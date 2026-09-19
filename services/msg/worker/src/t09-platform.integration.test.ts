@@ -14,6 +14,7 @@ import { registerGuestIssuer, registerService } from "../../../platform/src/serv
 import { ensureDefaultOrganization, hashOpaque, issueHumanCredential, opaqueSecret, type ServiceRegistration } from "../../../platform/src/platform-state";
 import { MSG_OPERATOR } from "./auth";
 import { createMsgMiniflareTempDirectory, startMsgMiniflare, TEST_ROOM_LIMITS } from "../test-fixtures/msg-worker.miniflare-fixture";
+import { PersistentCookieJar } from "../../cli/src/cookie-jar";
 
 const platformRoot = fileURLToPath(new URL("../../../platform/", import.meta.url));
 const platformWorkerEntry = fileURLToPath(new URL("../../../platform/src/worker.ts", import.meta.url));
@@ -87,6 +88,19 @@ function setCookies(response: Response): string[] {
 
 function cookieHeader(response: Response): string {
   return setCookies(response).map((cookie) => cookie.split(";", 1)[0]).join("; ");
+}
+
+function mergeCookieHeader(existing: string, response: Response): string {
+  const values = new Map<string, string>();
+  for (const cookie of existing.split("; ").filter(Boolean)) {
+    const separator = cookie.indexOf("=");
+    if (separator > 0) values.set(cookie.slice(0, separator), cookie);
+  }
+  for (const cookie of cookieHeader(response).split("; ").filter(Boolean)) {
+    const separator = cookie.indexOf("=");
+    if (separator > 0) values.set(cookie.slice(0, separator), cookie);
+  }
+  return [...values.values()].join("; ");
 }
 
 function cookieValue(header: string, name: string): string | undefined {
@@ -281,16 +295,31 @@ test.serial("crosses the actual Platform Worker/D1 and msg Worker/DO boundary", 
         organizationId: allowlistedOperator.organizationId,
       }]),
     };
-    firstMsg = await startMsgMiniflare(msgPersistence, TEST_ROOM_LIMITS, msgBindings, false);
+    firstMsg = await startMsgMiniflare(msgPersistence, TEST_ROOM_LIMITS, { ...msgBindings, MSG_DATA_ENCRYPTION_KEY_V1: "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8" }, false, true);
+    const creationKey = crypto.randomUUID();
+    const cliCookieJar = new PersistentCookieJar({ filePath: join(msgPersistence, "cli-cookies.json"), serviceOrigin: audience });
     const create = await firstMsg.miniflare.dispatchFetch("https://msg.0000.chat/", {
       method: "POST",
-      ...roomRequest("", { body: JSON.stringify({ content: "owner", author: "owner", display_name: "Owner", semantic_type: "message" }) }),
+      ...roomRequest("", { headers: { "idempotency-key": creationKey }, body: JSON.stringify({ content: "owner", author: "owner", display_name: "Owner", semantic_type: "message" }) }),
     });
     expect(create.status).toBe(201);
-    const ownerCookies = cookieHeader(create);
+    const createdFromReceipt = await create.clone().json() as { room: { id: string } };
+    cliCookieJar.store(`https://msg.0000.chat/${createdFromReceipt.room.id}`, create);
+    let ownerCookies = cookieHeader(create);
     expect(ownerCookies).toContain("msg_guest_control=");
     expect(ownerCookies).toContain("msg_resource=");
     const created = await create.json() as { room: { id: string }; manage_url: string };
+    const replay = await firstMsg.miniflare.dispatchFetch("https://msg.0000.chat/", {
+      method: "POST",
+      ...roomRequest(ownerCookies, { headers: { "idempotency-key": creationKey }, body: JSON.stringify({ content: "owner", author: "owner", display_name: "Owner", semantic_type: "message" }) }),
+    });
+    expect(replay.status).toBe(201);
+    const replayed = await replay.json() as { room: { id: string }; manage_url: string };
+    expect(replayed.room.id).toBe(created.room.id);
+    expect(replayed.manage_url).toBe(created.manage_url);
+    expect(cookieValue(ownerCookies, "msg_resource")).not.toBe(cookieValue(cookieHeader(replay), "msg_resource"));
+    cliCookieJar.store(`https://msg.0000.chat/${created.room.id}`, replay);
+    ownerCookies = mergeCookieHeader(ownerCookies, replay);
 
     const operatorStatus = await firstMsg.miniflare.dispatchFetch("https://msg.0000.chat/operator/v1/status", {
       headers: { authorization: `Bearer ${allowlistedOperator.credential}`, accept: "application/json" },
@@ -340,7 +369,10 @@ test.serial("crosses the actual Platform Worker/D1 and msg Worker/DO boundary", 
       "SELECT id FROM platform_guest_grant WHERE service_id = ? AND resource_id = ? AND assertion_kind = 'owner' AND revoked_at IS NULL",
     ).bind(service.serviceId, created.room.id).first<{ id: string }>();
     expect(ownerGrant?.id).toBeString();
-    live = await openLive(await firstMsg.miniflare.ready, created.room.id, ownerCookies);
+    const cliSocketCookies = cliCookieJar.websocketHeaders(`wss://msg.0000.chat/${created.room.id}/live`).Cookie;
+    expect(cliSocketCookies).toContain("msg_guest_control=");
+    expect(cliSocketCookies).toContain("msg_resource=");
+    live = await openLive(await firstMsg.miniflare.ready, created.room.id, cliSocketCookies ?? "");
     expect(JSON.parse(await live.ready)).toMatchObject({ type: "ready", latest_message: 2 });
     const platformGuest = createPlatformGuestClient({
       baseUrl: bridge.baseUrl,
@@ -366,7 +398,7 @@ test.serial("crosses the actual Platform Worker/D1 and msg Worker/DO boundary", 
 
     await firstMsg.dispose();
     firstMsg = undefined;
-    secondMsg = await startMsgMiniflare(msgPersistence, TEST_ROOM_LIMITS, msgBindings, false);
+    secondMsg = await startMsgMiniflare(msgPersistence, TEST_ROOM_LIMITS, { ...msgBindings, MSG_DATA_ENCRYPTION_KEY_V1: "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8" }, false, true);
     const restartedParticipant = await secondMsg.miniflare.dispatchFetch(`https://msg.0000.chat/${created.room.id}`, roomRequest(participantCookies));
     expect(restartedParticipant.status).toBe(200);
     expect((await restartedParticipant.json() as { latest_message: number }).latest_message).toBe(3);
@@ -383,5 +415,6 @@ test.serial("crosses the actual Platform Worker/D1 and msg Worker/DO boundary", 
     await platform?.dispose();
     await rm(platformPersistence, { force: true, recursive: true });
     await rm(msgPersistence, { force: true, recursive: true });
+    await rm(`${msgPersistence}-d1`, { force: true, recursive: true });
   }
 });

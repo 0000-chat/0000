@@ -1,4 +1,5 @@
-import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { dirname } from "node:path";
 
@@ -31,8 +32,9 @@ export class PersistentCookieJar {
   }
 
   cookieHeader(value: string | URL): string | undefined {
-    const url = new URL(value);
+    const url = cookieRequestUrl(value);
     if (!sameOrigin(url, this.serviceOrigin) || url.protocol !== "https:") return undefined;
+    this.cookies = load(this.filePath);
     const now = Date.now();
     this.purge(now);
     const matches = this.cookies.filter((cookie) => {
@@ -47,8 +49,17 @@ export class PersistentCookieJar {
     if (!sameOrigin(url, this.serviceOrigin)) return;
     const headers = response.headers as Headers & { getSetCookie?: () => string[] };
     const values = headers.getSetCookie?.() ?? (response.headers.get("set-cookie") ? [response.headers.get("set-cookie")!] : []);
-    for (const value of values) this.storeSetCookie(url, value);
-    this.persist();
+    if (values.length === 0) return;
+    const lock = acquireFileLock(this.filePath);
+    try {
+      const cookies = load(this.filePath);
+      for (const value of values) storeSetCookie(cookies, url, value, this.serviceOrigin);
+      this.cookies = cookies;
+      this.purge(Date.now());
+      writeAtomic(this.filePath, this.cookies);
+    } finally {
+      releaseFileLock(lock);
+    }
   }
 
   wrapFetch(baseFetch: typeof fetch): typeof fetch {
@@ -74,50 +85,95 @@ export class PersistentCookieJar {
     return cookie ? { Cookie: cookie } : {};
   }
 
-  private storeSetCookie(url: URL, header: string): void {
-    const parts = header.split(";").map((part) => part.trim());
-    const first = parts.shift();
-    if (!first) return;
-    const separator = first.indexOf("=");
-    if (separator <= 0) return;
-    const name = first.slice(0, separator).trim();
-    const value = decodeCookieValue(first.slice(separator + 1).trim());
-    if (!value || !/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/u.test(name)) return;
-    let domain = url.hostname;
-    let hostOnly = true;
-    let path = defaultPath(url.pathname);
-    let secure = false;
-    let expiresAt: number | undefined;
-    for (const attribute of parts) {
-      const split = attribute.indexOf("=");
-      const key = (split < 0 ? attribute : attribute.slice(0, split)).trim().toLowerCase();
-      const attributeValue = split < 0 ? "" : attribute.slice(split + 1).trim();
-      if (key === "domain") {
-        const candidate = attributeValue.replace(/^\./u, "").toLowerCase();
-        if (!candidate || !domainMatchesHost(candidate, url.hostname) || candidate !== this.serviceOrigin.hostname) return;
-        domain = candidate;
-        hostOnly = false;
-      } else if (key === "path" && attributeValue.startsWith("/")) path = attributeValue;
-      else if (key === "secure") secure = true;
-      else if (key === "max-age" && /^-?\d+$/u.test(attributeValue)) expiresAt = Date.now() + Number(attributeValue) * 1_000;
-      else if (key === "expires") {
-        const parsed = Date.parse(attributeValue);
-        if (Number.isFinite(parsed)) expiresAt = parsed;
-      }
-    }
-    this.cookies = this.cookies.filter((cookie) => !(cookie.name === name && cookie.domain === domain && cookie.path === path));
-    if (expiresAt !== undefined && expiresAt <= Date.now()) return;
-    this.cookies.push({ name, value, domain, hostOnly, path, secure, ...(expiresAt === undefined ? {} : { expiresAt }) });
-  }
-
   private purge(now: number): void {
     this.cookies = this.cookies.filter((cookie) => cookie.expiresAt === undefined || cookie.expiresAt > now);
   }
+}
 
-  private persist(): void {
-    mkdirSync(dirname(this.filePath), { recursive: true, mode: 0o700 });
-    writeFileSync(this.filePath, `${JSON.stringify(this.cookies, null, 2)}\n`, { mode: 0o600 });
-    chmodSync(this.filePath, 0o600);
+interface FileLock {
+  readonly fd: number;
+  readonly path: string;
+}
+
+function storeSetCookie(cookies: StoredCookie[], url: URL, header: string, serviceOrigin: URL): void {
+  const parts = header.split(";").map((part) => part.trim());
+  const first = parts.shift();
+  if (!first) return;
+  const separator = first.indexOf("=");
+  if (separator <= 0) return;
+  const name = first.slice(0, separator).trim();
+  const value = decodeCookieValue(first.slice(separator + 1).trim());
+  if (!/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/u.test(name)) return;
+  let domain = url.hostname;
+  let hostOnly = true;
+  let path = defaultPath(url.pathname);
+  let secure = false;
+  let expiresAt: number | undefined;
+  for (const attribute of parts) {
+    const split = attribute.indexOf("=");
+    const key = (split < 0 ? attribute : attribute.slice(0, split)).trim().toLowerCase();
+    const attributeValue = split < 0 ? "" : attribute.slice(split + 1).trim();
+    if (key === "domain") {
+      const candidate = attributeValue.replace(/^\./u, "").toLowerCase();
+      if (!candidate || !domainMatchesHost(candidate, url.hostname) || candidate !== serviceOrigin.hostname) return;
+      domain = candidate;
+      hostOnly = false;
+    } else if (key === "path" && attributeValue.startsWith("/")) path = attributeValue;
+    else if (key === "secure") secure = true;
+    else if (key === "max-age" && /^-?\d+$/u.test(attributeValue)) expiresAt = Date.now() + Number(attributeValue) * 1_000;
+    else if (key === "expires") {
+      const parsed = Date.parse(attributeValue);
+      if (Number.isFinite(parsed)) expiresAt = parsed;
+    }
+  }
+  const index = cookies.findIndex((cookie) => cookie.name === name && cookie.domain === domain && cookie.path === path);
+  if (index >= 0) cookies.splice(index, 1);
+  if (expiresAt !== undefined && expiresAt <= Date.now()) return;
+  cookies.push({ name, value, domain, hostOnly, path, secure, ...(expiresAt === undefined ? {} : { expiresAt }) });
+}
+
+function cookieRequestUrl(value: string | URL): URL {
+  const url = new URL(value);
+  if (url.protocol === "wss:") url.protocol = "https:";
+  else if (url.protocol === "ws:") url.protocol = "http:";
+  return url;
+}
+
+function acquireFileLock(path: string): FileLock {
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  const lockPath = `${path}.lock`;
+  const started = Date.now();
+  const waitBuffer = new Int32Array(new SharedArrayBuffer(4));
+  while (true) {
+    try {
+      return { fd: openSync(lockPath, "wx", 0o600), path: lockPath };
+    } catch (error) {
+      if (!(error instanceof Error) || !("code" in error) || error.code !== "EEXIST") throw error;
+      try {
+        if (Date.now() - statSync(lockPath).mtimeMs > 30_000) unlinkSync(lockPath);
+      } catch {
+        // The owner may have released the lock between stat and unlink.
+      }
+      if (Date.now() - started > 5_000) throw new Error("The msg cookie jar is locked by another process.");
+      Atomics.wait(waitBuffer, 0, 0, 10);
+    }
+  }
+}
+
+function releaseFileLock(lock: FileLock): void {
+  closeSync(lock.fd);
+  try { unlinkSync(lock.path); } catch { /* Another process already removed a stale lock. */ }
+}
+
+function writeAtomic(path: string, cookies: readonly StoredCookie[]): void {
+  const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
+  try {
+    writeFileSync(temporary, `${JSON.stringify(cookies, null, 2)}\n`, { mode: 0o600 });
+    chmodSync(temporary, 0o600);
+    renameSync(temporary, path);
+    chmodSync(path, 0o600);
+  } finally {
+    try { unlinkSync(temporary); } catch { /* The atomic rename already removed it. */ }
   }
 }
 

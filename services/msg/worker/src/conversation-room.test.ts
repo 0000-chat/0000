@@ -341,3 +341,28 @@ test("accepts a reconnect cursor and reports the current latest sequence", async
   expect((await durable.fetch(new Request("https://room/live?after=1"))).status).toBe(101);
   expect(JSON.parse(context.sockets[0].sent[0])).toMatchObject({ type: "ready", latest_message: 2 });
 });
+
+test("preserves identity-authority HTTP statuses and tombstones at the DO boundary", async () => {
+  const originalFetch = globalThis.fetch;
+  const { room: durable } = await room(undefined, Date.now, {
+    MSG_AUTH_REQUIRED: "1",
+    MSG_PLATFORM_BASE_URL: "https://platform.test",
+    MSG_PLATFORM_AUTHORITY: "platform-test",
+    MSG_PLATFORM_AUDIENCE: "https://msg.test",
+    MSG_PLATFORM_SERVICE_VERIFIER: "service-verifier",
+  });
+  await durable.fetch(request("/initialize", { management_hash: "hash", initial: { content: "first", author: "a", display_name: "a", semantic_type: "message" } }));
+  try {
+    globalThis.fetch = (async () => Response.json({ status: "invalid_credential" }, { status: 401 })) as typeof fetch;
+    const invalid = await durable.fetch(new Request("https://room/read?resource=room-1", { headers: { authorization: "Bearer invalid", "x-msg-guest-id": "guest-1", "x-msg-source": "public" } }));
+    expect(invalid.status).toBe(401);
+    globalThis.fetch = (async () => { throw new Error("platform unavailable"); }) as typeof fetch;
+    const unavailable = await durable.fetch(new Request("https://room/read?resource=room-1", { headers: { authorization: "Bearer unavailable", "x-msg-guest-id": "guest-1", "x-msg-source": "public" } }));
+    expect(unavailable.status).toBe(503);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  await durable.fetch(new Request("https://room/operator-delete", { method: "POST" }));
+  const check = await durable.fetch(request("/access/check", { guest_id: "guest-1", source: "public", action: "read" }));
+  expect(check.status).toBe(410);
+});

@@ -84,13 +84,23 @@ export class DurableRoomService implements RoomService {
     return value.source ? { source: value.source, ...(value.stored_owner_id ? { storedOwnerId: value.stored_owner_id } : {}) } : null;
   }
 
-  async recordGrant(input: { readonly room: string; readonly guestId: string; readonly source: RoomAccessSource; readonly capabilities: readonly string[] }): Promise<void> {
-    await responseJson(await this.room(input.room).fetch(jsonRequest("/access/record", { guest_id: input.guestId, source: input.source, capabilities: input.capabilities })));
+  async recordGrant(input: { readonly room: string; readonly guestId: string; readonly source: RoomAccessSource; readonly capabilities: readonly string[]; readonly grantId?: string }): Promise<void> {
+    await responseJson(await this.room(input.room).fetch(jsonRequest("/access/record", { guest_id: input.guestId, source: input.source, capabilities: input.capabilities, ...(input.grantId ? { grant_id: input.grantId } : {}) })));
   }
 
-  async checkGrant(input: { readonly room: string; readonly guestId: string; readonly source: RoomAccessSource; readonly action: "read" | "write" | "manage" }): Promise<boolean> {
-    const value = await responseJson(await this.room(input.room).fetch(jsonRequest("/access/check", { guest_id: input.guestId, source: input.source, action: input.action })));
+  async checkGrant(input: { readonly room: string; readonly guestId: string; readonly source: RoomAccessSource; readonly action: "read" | "write" | "manage"; readonly grantId?: string }): Promise<boolean> {
+    const value = await responseJson(await this.room(input.room).fetch(jsonRequest("/access/check", { guest_id: input.guestId, source: input.source, action: input.action, ...(input.grantId ? { grant_id: input.grantId } : {}) })));
     return value.allowed === true;
+  }
+
+  async findGrant(input: { readonly room: string; readonly guestId: string; readonly source?: RoomAccessSource; readonly grantId?: string }): Promise<{ readonly source: RoomAccessSource; readonly grantId?: string; readonly capabilities: readonly string[]; readonly active: boolean } | null> {
+    const response = await this.room(input.room).fetch(jsonRequest("/access/grant", { guest_id: input.guestId, ...(input.source ? { source: input.source } : {}), ...(input.grantId ? { grant_id: input.grantId } : {}) }));
+    if (response.status === 404) return null;
+    const value = await responseJson(response);
+    const source = value.source;
+    const capabilities = value.capabilities;
+    if ((source !== "owner" && source !== "public" && source !== "management") || !Array.isArray(capabilities) || !capabilities.every((item) => typeof item === "string")) throw new ProtocolError(ERROR_CODES.internal, "The room returned an invalid access grant.", 500);
+    return { source, ...(typeof value.grant_id === "string" ? { grantId: value.grant_id } : {}), capabilities, active: value.active === true };
   }
 
   private room(capability: string): RoomStub { return this.rooms.getByName(capability); }

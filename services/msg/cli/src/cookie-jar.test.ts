@@ -1,3 +1,4 @@
+import { spawn } from "node:child_process";
 import { mkdtemp, readFile, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -22,6 +23,8 @@ test("stores host and path scoped cookies without forwarding room credentials", 
   jar.store("https://msg.0000.chat/room-one", response);
 
   expect(jar.cookieHeader("https://msg.0000.chat/room-one")).toContain("msg_guest_control=control");
+  expect(jar.cookieHeader("wss://msg.0000.chat/room-one/live")).toContain("msg_guest_control=control");
+  expect(jar.websocketHeaders("wss://msg.0000.chat/room-one/live").Cookie).toContain("msg_resource=room-one");
   expect(jar.cookieHeader("https://msg.0000.chat/room-one")).toContain("msg_resource=room-one");
   expect(jar.cookieHeader("https://msg.0000.chat/room-two")).toBe("msg_guest_control=control");
   expect(jar.cookieHeader("https://msg.0000.chat/manage/room-one")).toContain("msg_management=manage");
@@ -42,4 +45,36 @@ test("rejects cross origin redirects while wrapping fetch", async () => {
   const { jar } = await temporaryJar();
   const fetcher = jar.wrapFetch(async () => new Response(null, { status: 302, headers: { location: "https://foreign.example/room" } }));
   await expect(fetcher("https://msg.0000.chat/room-one")).rejects.toThrow("unexpected cross-origin redirect");
+});
+
+test("reloads and merges cookie state before atomic replacement", async () => {
+  const { filePath } = await temporaryJar();
+  const first = new PersistentCookieJar({ filePath, serviceOrigin: "https://msg.0000.chat" });
+  const second = new PersistentCookieJar({ filePath, serviceOrigin: "https://msg.0000.chat" });
+  await Promise.all([
+    Promise.resolve().then(() => first.store("https://msg.0000.chat/room-one", new Response(null, { headers: { "set-cookie": "msg_guest_control=control; Path=/; Secure" } }))),
+    Promise.resolve().then(() => second.store("https://msg.0000.chat/room-one", new Response(null, { headers: { "set-cookie": "msg_resource=room-one; Path=/room-one; Secure" } }))),
+  ]);
+  const reloaded = new PersistentCookieJar({ filePath, serviceOrigin: "https://msg.0000.chat" });
+  expect(reloaded.cookieHeader("https://msg.0000.chat/room-one")).toContain("msg_guest_control=control");
+  expect(reloaded.cookieHeader("https://msg.0000.chat/room-one")).toContain("msg_resource=room-one");
+});
+
+test("merges concurrent cookie writers from separate CLI processes", async () => {
+  const { filePath } = await temporaryJar();
+  const moduleUrl = new URL("./cookie-jar.ts", import.meta.url).href;
+  const writers = Array.from({ length: 8 }, (_, index) => {
+    const cookie = `msg_worker_${index}=worker-${index}; Path=/room-overlap; Secure`;
+    const source = `import { PersistentCookieJar } from ${JSON.stringify(moduleUrl)}; const jar = new PersistentCookieJar({ filePath: process.env.T09_COOKIE_JAR, serviceOrigin: "https://msg.0000.chat" }); jar.store("https://msg.0000.chat/room-overlap", new Response(null, { headers: { "set-cookie": ${JSON.stringify(cookie)} } }));`;
+    return new Promise<void>((resolve, reject) => {
+      const child = spawn(process.execPath, ["-e", source], { env: { ...process.env, T09_COOKIE_JAR: filePath }, stdio: ["ignore", "ignore", "pipe"] });
+      let error = "";
+      child.stderr.on("data", (chunk: Buffer) => { error += chunk.toString(); });
+      child.once("error", reject);
+      child.once("close", (code) => code === 0 ? resolve() : reject(new Error(`Cookie writer exited ${code}: ${error}`)));
+    });
+  });
+  await Promise.all(writers);
+  const merged = new PersistentCookieJar({ filePath, serviceOrigin: "https://msg.0000.chat" }).cookieHeader("https://msg.0000.chat/room-overlap") ?? "";
+  for (let index = 0; index < 8; index += 1) expect(merged).toContain(`msg_worker_${index}=worker-${index}`);
 });

@@ -56,13 +56,13 @@ export interface MsgWorkerOptions {
 
 export type CreationClaim =
   | { readonly kind: "claimed"; readonly leaseToken: string; readonly plan: { readonly management: string; readonly room: string; readonly ownerGuestId?: string } }
-  | { readonly kind: "complete"; readonly response: CreateRoomResponse }
+  | { readonly kind: "complete"; readonly response: CreateRoomResponse; readonly ownerGrantId?: string }
   | { readonly kind: "conflict" }
   | { readonly kind: "pending" };
 
 export interface CreationOperations {
   claimCreation(key: string, fingerprint: string, guestId?: string): Promise<CreationClaim>;
-  completeCreation(key: string, leaseToken: string, response: CreateRoomResponse, guestId?: string): Promise<void>;
+  completeCreation(key: string, leaseToken: string, response: CreateRoomResponse, guestId?: string, ownerGrantId?: string): Promise<void>;
 }
 
 export interface Operations extends CreationOperations {
@@ -272,7 +272,7 @@ async function route(request: Request, service: RoomService, options: MsgWorkerO
       }
       if (claim) emitMsgEvent("msg.creation.claimed", claim.kind);
       if (claim?.kind === "complete") {
-        const owner = control && options.auth ? await options.auth.authorizeOwner(request, { room: claim.response.room.id, storedOwnerId: control.guestId }, control) : undefined;
+        const owner = control && options.auth ? await options.auth.authorizeOwner(request, { room: claim.response.room.id, storedOwnerId: control.guestId, ...(claim.ownerGrantId ? { grantId: claim.ownerGrantId } : {}) }, control) : undefined;
         return createResponse(claim.response, negotiateCreateRepresentation(request.headers.get("accept")), [...(control?.setCookies ?? []), ...(owner?.setCookies ?? [])]);
       }
       if (claim?.kind === "conflict") {
@@ -282,13 +282,13 @@ async function route(request: Request, service: RoomService, options: MsgWorkerO
         throw new ProtocolError(ERROR_CODES.serviceUnavailable, "Room creation is still in progress. Retry with the same Idempotency-Key.", 503);
       }
       const created = await service.create({ body, ...(control ? { ownerGuestId: control.guestId } : {}), ...(claim?.kind === "claimed" ? { plan: claim.plan } : {}) });
+      const owner = control && options.auth ? await options.auth.authorizeOwner(request, { room: created.room.id, storedOwnerId: control.guestId }, control) : undefined;
       try {
-        await options.operations.completeCreation(key, claim?.kind === "claimed" ? claim.leaseToken : "", created, control?.guestId);
+        await options.operations.completeCreation(key, claim?.kind === "claimed" ? claim.leaseToken : "", created, control?.guestId, owner?.context.grantId);
       } catch {
         // The created room remains valid when the optional replay receipt cannot persist.
         emitMsgEvent("msg.d1.availability", "unavailable");
       }
-      const owner = control && options.auth ? await options.auth.authorizeOwner(request, { room: created.room.id, storedOwnerId: control.guestId }, control) : undefined;
       return createResponse(created, negotiateCreateRepresentation(request.headers.get("accept")), [...(control?.setCookies ?? []), ...(owner?.setCookies ?? [])]);
     }
     const created = await service.create({ body, ...(control ? { ownerGuestId: control.guestId } : {}) });

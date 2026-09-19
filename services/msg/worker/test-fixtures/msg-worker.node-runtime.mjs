@@ -1,4 +1,5 @@
 import { request as sendWorkerRequest, createServer } from "node:http";
+import { readFile } from "node:fs/promises";
 import { createInterface } from "node:readline";
 
 import { Miniflare } from "miniflare";
@@ -146,11 +147,26 @@ async function start(configuration) {
       bindings: configuration.bindings,
       compatibilityDate: configuration.compatibilityDate,
       durableObjects: configuration.durableObjects,
+      ...(configuration.d1Databases ? { d1Databases: configuration.d1Databases } : {}),
+      ...(configuration.d1Persist ? { d1Persist: configuration.d1Persist } : {}),
       durableObjectsPersist: configuration.persistenceDirectory,
       host: "127.0.0.1",
       modules: true,
       script: configuration.script,
     });
+    if (configuration.d1MigrationPaths?.length) {
+      const database = await miniflare.getD1Database("MSG_DB");
+      for (const path of configuration.d1MigrationPaths) {
+        const source = await readFile(path, "utf8");
+        for (const statement of source.split(";").map((value) => value.trim()).filter(Boolean)) {
+          try {
+            await database.prepare(statement).run();
+          } catch (error) {
+            if (!(error instanceof Error) || !/duplicate column name|already exists/iu.test(error.message)) throw error;
+          }
+        }
+      }
+    }
     dispatchServer = createServer((request, response) => {
       void dispatch(request, response);
     });

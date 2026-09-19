@@ -47,6 +47,9 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 interface NodeRuntimeConfiguration {
   bindings: Record<string, string>;
   compatibilityDate: string;
+  d1Databases?: Record<string, string>;
+  d1MigrationPaths?: string[];
+  d1Persist?: string;
   durableObjects: { ConversationRoom: { className: string; useSQLite: boolean } };
   persistenceDirectory: string;
   script: string;
@@ -212,6 +215,7 @@ export async function startMsgMiniflare(
   limits = TEST_ROOM_LIMITS,
   extraBindings: Record<string, string> = {},
   useTestLimits = true,
+  useOperations = false,
 ): Promise<MsgMiniflareFixture> {
   const releaseRuntime = await acquireMiniflareTestLock();
   let runtime: NodeRuntimeProcess | undefined;
@@ -225,6 +229,15 @@ export async function startMsgMiniflare(
         ...extraBindings,
       },
       compatibilityDate: "2026-05-15",
+      ...(useOperations ? {
+        d1Databases: { MSG_DB: "msg-operations" },
+        d1MigrationPaths: [
+          fileURLToPath(new URL("../migrations/0001_operations.sql", import.meta.url)),
+          fileURLToPath(new URL("../migrations/0002_operations_retention.sql", import.meta.url)),
+          fileURLToPath(new URL("../migrations/0003_creation_plan.sql", import.meta.url)),
+        ],
+        d1Persist: `${persistenceDirectory}-d1`,
+      } : {}),
       durableObjects: {
         ConversationRoom: { className: "ConversationRoom", useSQLite: true },
       },

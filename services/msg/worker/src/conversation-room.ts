@@ -47,6 +47,8 @@ type HibernatingSocket = WebSocket & {
   serializeAttachment(value: unknown): void;
 };
 
+type CredentialVerification = "valid" | "invalid" | "unavailable";
+
 interface SocketContext {
   readonly guestId: string;
   readonly resource: string;
@@ -78,6 +80,7 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
       if (request.method === "POST" && url.pathname === "/access/proof") return await this.accessProof(request);
       if (request.method === "POST" && url.pathname === "/access/record") return await this.accessRecord(request);
       if (request.method === "POST" && url.pathname === "/access/check") return await this.accessCheck(request);
+      if (request.method === "POST" && url.pathname === "/access/grant") return await this.accessGrant(request);
       if (request.method === "GET" && url.pathname === "/read") return await this.read(request);
       if (request.method === "POST" && url.pathname === "/messages") return await this.post(request);
       if (request.method === "GET" && url.pathname === "/manage") return await this.manage(request, false);
@@ -259,19 +262,35 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
   }
 
   private async accessRecord(request: Request): Promise<Response> {
-    const input = await request.json() as { guest_id?: string; source?: string; capabilities?: unknown };
+    const input = await request.json() as { guest_id?: string; source?: string; capabilities?: unknown; grant_id?: string };
     if (!input.guest_id || (input.source !== "owner" && input.source !== "public" && input.source !== "management") || !Array.isArray(input.capabilities) || !input.capabilities.every((value) => typeof value === "string")) throw new ProtocolError(ERROR_CODES.invalidBody, "The room access grant is invalid.", 400);
+    if (input.grant_id !== undefined && !input.grant_id) throw new ProtocolError(ERROR_CODES.invalidBody, "The room access grant is invalid.", 400);
     const state = this.requireState();
     if (state.status !== "active") throw new ProtocolError(ERROR_CODES.gone, "The conversation has expired.", 410);
     if (input.source === "owner" && state.owner_guest_id !== input.guest_id) throw new ProtocolError(ERROR_CODES.forbidden, "The room owner is invalid.", 403);
-    this.ctx.storage.transactionSync(() => this.insertAcl(input.guest_id!, input.source as SocketContext["source"], input.capabilities as string[], this.now()));
+    this.ctx.storage.transactionSync(() => this.insertAcl(input.guest_id!, input.source as SocketContext["source"], input.capabilities as string[], this.now(), input.grant_id));
     return this.json({ recorded: true });
   }
 
   private async accessCheck(request: Request): Promise<Response> {
-    const input = await request.json() as { guest_id?: string; source?: string; action?: string };
+    const input = await request.json() as { guest_id?: string; source?: string; action?: string; grant_id?: string };
     if (!input.guest_id || (input.source !== "owner" && input.source !== "public" && input.source !== "management") || (input.action !== "read" && input.action !== "write" && input.action !== "manage")) throw new ProtocolError(ERROR_CODES.invalidBody, "The room access check is invalid.", 400);
-    return this.json({ allowed: this.hasGrant(input.guest_id, input.source as SocketContext["source"], input.action as "read" | "write" | "manage") });
+    if (input.grant_id !== undefined && !input.grant_id) throw new ProtocolError(ERROR_CODES.invalidBody, "The room access check is invalid.", 400);
+    await this.requireActive(this.now());
+    return this.json({ allowed: this.hasGrant(input.guest_id, input.source as SocketContext["source"], input.action as "read" | "write" | "manage", input.grant_id) });
+  }
+
+  private async accessGrant(request: Request): Promise<Response> {
+    const input = await request.json() as { guest_id?: string; source?: string; grant_id?: string };
+    if (!input.guest_id || input.source !== undefined && input.source !== "owner" && input.source !== "public" && input.source !== "management" || input.grant_id !== undefined && !input.grant_id) throw new ProtocolError(ERROR_CODES.invalidBody, "The room access lookup is invalid.", 400);
+    await this.requireActive(this.now());
+    const conditions = ["guest_id = ?"];
+    const values: unknown[] = [input.guest_id];
+    if (input.source !== undefined) { conditions.push("source = ?"); values.push(input.source); }
+    if (input.grant_id !== undefined) { conditions.push("grant_id = ?"); values.push(input.grant_id); }
+    const row = rows<{ source: SocketContext["source"]; grant_id: string | null; capabilities: string; active: number }>(this.ctx.storage.sql.exec(`SELECT source, grant_id, capabilities, active FROM room_acl WHERE ${conditions.join(" AND ")} LIMIT 1`, ...values))[0];
+    if (!row) throw new ProtocolError(ERROR_CODES.notFound, "The requested resource was not found.", 404);
+    return this.json({ source: row.source, ...(row.grant_id ? { grant_id: row.grant_id } : {}), capabilities: parseCapabilities(row.capabilities), active: row.active === 1 });
   }
 
   private parseAuth(request: Request): { readonly credential?: string; readonly guestId: string; readonly source: SocketContext["source"] } {
@@ -296,20 +315,24 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
   private async requireAccess(auth: { readonly credential?: string; readonly guestId: string; readonly source: SocketContext["source"] }, action: "read" | "write" | "manage", resource: string): Promise<void> {
     if (this.config.MSG_AUTH_REQUIRED !== "1") return;
     if (!auth.credential || !resource) throw new ProtocolError(ERROR_CODES.forbidden, "The room authorization is missing.", 403);
-    if (!(await this.verifyCredential(auth, auth.credential, resource, action))) throw new ProtocolError(ERROR_CODES.forbidden, "The room authorization is no longer valid.", 403);
+    await this.requireActive(this.now());
+    const verification = await this.verifyCredential(auth, auth.credential, resource, action);
+    if (verification === "unavailable") throw new ProtocolError(ERROR_CODES.serviceUnavailable, "The identity authority is temporarily unavailable.", 503);
+    if (verification !== "valid") throw new ProtocolError(ERROR_CODES.invalidBody, "The room authorization is no longer valid.", 401);
   }
 
-  private async verifyCredential(auth: { readonly credential?: string; readonly guestId: string; readonly source: SocketContext["source"] }, credential: string, resource: string, action: "read" | "write" | "manage"): Promise<boolean> {
+  private async verifyCredential(auth: { readonly credential?: string; readonly guestId: string; readonly source: SocketContext["source"] }, credential: string, resource: string, action: "read" | "write" | "manage"): Promise<CredentialVerification> {
     const baseUrl = this.config.MSG_PLATFORM_BASE_URL;
     const authority = this.config.MSG_PLATFORM_AUTHORITY;
     const audience = this.config.MSG_PLATFORM_AUDIENCE;
     const verifier = this.config.MSG_PLATFORM_SERVICE_VERIFIER;
-    if (!baseUrl || !authority || !audience || !verifier) return false;
+    if (!baseUrl || !authority || !audience || !verifier) return "unavailable";
     const authentication = await createPlatformClient({ baseUrl, authority, audience, serviceVerifier: verifier }).authenticate(credential);
-    if (authentication.status !== "authenticated" || authentication.principal.kind !== "guest") return false;
+    if (authentication.status === "authority_unavailable") return "unavailable";
+    if (authentication.status !== "authenticated" || authentication.principal.kind !== "guest") return "invalid";
     const principal = authentication.principal;
     const capability = action === "read" ? "msg:read" : action === "write" ? "msg:write" : "msg:manage";
-    return principal.subjectId === auth.guestId && principal.resourceIds.includes(resource) && principal.capabilities.includes(capability) && this.hasGrant(auth.guestId, auth.source, action);
+    return principal.subjectId === auth.guestId && principal.resourceIds.includes(resource) && principal.capabilities.includes(capability) && this.hasGrant(auth.guestId, auth.source, action, principal.grantId) ? "valid" : "invalid";
   }
 
   private attachmentContext(socket: HibernatingSocket): SocketContext | undefined {
@@ -323,22 +346,22 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
   private async verifySocket(context: SocketContext, credential: string): Promise<boolean> {
     // The Durable Object name is the room resource identifier. The raw bearer
     // stays in the volatile map and is never serialized as socket attachment.
-    return this.verifyCredential({ ...context, credential }, credential, context.resource, "read");
+    return (await this.verifyCredential({ ...context, credential }, credential, context.resource, "read")) === "valid";
   }
 
-  private insertAcl(guestId: string, source: SocketContext["source"], capabilities: readonly string[], createdAt: number): void {
+  private insertAcl(guestId: string, source: SocketContext["source"], capabilities: readonly string[], createdAt: number, grantId?: string): void {
     const prior = rows<{ capabilities: string }>(this.ctx.storage.sql.exec("SELECT capabilities FROM room_acl WHERE guest_id = ? AND source = ?", guestId, source))[0];
     const existing = prior ? parseCapabilities(prior.capabilities) : [];
     const merged = [...new Set([...existing, ...capabilities])];
-    this.ctx.storage.sql.exec("INSERT INTO room_acl (guest_id, source, capabilities, active, created_at) VALUES (?, ?, ?, 1, ?) ON CONFLICT(guest_id, source) DO UPDATE SET capabilities = excluded.capabilities, active = 1", guestId, source, JSON.stringify(merged), createdAt);
+    this.ctx.storage.sql.exec("INSERT INTO room_acl (guest_id, source, capabilities, active, created_at, grant_id) VALUES (?, ?, ?, 1, ?, ?) ON CONFLICT(guest_id, source) DO UPDATE SET capabilities = excluded.capabilities, active = 1, grant_id = COALESCE(excluded.grant_id, room_acl.grant_id)", guestId, source, JSON.stringify(merged), createdAt, grantId ?? null);
   }
 
-  private hasGrant(guestId: string, source: SocketContext["source"], action: "read" | "write" | "manage"): boolean {
+  private hasGrant(guestId: string, source: SocketContext["source"], action: "read" | "write" | "manage", grantId?: string): boolean {
     const required = action === "read" ? "msg:read" : action === "write" ? "msg:write" : "msg:manage";
     const sources = source === "public" ? ["public", "owner"] : [source];
     return sources.some((candidate) => {
-      const row = rows<{ capabilities: string; active: number }>(this.ctx.storage.sql.exec("SELECT capabilities, active FROM room_acl WHERE guest_id = ? AND source = ?", guestId, candidate))[0];
-      return row?.active === 1 && parseCapabilities(row.capabilities).includes(required);
+      const row = rows<{ capabilities: string; active: number; grant_id: string | null }>(this.ctx.storage.sql.exec("SELECT capabilities, active, grant_id FROM room_acl WHERE guest_id = ? AND source = ?", guestId, candidate))[0];
+      return row?.active === 1 && (!grantId || row.grant_id === grantId) && parseCapabilities(row.capabilities).includes(required);
     });
   }
 

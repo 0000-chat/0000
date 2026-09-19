@@ -33,7 +33,7 @@ export default {
     const operations = env.MSG_DB && env.MSG_DATA_ENCRYPTION_KEY_V1
       ? new D1OperationStore(env.MSG_DB, env.MSG_DATA_ENCRYPTION_KEY_V1)
       : undefined;
-    const accessPort = roomService && roomService.proveLink && roomService.recordGrant && roomService.checkGrant ? roomService as MsgRoomAuthPort : undefined;
+    const accessPort = roomService && roomService.proveLink && roomService.recordGrant && roomService.checkGrant && roomService.findGrant ? roomService as unknown as MsgRoomAuthPort : undefined;
     const auth = env.MSG_TEST_MODE === "1"
       ? undefined
       : accessPort && env.MSG_PLATFORM_BASE_URL && env.MSG_PLATFORM_AUTHORITY && env.MSG_PLATFORM_AUDIENCE && env.MSG_PLATFORM_SERVICE_VERIFIER && env.MSG_PLATFORM_GUEST_GRANT_ISSUER

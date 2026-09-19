@@ -166,3 +166,11 @@ test("scopes creation plans and receipts by stable guest control", { timeout: 20
   expect(second.kind).toBe("claimed");
   if (second.kind === "claimed") expect(second.plan.room).not.toBe(first.plan.room);
 });
+
+test("persists the owner grant reference for an idempotent retry", { timeout: 20_000 }, async () => {
+  const { operations } = await store({ now: 1_000 });
+  const first = await operations.claimCreation("same-key", "fingerprint", "guest-a");
+  if (first.kind !== "claimed") throw new Error("Expected the first guest to claim the plan.");
+  await operations.completeCreation("same-key", first.leaseToken, created, "guest-a", "owner-grant-a");
+  await expect(operations.claimCreation("same-key", "fingerprint", "guest-a")).resolves.toEqual({ kind: "complete", response: created, ownerGrantId: "owner-grant-a" });
+});

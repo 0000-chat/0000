@@ -123,8 +123,9 @@ export interface RoomService {
   live?(input: LiveRoomInput): Promise<Response>;
   exportRoom?(input: ExportRoomInput): Promise<Response>;
   proveLink?(input: { readonly room: string; readonly source: RoomAccessSource; readonly token?: string }): Promise<{ readonly source: RoomAccessSource; readonly storedOwnerId?: string } | null>;
-  recordGrant?(input: { readonly room: string; readonly guestId: string; readonly source: RoomAccessSource; readonly capabilities: readonly string[] }): Promise<void>;
-  checkGrant?(input: { readonly room: string; readonly guestId: string; readonly source: RoomAccessSource; readonly action: "read" | "write" | "manage" }): Promise<boolean>;
+  recordGrant?(input: { readonly room: string; readonly guestId: string; readonly source: RoomAccessSource; readonly capabilities: readonly string[]; readonly grantId?: string }): Promise<void>;
+  checkGrant?(input: { readonly room: string; readonly guestId: string; readonly source: RoomAccessSource; readonly action: "read" | "write" | "manage"; readonly grantId?: string }): Promise<boolean>;
+  findGrant?(input: { readonly room: string; readonly guestId: string; readonly source?: RoomAccessSource; readonly grantId?: string }): Promise<{ readonly source: RoomAccessSource; readonly grantId?: string; readonly capabilities: readonly string[]; readonly active: boolean } | null>;
 }
 
 export interface ReadRoomInput {

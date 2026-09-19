@@ -1,6 +1,6 @@
 import { ROOM_LIMITS } from "./room-domain";
 
-export const CURRENT_ROOM_SCHEMA_VERSION = 4;
+export const CURRENT_ROOM_SCHEMA_VERSION = 5;
 
 interface SqlStorage {
   exec(query: string, ...values: unknown[]): Iterable<unknown>;
@@ -86,6 +86,11 @@ function applyMigration(sql: SqlStorage, version: number, inactivityTtlMs: numbe
       );
       CREATE INDEX IF NOT EXISTS room_acl_room_guest ON room_acl(guest_id, source);
     `);
+    return;
+  }
+  if (version === 5) {
+    const columns = rows<{ name: string }>(sql.exec("PRAGMA table_info(room_acl)"));
+    if (!columns.some((column) => column.name === "grant_id")) sql.exec("ALTER TABLE room_acl ADD COLUMN grant_id TEXT");
     return;
   }
   throw new Error("The room schema migration is not defined.");

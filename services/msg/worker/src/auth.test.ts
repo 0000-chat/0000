@@ -28,10 +28,11 @@ function responseForPlatform(): { fetch: typeof fetch; credentials: Map<string, 
         ? Response.json({ status: "success", guestId: guest.guestId, authority, audience, purpose: "guest_control" })
         : Response.json({ status: "invalid_guest_control" }, { status: 401 });
     }
-    if (url.pathname === "/internal/v1/guest-grants") {
+    if (url.pathname === "/internal/v1/guest-grants" || /\/internal\/v1\/guest-grants\/[^/]+\/renew/u.test(url.pathname)) {
       const guest = guests.find((candidate) => candidate.bootstrap === body.bootstrapCredential);
       if (!guest) return Response.json({ status: "invalid_guest_control" }, { status: 401 });
-      const grantId = `grant-${++grantSequence}`;
+      const existingGrantId = /\/internal\/v1\/guest-grants\/([^/]+)\/renew/u.exec(url.pathname)?.[1];
+      const grantId = existingGrantId ?? `grant-${++grantSequence}`;
       const credential = `credential-${grantId}`;
       const capabilities = Array.isArray(body.capabilities) ? body.capabilities.filter((value): value is string => typeof value === "string") : [];
       credentials.set(credential, { guestId: guest.guestId, capabilities, grantId });
@@ -55,17 +56,27 @@ function responseForPlatform(): { fetch: typeof fetch; credentials: Map<string, 
 }
 
 function accessPort(): MsgRoomAuthPort {
-  const grants = new Map<string, string[]>();
+  const grants = new Map<string, { capabilities: string[]; grantId?: string }>();
   return {
     async proveLink(input) {
       if (input.room !== "room-1") return null;
       if (input.source === "management" && input.token !== "manage") return null;
       return { source: input.source };
     },
-    async recordGrant(input) { grants.set(`${input.guestId}:${input.source}`, [...input.capabilities]); },
+    async recordGrant(input) { grants.set(`${input.guestId}:${input.source}`, { capabilities: [...input.capabilities], ...(input.grantId ? { grantId: input.grantId } : {}) }); },
     async checkGrant(input) {
-      const capabilities = grants.get(`${input.guestId}:${input.source}`) ?? (input.source === "public" ? grants.get(`${input.guestId}:owner`) : undefined) ?? [];
-      return capabilities.includes(input.action === "read" ? MSG_READ : input.action === "write" ? MSG_WRITE : "msg:manage");
+      const grant = grants.get(`${input.guestId}:${input.source}`) ?? (input.source === "public" ? grants.get(`${input.guestId}:owner`) : undefined);
+      return (!input.grantId || grant?.grantId === input.grantId) && (grant?.capabilities ?? []).includes(input.action === "read" ? MSG_READ : input.action === "write" ? MSG_WRITE : "msg:manage");
+    },
+    async findGrant(input) {
+      const entries = [...grants.entries()].filter(([key, grant]) => {
+        const [guestId, source] = key.split(":");
+        return guestId === input.guestId && (input.source === undefined || source === input.source) && (input.grantId === undefined || grant.grantId === input.grantId);
+      });
+      const entry = entries[0];
+      if (!entry) return null;
+      const source = entry[0].split(":")[1] as "owner" | "public" | "management";
+      return { source, ...(entry[1].grantId ? { grantId: entry[1].grantId } : {}), capabilities: entry[1].capabilities, active: true };
     },
   };
 }
@@ -107,11 +118,11 @@ test("resolves guest control, attests owner or participant, and scopes cookies b
 
   const read = await worker.fetch(new Request("https://msg.0000.chat/room-1", { headers: { accept: "application/json", cookie: cookieHeader } }));
   expect(read.status).toBe(200);
-  expect(serviceCalls.at(-1)).toMatchObject({ kind: "read", source: "public", guestId: "guest-1" });
+  expect(serviceCalls.at(-1)).toMatchObject({ kind: "read", source: "owner", guestId: "guest-1" });
 
   const posted = await worker.fetch(new Request("https://msg.0000.chat/room-1", { method: "POST", headers: { accept: "application/json", "content-type": "application/json", cookie: cookieHeader }, body: JSON.stringify({ content: "second", author: "b", display_name: "B", semantic_type: "message" }) }));
   expect(posted.status).toBe(201);
-  expect(serviceCalls.at(-1)).toMatchObject({ kind: "post", source: "public", guestId: "guest-1" });
+  expect(serviceCalls.at(-1)).toMatchObject({ kind: "post", source: "owner", guestId: "guest-1" });
 
   const participant = await worker.fetch(new Request("https://msg.0000.chat/room-1", { headers: { accept: "application/json" } }));
   expect(participant.status).toBe(200);

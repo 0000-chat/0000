@@ -19,6 +19,11 @@ export interface AbuseReportInput {
 }
 export interface CreationPlan { readonly management: string; readonly room: string; readonly ownerGuestId?: string; }
 
+interface CreationReceipt {
+  readonly response: CreateRoomResponse;
+  readonly ownerGrantId?: string;
+}
+
 export type AbuseReportStatus = "closed" | "open" | "reviewed";
 
 export interface OperatorReportSummary {
@@ -67,9 +72,10 @@ export class D1OperationStore implements CreationOperations {
     return this.claim(storageId, comparisonFingerprint, now, 0, guestId);
   }
 
-  async completeCreation(key: string, leaseToken: string, response: CreateRoomResponse, guestId = "legacy-unscoped-test"): Promise<void> {
+  async completeCreation(key: string, leaseToken: string, response: CreateRoomResponse, guestId = "legacy-unscoped-test", ownerGrantId?: string): Promise<void> {
     const storageId = await this.storageId(guestId, key);
-    const envelope = await encryptOperationRecord(this.encryptionKey, "creation_idempotency", storageId, response);
+    const receipt: CreationReceipt = { response, ...(ownerGrantId ? { ownerGrantId } : {}) };
+    const envelope = await encryptOperationRecord(this.encryptionKey, "creation_idempotency", storageId, receipt);
     const now = this.now();
     const result = await this.d1.prepare("UPDATE creation_idempotency SET state = 'complete', response_envelope = ?, updated_at = ?, lease_token = '' WHERE idempotency_key = ? AND state = 'pending' AND lease_token = ?").bind(envelope, now, storageId, leaseToken).run();
     if (result.meta?.changes !== 1) throw new Error("The creation lease is no longer valid.");
@@ -145,7 +151,9 @@ export class D1OperationStore implements CreationOperations {
     }
     if (row.request_fingerprint !== fingerprint) return { kind: "conflict" };
     if (row.state === "complete" && row.response_envelope) {
-      return { kind: "complete", response: await decryptOperationRecord<CreateRoomResponse>(this.encryptionKey, "creation_idempotency", storageId, row.response_envelope) };
+      const stored = await decryptOperationRecord<CreationReceipt | CreateRoomResponse>(this.encryptionKey, "creation_idempotency", storageId, row.response_envelope);
+      if (isCreationReceipt(stored)) return { kind: "complete", response: stored.response, ...(stored.ownerGrantId ? { ownerGrantId: stored.ownerGrantId } : {}) };
+      return { kind: "complete", response: stored };
     }
     if (now - row.updated_at < STALE_PENDING_MS) return { kind: "pending" };
     const reclaimed = await this.d1.prepare("UPDATE creation_idempotency SET lease_token = ?, updated_at = ? WHERE idempotency_key = ? AND state = 'pending' AND lease_token = ? AND updated_at = ? AND expires_at > ?").bind(leaseToken, now, storageId, row.lease_token, row.updated_at, now).run();
@@ -163,6 +171,10 @@ export class D1OperationStore implements CreationOperations {
     const c = await this.d1.prepare("DELETE FROM operator_audit WHERE rowid IN (SELECT rowid FROM operator_audit WHERE expires_at <= ? LIMIT ?)").bind(now, PURGE_LIMIT).run();
     return (a.meta?.changes ?? 0) + (b.meta?.changes ?? 0) + (c.meta?.changes ?? 0);
   }
+}
+
+function isCreationReceipt(value: CreationReceipt | CreateRoomResponse): value is CreationReceipt {
+  return typeof value === "object" && value !== null && "response" in value && typeof value.response === "object" && value.response !== null;
 }
 
 const reportStatuses = new Set<AbuseReportStatus>(["closed", "open", "reviewed"]);

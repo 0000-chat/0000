@@ -29,13 +29,21 @@ export interface MsgRoomAuthPort {
     guestId: string;
     source: AccessSource;
     capabilities: readonly string[];
+    grantId?: string;
   }): Promise<void>;
   checkGrant(input: {
     room: string;
     guestId: string;
     source: AccessSource;
     action: "read" | "write" | "manage";
+    grantId?: string;
   }): Promise<boolean>;
+  findGrant(input: {
+    room: string;
+    guestId: string;
+    source?: AccessSource;
+    grantId?: string;
+  }): Promise<{ source: AccessSource; grantId?: string; capabilities: readonly string[]; active: boolean } | null>;
 }
 
 export interface MsgAuthConfig {
@@ -78,7 +86,7 @@ export type OperatorAuthorization =
 
 export interface MsgAuthenticator {
   control(request: Request): Promise<GuestControl>;
-  authorizeOwner(request: Request, input: { room: string; storedOwnerId: string }, control?: GuestControl): Promise<ResourceAuthorization>;
+  authorizeOwner(request: Request, input: { room: string; storedOwnerId: string; grantId?: string }, control?: GuestControl): Promise<ResourceAuthorization>;
   authorizeResource(request: Request, input: {
     room: string;
     source: AccessSource;
@@ -135,15 +143,28 @@ export function createMsgAuthenticator(
     async authorizeOwner(request, input, existingControl) {
       const control = existingControl ?? await this.control(request);
       if (control.guestId !== input.storedOwnerId) throw authError("The creator control is not the stored room owner.", 403);
-      const grant = await guestClient.attestGuestGrant({
-        bootstrapCredential: control.bootstrapCredential,
-        resourceId: input.room,
-        capabilities: [MSG_READ, MSG_WRITE],
-        assertion: { kind: "owner", storedOwnerId: input.storedOwnerId },
-      });
+      const local = await rooms.findGrant({ room: input.room, guestId: control.guestId, source: "owner", ...(input.grantId ? { grantId: input.grantId } : {}) });
+      if (local && !local.active) throw authError("The creator permission is no longer valid.", 403);
+      if (input.grantId && (!local || local.grantId !== input.grantId || !local.capabilities.includes(MSG_READ) || !local.capabilities.includes(MSG_WRITE))) {
+        throw authError("The creator permission is no longer valid.", 403);
+      }
+      const grant = local?.grantId
+        ? await guestClient.renewGuestGrant({
+          bootstrapCredential: control.bootstrapCredential,
+          grantId: local.grantId,
+          resourceId: input.room,
+          capabilities: [MSG_READ, MSG_WRITE],
+          assertion: { kind: "owner", storedOwnerId: input.storedOwnerId },
+        })
+        : await guestClient.attestGuestGrant({
+          bootstrapCredential: control.bootstrapCredential,
+          resourceId: input.room,
+          capabilities: [MSG_READ, MSG_WRITE],
+          assertion: { kind: "owner", storedOwnerId: input.storedOwnerId },
+        });
       if (grant.status === "authority_unavailable") throw authorityError();
       if (grant.status !== "success") throw authError("The creator grant could not be issued.", 403);
-      await rooms.recordGrant({ room: input.room, guestId: control.guestId, source: "owner", capabilities: [MSG_READ, MSG_WRITE] });
+      await rooms.recordGrant({ room: input.room, guestId: control.guestId, source: "owner", capabilities: [MSG_READ, MSG_WRITE], grantId: grant.value.grantId });
       return {
         context: { credential: grant.value.credential, guestId: control.guestId, grantId: grant.value.grantId, source: "owner" },
         setCookies: [
@@ -166,6 +187,7 @@ export function createMsgAuthenticator(
           ? [MSG_MANAGE]
           : [MSG_READ];
       if (resourceCookie !== undefined && !input.recover) {
+        await rooms.checkGrant({ room: input.room, guestId: control.guestId, source: input.source, action: input.action });
         const authentication = await platformClient.authenticate(resourceCookie);
         if (authentication.status === "invalid_credential") throw authError("The resource credential is invalid.", 401);
         if (authentication.status === "authority_unavailable") throw authorityError();
@@ -173,11 +195,13 @@ export function createMsgAuthenticator(
         if (principal.kind !== "guest" || principal.subjectId !== control.guestId || !principal.resourceIds.includes(input.room) || needed.some((capability) => !principal.capabilities.includes(capability))) {
           throw authError("The resource credential is not valid for this request.", 403);
         }
-        if (!(await rooms.checkGrant({ room: input.room, guestId: control.guestId, source: input.source, action: input.action }))) {
+        const local = await rooms.findGrant({ room: input.room, guestId: control.guestId, grantId: principal.grantId });
+        const effectiveSource = input.source === "public" && local?.source === "owner" ? "owner" : input.source;
+        if (!local || !local.active || local.source !== effectiveSource || !(await rooms.checkGrant({ room: input.room, guestId: control.guestId, source: effectiveSource, action: input.action, grantId: principal.grantId }))) {
           throw authError("The resource permission is no longer valid.", 403);
         }
         return {
-          context: { credential: resourceCookie, guestId: control.guestId, grantId: principal.grantId, source: input.source },
+          context: { credential: resourceCookie, guestId: control.guestId, grantId: principal.grantId, source: effectiveSource },
           setCookies: control.setCookies,
         };
       }
@@ -192,7 +216,7 @@ export function createMsgAuthenticator(
       });
       if (grant.status === "authority_unavailable") throw authorityError();
       if (grant.status !== "success") throw authError("The resource permission is not valid.", 403);
-      await rooms.recordGrant({ room: input.room, guestId: control.guestId, source: input.source, capabilities: needed });
+      await rooms.recordGrant({ room: input.room, guestId: control.guestId, source: input.source, capabilities: needed, grantId: grant.value.grantId });
       const resourceCookiePath = input.source === "management" ? `/manage/${input.room}` : `/${input.room}`;
       const resourceCookieName = input.source === "management" ? MANAGEMENT_COOKIE : RESOURCE_COOKIE;
       return {
