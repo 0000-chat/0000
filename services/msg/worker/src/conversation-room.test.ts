@@ -232,6 +232,62 @@ test("uses only the Durable Object clock for expiry and inactivity refresh", asy
   expect((await durable.fetch(request("/messages", { now: 0, input: { content: "late", author: "a", display_name: "a", semantic_type: "message" } }))).status).toBe(410);
 });
 
+test("checks inactivity inside the claim transaction before a new claim or receipt replay", async () => {
+  const originalFetch = globalThis.fetch;
+  let now = 1_000;
+  const env = {
+    MSG_AUTH_REQUIRED: "1",
+    MSG_PLATFORM_BASE_URL: "https://platform.test",
+    MSG_PLATFORM_AUTHORITY: "platform-test",
+    MSG_PLATFORM_AUDIENCE: "https://msg.test",
+    MSG_PLATFORM_SERVICE_VERIFIER: "service-verifier",
+  };
+  const database = new Database(":memory:");
+  const first = await room(database, () => now, env);
+  const claimRequest = (key: string) => new Request("https://room/claim?resource=room-1", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      authorization: "Bearer human-claim",
+      "x-msg-auth-kind": "claim",
+      "x-msg-guest-id": "guest-owner",
+    },
+    body: JSON.stringify({ idempotency_key: key, request_digest: "digest", revoke_links: false }),
+  });
+  const platformPrincipal = {
+    version: 1,
+    authority: "platform-test",
+    kind: "human",
+    subjectId: "human-claimant",
+    credentialId: "human-credential",
+    audience: "https://msg.test",
+    capabilities: ["msg:claim"],
+    expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    organizationId: "org-claimant",
+    membershipId: "membership-claimant",
+  };
+  globalThis.fetch = (async () => Response.json({ status: "authenticated", principal: platformPrincipal }, { status: 200 })) as typeof fetch;
+  try {
+    await first.room.fetch(request("/initialize", { management_hash: "hash", owner_guest_id: "guest-owner", initial: { content: "first", author: "owner", display_name: "Owner", semantic_type: "message" } }));
+    expect((await first.room.fetch(claimRequest("claim-before-expiry"))).status).toBe(200);
+    expect(database.query("SELECT COUNT(*) AS count FROM claim_receipts").get()).toEqual({ count: 1 });
+
+    now += ROOM_LIMITS.inactivityTtlMs + 1;
+    expect((await first.room.fetch(claimRequest("claim-before-expiry"))).status).toBe(410);
+    expect(database.query("SELECT status FROM room_state").get()).toEqual({ status: "deleted" });
+    expect(database.query("SELECT COUNT(*) AS count FROM claim_receipts").get()).toEqual({ count: 0 });
+
+    const secondDatabase = new Database(":memory:");
+    const second = await room(secondDatabase, () => now, env);
+    await second.room.fetch(request("/initialize", { management_hash: "hash", owner_guest_id: "guest-owner", initial: { content: "second", author: "owner", display_name: "Owner", semantic_type: "message" } }));
+    now += ROOM_LIMITS.inactivityTtlMs + 1;
+    expect((await second.room.fetch(claimRequest("new-claim-after-expiry"))).status).toBe(410);
+    expect(secondDatabase.query("SELECT status FROM room_state").get()).toEqual({ status: "deleted" });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("exports a complete ascending transcript with safety warnings", async () => {
   const { room: durable } = await room();
   await durable.fetch(request("/initialize", { management_hash: "hash", initial: { content: "first", author: "a", display_name: "Alpha", semantic_type: "message" } }));

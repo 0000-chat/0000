@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { readD1Migrations } from "../../../platform/node_modules/@cloudflare/vitest-plugin";
+import { createPlatformClient, createPlatformGuestClient } from "@0000/platform-client";
 import { expect, test } from "bun:test";
 import { convertV4MiniflareOptions, Miniflare } from "../../../platform/node_modules/miniflare";
 import { Database } from "bun:sqlite";
@@ -128,7 +129,7 @@ function socketClosed(socket: WebSocketClient): Promise<number> {
   });
 }
 
-async function provisionHuman(database: D1Database, service: ServiceRegistration, email: string, capabilities: string[]): Promise<{ credential: string; organizationId: string; subjectId: string }> {
+async function provisionHuman(database: D1Database, service: ServiceRegistration, email: string, capabilities: string[]): Promise<{ credential: string; organizationId: string; subjectId: string; membershipId: string }> {
   const subjectId = crypto.randomUUID();
   const now = Date.now();
   await database.prepare('INSERT INTO "user" (id, name, email, emailVerified, image, createdAt, updatedAt, disabledAt) VALUES (?, ?, ?, 1, NULL, ?, ?, NULL)').bind(subjectId, "T10 claimant", email, now, now).run();
@@ -141,7 +142,114 @@ async function provisionHuman(database: D1Database, service: ServiceRegistration
     capabilities,
     expiresAt: now + 86_400_000,
   });
-  return { credential: issued.credential, organizationId: organization.organizationId, subjectId };
+  return { credential: issued.credential, organizationId: organization.organizationId, subjectId, membershipId: organization.membershipId };
+}
+
+interface PlatformRenewalGate {
+  readonly entered: Promise<void>;
+  hold(): Promise<void>;
+  release(): void;
+}
+
+function createPlatformRenewalGate(): PlatformRenewalGate {
+  let enter!: () => void;
+  let releaseWait!: () => void;
+  let released = false;
+  const entered = new Promise<void>((resolve) => { enter = resolve; });
+  const releasedPromise = new Promise<void>((resolve) => { releaseWait = resolve; });
+  return {
+    entered,
+    hold() {
+      enter();
+      return releasedPromise;
+    },
+    release() {
+      if (released) return;
+      released = true;
+      releaseWait();
+    },
+  };
+}
+
+type LocalClaimResult =
+  | { readonly status: "claimed" | "replayed"; readonly guestId: string; readonly subjectId: string; readonly organizationId: string }
+  | { readonly status: "denied" | "conflict"; readonly reason: string };
+
+interface LocalClaimFixture {
+  readonly database: Database;
+  seed(input: { resourceId: string; tenantId: string; organizationId: string; bootstrapCredential: string }): Promise<{ guestId: string }>;
+  claim(input: { resourceId: string; idempotencyKey: string; requestDigest: string; revokeLinks: boolean; bootstrapCredential: string; claimantCredential: string }): Promise<LocalClaimResult>;
+  authorize(input: { resourceId: string; credential: string; action: "read" | "write" }): Promise<{ readonly allowed: boolean; readonly reason?: string }>;
+}
+
+function createLocalClaimFixture(options: { baseUrl: string; authority: string; audience: string; serviceVerifier: string; guestGrantIssuer: string }): LocalClaimFixture {
+  const database = new Database(":memory:");
+  database.exec(`
+    CREATE TABLE tenant (id TEXT PRIMARY KEY, owner_organization_id TEXT NOT NULL);
+    CREATE TABLE resource (
+      id TEXT PRIMARY KEY,
+      tenant_id TEXT NOT NULL,
+      creation_guest_id TEXT NOT NULL,
+      owner_guest_id TEXT,
+      owner_subject_id TEXT,
+      owner_organization_id TEXT
+    );
+    CREATE TABLE claim_receipts (
+      receipt_key TEXT PRIMARY KEY,
+      request_digest TEXT NOT NULL,
+      original_guest_id TEXT NOT NULL,
+      claimant_subject_id TEXT NOT NULL,
+      organization_id TEXT NOT NULL,
+      revoke_links INTEGER NOT NULL,
+      claimed_at INTEGER NOT NULL
+    );
+  `);
+  const platform = createPlatformClient({ baseUrl: options.baseUrl, authority: options.authority, audience: options.audience, serviceVerifier: options.serviceVerifier });
+  const guest = createPlatformGuestClient({ baseUrl: options.baseUrl, authority: options.authority, audience: options.audience, guestGrantIssuer: options.guestGrantIssuer });
+
+  return {
+    database,
+    async seed(input) {
+      const resolved = await guest.resolveGuestControl(input.bootstrapCredential);
+      if (resolved.status !== "success") throw new Error(`Local fixture could not resolve the guest control: ${resolved.status}`);
+      database.query("INSERT INTO tenant (id, owner_organization_id) VALUES (?, ?)").run(input.tenantId, input.organizationId);
+      database.query("INSERT INTO resource (id, tenant_id, creation_guest_id, owner_guest_id) VALUES (?, ?, ?, ?)").run(input.resourceId, input.tenantId, resolved.guestId, resolved.guestId);
+      return { guestId: resolved.guestId };
+    },
+    async claim(input) {
+      const authentication = await platform.authenticate(input.claimantCredential);
+      if (authentication.status !== "authenticated" || authentication.principal.kind !== "human" || !authentication.principal.capabilities.includes(MSG_CLAIM)) return { status: "denied", reason: "claimant credential" };
+      const resolved = await guest.resolveGuestControl(input.bootstrapCredential);
+      if (resolved.status !== "success") return { status: "denied", reason: "guest control" };
+      const principal = authentication.principal;
+      return database.transaction(() => {
+        const receipt = database.query("SELECT * FROM claim_receipts WHERE receipt_key = ?").get(input.idempotencyKey) as { request_digest: string; original_guest_id: string; claimant_subject_id: string; organization_id: string; revoke_links: number; claimed_at: number } | null;
+        if (receipt) {
+          return receipt.request_digest === input.requestDigest && receipt.original_guest_id === resolved.guestId && receipt.claimant_subject_id === principal.subjectId && receipt.organization_id === principal.organizationId && receipt.revoke_links === (input.revokeLinks ? 1 : 0)
+            ? { status: "replayed" as const, guestId: resolved.guestId, subjectId: principal.subjectId, organizationId: principal.organizationId }
+            : { status: "conflict" as const, reason: "idempotency key" };
+        }
+        const resource = database.query("SELECT tenant_id, owner_guest_id, owner_subject_id FROM resource WHERE id = ?").get(input.resourceId) as { tenant_id: string; owner_guest_id: string | null; owner_subject_id: string | null } | null;
+        const tenant = resource ? database.query("SELECT owner_organization_id FROM tenant WHERE id = ?").get(resource.tenant_id) as { owner_organization_id: string } | null : null;
+        if (!resource || !tenant || resource.owner_guest_id !== resolved.guestId || resource.owner_subject_id !== null || tenant.owner_organization_id !== principal.organizationId) return { status: "denied" as const, reason: "resource owner or tenant" };
+        const updated = database.query("UPDATE resource SET owner_guest_id = NULL, owner_subject_id = ?, owner_organization_id = ? WHERE id = ? AND owner_guest_id = ? AND owner_subject_id IS NULL").run(principal.subjectId, principal.organizationId, input.resourceId, resolved.guestId);
+        if (updated.changes !== 1) return { status: "denied" as const, reason: "resource changed" };
+        database.query("INSERT INTO claim_receipts (receipt_key, request_digest, original_guest_id, claimant_subject_id, organization_id, revoke_links, claimed_at) VALUES (?, ?, ?, ?, ?, ?, ?)").run(input.idempotencyKey, input.requestDigest, resolved.guestId, principal.subjectId, principal.organizationId, input.revokeLinks ? 1 : 0, Date.now());
+        return { status: "claimed" as const, guestId: resolved.guestId, subjectId: principal.subjectId, organizationId: principal.organizationId };
+      })();
+    },
+    async authorize(input) {
+      const authentication = await platform.authenticate(input.credential);
+      if (authentication.status !== "authenticated" || authentication.principal.kind !== "human") return { allowed: false, reason: "credential" };
+      const principal = authentication.principal;
+      const resource = database.query("SELECT tenant_id, owner_subject_id, owner_organization_id FROM resource WHERE id = ?").get(input.resourceId) as { tenant_id: string; owner_subject_id: string | null; owner_organization_id: string | null } | null;
+      const tenant = resource ? database.query("SELECT owner_organization_id FROM tenant WHERE id = ?").get(resource.tenant_id) as { owner_organization_id: string } | null : null;
+      const capability = input.action === "read" ? MSG_READ : MSG_WRITE;
+      return resource && tenant && resource.owner_subject_id === principal.subjectId && resource.owner_organization_id === principal.organizationId && tenant.owner_organization_id === principal.organizationId && principal.capabilities.includes(capability)
+        ? { allowed: true }
+        : { allowed: false, reason: "resource action" };
+    },
+  };
 }
 
 test.serial("proves atomic guest-to-organization claim across Platform, DO restart, and concurrent contenders", { timeout: 60_000 }, async () => {
@@ -151,6 +259,7 @@ test.serial("proves atomic guest-to-organization claim across Platform, DO resta
   let firstMsg: Awaited<ReturnType<typeof startMsgMiniflare>> | undefined;
   let secondMsg: Awaited<ReturnType<typeof startMsgMiniflare>> | undefined;
   let bridgeServer: ReturnType<typeof createServer> | undefined;
+  let renewalGate: PlatformRenewalGate | undefined;
   let organizationLive: WebSocketClient | undefined;
   let revokedParticipantLive: WebSocketClient | undefined;
   try {
@@ -178,6 +287,8 @@ test.serial("proves atomic guest-to-organization claim across Platform, DO resta
       void (async () => {
         const chunks: Buffer[] = [];
         for await (const chunk of request) chunks.push(Buffer.from(chunk));
+        const gate = renewalGate;
+        if (gate && /\/internal\/v1\/guest-grants\/[^/]+\/renew$/u.test(request.url ?? "")) await gate.hold();
         const headers = new Headers();
         for (const [name, value] of Object.entries(request.headers)) if (value !== undefined) headers.set(name, Array.isArray(value) ? value.join(", ") : value);
         const result = await platform!.dispatchFetch(new Request(`${bridge.baseUrl}${request.url ?? "/"}`, { method: request.method, headers, ...(chunks.length > 0 ? { body: Buffer.concat(chunks) } : {}) }));
@@ -194,10 +305,13 @@ test.serial("proves atomic guest-to-organization claim across Platform, DO resta
     await registerService(database, { serviceId: service.serviceId, audience: service.audience, capabilities: service.allowedCapabilities }, service.verifier);
     await registerGuestIssuer(database, service.serviceId, service.guestGrantIssuer);
     const registration: ServiceRegistration = { serviceId: service.serviceId, audience: service.audience, verifierHash: await hashOpaque(service.verifier), allowedCapabilities: service.allowedCapabilities };
+    const platformClient = createPlatformClient({ baseUrl: bridge.baseUrl, authority, audience, serviceVerifier: service.verifier });
+    const platformGuest = createPlatformGuestClient({ baseUrl: bridge.baseUrl, authority, audience, guestGrantIssuer: service.guestGrantIssuer });
     const claimant = await provisionHuman(database, registration, "claimant-t10@example.test", [MSG_READ, MSG_WRITE, MSG_MANAGE, MSG_CLAIM]);
     const otherClaimant = await provisionHuman(database, registration, "other-claimant-t10@example.test", [MSG_READ, MSG_WRITE, MSG_MANAGE, MSG_CLAIM]);
     const underprivileged = await provisionHuman(database, registration, "underprivileged-t10@example.test", [MSG_READ]);
     const revokedClaimant = await provisionHuman(database, registration, "revoked-claimant-t10@example.test", [MSG_CLAIM]);
+    const removedMember = await provisionHuman(database, registration, "removed-member-t10@example.test", [MSG_READ, MSG_WRITE, MSG_MANAGE, MSG_CLAIM]);
     await database.prepare("UPDATE platform_credential SET revoked_at = ? WHERE subject_id = ? AND kind = 'human'").bind(Date.now(), revokedClaimant.subjectId).run();
 
     const msgBindings = {
@@ -227,6 +341,10 @@ test.serial("proves atomic guest-to-organization claim across Platform, DO resta
     expect(managementBefore.status).toBe(200);
     const managementCredential = cookieValue(cookieHeader(managementBefore), "msg_management");
     expect(managementCredential).toBeString();
+    const participantManagementBefore = await firstMsg.miniflare.dispatchFetch(created.manage_url, roomRequest(participantCookies));
+    expect(participantManagementBefore.status).toBe(200);
+    const participantManagementCookies = mergeCookies(participantCookies, participantManagementBefore);
+    expect(cookieValue(participantManagementCookies, "msg_management")).toBeString();
 
     const claimKey = crypto.randomUUID();
     const claim = await firstMsg.miniflare.dispatchFetch(`https://msg.0000.chat/${room}/claim`, { method: "POST", ...roomRequest(ownerCookies, { headers: { authorization: `Bearer ${claimant.credential}`, "idempotency-key": claimKey }, body: JSON.stringify({}) }) });
@@ -238,6 +356,8 @@ test.serial("proves atomic guest-to-organization claim across Platform, DO resta
     expect(formerOwner.status).toBe(403);
     const oldManagement = await firstMsg.miniflare.dispatchFetch(created.manage_url, roomRequest(ownerCookies));
     expect(oldManagement.status).toBe(404);
+    const otherManagement = await firstMsg.miniflare.dispatchFetch(created.manage_url, roomRequest(participantManagementCookies));
+    expect(otherManagement.status).toBe(403);
     const preservedParticipant = await firstMsg.miniflare.dispatchFetch(`https://msg.0000.chat/${room}`, roomRequest(participantCookies));
     expect(preservedParticipant.status).toBe(200);
 
@@ -285,6 +405,51 @@ test.serial("proves atomic guest-to-organization claim across Platform, DO resta
     const missingControlClaim = await firstMsg.miniflare.dispatchFetch(`https://msg.0000.chat/${room}/claim`, { method: "POST", ...roomRequest("", { headers: { authorization: `Bearer ${claimant.credential}`, "idempotency-key": crypto.randomUUID() }, body: JSON.stringify({}) }) });
     expect(missingControlClaim.status).toBe(403);
 
+    const barrierCreate = await firstMsg.miniflare.dispatchFetch("https://msg.0000.chat/", { method: "POST", ...roomRequest(ownerCookies, { headers: { "idempotency-key": crypto.randomUUID() }, body: JSON.stringify({ content: "renewal barrier", author: "owner", display_name: "Owner", semantic_type: "message" }) }) });
+    expect(barrierCreate.status).toBe(201);
+    const barrierRoom = (await barrierCreate.clone().json() as { room: { id: string } }).room.id;
+    const barrierOwnerCookies = mergeCookies(ownerCookies, barrierCreate);
+    const barrierParticipant = await firstMsg.miniflare.dispatchFetch(`https://msg.0000.chat/${barrierRoom}`, roomRequest(""));
+    expect(barrierParticipant.status).toBe(200);
+    const barrierParticipantCookies = cookieHeader(barrierParticipant);
+    const barrierGate = createPlatformRenewalGate();
+    renewalGate = barrierGate;
+    const recoveryDuringClaim = firstMsg.miniflare.dispatchFetch(`https://msg.0000.chat/${barrierRoom}?recover=1`, roomRequest(barrierParticipantCookies));
+    try {
+      await barrierGate.entered;
+      const barrierClaim = await firstMsg.miniflare.dispatchFetch(`https://msg.0000.chat/${barrierRoom}/claim`, { method: "POST", ...roomRequest(barrierOwnerCookies, { headers: { authorization: `Bearer ${claimant.credential}`, "idempotency-key": crypto.randomUUID() }, body: JSON.stringify({ revoke_links: true }) }) });
+      expect(barrierClaim.status).toBe(200);
+    } finally {
+      barrierGate.release();
+      renewalGate = undefined;
+    }
+    expect((await recoveryDuringClaim).status).toBe(403);
+    expect((await firstMsg.miniflare.dispatchFetch(`https://msg.0000.chat/${barrierRoom}`, roomRequest(""))).status).toBe(404);
+
+    const local = createLocalClaimFixture({ baseUrl: bridge.baseUrl, authority, audience, serviceVerifier: service.verifier, guestGrantIssuer: service.guestGrantIssuer });
+    const localResource = "local-resource-t10";
+    const localForeignResource = "local-foreign-resource-t10";
+    const originalGuest = await local.seed({ resourceId: localResource, tenantId: "local-tenant-t10", organizationId: claimant.organizationId, bootstrapCredential: control ?? "" });
+    await local.seed({ resourceId: localForeignResource, tenantId: "local-foreign-tenant-t10", organizationId: otherClaimant.organizationId, bootstrapCredential: control ?? "" });
+    expect(originalGuest.guestId).not.toBe(control);
+    const otherGuest = await platformGuest.createGuest();
+    expect(otherGuest.status).toBe("success");
+    if (otherGuest.status !== "success") throw new Error("The local fixture could not create its wrong-proof guest.");
+    expect((await local.claim({ resourceId: localResource, idempotencyKey: "local-missing-proof", requestDigest: "local-missing-proof", revokeLinks: false, bootstrapCredential: "", claimantCredential: claimant.credential })).status).toBe("denied");
+    expect((await local.claim({ resourceId: localResource, idempotencyKey: "local-wrong-proof", requestDigest: "local-wrong-proof", revokeLinks: false, bootstrapCredential: otherGuest.bootstrapCredential, claimantCredential: claimant.credential })).status).toBe("denied");
+    expect((await local.claim({ resourceId: localForeignResource, idempotencyKey: "local-foreign-tenant", requestDigest: "local-foreign-tenant", revokeLinks: false, bootstrapCredential: control ?? "", claimantCredential: claimant.credential })).status).toBe("denied");
+    const localClaim = await local.claim({ resourceId: localResource, idempotencyKey: "local-claim", requestDigest: "local-claim:v1", revokeLinks: false, bootstrapCredential: control ?? "", claimantCredential: claimant.credential });
+    expect(localClaim).toMatchObject({ status: "claimed", guestId: originalGuest.guestId, subjectId: claimant.subjectId, organizationId: claimant.organizationId });
+    expect(await local.authorize({ resourceId: localResource, credential: claimant.credential, action: "read" })).toEqual({ allowed: true });
+    expect(await local.authorize({ resourceId: localResource, credential: claimant.credential, action: "write" })).toEqual({ allowed: true });
+    expect((await local.authorize({ resourceId: localResource, credential: underprivileged.credential, action: "write" })).allowed).toBe(false);
+    expect((await local.authorize({ resourceId: localResource, credential: otherClaimant.credential, action: "read" })).allowed).toBe(false);
+    expect(await local.claim({ resourceId: localResource, idempotencyKey: "local-claim", requestDigest: "local-claim:v1", revokeLinks: false, bootstrapCredential: control ?? "", claimantCredential: claimant.credential })).toMatchObject({ status: "replayed" });
+    expect((await local.claim({ resourceId: localResource, idempotencyKey: "local-claim", requestDigest: "local-claim:changed", revokeLinks: true, bootstrapCredential: control ?? "", claimantCredential: claimant.credential })).status).toBe("conflict");
+    expect(local.database.query("SELECT creation_guest_id, owner_guest_id, owner_subject_id, owner_organization_id FROM resource WHERE id = ?").get(localResource)).toEqual({ creation_guest_id: originalGuest.guestId, owner_guest_id: null, owner_subject_id: claimant.subjectId, owner_organization_id: claimant.organizationId });
+    expect(local.database.query("SELECT claimant_subject_id, original_guest_id, request_digest FROM claim_receipts WHERE receipt_key = ?").get("local-claim")).toEqual({ claimant_subject_id: claimant.subjectId, original_guest_id: originalGuest.guestId, request_digest: "local-claim:v1" });
+    local.database.close();
+
     const secondCreate = await firstMsg.miniflare.dispatchFetch("https://msg.0000.chat/", { method: "POST", ...roomRequest(ownerCookies, { headers: { "idempotency-key": crypto.randomUUID() }, body: JSON.stringify({ content: "race", author: "owner", display_name: "Owner", semantic_type: "message" }) }) });
     expect(secondCreate.status).toBe(201);
     const secondRoom = (await secondCreate.clone().json() as { room: { id: string } }).room.id;
@@ -298,6 +463,7 @@ test.serial("proves atomic guest-to-organization claim across Platform, DO resta
 
     const revokeCreate = await firstMsg.miniflare.dispatchFetch("https://msg.0000.chat/", { method: "POST", ...roomRequest(ownerCookies, { headers: { "idempotency-key": crypto.randomUUID() }, body: JSON.stringify({ content: "revoke", author: "owner", display_name: "Owner", semantic_type: "message" }) }) });
     const revokeRoom = (await revokeCreate.clone().json() as { room: { id: string } }).room.id;
+    expect((await firstMsg.miniflare.dispatchFetch(`https://msg.0000.chat/${revokeRoom}`, roomRequest(mergeCookies(ownerCookies, revokeCreate)))).status).toBe(200);
     const revokeParticipant = await firstMsg.miniflare.dispatchFetch(`https://msg.0000.chat/${revokeRoom}`, roomRequest(""));
     expect(revokeParticipant.status).toBe(200);
     const revokedParticipantConnection = await openLive(await firstMsg.miniflare.ready, revokeRoom, { cookie: cookieHeader(revokeParticipant) });
@@ -312,18 +478,6 @@ test.serial("proves atomic guest-to-organization claim across Platform, DO resta
     expect((await firstMsg.miniflare.dispatchFetch(`https://msg.0000.chat/${revokeRoom}`, roomRequest(cookieHeader(revokeParticipant)))).status).toBe(403);
     expect((await firstMsg.miniflare.dispatchFetch(`https://msg.0000.chat/${revokeRoom}`, roomRequest(""))).status).toBe(404);
 
-    const local = new Database(":memory:");
-    local.exec("CREATE TABLE tenant (id TEXT PRIMARY KEY, owner_organization_id TEXT NOT NULL); CREATE TABLE resource (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, creation_guest_id TEXT NOT NULL, owner_guest_id TEXT, owner_subject_id TEXT, receipt_key TEXT UNIQUE); CREATE TABLE claim_receipts (receipt_key TEXT PRIMARY KEY, claimant_subject_id TEXT NOT NULL, claimant_credential TEXT NOT NULL, organization_id TEXT NOT NULL)");
-    local.query("INSERT INTO tenant (id, owner_organization_id) VALUES (?, ?)").run("tenant-t10", claimant.organizationId);
-    local.query("INSERT INTO resource (id, tenant_id, creation_guest_id, owner_guest_id) VALUES (?, ?, ?, ?)").run(room, "tenant-t10", control ?? "", control ?? "");
-    local.transaction(() => {
-      local.query("UPDATE resource SET owner_guest_id = NULL, owner_subject_id = ?, receipt_key = ? WHERE id = ? AND owner_guest_id = ?").run(claimant.subjectId, claimKey, room, control ?? "");
-      local.query("INSERT INTO claim_receipts (receipt_key, claimant_subject_id, claimant_credential, organization_id) VALUES (?, ?, ?, ?)").run(claimKey, claimant.subjectId, claimant.credential, claimant.organizationId);
-    })();
-    expect(local.query("SELECT creation_guest_id, owner_guest_id, owner_subject_id, receipt_key FROM resource WHERE id = ?").get(room)).toEqual({ creation_guest_id: control, owner_guest_id: null, owner_subject_id: claimant.subjectId, receipt_key: claimKey });
-    expect(local.query("SELECT claimant_subject_id, claimant_credential, organization_id FROM claim_receipts WHERE receipt_key = ?").get(claimKey)).toEqual({ claimant_subject_id: claimant.subjectId, claimant_credential: claimant.credential, organization_id: claimant.organizationId });
-    local.close();
-
     await firstMsg.dispose();
     firstMsg = undefined;
     secondMsg = await startMsgMiniflare(msgPersistence, TEST_ROOM_LIMITS, { ...msgBindings, MSG_DATA_ENCRYPTION_KEY_V1: "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8" }, false, true);
@@ -333,6 +487,10 @@ test.serial("proves atomic guest-to-organization claim across Platform, DO resta
     expect(restartedRetry.status).toBe(200);
     const creationReplayAfterClaim = await secondMsg.miniflare.dispatchFetch("https://msg.0000.chat/", { method: "POST", ...roomRequest(ownerCookies, { headers: { "idempotency-key": creationKey }, body: JSON.stringify({ content: "claimable", author: "owner", display_name: "Owner", semantic_type: "message" }) }) });
     expect(creationReplayAfterClaim.status).toBe(403);
+    await database.prepare("DELETE FROM member WHERE id = ?").bind(removedMember.membershipId).run();
+    expect((await platformClient.authenticate(removedMember.credential)).status).toBe("invalid_credential");
+    const membershipRemovedRead = await secondMsg.miniflare.dispatchFetch(`https://msg.0000.chat/${room}`, roomRequest("", { headers: { authorization: `Bearer ${removedMember.credential}` } }));
+    expect(membershipRemovedRead.status).toBe(401);
 
     const outageCreate = await secondMsg.miniflare.dispatchFetch("https://msg.0000.chat/", { method: "POST", ...roomRequest(ownerCookies, { headers: { "idempotency-key": crypto.randomUUID() }, body: JSON.stringify({ content: "outage", author: "owner", display_name: "Owner", semantic_type: "message" }) }) });
     expect(outageCreate.status).toBe(201);
