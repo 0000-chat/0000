@@ -49,10 +49,10 @@ with simulated Google provider HTTP:
   credential capabilities;
 - concurrent grant narrowing uses a stored-capability compare-and-set, so a
   stale request cannot reintroduce a capability under the same grant ID;
-- deterministic verification interleavings revoke an agent credential while
-  its agent is disabled and revoke a human credential while its organization
-  is suspended, then restore the authority state; both requests remain
-  invalid after the initial credential read observed an otherwise-live key;
+- deterministic verification interleavings start with an agent disabled or an
+  organization suspended, revoke the credential while that authority remains
+  unavailable, then restore the authority state; both requests remain invalid
+  after the initial credential read observed an otherwise-live key;
 - invalid lifetime configuration blocks issue and rotation while allowing
   metadata listing and revocation;
 - shared-client requests through the real protected-resource fixture prove

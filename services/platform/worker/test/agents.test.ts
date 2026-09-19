@@ -617,16 +617,16 @@ describe("T05 organization-owned agents", () => {
       credential: string;
       credentialId: string;
     };
+    await testEnv.IDENTITY_DB.prepare(
+      "UPDATE platform_agent SET enabled = 0 WHERE id = ? AND organization_id = ?",
+    )
+      .bind(agent.id, owner.organizationId)
+      .run();
     let agentRaceInitialRead = false;
     const agentRaceDatabase = interleavedCredentialReadDatabase(
       testEnv.IDENTITY_DB,
       async () => {
         agentRaceInitialRead = true;
-        await testEnv.IDENTITY_DB.prepare(
-          "UPDATE platform_agent SET enabled = 0 WHERE id = ? AND organization_id = ?",
-        )
-          .bind(agent.id, owner.organizationId)
-          .run();
         expect(
           await revokeAgentCredential(
             testEnv.IDENTITY_DB.withSession("first-primary"),
@@ -675,21 +675,21 @@ describe("T05 organization-owned agents", () => {
       credential: string;
       credentialId: string;
     };
+    const humanRaceSuspendedAt = Date.now();
+    await testEnv.IDENTITY_DB.prepare(
+      "UPDATE organization SET suspendedAt = ? WHERE id = ?",
+    )
+      .bind(humanRaceSuspendedAt, owner.organizationId)
+      .run();
     let humanRaceInitialRead = false;
     const humanRaceDatabase = interleavedCredentialReadDatabase(
       testEnv.IDENTITY_DB,
       async () => {
         humanRaceInitialRead = true;
-        const suspendedAt = Date.now();
-        await testEnv.IDENTITY_DB.prepare(
-          "UPDATE organization SET suspendedAt = ? WHERE id = ?",
-        )
-          .bind(suspendedAt, owner.organizationId)
-          .run();
         await testEnv.IDENTITY_DB.prepare(
           "UPDATE platform_credential SET revoked_at = ?, revoked_reason = 't05_verification_race' WHERE id = ? AND revoked_at IS NULL",
         )
-          .bind(suspendedAt, humanRaceCredential.credentialId)
+          .bind(humanRaceSuspendedAt, humanRaceCredential.credentialId)
           .run();
         await testEnv.IDENTITY_DB.prepare(
           "UPDATE organization SET suspendedAt = NULL WHERE id = ?",
@@ -956,7 +956,7 @@ describe("T05 organization-owned agents", () => {
          SELECT RAISE(ABORT, 'injected replacement insert failure');
        END`,
     ).run();
-    let rotationFailureObserved = false;
+    let rotationFailureMessage: string | null = null;
     try {
       await rotateAgentCredential(testEnv.IDENTITY_DB, {
         actorUserId: owner.id,
@@ -967,14 +967,17 @@ describe("T05 organization-owned agents", () => {
         credentialId: firstReadCredential.credentialId,
         expiresAt: Date.now() + 90 * 24 * 60 * 60 * 1000,
       });
-    } catch {
-      rotationFailureObserved = true;
+    } catch (error) {
+      rotationFailureMessage =
+        error instanceof Error ? error.message : String(error);
     } finally {
       await testEnv.IDENTITY_DB.prepare(
         `DROP TRIGGER IF EXISTS ${rotationFailureTrigger}`,
       ).run();
     }
-    expect(rotationFailureObserved).toBe(true);
+    expect(rotationFailureMessage).toContain(
+      "injected replacement insert failure",
+    );
     const rolledBackPredecessor = await testEnv.IDENTITY_DB.prepare(
       "SELECT revoked_at, replaced_by_id FROM platform_credential WHERE id = ?",
     )
