@@ -60,16 +60,23 @@ resource transfer and action-bound receipt write. It proves missing and wrong
 guest proof, foreign-tenant denial, exact retry and conflict, read/write
 authorization, underprivileged and foreign-human denial, and that the stored
 guest subject is the Platform-resolved guest ID rather than the cookie secret.
-The fixture is deliberately local contract evidence; it is not Database
-integration.
+Receipt identity is scoped to `(resource_id, idempotency_key)`: reusing the A
+receipt key against foreign B reaches B's tenant/owner denial, leaves B's
+guest-owned row unchanged, and creates no B receipt. The fixture is
+deliberately local contract evidence; it is not Database integration.
 
 The boundary proof also advances a deterministic DO clock through expiry before
 both a new claim and a receipt retry, pauses a real Platform guest-grant
 renewal between proof and DO recording while `revoke_links` claims the room,
 proves the stale record is rejected, removes a real Platform membership and
-proves the credential is denied, and preserves an unrelated room. Public links
-remain active for the default claim, while every stored management ACL is
-disabled and `revoke_links` disables all public ACLs.
+proves both read and claim denial for that removed member on a still
+guest-owned room. The valid owner remains able to read it, and an active
+claimant can then use the denied request's same idempotency key, proving the
+denied request did not transfer the room or write a receipt. Two other rooms
+receive owner grants before one is claimed; the original owner credential for
+the unrelated room still reads successfully afterward. Public links remain
+active for the default claim, while every stored management ACL is disabled
+and `revoke_links` disables all public ACLs.
 
 The T09 Platform integration assertions remain unchanged. Its bundling helper
 and this test now share the child Bun Worker-bundle path so the actual boundary
@@ -82,7 +89,7 @@ Run from the repository root or `services/msg` as indicated:
 ```text
 bun run check                         # services/msg: pass
 bun run --cwd worker check:application # services/msg: pass
-bun test worker/src/t10-claim.integration.test.ts # 1 pass, 71 assertions
+bun test worker/src/t10-claim.integration.test.ts # 1 pass, 83 assertions
 bun scripts/check-workspace.mjs       # root: 11 workspace manifests pass
 ```
 
