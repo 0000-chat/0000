@@ -71,7 +71,14 @@
     "crons": ["17 3 * * *"]
   },
   "secrets": {
-    "required": ["MSG_DATA_ENCRYPTION_KEY_V1", "MSG_PLATFORM_SERVICE_VERIFIER", "MSG_PLATFORM_GUEST_GRANT_ISSUER"]
+    "required": [
+      "MSG_DATA_ENCRYPTION_KEY_V1",
+      "MSG_PLATFORM_SERVICE_VERIFIER",
+      "MSG_PLATFORM_GUEST_GRANT_ISSUER",
+      "MSG_VAPID_PUBLIC_KEY",
+      "MSG_VAPID_PRIVATE_KEY",
+      "MSG_VAPID_SUBJECT"
+    ]
   },
   "vars": {
     "MSG_AUTH_REQUIRED": "1",

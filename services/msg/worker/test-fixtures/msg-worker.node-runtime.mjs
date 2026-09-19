@@ -13,6 +13,9 @@ let startupFailed = false;
 let stopRequested = false;
 let parentDisconnected = false;
 let shutdownPromise;
+let outboundRequests = [];
+let providerPendingPushes = new Map();
+let outboundResponse = { status: 204, delayMs: 0 };
 
 function send(message) {
   if (parentDisconnected) return;
@@ -47,6 +50,177 @@ async function readBody(request) {
   const chunks = [];
   for await (const chunk of request) chunks.push(Buffer.from(chunk));
   return Buffer.concat(chunks);
+}
+
+async function fetchLocalOutbound(request) {
+  const url = new URL(request.url);
+  const body = Buffer.from(await request.arrayBuffer());
+  const headers = Object.fromEntries(request.headers.entries());
+  return new Promise((resolve, reject) => {
+    const outgoing = sendWorkerRequest({
+      hostname: url.hostname,
+      port: url.port || (url.protocol === "https:" ? 443 : 80),
+      path: `${url.pathname}${url.search}`,
+      method: request.method,
+      headers,
+    }, (incoming) => {
+      const chunks = [];
+      incoming.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+      incoming.on("error", reject);
+      incoming.on("end", () => {
+        const responseHeaders = new Headers();
+        for (const [name, value] of Object.entries(incoming.headers)) {
+          if (value !== undefined) responseHeaders.set(name, Array.isArray(value) ? value.join(", ") : value);
+        }
+        resolve(new Response(Buffer.concat(chunks), { status: incoming.statusCode ?? 502, headers: responseHeaders }));
+      });
+    });
+    outgoing.on("error", reject);
+    if (body.byteLength > 0) outgoing.end(body);
+    else outgoing.end();
+  });
+}
+
+function sendJson(response, value, status = 200) {
+  const body = Buffer.from(JSON.stringify(value));
+  response.writeHead(status, { "content-type": "application/json; charset=utf-8", "content-length": body.byteLength });
+  response.end(body);
+}
+
+function pendingPushRequests() {
+  const now = Date.now();
+  for (const [key, pending] of providerPendingPushes) {
+    if (pending.expiresAt <= now) providerPendingPushes.delete(key);
+  }
+  return [...providerPendingPushes.values()].map(({ request }) => request);
+}
+
+async function handleTestControl(request, response) {
+  const path = new URL(request.url ?? "/", "http://127.0.0.1").pathname;
+  if (path === "/__test/pending-pushes" && request.method === "GET") {
+    sendJson(response, pendingPushRequests());
+    return true;
+  }
+  if (path === "/__test/outbound" && request.method === "GET") {
+    sendJson(response, outboundRequests);
+    return true;
+  }
+  if (path === "/__test/outbound" && request.method === "DELETE") {
+    outboundRequests = [];
+    response.writeHead(204);
+    response.end();
+    return true;
+  }
+  if (path === "/__test/outbound" && request.method === "POST") {
+    let value;
+    try { value = JSON.parse((await readBody(request)).toString("utf8")); } catch {
+      response.writeHead(400);
+      response.end();
+      return true;
+    }
+    if (!isRecord(value) || !Number.isSafeInteger(value.status) || value.status < 200 || value.status > 599 || value.status === 204 && value.location !== undefined || value.location !== undefined && typeof value.location !== "string" || value.delay_ms !== undefined && (!Number.isSafeInteger(value.delay_ms) || value.delay_ms < 0 || value.delay_ms > 10_000)) {
+      response.writeHead(400);
+      response.end();
+      return true;
+    }
+    outboundResponse = { status: value.status, delayMs: typeof value.delay_ms === "number" ? value.delay_ms : 0, ...(typeof value.location === "string" ? { location: value.location } : {}) };
+    response.writeHead(204);
+    response.end();
+    return true;
+  }
+  if (path === "/__test/alarm" && request.method === "POST") {
+    let value;
+    try { value = JSON.parse((await readBody(request)).toString("utf8")); } catch {
+      response.writeHead(400);
+      response.end();
+      return true;
+    }
+    if (!isRecord(value) || typeof value.room !== "string" || !value.room || value.room.length > 512 || !miniflare) {
+      response.writeHead(400);
+      response.end();
+      return true;
+    }
+    const namespace = await miniflare.getDurableObjectNamespace("ConversationRoom");
+    const stub = namespace.get(namespace.idFromName(value.room));
+    const result = await stub.fetch("https://room/__test/run-alarm", { method: "POST" });
+    const body = Buffer.from(await result.arrayBuffer());
+    response.writeHead(result.status, { "content-type": "application/json; charset=utf-8", "content-length": body.byteLength });
+    response.end(body);
+    return true;
+  }
+  if (path === "/__test/push-send-gate" && request.method === "POST") {
+    let value;
+    try { value = JSON.parse((await readBody(request)).toString("utf8")); } catch {
+      response.writeHead(400);
+      response.end();
+      return true;
+    }
+    if (!isRecord(value) || typeof value.room !== "string" || !value.room || value.room.length > 512 || !["arm", "wait", "release", "advance"].includes(value.action) || value.action === "advance" && (!Number.isSafeInteger(value.now_ms) || value.now_ms < 0) || value.action !== "advance" && value.now_ms !== undefined || !miniflare) {
+      response.writeHead(400);
+      response.end();
+      return true;
+    }
+    const namespace = await miniflare.getDurableObjectNamespace("ConversationRoom");
+    const stub = namespace.get(namespace.idFromName(value.room));
+    const result = await stub.fetch("https://room/__test/push-send-gate", {
+      body: JSON.stringify({ action: value.action, ...(value.action === "advance" ? { now_ms: value.now_ms } : {}) }),
+      headers: { "content-type": "application/json" },
+      method: "POST",
+    });
+    const body = Buffer.from(await result.arrayBuffer());
+    response.writeHead(result.status, { "content-type": "application/json; charset=utf-8", "content-length": body.byteLength });
+    response.end(body);
+    return true;
+  }
+  if (path === "/__test/mark-webhook-sending" && request.method === "POST") {
+    let value;
+    try { value = JSON.parse((await readBody(request)).toString("utf8")); } catch {
+      response.writeHead(400);
+      response.end();
+      return true;
+    }
+    if (!isRecord(value) || typeof value.room !== "string" || !value.room || value.room.length > 512 || typeof value.event_id !== "string" || !value.event_id || value.event_id.length > 128 || !miniflare) {
+      response.writeHead(400);
+      response.end();
+      return true;
+    }
+    const namespace = await miniflare.getDurableObjectNamespace("ConversationRoom");
+    const stub = namespace.get(namespace.idFromName(value.room));
+    const result = await stub.fetch("https://room/__test/mark-webhook-sending", {
+      body: JSON.stringify({ event_id: value.event_id }),
+      headers: { "content-type": "application/json" },
+      method: "POST",
+    });
+    const body = Buffer.from(await result.arrayBuffer());
+    response.writeHead(result.status, { "content-type": "application/json; charset=utf-8", "content-length": body.byteLength });
+    response.end(body);
+    return true;
+  }
+  if (path === "/__test/delete-webhook-source" && request.method === "POST") {
+    let value;
+    try { value = JSON.parse((await readBody(request)).toString("utf8")); } catch {
+      response.writeHead(400);
+      response.end();
+      return true;
+    }
+    if (!isRecord(value) || typeof value.room !== "string" || !value.room || value.room.length > 512 || typeof value.message_id !== "string" || !value.message_id || value.message_id.length > 128 || !miniflare) {
+      response.writeHead(400);
+      response.end();
+      return true;
+    }
+    const namespace = await miniflare.getDurableObjectNamespace("ConversationRoom");
+    const stub = namespace.get(namespace.idFromName(value.room));
+    const result = await stub.fetch("https://room/__test/delete-webhook-source", {
+      body: JSON.stringify({ message_id: value.message_id }),
+      headers: { "content-type": "application/json" },
+      method: "POST",
+    });
+    const body = Buffer.from(await result.arrayBuffer());
+    response.writeHead(result.status, { "content-type": "application/json; charset=utf-8", "content-length": body.byteLength });
+    response.end(body);
+    return true;
+  }
+  return false;
 }
 
 function parseDescriptor(encoded) {
@@ -112,6 +286,7 @@ function respondWithError(response, error) {
 }
 
 async function dispatch(request, response) {
+  if (await handleTestControl(request, response)) return;
   if (request.method !== "POST" || request.url !== "/dispatch") {
     response.writeHead(404);
     response.end();
@@ -141,8 +316,12 @@ async function dispatch(request, response) {
   }
 }
 
-async function start(configuration) {
+async function start(configurationPath) {
   try {
+    const configuration = JSON.parse(await readFile(configurationPath, "utf8"));
+    if (!isRecord(configuration) || !isRecord(configuration.bindings) || typeof configuration.compatibilityDate !== "string" || !isRecord(configuration.durableObjects) || typeof configuration.persistenceDirectory !== "string" || typeof configuration.script !== "string") {
+      throw new Error("Invalid Node-owned Miniflare startup configuration file.");
+    }
     miniflare = new Miniflare({
       bindings: configuration.bindings,
       compatibilityDate: configuration.compatibilityDate,
@@ -153,6 +332,42 @@ async function start(configuration) {
       host: "127.0.0.1",
       modules: true,
       ratelimits: configuration.ratelimits,
+      outboundService: async (request) => {
+        // Platform integration fixtures expose the authority through a local
+        // HTTP bridge. Preserve that real boundary while the notification
+        // tests use this hook as their deterministic push provider.
+        const outboundUrl = new URL(request.url);
+        if (outboundUrl.hostname === "127.0.0.1" || outboundUrl.hostname === "localhost") return fetchLocalOutbound(request);
+        const bodyBytes = Buffer.from(await request.arrayBuffer());
+        const responseConfig = outboundResponse;
+        const captured = {
+          body: bodyBytes.toString("utf8"),
+          body_base64: bodyBytes.toString("base64"),
+          headers: Object.fromEntries(request.headers.entries()),
+          method: request.method,
+          url: request.url,
+        };
+        outboundRequests.push(captured);
+        if (responseConfig.delayMs > 0) await new Promise((resolve) => setTimeout(resolve, responseConfig.delayMs));
+        const topic = captured.headers.topic;
+        const ttlSeconds = Number(captured.headers.ttl);
+        if (responseConfig.status >= 200 && responseConfig.status < 300 && typeof topic === "string" && Number.isSafeInteger(ttlSeconds) && ttlSeconds >= 0) {
+          // A successful response models an offline push service retaining the latest body for this endpoint and Topic until TTL.
+          providerPendingPushes.set(`${captured.url}\u0000${topic}`, {
+            expiresAt: Date.now() + ttlSeconds * 1_000,
+            request: captured,
+          });
+        }
+        const responseBody = responseConfig.status === 204 || responseConfig.status === 304 ? null : new ReadableStream({
+          start(controller) {
+            controller.enqueue(Buffer.from("test-only response body"));
+          },
+        });
+        return new Response(responseBody, {
+          status: responseConfig.status,
+          ...(responseConfig.location === undefined ? {} : { headers: { location: responseConfig.location } }),
+        });
+      },
       script: configuration.script,
     });
     if (configuration.d1MigrationPaths?.length) {
@@ -225,9 +440,9 @@ input.on("line", (line) => {
     return;
   }
 
-  if (isRecord(message) && message.type === "start" && !startupRequested && isRecord(message.configuration)) {
+  if (isRecord(message) && message.type === "start" && !startupRequested) {
     startupRequested = true;
-    void start(message.configuration);
+    void start(typeof message.configurationPath === "string" && message.configurationPath.length > 0 ? message.configurationPath : "");
   } else if (isRecord(message) && message.type === "stop") {
     void shutdown();
   }

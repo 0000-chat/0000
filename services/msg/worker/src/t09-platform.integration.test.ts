@@ -418,11 +418,64 @@ test.serial("crosses the actual Platform Worker/D1 and msg Worker/DO boundary", 
     expect(participantCookies).toContain("msg_resource=");
     const participantCliJar = new PersistentCookieJar({ filePath: join(msgPersistence, "participant-cli-cookies.json"), serviceOrigin: audience });
     participantCliJar.store(`https://msg.0000.chat/${created.room.id}`, participantRead.clone());
+    const platformGuest = createPlatformGuestClient({
+      baseUrl: bridge.baseUrl,
+      authority,
+      audience,
+      guestGrantIssuer: service.guestGrantIssuer,
+    });
     const participantPost = await firstMsg.miniflare.dispatchFetch(`https://msg.0000.chat/${created.room.id}`, roomRequest(participantCookies, {
       method: "POST",
       body: JSON.stringify({ content: "participant", author: "participant", display_name: "Participant", semantic_type: "message" }),
     }));
     expect(participantPost.status).toBe(201);
+    const participantWebhook = await firstMsg.miniflare.dispatchFetch(`https://msg.0000.chat/${created.room.id}/webhooks`, roomRequest(participantCookies, {
+      method: "POST",
+      body: JSON.stringify({ url: "https://example.com/msg-t09-hook" }),
+    }));
+    expect(participantWebhook.status).toBe(201);
+    const participantWebhookValue = await participantWebhook.json() as { webhook: { id: string } };
+    expect(participantWebhookValue.webhook.id).toMatch(/^[0-9a-f-]{36}$/u);
+    const participantWebhookList = await firstMsg.miniflare.dispatchFetch(`https://msg.0000.chat/${created.room.id}/webhooks`, roomRequest(participantCookies));
+    expect(participantWebhookList.status).toBe(200);
+    expect((await participantWebhookList.json() as { webhooks: unknown[] }).webhooks).toHaveLength(1);
+
+    const readOnlyGuest = await platformGuest.createGuest();
+    expect(readOnlyGuest.status).toBe("success");
+    if (readOnlyGuest.status !== "success") throw new Error("The read-only Platform guest was not issued.");
+    const readOnlyControl = `msg_guest_control=${encodeURIComponent(readOnlyGuest.bootstrapCredential)}`;
+    const readOnlyJoin = await firstMsg.miniflare.dispatchFetch(`https://msg.0000.chat/${created.room.id}`, roomRequest(readOnlyControl));
+    expect(readOnlyJoin.status).toBe(200);
+    const readOnlyIdentity = await platformGuest.resolveGuestControl(readOnlyGuest.bootstrapCredential);
+    expect(readOnlyIdentity.status).toBe("success");
+    if (readOnlyIdentity.status !== "success") throw new Error("The read-only Platform guest could not be resolved.");
+    const readOnlyGrant = await database.prepare(
+      "SELECT id FROM platform_guest_grant WHERE service_id = ? AND resource_id = ? AND guest_id = ? AND permission_id = 'msg-public' AND revoked_at IS NULL",
+    ).bind(service.serviceId, created.room.id, readOnlyIdentity.guestId).first<{ id: string }>();
+    expect(readOnlyGrant?.id).toBeString();
+    if (!readOnlyGrant) throw new Error("The read-only Platform grant was not stored.");
+    await database.prepare("UPDATE platform_guest_grant SET capabilities = ? WHERE id = ?").bind(JSON.stringify([MSG_READ]), readOnlyGrant.id).run();
+    const readOnlyRead = await firstMsg.miniflare.dispatchFetch(`https://msg.0000.chat/${created.room.id}`, roomRequest(readOnlyControl));
+    expect(readOnlyRead.status).toBe(200);
+    const readOnlyCookies = `${readOnlyControl}; ${cookieHeader(readOnlyRead)}`;
+    const readOnlyWebhookList = await firstMsg.miniflare.dispatchFetch(`https://msg.0000.chat/${created.room.id}/webhooks`, roomRequest(readOnlyCookies));
+    expect(readOnlyWebhookList.status).toBe(200);
+    const readOnlyWebhookPost = await firstMsg.miniflare.dispatchFetch(`https://msg.0000.chat/${created.room.id}/webhooks`, roomRequest(readOnlyCookies, {
+      method: "POST",
+      body: JSON.stringify({ url: "https://example.com/msg-t09-read-only" }),
+    }));
+    expect(readOnlyWebhookPost.status).toBe(403);
+    const invalidNotificationBearer = await firstMsg.miniflare.dispatchFetch(`https://msg.0000.chat/${created.room.id}/webhooks`, roomRequest(readOnlyCookies, {
+      headers: { authorization: "Bearer invalid-notification-credential" },
+    }));
+    expect(invalidNotificationBearer.status).toBe(401);
+    const readOnlyResource = cookieValue(readOnlyCookies, "msg_resource");
+    expect(readOnlyResource).toBeString();
+    expect(await platformGuest.revokeGuestGrant(readOnlyGrant.id)).toEqual({ status: "success", revoked: true });
+    const revokedNotificationBearer = await firstMsg.miniflare.dispatchFetch(`https://msg.0000.chat/${created.room.id}/webhooks`, roomRequest(readOnlyCookies, {
+      headers: { authorization: `Bearer ${readOnlyResource ?? ""}` },
+    }));
+    expect(revokedNotificationBearer.status).toBe(401);
     const invalidManagement = await firstMsg.miniflare.dispatchFetch(`https://msg.0000.chat/manage/${created.room.id}/wrong`, roomRequest(participantCookies));
     expect(invalidManagement.status).toBe(404);
     const management = await firstMsg.miniflare.dispatchFetch(created.manage_url, roomRequest(ownerCookies));
@@ -457,12 +510,6 @@ test.serial("crosses the actual Platform Worker/D1 and msg Worker/DO boundary", 
     }));
     expect(liveOwnerPost.status).toBe(201);
     expect(JSON.parse(await liveFrame)).toMatchObject({ latest_message: 3, protocol_version: 1, sequence: 3, type: "message.created" });
-    const platformGuest = createPlatformGuestClient({
-      baseUrl: bridge.baseUrl,
-      authority,
-      audience,
-      guestGrantIssuer: service.guestGrantIssuer,
-    });
     if (!ownerGrant) throw new Error("The actual Platform owner grant was not stored.");
     expect(await platformGuest.revokeGuestGrant(ownerGrant.id)).toEqual({ status: "success", revoked: true });
     const revokedLiveClose = socketClosed(live.socket);
@@ -540,6 +587,11 @@ test.serial("crosses the actual Platform Worker/D1 and msg Worker/DO boundary", 
 
     await platform.dispose();
     platform = undefined;
+    const unavailableNotification = await secondMsg.miniflare.dispatchFetch(`https://msg.0000.chat/${created.room.id}/webhooks`, roomRequest(participantCookies, {
+      method: "POST",
+      body: JSON.stringify({ url: "https://example.com/msg-t09-unavailable" }),
+    }));
+    expect(unavailableNotification.status).toBe(503);
     const authorityOutage = await secondMsg.miniflare.dispatchFetch(`https://msg.0000.chat/${created.room.id}`, roomRequest(participantCookies));
     expect(authorityOutage.status).toBe(503);
     markT09Phase("authority-outage-proved");

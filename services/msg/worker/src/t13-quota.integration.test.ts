@@ -198,6 +198,13 @@ test.serial("keeps the configured msg quota after a genuinely new Platform guest
     }));
     expect(firstPost.status).toBe(201);
 
+    const rateLimitedWebhook = await msg.miniflare.dispatchFetch(`https://msg.0000.chat/${created.room.id}/webhooks`, roomRequest(ownerCookies, actor, {
+      method: "POST",
+      body: JSON.stringify({ url: "https://example.com/msg-t13-hook" }),
+    }));
+    expect(rateLimitedWebhook.status).toBe(429);
+    expect(rateLimitedWebhook.headers.get("retry-after")).toBe("60");
+
     const newGuest = await platformGuest.createGuest();
     expect(newGuest.status).toBe("success");
     if (newGuest.status !== "success") throw new Error("The fresh Platform guest was not issued.");
