@@ -362,17 +362,17 @@ CLI stores the jar with mode 600. Use the local service origin so its URL
 validation does not expect `https://msg.0000.chat`.
 
 ```sh
-bun run --cwd services/msg/cli build
+bun run --cwd "$MSG_DIR/cli" build
 export MSG_COOKIE_JAR="$(mktemp)"
 chmod 600 "$MSG_COOKIE_JAR"
 NODE_TLS_REJECT_UNAUTHORIZED=0 \
   MSG_SERVICE_ORIGIN="$MSG_ORIGIN" \
   MSG_COOKIE_JAR="$MSG_COOKIE_JAR" \
-  node services/msg/cli/dist/cli.js join "$ROOM_URL"
+  node "$MSG_DIR/cli/dist/cli.js" join "$ROOM_URL"
 NODE_TLS_REJECT_UNAUTHORIZED=0 \
   MSG_SERVICE_ORIGIN="$MSG_ORIGIN" \
   MSG_COOKIE_JAR="$MSG_COOKIE_JAR" \
-  node services/msg/cli/dist/cli.js post "$ROOM_URL" \
+  node "$MSG_DIR/cli/dist/cli.js" post "$ROOM_URL" \
     --author local-setup-cli \
     --content 'synthetic CLI post'
 ```
@@ -420,9 +420,10 @@ This guide does not close these acceptance gates:
 
 - The provider callback and sign-in steps require the operator's own Google or
   GitHub clients. This guide does not claim live provider verification.
-- Communicator's human, machine, OAuth, browser, and accepted binding work
-  remains gated by [T11 service-principal evidence](../T11_SERVICE_PRINCIPAL_REPORT.md)
-  and [T11 Matrix caller evidence](../T11_MATRIX_CALLER_REPORT.md).
+- The accepted [T11 service-principal evidence](../T11_SERVICE_PRINCIPAL_REPORT.md)
+  and [T11 Matrix caller evidence](../T11_MATRIX_CALLER_REPORT.md) provide
+  prerequisites. Full Communicator human, machine, OAuth, and browser adoption
+  remains pending.
 - Platform endpoint limits, deadlines, and audit behavior remain the T12 gate.
   This guide does not publish a command for that unfinished server work.
 - Production deployment, external client acceptance in issues 35 and 36,
@@ -432,11 +433,13 @@ Do not use the local checks in this guide as production or full T15 evidence.
 
 ## Checks run for this guide
 
-The following checks ran against unchanged source in disposable local state.
-The generated verifier, guest issuer, provider values, and cookie files stayed
-in mode-600 temporary files and were not printed.
+The following checks ran against runtime source at `b1e8be3` in disposable
+local state. The documentation commit does not change runtime source. The
+generated verifier, guest issuer, provider values, and cookie files stayed in
+mode-600 temporary files and were not printed.
 
-- Platform's 11 local migrations and msg's 3 local migrations completed.
+- Platform's 11 local migrations and msg's 3 local migrations present at
+  `b1e8be3` completed.
 - Local service registration, guest issuer registration, and public OAuth
   client registration completed against a disposable Platform D1 database.
 - Platform `/healthz` returned HTTP 200, and msg `/healthz` returned HTTP 200
