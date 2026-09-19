@@ -53,14 +53,27 @@ and crosses the HTTP boundary. It proves:
   original creation-receipt retry remaining denied;
 - an identity-authority outage response at the actual msg boundary.
 
-The test also creates a local SQLite tenant/resource fixture populated with the
-actual Platform-issued claimant organization, claimant credential, and
-guest-control identity. It performs a local transaction that separates
-immutable creation provenance from current owner and records an action-bound
-receipt. This is a Database-style stored-owner/receipt contract fixture in the
-msg harness; it is deliberately not described as Database integration.
+The test also runs a callable local SQLite tenant/resource fixture. Each
+operation first uses the actual Platform client to verify the human credential
+and resolve the actual guest-control credential, then performs an atomic local
+resource transfer and action-bound receipt write. It proves missing and wrong
+guest proof, foreign-tenant denial, exact retry and conflict, read/write
+authorization, underprivileged and foreign-human denial, and that the stored
+guest subject is the Platform-resolved guest ID rather than the cookie secret.
+The fixture is deliberately local contract evidence; it is not Database
+integration.
 
-The existing T09 Platform integration test remains unchanged.
+The boundary proof also advances a deterministic DO clock through expiry before
+both a new claim and a receipt retry, pauses a real Platform guest-grant
+renewal between proof and DO recording while `revoke_links` claims the room,
+proves the stale record is rejected, removes a real Platform membership and
+proves the credential is denied, and preserves an unrelated room. Public links
+remain active for the default claim, while every stored management ACL is
+disabled and `revoke_links` disables all public ACLs.
+
+The T09 Platform integration assertions remain unchanged. Its bundling helper
+and this test now share the child Bun Worker-bundle path so the actual boundary
+tests do not use the intermittent in-process build path.
 
 ## Checks
 
@@ -69,12 +82,12 @@ Run from the repository root or `services/msg` as indicated:
 ```text
 bun run check                         # services/msg: pass
 bun run --cwd worker check:application # services/msg: pass
-bun test worker/src/t10-claim.integration.test.ts # 1 pass, 48 assertions
+bun test worker/src/t10-claim.integration.test.ts # 1 pass, 71 assertions
 bun scripts/check-workspace.mjs       # root: 11 workspace manifests pass
 ```
 
-The service check includes 193 Worker tests (including the unchanged T09
-actual Platform/D1 → msg Worker/DO test), 17 tooling tests, 66 CLI tests, and
+The service check includes the Worker tests (including the unchanged T09
+actual Platform/D1 → msg Worker/DO assertions), 17 tooling tests, 66 CLI tests, and
 CLI build/pack checks. It includes the pre-existing lint warning in
 `worker/scripts/production-synthetic.ts:142` and otherwise passes lint,
 TypeScript, Worker tests, tooling, CLI tests, build, and pack. The focused

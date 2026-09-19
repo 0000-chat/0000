@@ -14,7 +14,7 @@ import WebSocketClient from "ws";
 import { registerGuestIssuer, registerService } from "../../../platform/src/service-registration";
 import { ensureDefaultOrganization, hashOpaque, issueHumanCredential, opaqueSecret, type ServiceRegistration } from "../../../platform/src/platform-state";
 import { MSG_CLAIM, MSG_MANAGE, MSG_READ, MSG_WRITE } from "./auth";
-import { createMsgMiniflareTempDirectory, startMsgMiniflare, TEST_ROOM_LIMITS } from "../test-fixtures/msg-worker.miniflare-fixture";
+import { buildWorkerBundleInChild, createMsgMiniflareTempDirectory, startMsgMiniflare, TEST_ROOM_LIMITS } from "../test-fixtures/msg-worker.miniflare-fixture";
 
 const platformRoot = fileURLToPath(new URL("../../../platform/", import.meta.url));
 const platformWorkerEntry = fileURLToPath(new URL("../../../platform/src/worker.ts", import.meta.url));
@@ -22,13 +22,7 @@ const authority = "platform-t10-authority";
 const audience = "https://msg.0000.chat";
 
 async function buildPlatformWorker(): Promise<string> {
-  const result = await Bun.build({ entrypoints: [platformWorkerEntry], external: ["cloudflare:workers"], format: "esm", naming: "worker.js", target: "browser" });
-  if (!result.success) throw new Error(result.logs.map((log) => log.message).join("\n"));
-  const entry = result.outputs.find((output) => output.kind === "entry-point");
-  if (!entry) throw new Error("The Platform Worker bundle was not emitted.");
-  // Reading the emitted bytes avoids Bun's intermittent output.text() stall
-  // seen in the shared CI boundary harness.
-  return new TextDecoder().decode(await entry.arrayBuffer());
+  return buildWorkerBundleInChild(platformWorkerEntry);
 }
 
 async function applyPlatformMigrations(database: D1Database): Promise<void> {
