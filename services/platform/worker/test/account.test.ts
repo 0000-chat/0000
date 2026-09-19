@@ -1482,11 +1482,11 @@ describe("Platform human account providers", () => {
     );
     expect(disabledSessionRead.status).toBe(401);
 
-    const disabledLoginStart = await startSocialLogin("google");
+    const disabledLoginStart = await startSocialLogin(existingProvider);
     const disabledLogin = await completeSocialCallback(
-      "google",
+      existingProvider,
       disabledLoginStart,
-      "disabled-google-sign-in",
+      "disabled-existing-provider-sign-in",
     );
     const disabledLoginLocation = new URL(
       disabledLogin.headers.get("location")!,
