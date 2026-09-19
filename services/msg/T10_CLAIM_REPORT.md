@@ -1,5 +1,15 @@
 # T10 guest-to-organization claim proof
 
+Reviewed source checkpoint `1a438da` is integrated at `c54d884`. Parent
+verification passes all 83 actual Platform/D1-to-msg/DO claim assertions,
+the deterministic DO suite, and the full combined msg package checks.
+Independent Standards and Spec reviews cleared the corrected implementation
+and evidence. A bounded authenticated Grok 4.6 high adversarial review of claim,
+receipt and link-revocation races found no confirmed defect. Current-authority
+checks occur at request/next-frame boundaries; an already authorized in-flight
+operation is not a cross-service atomic transaction. This does not establish
+production deployment or Database adoption.
+
 This change adds the msg-side ownership claim boundary. It does not modify
 Platform production code, the shared contracts/client packages, or Database.
 

@@ -35,8 +35,13 @@ reviewed and verified at `be5b001`; [the msg report](../msg/T09_PLATFORM_AUTH_RE
 records the actual Worker/D1-to-Worker/DO evidence. Parent combined checks pass
 59 boundary assertions, the full msg package and Platform's 32 tests plus
 restart. Independent Chromium flows pass. Final review's CLI recovery,
-credential-persistence race and live-socket corrections are verified. Atomic
-ownership claims, quotas and Communicator adoption remain separate gates.
+credential-persistence race and live-socket corrections are verified.
+Atomic ownership claims are reviewed and integrated at `c54d884`;
+[the claim report](../msg/T10_CLAIM_REPORT.md) records 83 actual boundary
+assertions, deterministic expiry and claim/renewal race evidence, and the
+explicitly local Database-style contract fixture. Parent full msg checks pass;
+native and bounded adversarial reviews found no remaining confirmed defect.
+Managed quotas and Communicator adoption remain separate gates.
 
 The shared-client transport portion of T12 is integrated at `82e6181` with
 independently verified deadlines, late-result suppression and redirect refusal.

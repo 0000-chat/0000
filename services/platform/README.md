@@ -43,8 +43,15 @@ simulated; these checks do not establish external-client adoption.
 auth integration at `be5b001`. Parent combined checks pass the full msg package,
 the actual Platform Worker/D1-to-msg Worker/DO boundary with 59 assertions, and
 Platform's 32 tests plus restart. Chromium guest, management, recovery,
-revocation and outage flows pass independently. Atomic claims and managed
-quotas remain T10/T13; Communicator integration remains T11.
+revocation and outage flows pass independently.
+[Msg's claim report](../msg/T10_CLAIM_REPORT.md) records atomic guest-to-organization
+transfer, exact authorized retries, preserved participants and explicit link
+revocation, reviewed and integrated at `c54d884`. Parent checks pass the full
+msg package and 83 actual Platform/D1-to-msg/DO claim assertions; deterministic
+DO expiry coverage also passes. Native reviews and the bounded adversarial
+review found no remaining confirmed defect. The Database-style fixture remains
+a local contract fixture. Managed quotas remain T13; Communicator integration
+remains T11.
 The full MVP is not implemented or accepted, and these reports do not establish
 production readiness.
 
