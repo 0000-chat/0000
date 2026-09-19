@@ -108,6 +108,19 @@ The parent’s corrected browser harness also passed the combined organization,
 disabled-member and selection-navigation flow, including clearing the old
 secret and disabling old controls while navigation was held.
 
+The bounded stale-completion browser probe held both the real Worker response
+delivery and organization navigation, then passed with the generation guard:
+
+```text
+bun /tmp/platform-account-browser-smoke.mjs \
+  /home/ubuntu/0000-full/worktrees/platform-t04/services/platform \
+  --organizations --credentials --credential-response-race
+```
+
+The same probe using only the pre-fix account UI failed because the old secret
+panel reappeared during the held navigation. This is a controlled response
+completion regression check; it does not claim an arbitrary network exploit.
+
 Local provisioning was exercised sequentially after applying the migrations:
 
 ```text
