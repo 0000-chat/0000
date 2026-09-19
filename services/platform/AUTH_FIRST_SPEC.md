@@ -5,12 +5,14 @@ on the aggregate; T14 reconnect fixture reviewed and verified at `166e54d`;
 T05 verified at `10d31c8`; T07 refresh and installation controls reviewed and
 verified at `1d519cd`; full MVP not accepted.
 
-The bounded T11 service-principal runtime prerequisite is implemented on the
-existing organization-owned machine lifecycle and recorded in
+The bounded T11 service-principal runtime prerequisite is reviewed and verified
+at aggregate `cb89383` on the existing organization-owned machine lifecycle, recorded in
 [T11_SERVICE_PRINCIPAL_REPORT.md](T11_SERVICE_PRINCIPAL_REPORT.md). Its
 immutable machine kind, fixed-kind management routes, current verification,
-and shared-client evidence are complete; Communicator adoption, browser UI,
-deployment provisioning, and full T11 consumer acceptance remain open.
+and shared-client evidence pass thirteen Worker/D1 files and fifty-two tests,
+persistence/refresh restart and the actual Platform-to-msg boundary. Communicator
+adoption, first-party human browser transport, deployment provisioning and full
+T11 consumer acceptance remain open.
 
 [README.md](README.md) defines Platform's ownership. This specification records
 the agreed product and security decisions for the implementation.

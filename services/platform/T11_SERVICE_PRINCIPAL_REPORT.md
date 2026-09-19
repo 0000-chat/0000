@@ -77,14 +77,21 @@ bunx vitest run --config vitest.worker.config.ts worker/test/agents.test.ts
 2 tests passed
 ```
 
-`bun run typecheck` and the full Platform format check pass. The final
-`bun run check` passes all 13 Worker/D1 files and 52 tests, including the
-parent-owned account fixture, then passes the D1 persistence restart probe.
-An earlier concurrent run with the accepted fixture correction reproduced its
-known survivor-provider race (`account_not_linked` where a hard-coded Google
-login expected `user_disabled`); the rerun passed without any production or
-account-test edits in this branch. The fixture correction remains isolated in
-`de7af31`.
-
+Parent acceptance at aggregate `cb89383` independently passes `bun run check`:
+13 Worker/D1 files, 52 tests, formatting/typecheck and D1 persistence restart.
 `bun scripts/test-oauth-refresh-restart.mjs` passes the actual refresh restart
-probe. No external provider HTTP or consumer deployment is claimed here.
+probe. Actual Platform-to-msg Worker/DO boundary checks pass two tests and
+142 assertions. Provider HTTP remains simulated; no deployment is claimed.
+
+Independent Astra medium Standards/Spec reviews found no production defect and
+closed the service-route proof findings at `d7c6cef`. An authenticated isolated
+Grok 4.6 high pass found no issue in the bounded runtime kind-confusion concern.
+It did not claim to review source outside its supplied excerpts.
+
+The combined acceptance includes the account fixture's surviving-provider fixes
+(`fafca7e`, `250e36d`) and a deterministic T07 expiry proof (`cb89383`, source
+`edbb06e`). The latter advances only the test Date clock past predecessor access
+expiry, retaining live refresh authority and real Worker/D1 execution, instead
+of requiring a one-second successor to survive a loaded CI runner. No production
+authority check was relaxed. First-party browser transport and Communicator
+adoption remain separate T11 work.

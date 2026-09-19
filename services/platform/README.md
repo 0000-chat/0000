@@ -76,8 +76,11 @@ bounded organization-owned service-principal prerequisite, integrated here on
 the existing machine lifecycle. Service principals have an immutable stored
 kind, stable `subjectId` values, fixed-kind owner/admin management routes,
 per-audience grants and opaque credentials, and authoritative current-state
-verification. The report covers Platform Worker/D1 and shared-client evidence;
-Communicator adoption, browser UI, deployment provisioning and full T11
+verification. Parent acceptance at `cb89383` passes thirteen Worker/D1 files and
+fifty-two tests, formatting/typecheck, persistence and refresh restart, and the
+actual Platform-to-msg boundary (142 assertions). Independent Standards/Spec
+reviews and a bounded Grok runtime-kind review are clear. Communicator adoption,
+first-party human browser transport, deployment provisioning and full T11
 consumer acceptance remain open.
 
 ## Purpose and deployment
