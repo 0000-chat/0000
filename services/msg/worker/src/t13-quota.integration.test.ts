@@ -11,13 +11,25 @@ import { createPlatformGuestClient } from "@0000/platform-client";
 
 import { registerGuestIssuer, registerService } from "../../../platform/src/service-registration";
 import { opaqueSecret } from "../../../platform/src/platform-state";
-import { buildWorkerBundleInChild, createMsgMiniflareTempDirectory, startMsgMiniflare, TEST_ROOM_LIMITS } from "../test-fixtures/msg-worker.miniflare-fixture";
+import {
+  buildPlatformMiniflareRateLimits,
+  buildPlatformTestRateLimitPolicy,
+} from "../../../platform/src/rate-limit-policy";
+import {
+  buildWorkerBundleInChild,
+  createMsgMiniflareTempDirectory,
+  isMsgPlatformScenarioChild,
+  runMsgPlatformScenarioInChild,
+  startMsgMiniflare,
+  TEST_ROOM_LIMITS,
+} from "../test-fixtures/msg-worker.miniflare-fixture";
 import type { MsgRateLimitPolicy } from "../../scripts/msg-rate-limit-policy";
 
 const platformRoot = fileURLToPath(new URL("../../../platform/", import.meta.url));
 const platformWorkerEntry = fileURLToPath(new URL("../../../platform/src/worker.ts", import.meta.url));
 const authority = "platform-t13-authority";
 const audience = "https://msg.0000.chat";
+const platformRateLimitPolicy = buildPlatformTestRateLimitPolicy();
 
 interface RuntimeBridge {
   readonly baseUrl: string;
@@ -68,6 +80,8 @@ async function createPlatformRuntime(script: string, persistenceDirectory: strin
       PLATFORM_BASE_URL: baseUrl,
       PLATFORM_CREDENTIAL_MAX_LIFETIME_DAYS: "90",
       PLATFORM_DEPLOYMENT_MODE: "self-hosted",
+      PLATFORM_RATE_LIMIT_POLICY: JSON.stringify(platformRateLimitPolicy),
+      PLATFORM_SERVER_DEADLINE_MS: "8000",
       PLATFORM_SIGNUP_POLICY: "open",
     },
     compatibilityDate: "2026-09-18",
@@ -76,6 +90,7 @@ async function createPlatformRuntime(script: string, persistenceDirectory: strin
     host: "127.0.0.1",
     modules: true,
     name: "platform-t13-runtime",
+    ratelimits: buildPlatformMiniflareRateLimits(platformRateLimitPolicy),
     resourcePersistencePath: persistenceDirectory,
     script,
   }));
@@ -115,6 +130,11 @@ async function installPlatformBridge(server: Server, platform: Miniflare, baseUr
 }
 
 test.serial("keeps the configured msg quota after a genuinely new Platform guest is issued", { timeout: 45_000 }, async () => {
+  const scenarioFile = fileURLToPath(import.meta.url);
+  if (!isMsgPlatformScenarioChild("t13-quota", scenarioFile)) {
+    await runMsgPlatformScenarioInChild({ scenario: "t13-quota", scenarioFile, timeoutMs: 45_000 });
+    return;
+  }
   const platformPersistence = await mkdtemp(join(tmpdir(), "platform-t13-d1-"));
   const msgPersistence = await createMsgMiniflareTempDirectory("t13-quota-state");
   let platform: Miniflare | undefined;

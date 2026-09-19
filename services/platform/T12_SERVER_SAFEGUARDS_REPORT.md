@@ -100,3 +100,37 @@ HTTP execution separately. The parent still must reconcile this Platform
 checkpoint with accepted msg aggregate `9bad4c9`, wire the real Communicator
 consumer fixture through this binding/deadline contract, and run the actual
 Platform-to-msg boundary before full T12 acceptance.
+
+The three actual msg Platform integration scenarios now run in separately
+owned Bun test children. This isolates the pre-existing same-process
+Bun/workerd startup failure while preserving each scenario's production
+Platform Worker/D1, msg Worker/DO, restart and concurrency paths. The forced
+worker-cwd order (`bun test src/t13-quota.integration.test.ts
+src/t09-platform.integration.test.ts src/t10-claim.integration.test.ts`) passed
+3 parent tests; the children passed their 3 real tests with 183 assertions
+(13 + 84 + 86), recorded in
+`/tmp/platform-t12-msg-isolated-forced-order-final.log`. Each wrapper emits a
+bounded structured child summary with its scenario, test count and assertion
+count. The normal three-file worker-cwd invocation also passed 3 parent tests
+in `/tmp/platform-t12-msg-isolated-combined-worker-final.log`. The required
+`bun run check` passed 270 Worker tests with 1,901 parent-level assertions, 13
+tooling tests with 34 assertions, 67 CLI tests with 254 assertions, and 3
+packaging tests with 18 assertions; its complete output is in
+`/tmp/platform-t12-msg-isolated-full-check-final.log`. Child assertions are
+reported separately because the parent wrapper intentionally does not
+duplicate them.
+
+The runner terminates the owned detached process group even if the Bun leader
+has already exited, with bounded SIGTERM/SIGKILL escalation. A deliberate
+child failure whose descendant retained the output pipe exited the parent with
+1, left no owned descendant, and retained the bounded child output in a
+mode-600 ignored artifact under
+`services/msg/worker/.miniflare-tests/isolated-scenario-diagnostics/`; the
+proof log is `/tmp/platform-t12-msg-isolation-descendant-failure.log`. The
+existing browser smoke evidence remains valid because the browser fixture
+source was unchanged (`/tmp/platform-t12-msg-browser-smoke.log`, exit 0). The
+prior same-process
+T13 -> T09 -> T10 failure, including pristine accepted-baseline reproduction,
+remains a local runtime-order caveat; the adapted normal test commands use
+fresh process ownership for each scenario. Full Communicator adoption and
+final combined T12 acceptance remain pending.

@@ -10,6 +10,10 @@ import { convertV4MiniflareOptions, Miniflare } from "../../../platform/node_mod
 import { readD1Migrations } from "../../../platform/node_modules/@cloudflare/vitest-plugin/dist/pool/index.mjs";
 import { registerGuestIssuer, registerService } from "../../../platform/src/service-registration";
 import { opaqueSecret } from "../../../platform/src/platform-state";
+import {
+  buildPlatformMiniflareRateLimits,
+  buildPlatformTestRateLimitPolicy,
+} from "../../../platform/src/rate-limit-policy.ts";
 
 const playwrightModule = process.env.T09_PLAYWRIGHT_MODULE;
 if (!playwrightModule) throw new Error("Set T09_PLAYWRIGHT_MODULE to the installed @playwright/test module before running the optional T09 browser smoke.");
@@ -21,6 +25,7 @@ const platformRoot = fileURLToPath(new URL("../../../platform/", import.meta.url
 const platformWorkerEntry = fileURLToPath(new URL("../../../platform/src/worker.ts", import.meta.url));
 const authority = "platform-t09-browser-authority";
 const audience = "https://msg.0000.chat";
+const platformRateLimitPolicy = buildPlatformTestRateLimitPolicy();
 const service = {
   serviceId: "msg-t09-browser",
   audience,
@@ -135,6 +140,8 @@ async function main() {
         GOOGLE_CLIENT_SECRET: "t09-browser-google-secret",
         PLATFORM_AUTHORITY_ID: authority,
         PLATFORM_BASE_URL: bridge.baseUrl,
+        PLATFORM_RATE_LIMIT_POLICY: JSON.stringify(platformRateLimitPolicy),
+        PLATFORM_SERVER_DEADLINE_MS: "8000",
         PLATFORM_DEPLOYMENT_MODE: "self-hosted",
         PLATFORM_SIGNUP_POLICY: "open",
       },
@@ -144,6 +151,7 @@ async function main() {
       host: "127.0.0.1",
       modules: true,
       name: "platform-t09-browser-runtime",
+      ratelimits: buildPlatformMiniflareRateLimits(platformRateLimitPolicy),
       resourcePersistencePath: platformPersistence,
       script: platformScript,
     }));
