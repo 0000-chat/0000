@@ -85,6 +85,11 @@ deployment provisioning and full T11 consumer acceptance remain open. The
 browser purpose, shared SDK, real Worker/D1 consumer fixture and Chromium
 proof; it does not claim Communicator adoption or deployed provisioning.
 
+[T11_BINDINGS_REPORT.md](T11_BINDINGS_REPORT.md) records the reviewed immutable
+Communicator mappings and current local-state resolver. Actual D1 proves
+terminal history and tenant association, including replacement attempts. Public
+routes, provisioning, UI and realtime adoption remain pending.
+
 [T11_MATRIX_CALLER_REPORT.md](T11_MATRIX_CALLER_REPORT.md) records the bounded
 Matrix gateway caller prerequisite: protected finite ingestion and claim
 credentials, separate transport secrets, and explicit recovery after a 401

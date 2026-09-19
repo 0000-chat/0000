@@ -16,6 +16,11 @@ human browser purpose and shared transport proof through a real Worker/D1
 consumer fixture and Chromium. Communicator adoption, deployment provisioning
 and full T11 consumer acceptance remain open.
 
+The Communicator local-binding prerequisite is reviewed and verified with
+actual D1, including immutable history under replacement and exact current
+local-state resolution. [T11_BINDINGS_REPORT.md](T11_BINDINGS_REPORT.md) records
+the bounded evidence; registered consumer routes and full adoption remain open.
+
 The Matrix gateway caller prerequisite now uses protected finite ingestion and
 claim credentials with separate transport secrets. A 401 stops automatic
 delivery and preserves the pending batch for explicit credential replacement
