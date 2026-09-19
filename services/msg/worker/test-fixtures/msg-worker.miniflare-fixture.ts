@@ -1,9 +1,10 @@
-import { spawn } from "node:child_process";
+import { execFile as execFileCallback, spawn } from "node:child_process";
 import { Buffer } from "node:buffer";
 import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { createInterface } from "node:readline";
-import { join, resolve, sep } from "node:path";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 
 import { acquireMiniflareTestLock } from "./miniflare-test-lock";
 
@@ -11,10 +12,9 @@ const appDirectory = fileURLToPath(new URL("../", import.meta.url));
 const temporaryDirectory = join(appDirectory, ".miniflare-tests");
 const workerEntry = fileURLToPath(new URL("../src/worker-entry.ts", import.meta.url));
 const nodeRuntimeEntry = fileURLToPath(new URL("./msg-worker.node-runtime.mjs", import.meta.url));
-const bunWorkerBundleEntry = fileURLToPath(new URL("./bun-worker-bundle.mjs", import.meta.url));
 const bunWorkerBundleTimeoutMs = 20_000;
-const bunWorkerBundleKillGraceMs = 1_000;
 const bunWorkerBundleOutputLimit = 16 * 1024;
+const execFile = promisify(execFileCallback);
 let workerScriptPromise: Promise<string> | undefined;
 
 export const TEST_ROOM_LIMITS = {
@@ -36,14 +36,6 @@ export interface MsgMiniflareRuntime {
 export interface MsgMiniflareFixture {
   readonly miniflare: MsgMiniflareRuntime;
   dispose(): Promise<void>;
-}
-
-export interface BunWorkerBundleOptions {
-  entrypoint: string;
-  external: string[];
-  format: string;
-  naming: string;
-  target: string;
 }
 
 interface NodeRuntimeReadyMessage {
@@ -78,123 +70,35 @@ export async function createMsgMiniflareTempDirectory(label: string): Promise<st
   return mkdtemp(join(temporaryDirectory, `${label}-`));
 }
 
-function captureChildOutput(stream: NodeJS.ReadableStream | null): { text(): string; byteLength(): number } {
-  const chunks: Buffer[] = [];
-  let byteLength = 0;
-  let capturedByteLength = 0;
-  stream?.on("data", (chunk: unknown) => {
-    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk));
-    byteLength += buffer.byteLength;
-    const remaining = bunWorkerBundleOutputLimit - capturedByteLength;
-    if (remaining > 0) {
-      const captured = buffer.subarray(0, remaining);
-      chunks.push(captured);
-      capturedByteLength += captured.byteLength;
-    }
-  });
-  return {
-    text: () => Buffer.concat(chunks).toString("utf8"),
-    byteLength: () => byteLength,
-  };
-}
-
-function delay(milliseconds: number): Promise<void> {
-  return new Promise((resolveDelay) => setTimeout(resolveDelay, milliseconds));
-}
-
-interface ChildExit {
-  code: number | null;
-  error?: Error;
-  signal: NodeJS.Signals | null;
-  timedOut?: boolean;
-}
-
-async function waitForChildExit(child: ReturnType<typeof spawn>): Promise<ChildExit> {
-  let timeoutId: ReturnType<typeof setTimeout> | undefined;
-  const timeoutMarker = Symbol("child-timeout");
-  const closed = new Promise<ChildExit>((resolveExit) => {
-    let settled = false;
-    const settle = (result: ChildExit) => {
-      if (settled) return;
-      settled = true;
-      resolveExit(result);
-    };
-    child.once("error", (error: Error) => settle({ code: null, error, signal: null }));
-    child.once("close", (code, signal) => settle({ code, signal }));
-  });
-  const timeout = new Promise<typeof timeoutMarker>((resolveTimeout) => {
-    timeoutId = setTimeout(() => resolveTimeout(timeoutMarker), bunWorkerBundleTimeoutMs);
-  });
-  const result = await Promise.race([closed, timeout]);
-  if (result !== timeoutMarker) {
-    if (timeoutId) clearTimeout(timeoutId);
-    return result;
-  }
-
-  child.kill("SIGTERM");
-  const graceful = await Promise.race([closed, delay(bunWorkerBundleKillGraceMs)]);
-  if (graceful === undefined) child.kill("SIGKILL");
-  await Promise.race([closed, delay(bunWorkerBundleKillGraceMs)]);
-  return { code: null, signal: "SIGKILL", timedOut: true };
-}
-
-function childBundleMessage(stdout: string): Record<string, unknown> | undefined {
-  for (const line of stdout.trim().split("\n").reverse()) {
-    if (!line) continue;
-    try {
-      const value: unknown = JSON.parse(line);
-      if (isRecord(value)) return value;
-    } catch {
-      // Keep the bounded child output for the error below.
-    }
-  }
-  return undefined;
-}
-
-function childFailureMessage(exit: ChildExit, stdout: { text(): string; byteLength(): number }, stderr: { text(): string; byteLength(): number }, message: Record<string, unknown> | undefined): string {
-  if (exit.timedOut) return `Bun Worker bundle child timed out after ${bunWorkerBundleTimeoutMs}ms.`;
-  if (exit.error) return `Bun Worker bundle child could not start: ${exit.error.message}`;
-  const childMessage = typeof message?.message === "string" ? message.message : undefined;
-  const stderrMessage = stderr.text().trim().split("\n")[0];
-  const detail = childMessage ?? (stderrMessage || undefined);
-  const result = exit.code === null ? `signal ${exit.signal ?? "unknown"}` : `exit ${exit.code}`;
-  const output = detail ? `: ${detail}` : ".";
-  return `Bun Worker bundle child failed (${result}, stdout ${stdout.byteLength()} bytes, stderr ${stderr.byteLength()} bytes)${output}`;
-}
-
 /** Builds a Worker bundle in a separate pinned Bun process and returns its script. */
-export async function buildWorkerBundleInChild(options: BunWorkerBundleOptions): Promise<string> {
+export async function buildWorkerBundleInChild(entrypoint: string): Promise<string> {
   const buildDirectory = await createMsgMiniflareTempDirectory("bun-worker-build");
-  let script: string | undefined;
-  let failure: unknown;
+  const outputPath = join(buildDirectory, "worker.js");
   try {
-    const child = spawn(process.execPath, [bunWorkerBundleEntry, JSON.stringify({ ...options, outdir: buildDirectory })], {
+    await execFile(process.execPath, [
+      "build",
+      entrypoint,
+      "--external",
+      "cloudflare:workers",
+      "--format",
+      "esm",
+      "--target",
+      "browser",
+      "--outfile",
+      outputPath,
+    ], {
       cwd: appDirectory,
-      stdio: ["ignore", "pipe", "pipe"],
+      killSignal: "SIGKILL",
+      maxBuffer: bunWorkerBundleOutputLimit,
+      timeout: bunWorkerBundleTimeoutMs,
     });
-    const stdout = captureChildOutput(child.stdout);
-    const stderr = captureChildOutput(child.stderr);
-    const exit = await waitForChildExit(child);
-    const message = childBundleMessage(stdout.text());
-    if (exit.timedOut || exit.error || exit.code !== 0 || message?.type !== "success") {
-      throw new Error(childFailureMessage(exit, stdout, stderr, message));
-    }
-    if (typeof message.outputPath !== "string") throw new Error("Bun Worker bundle child returned no output path.");
-    const outputRoot = resolve(buildDirectory);
-    const outputPath = resolve(message.outputPath);
-    if (!outputPath.startsWith(`${outputRoot}${sep}`)) throw new Error("Bun Worker bundle child returned an invalid output path.");
-    script = await readFile(outputPath, "utf8");
+    return await readFile(outputPath, "utf8");
   } catch (error) {
-    failure = error;
-  }
-  try {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new Error(`Bun Worker bundle failed: ${detail}`, { cause: error });
+  } finally {
     await rm(buildDirectory, { force: true, recursive: true });
-  } catch (error) {
-    if (!failure) failure = error;
   }
-  if (failure) throw failure;
-  if (script === undefined) throw new Error("The Bun Worker bundle child returned no script.");
-  return script;
 }
 
 function workerScript(): Promise<string> {

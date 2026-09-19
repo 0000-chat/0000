@@ -29,13 +29,7 @@ interface RuntimeBridge {
 }
 
 async function buildPlatformWorker(): Promise<string> {
-  return buildWorkerBundleInChild({
-    entrypoint: platformWorkerEntry,
-    external: ["cloudflare:workers"],
-    format: "esm",
-    naming: "worker.js",
-    target: "browser",
-  });
+  return buildWorkerBundleInChild(platformWorkerEntry);
 }
 
 async function applyPlatformMigrations(database: D1Database): Promise<void> {
