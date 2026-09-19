@@ -112,13 +112,15 @@ Commands and results on this branch:
   The existing `production-synthetic.ts:142` constant-condition warning
   remains.
 - `bun test src/t09-platform.integration.test.ts` from `services/msg/worker`:
-  passed 1 actual boundary test with 57 assertions, including D1 creation
+  passed 1 actual boundary test with 59 assertions, including D1 creation
   receipt replay/renewal, public and management recovery renewal, positive
   human and issued agent operator authentication, underprivileged agent
   denial, independent management/public revocation, and an actual CLI-cookie
   WebSocket handshake. With `MSG_AUTH_REQUIRED=1`, that handshake takes the
-  standard WebSocket registration path; the live frame, Platform revocation
-  close (`1008`), outage, and reconnect assertions therefore exercise the
+  standard WebSocket registration path; an authorized owner post produces a
+  real `message.created` frame before Platform revocation, then the next
+  participant post closes the socket with `1008`. The outage and reconnect
+  assertions therefore exercise the
   in-memory authenticated socket path rather than a fabricated
   attachment-only seam. The same test runs the real CLI join transport: a
   stale resource stays denied without recovery, `--recover` keeps the control

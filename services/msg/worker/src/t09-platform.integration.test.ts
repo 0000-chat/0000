@@ -213,6 +213,20 @@ function socketClosed(socket: WebSocketClient): Promise<number> {
   });
 }
 
+function socketMessage(socket: WebSocketClient): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error("Timed out waiting for the authenticated live message frame.")), 2_000);
+    socket.once("message", (value) => {
+      clearTimeout(timeout);
+      resolve(value.toString());
+    });
+    socket.once("error", (error) => {
+      clearTimeout(timeout);
+      reject(error);
+    });
+  });
+}
+
 test.serial("crosses the actual Platform Worker/D1 and msg Worker/DO boundary", { timeout: 45_000 }, async () => {
   const platformPersistence = await mkdtemp(join(tmpdir(), "platform-t09-d1-"));
   const msgPersistence = await createMsgMiniflareTempDirectory("t09-auth-state");
@@ -434,6 +448,13 @@ test.serial("crosses the actual Platform Worker/D1 and msg Worker/DO boundary", 
     expect(cliSocketCookies).toContain("msg_resource=");
     live = await openLive(await firstMsg.miniflare.ready, created.room.id, cliSocketCookies ?? "");
     expect(JSON.parse(await live.ready)).toMatchObject({ type: "ready", latest_message: 2 });
+    const liveFrame = socketMessage(live.socket);
+    const liveOwnerPost = await firstMsg.miniflare.dispatchFetch(`https://msg.0000.chat/${created.room.id}`, roomRequest(ownerCookies, {
+      method: "POST",
+      body: JSON.stringify({ content: "standard live frame", author: "owner", display_name: "Owner", semantic_type: "message" }),
+    }));
+    expect(liveOwnerPost.status).toBe(201);
+    expect(JSON.parse(await liveFrame)).toMatchObject({ latest_message: 3, protocol_version: 1, sequence: 3, type: "message.created" });
     const platformGuest = createPlatformGuestClient({
       baseUrl: bridge.baseUrl,
       authority,
@@ -485,7 +506,7 @@ test.serial("crosses the actual Platform Worker/D1 and msg Worker/DO boundary", 
     secondMsg = await startMsgMiniflare(msgPersistence, TEST_ROOM_LIMITS, { ...msgBindings, MSG_DATA_ENCRYPTION_KEY_V1: "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8" }, false, true);
     const restartedParticipant = await secondMsg.miniflare.dispatchFetch(`https://msg.0000.chat/${created.room.id}`, roomRequest(participantCookies));
     expect(restartedParticipant.status).toBe(200);
-    expect((await restartedParticipant.json() as { latest_message: number }).latest_message).toBe(3);
+    expect((await restartedParticipant.json() as { latest_message: number }).latest_message).toBe(4);
 
     const participantControlBeforeRecovery = cookieValue(participantCliJar.cookieHeader(`https://msg.0000.chat/${created.room.id}`) ?? "", "msg_guest_control");
     expect(participantControlBeforeRecovery).toBeString();
