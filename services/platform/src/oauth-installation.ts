@@ -22,6 +22,11 @@ const SIGNED_QUERY_FIELDS = new Set([
 const MAX_QUERY_LENGTH = 16_384;
 
 export type OAuthClientAuthMethod = "none" | "client_secret_post";
+export type OAuthClientPurpose = "personal_harness" | "first_party_browser";
+
+function validOAuthClientPurpose(value: unknown): value is OAuthClientPurpose {
+  return value === "personal_harness" || value === "first_party_browser";
+}
 
 function validOAuthCapabilities(value: unknown): value is string[] {
   return validCapabilities(value) && !value.includes("offline_access");
@@ -50,6 +55,7 @@ export interface TrustedOAuthClientInput {
   redirectUri: string;
   capabilities: string[];
   authMethod: OAuthClientAuthMethod;
+  purpose?: OAuthClientPurpose;
   ownerUserId?: string | null;
   clientId?: string;
   name?: string;
@@ -64,6 +70,7 @@ export interface TrustedOAuthClient {
   redirectUri: string;
   capabilities: string[];
   authMethod: OAuthClientAuthMethod;
+  purpose: OAuthClientPurpose;
   refreshEnabled: boolean;
 }
 
@@ -101,6 +108,7 @@ export interface OAuthFlow {
   organization_id: string | null;
   membership_id: string | null;
   installation_id: string | null;
+  purpose: OAuthClientPurpose;
   status: OAuthFlowStatus;
   expires_at: number;
   created_at: number;
@@ -272,6 +280,7 @@ export async function provisionTrustedOAuthClient(
     redirectUri: input.redirectUri,
     capabilities: [...input.capabilities],
     authMethod: input.authMethod,
+    purpose: registration.purpose,
     refreshEnabled: registration.refreshEnabled,
   };
 }
@@ -286,6 +295,18 @@ export function validateTrustedOAuthClientInput(
     input.authMethod !== "client_secret_post"
   ) {
     throw new Error("invalid_client_auth_method");
+  }
+  const purpose = input.purpose ?? "personal_harness";
+  if (!validOAuthClientPurpose(purpose)) {
+    throw new Error("invalid_client_purpose");
+  }
+  if (purpose === "first_party_browser") {
+    if (input.authMethod !== "client_secret_post") {
+      throw new Error("first_party_browser_requires_confidential_client");
+    }
+    if (input.refreshEnabled === true) {
+      throw new Error("first_party_browser_refresh_not_supported");
+    }
   }
   if (!secretKey) throw new Error("missing_better_auth_secret");
   if (!validOAuthClientRedirectUri(input.redirectUri)) {
@@ -324,6 +345,7 @@ export interface TrustedOAuthClientRegistration {
   redirectUri: string;
   capabilities: string[];
   authMethod: OAuthClientAuthMethod;
+  purpose: OAuthClientPurpose;
   refreshEnabled: boolean;
   ownerUserId: string | null;
   clientName: string;
@@ -371,6 +393,7 @@ export async function prepareTrustedOAuthClientRegistration(
     redirectUri: input.redirectUri,
     capabilities: [...input.capabilities],
     authMethod: input.authMethod,
+    purpose: input.purpose ?? "personal_harness",
     refreshEnabled: input.refreshEnabled === true,
     ownerUserId: input.ownerUserId ?? null,
     clientName: input.name?.trim() || `0000 ${input.serviceId}`,
@@ -499,8 +522,8 @@ export function trustedOAuthClientStatements(
     {
       sql: `INSERT INTO platform_oauth_client
        (client_id, service_id, owner_user_id, redirect_uri, capabilities,
-        active, refresh_enabled, created_at, updated_at)
-       SELECT ?, ?, ?, ?, ?, 1, ?, ?, ?
+        purpose, active, refresh_enabled, created_at, updated_at)
+       SELECT ?, ?, ?, ?, ?, ?, 1, ?, ?, ?
        WHERE ${serviceGuard}`,
       values: [
         registration.clientId,
@@ -508,6 +531,7 @@ export function trustedOAuthClientStatements(
         registration.ownerUserId,
         registration.redirectUri,
         capabilities,
+        registration.purpose,
         registration.refreshEnabled ? 1 : 0,
         registration.now,
         registration.now,
@@ -524,7 +548,7 @@ export async function findOAuthClient(
   const row = await database
     .prepare(
       `SELECT p.client_id, p.service_id, p.owner_user_id, p.redirect_uri,
-              p.capabilities, p.refresh_enabled, o.scopes, o.tokenEndpointAuthMethod,
+              p.capabilities, p.purpose, p.refresh_enabled, o.scopes, o.tokenEndpointAuthMethod,
               o.disabled AS client_disabled, s.audience, s.disabled AS service_disabled,
               r.disabled AS resource_disabled, cr.id AS resource_link
        FROM platform_oauth_client AS p
@@ -543,6 +567,7 @@ export async function findOAuthClient(
       owner_user_id: string | null;
       redirect_uri: string;
       capabilities: string;
+      purpose: OAuthClientPurpose;
       refresh_enabled: number;
       scopes: string | null;
       tokenEndpointAuthMethod: OAuthClientAuthMethod | null;
@@ -563,6 +588,15 @@ export async function findOAuthClient(
   ) {
     return null;
   }
+  if (!validOAuthClientPurpose(row.purpose)) return null;
+  if (
+    row.purpose === "first_party_browser" &&
+    (row.tokenEndpointAuthMethod !== "client_secret_post" ||
+      row.refresh_enabled !== 0 ||
+      scopes.includes("offline_access"))
+  ) {
+    return null;
+  }
   if (
     row.tokenEndpointAuthMethod !== "none" &&
     row.tokenEndpointAuthMethod !== "client_secret_post"
@@ -577,6 +611,7 @@ export async function findOAuthClient(
     redirectUri: row.redirect_uri,
     capabilities,
     authMethod: row.tokenEndpointAuthMethod,
+    purpose: row.purpose,
     refreshEnabled: row.refresh_enabled === 1,
     ownerUserId: row.owner_user_id,
     scopes,
@@ -636,7 +671,7 @@ export async function loadOAuthFlow(
   const row = await database
     .prepare(
       `SELECT id, query_hash, oauth_query, state, user_id, session_id,
-              organization_id, membership_id, installation_id, status,
+              organization_id, membership_id, installation_id, purpose, status,
               expires_at, created_at, consumed_at
        FROM platform_oauth_flow WHERE id = ?`,
     )
@@ -656,7 +691,7 @@ export async function findOAuthFlowForQuery(
   const rows = await database
     .prepare(
       `SELECT id, query_hash, oauth_query, state, user_id, session_id,
-              organization_id, membership_id, installation_id, status,
+              organization_id, membership_id, installation_id, purpose, status,
               expires_at, created_at, consumed_at
        FROM platform_oauth_flow
        WHERE state = ? AND user_id = ? AND session_id = ?
@@ -691,7 +726,7 @@ export async function beginOAuthFlow(
   const existing = await database
     .prepare(
       `SELECT id, query_hash, oauth_query, state, user_id, session_id,
-              organization_id, membership_id, installation_id, status,
+              organization_id, membership_id, installation_id, purpose, status,
               expires_at, created_at, consumed_at
        FROM platform_oauth_flow WHERE query_hash = ?`,
     )
@@ -704,6 +739,9 @@ export async function beginOAuthFlow(
     ) {
       return { status: 403, flow: null, error: "oauth_flow_forbidden" };
     }
+    if (existing.purpose !== client.purpose) {
+      return { status: 400, flow: null, error: "oauth_request_not_registered" };
+    }
     if (existing.status !== "pending") {
       return { status: 409, flow: existing, error: "oauth_flow_used" };
     }
@@ -715,9 +753,9 @@ export async function beginOAuthFlow(
     .prepare(
       `INSERT INTO platform_oauth_flow
        (id, query_hash, oauth_query, state, user_id, session_id,
-        organization_id, membership_id, installation_id, status,
+        organization_id, membership_id, installation_id, purpose, status,
         expires_at, created_at, consumed_at)
-       VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, NULL, 'pending', ?, ?, NULL)`,
+       VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?, 'pending', ?, ?, NULL)`,
     )
     .bind(
       flowId,
@@ -726,6 +764,7 @@ export async function beginOAuthFlow(
       binding.state,
       current.userId,
       current.sessionId,
+      client.purpose,
       binding.expiresAt,
       now,
     )
@@ -768,7 +807,12 @@ export async function selectOAuthFlow(
   const client = binding
     ? await findOAuthClient(database, binding.clientId)
     : null;
-  if (!binding || !client || !validateOAuthQuery(binding, client)) {
+  if (
+    !binding ||
+    !client ||
+    flow.purpose !== client.purpose ||
+    !validateOAuthQuery(binding, client)
+  ) {
     return { status: 400, flow: null, error: "oauth_request_not_registered" };
   }
   const currentMembership = await database
@@ -792,9 +836,9 @@ export async function selectOAuthFlow(
     .prepare(
       `INSERT INTO platform_oauth_installation
        (id, client_id, user_id, membership_id, organization_id, service_id,
-        audience, capabilities, subject_id, grant_id, active, revoked_at,
+        audience, capabilities, subject_id, grant_id, purpose, active, revoked_at,
         created_at, expires_at)
-       SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, ?, ?
+       SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, ?, ?
        WHERE EXISTS (
          SELECT 1 FROM "user" WHERE id = ? AND disabledAt IS NULL
        ) AND EXISTS (
@@ -804,7 +848,7 @@ export async function selectOAuthFlow(
            AND member.userId = ? AND organization.suspendedAt IS NULL
        ) AND EXISTS (
          SELECT 1 FROM platform_oauth_client
-         WHERE client_id = ? AND service_id = ? AND active = 1
+         WHERE client_id = ? AND service_id = ? AND purpose = ? AND active = 1
        ) AND EXISTS (
          SELECT 1 FROM platform_service
          WHERE service_id = ? AND audience = ? AND disabled = 0
@@ -834,6 +878,7 @@ export async function selectOAuthFlow(
       JSON.stringify(oauthCapabilitiesFromScopes(binding.scopes)),
       subjectId,
       grantId,
+      client.purpose,
       now,
       binding.expiresAt,
       input.userId,
@@ -842,6 +887,7 @@ export async function selectOAuthFlow(
       input.userId,
       client.clientId,
       client.serviceId,
+      client.purpose,
       client.serviceId,
       client.audience,
       JSON.stringify(oauthCapabilitiesFromScopes(binding.scopes)),
@@ -868,7 +914,7 @@ export async function selectOAuthFlow(
              AND member.userId = ? AND organization.suspendedAt IS NULL
          ) AND EXISTS (
            SELECT 1 FROM platform_oauth_client
-           WHERE client_id = ? AND service_id = ? AND active = 1
+           WHERE client_id = ? AND service_id = ? AND purpose = ? AND active = 1
          ) AND EXISTS (
            SELECT 1 FROM oauthClient
            WHERE clientId = ? AND disabled = 0
@@ -902,6 +948,7 @@ export async function selectOAuthFlow(
       input.userId,
       client.clientId,
       client.serviceId,
+      client.purpose,
       client.clientId,
       client.audience,
       client.serviceId,
@@ -989,6 +1036,7 @@ export function oauthPostLoginHooks(
            JOIN platform_oauth_client AS oauth_client
              ON oauth_client.client_id = installation.client_id
             AND oauth_client.service_id = installation.service_id
+            AND oauth_client.purpose = installation.purpose
             AND oauth_client.active = 1
            JOIN oauthClient AS registered_client
              ON registered_client.clientId = installation.client_id
@@ -999,6 +1047,7 @@ export function oauthPostLoginHooks(
             AND service.disabled = 0
            WHERE installation.id = ? AND installation.user_id = ? AND installation.membership_id = ?
              AND installation.organization_id = ? AND installation.active = 0
+             AND installation.purpose = ?
              AND installation.revoked_at IS NULL
              AND NOT EXISTS (
                SELECT 1 FROM json_each(installation.capabilities) AS requested
@@ -1013,6 +1062,7 @@ export function oauthPostLoginHooks(
           user.id,
           flow.membership_id,
           flow.organization_id,
+          flow.purpose,
         )
         .first<{ id: string }>();
       if (!installation) {
@@ -1207,7 +1257,7 @@ export async function completeInitialOAuthAccess(
   const flow = await database
     .prepare(
       `SELECT id, query_hash, oauth_query, state, user_id, session_id,
-              organization_id, membership_id, installation_id, status,
+              organization_id, membership_id, installation_id, purpose, status,
               expires_at, created_at, consumed_at
        FROM platform_oauth_flow WHERE installation_id = ?`,
     )
@@ -1217,7 +1267,7 @@ export async function completeInitialOAuthAccess(
     .prepare(
       `SELECT id, client_id, user_id, membership_id, organization_id,
               service_id, audience, capabilities, subject_id, grant_id,
-              active, revoked_at, expires_at
+              purpose, active, revoked_at, expires_at
        FROM platform_oauth_installation WHERE id = ?`,
     )
     .bind(installationId)
@@ -1231,7 +1281,8 @@ export async function completeInitialOAuthAccess(
       audience: string;
       capabilities: string;
       subject_id: string;
-      grant_id: string;
+      grant_id: string | null;
+      purpose: OAuthClientPurpose;
       active: number;
       revoked_at: number | null;
       expires_at: number;
@@ -1243,7 +1294,9 @@ export async function completeInitialOAuthAccess(
   const current = installation
     ? await database
         .prepare(
-          `SELECT member.id, pc.redirect_uri,
+          `SELECT member.id, pc.redirect_uri, pc.purpose AS client_purpose,
+                  pc.refresh_enabled AS client_refresh_enabled,
+                  oc.tokenEndpointAuthMethod AS client_auth_method,
                   pc.capabilities AS client_capabilities,
                   oc.scopes AS registered_scopes,
                   consent.resources AS consent_resources,
@@ -1284,6 +1337,9 @@ export async function completeInitialOAuthAccess(
         .first<{
           id: string;
           redirect_uri: string;
+          client_purpose: OAuthClientPurpose;
+          client_refresh_enabled: number;
+          client_auth_method: OAuthClientAuthMethod;
           client_capabilities: string;
           registered_scopes: string;
           consent_resources: string | null;
@@ -1309,10 +1365,15 @@ export async function completeInitialOAuthAccess(
     flow.status !== "consumed" ||
     flow.user_id !== access.userId ||
     flow.installation_id !== installation.id ||
+    flow.purpose !== installation.purpose ||
     access.clientId !== installation.client_id ||
     access.referenceId !== installation.id ||
     !current ||
     current.redirect_uri !== binding.redirectUri ||
+    current.client_purpose !== installation.purpose ||
+    (installation.purpose === "first_party_browser" &&
+      (current.client_refresh_enabled !== 0 ||
+        current.client_auth_method !== "client_secret_post")) ||
     binding.clientId !== installation.client_id ||
     binding.resource !== installation.audience ||
     installation.active !== 0 ||
@@ -1364,15 +1425,21 @@ export async function completeInitialOAuthAccess(
         name, created_at, revoked_reason, replaced_by_id, predecessor_id,
         oauth_origin, oauth_installation_id, oauth_provider_row_id,
         oauth_provider_token_hash)
-       SELECT ?, ?, 'agent', i.subject_id, i.organization_id, i.membership_id,
-              i.grant_id, i.audience, i.capabilities, '[]', a.expiresAt, NULL,
-              'OAuth personal harness', ?, NULL, NULL, NULL, 'better-auth',
+       SELECT ?, ?,
+              CASE WHEN i.purpose = 'first_party_browser' THEN 'human' ELSE 'agent' END,
+              CASE WHEN i.purpose = 'first_party_browser' THEN i.user_id ELSE i.subject_id END,
+              i.organization_id, i.membership_id,
+              CASE WHEN i.purpose = 'first_party_browser' THEN NULL ELSE i.grant_id END,
+              i.audience, i.capabilities, '[]', a.expiresAt, NULL,
+              CASE WHEN i.purpose = 'first_party_browser'
+                THEN 'First-party browser access' ELSE 'OAuth personal harness' END,
+              ?, NULL, NULL, NULL, 'better-auth',
               i.id, a.id, ?
        FROM platform_oauth_installation AS i
        JOIN oauthAccessToken AS a ON a.id = ? AND a.token = ?
        JOIN platform_oauth_client AS pc
          ON pc.client_id = i.client_id AND pc.service_id = i.service_id
-        AND pc.active = 1
+        AND pc.active = 1 AND pc.purpose = i.purpose
        JOIN oauthClient AS oc ON oc.clientId = i.client_id AND oc.disabled = 0
        JOIN platform_service AS service
          ON service.service_id = i.service_id AND service.audience = i.audience
@@ -1398,8 +1465,9 @@ export async function completeInitialOAuthAccess(
          AND EXISTS (SELECT 1 FROM member WHERE id = i.membership_id
            AND userId = i.user_id AND organizationId = i.organization_id)
          AND EXISTS (
-           SELECT 1 FROM platform_oauth_flow
-           WHERE id = ? AND installation_id = i.id AND status = 'consumed'
+         SELECT 1 FROM platform_oauth_flow
+           WHERE id = ? AND installation_id = i.id AND purpose = i.purpose
+             AND status = 'consumed'
              AND user_id = i.user_id AND organization_id = i.organization_id
              AND membership_id = i.membership_id AND expires_at > ?
          )
@@ -1514,11 +1582,12 @@ export async function completeInitialOAuthAccess(
   }
   const durable = await database
     .prepare(
-      `SELECT c.id AS credential_id, i.active, f.status, a.sessionId
+       `SELECT c.id AS credential_id, i.active, f.status, a.sessionId
        FROM platform_credential AS c
        JOIN platform_oauth_installation AS i ON i.id = c.oauth_installation_id
        JOIN platform_oauth_flow AS f
-         ON f.id = ? AND f.installation_id = i.id AND f.status = 'activated'
+         ON f.id = ? AND f.installation_id = i.id
+        AND f.purpose = i.purpose AND f.status = 'activated'
        JOIN oauthAccessToken AS a ON a.id = c.oauth_provider_row_id
        WHERE c.id = ? AND c.oauth_provider_token_hash = ?`,
     )
@@ -1576,6 +1645,7 @@ export async function oauthTokenIsCurrentlyAuthorized(
          AND f.expires_at > ?
          JOIN platform_oauth_installation AS i ON i.id = c.oauth_installation_id
           AND i.active = 1 AND i.revoked_at IS NULL
+          AND i.purpose = 'personal_harness'
          JOIN oauthAccessToken AS a ON a.id = c.oauth_provider_row_id
           AND a.token = c.oauth_provider_token_hash
           AND a.refreshId = t.provider_refresh_row_id
@@ -1611,7 +1681,8 @@ export async function oauthTokenIsCurrentlyAuthorized(
           AND json_array_length(json_extract(consent.resources, '$')) = 1
           AND json_extract(json_extract(consent.resources, '$'), '$[0]') = i.audience
          WHERE c.credential_hash = ? AND c.oauth_refresh_token_id = ?
-           AND c.oauth_origin = 'better-auth' AND c.revoked_at IS NULL
+           AND c.oauth_origin = 'better-auth' AND c.kind = 'agent'
+           AND c.revoked_at IS NULL
            AND c.expires_at > ?
            AND c.subject_id = f.subject_id AND c.grant_id = f.grant_id
            AND c.organization_id = f.organization_id
@@ -1689,7 +1760,15 @@ export async function oauthTokenIsCurrentlyAuthorized(
   const hash = await oauthProviderTokenHash(token);
   const row = await database
     .prepare(
-      `SELECT c.id, i.client_id AS client_id, i.audience AS audience,
+      `SELECT c.id, c.kind, c.subject_id, c.membership_id, c.grant_id,
+              i.user_id AS installation_user_id,
+              i.membership_id AS installation_membership_id,
+              i.subject_id AS installation_subject_id,
+              i.grant_id AS installation_grant_id,
+              i.client_id AS client_id, i.audience AS audience,
+              i.purpose AS installation_purpose,
+              pc.refresh_enabled AS client_refresh_enabled,
+              oc.tokenEndpointAuthMethod AS client_auth_method,
               i.capabilities AS installation_capabilities,
               pc.redirect_uri AS client_redirect_uri,
               f.oauth_query AS oauth_query,
@@ -1697,16 +1776,19 @@ export async function oauthTokenIsCurrentlyAuthorized(
               consent.resources AS consent_resources, consent.scopes AS consent_scopes,
               pc.capabilities AS client_capabilities, oc.scopes AS registered_scopes,
               service.allowed_capabilities AS service_capabilities
-       FROM platform_credential AS c
-       JOIN platform_oauth_installation AS i
+      FROM platform_credential AS c
+      JOIN platform_oauth_installation AS i
          ON i.id = c.oauth_installation_id AND i.active = 1
+        AND i.revoked_at IS NULL
        JOIN oauthAccessToken AS a
          ON a.id = c.oauth_provider_row_id AND a.token = c.oauth_provider_token_hash
         AND a.refreshId IS NULL
        JOIN platform_oauth_client AS pc
          ON pc.client_id = i.client_id AND pc.active = 1
+        AND pc.purpose = i.purpose
        JOIN platform_oauth_flow AS f
-         ON f.installation_id = i.id AND f.status = 'activated'
+         ON f.installation_id = i.id AND f.purpose = i.purpose
+        AND f.status = 'activated'
        JOIN oauthClient AS oc ON oc.clientId = i.client_id AND oc.disabled = 0
        JOIN member AS m ON m.id = i.membership_id
          AND m.userId = i.user_id AND m.organizationId = i.organization_id
@@ -1732,8 +1814,19 @@ export async function oauthTokenIsCurrentlyAuthorized(
     .bind(await hashOpaque(token), hash, Date.now(), Date.now())
     .first<{
       id: string;
+      kind: string;
+      subject_id: string;
+      membership_id: string | null;
+      grant_id: string | null;
+      installation_user_id: string;
+      installation_membership_id: string;
+      installation_subject_id: string;
+      installation_grant_id: string;
       client_id: string;
       audience: string;
+      installation_purpose: OAuthClientPurpose;
+      client_refresh_enabled: number;
+      client_auth_method: OAuthClientAuthMethod;
       installation_capabilities: string;
       client_redirect_uri: string;
       oauth_query: string;
@@ -1775,6 +1868,18 @@ export async function oauthTokenIsCurrentlyAuthorized(
     return false;
   }
   return (
+    ((row.installation_purpose === "first_party_browser" &&
+      row.client_refresh_enabled === 0 &&
+      row.client_auth_method === "client_secret_post" &&
+      row.kind === "human" &&
+      row.subject_id === row.installation_user_id &&
+      row.membership_id === row.installation_membership_id &&
+      row.grant_id === null) ||
+      (row.installation_purpose === "personal_harness" &&
+        row.kind === "agent" &&
+        row.subject_id === row.installation_subject_id &&
+        row.membership_id === row.installation_membership_id &&
+        row.grant_id === row.installation_grant_id)) &&
     binding.clientId === row.client_id &&
     binding.redirectUri === row.client_redirect_uri &&
     binding.resource === row.audience &&

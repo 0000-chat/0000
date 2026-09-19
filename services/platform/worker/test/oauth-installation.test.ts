@@ -1408,6 +1408,186 @@ describe("T06 production OAuth installation", () => {
     expect(missingToken?.status).toBe(500);
   });
 
+  it("issues a first-party browser credential for the selected human organization", async () => {
+    const suffix = crypto.randomUUID().slice(0, 8);
+    const service = await registerService(testEnv.IDENTITY_DB, {
+      serviceId: `t11-browser-service-${suffix}`,
+      audience: `https://t11-browser-${suffix}.0000.test`,
+      capabilities: ["resource:read"],
+    });
+    const user = await signIn({
+      id: 816399,
+      login: `t11-browser-${suffix}`,
+      email: `t11-browser-${suffix}@example.test`,
+    });
+    const organizationId = await ownerOrganization(user.cookies);
+    const client = await provisionTrustedOAuthClient(
+      testEnv.IDENTITY_DB,
+      testEnv.BETTER_AUTH_SECRET,
+      {
+        serviceId: service.serviceId,
+        redirectUri: `https://t11-browser-client-${suffix}.example.test/callback`,
+        capabilities: ["resource:read"],
+        authMethod: "client_secret_post",
+        purpose: "first_party_browser",
+        refreshEnabled: false,
+      },
+    );
+    expect(client.purpose).toBe("first_party_browser");
+    expect(client.authMethod).toBe("client_secret_post");
+    expect(client.refreshEnabled).toBe(false);
+
+    const preview = await beginSelection({
+      cookies: user.cookies,
+      userId: user.userId,
+      client,
+      audience: service.audience,
+    });
+    const selected = await selectFlow({
+      cookies: user.cookies,
+      flowId: preview.flowId,
+      organizationId,
+    });
+    expect(selected.status).toBe(303);
+    const continued = await continueFlow(user.cookies, preview.flowId);
+    expect(continued.status).toBe(302);
+    const consentLocation = new URL(
+      continued.headers.get("location")!,
+      "http://localhost",
+    );
+    const consentPage = await SELF.fetch(consentLocation, {
+      headers: { cookie: user.cookies },
+    });
+    const consentText = await consentPage.text();
+    expect(consentText).toContain("uses your signed-in human account");
+    expect(consentText).toContain("organization you selected");
+    expect(consentText).not.toContain("personal-harness agent");
+    const deniedPreview = await SELF.fetch(
+      "http://localhost/api/auth/oauth2/consent",
+      {
+        method: "POST",
+        headers: {
+          cookie: user.cookies,
+          origin: testEnv.PLATFORM_BASE_URL,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          accept: false,
+          oauth_query: consentLocation.search.slice(1),
+        }),
+      },
+    );
+    expect(deniedPreview.status).toBe(200);
+
+    const issued = await completeFlow({
+      cookies: user.cookies,
+      userId: user.userId,
+      organizationId,
+      client,
+      audience: service.audience,
+      clientSecret: client.clientSecret!,
+    });
+    const installation = await testEnv.IDENTITY_DB.prepare(
+      `SELECT i.id, i.purpose, i.user_id, i.membership_id, i.organization_id,
+              c.kind, c.subject_id, c.grant_id
+       FROM platform_oauth_installation AS i
+       JOIN platform_credential AS c ON c.oauth_installation_id = i.id
+       WHERE i.client_id = ? AND i.organization_id = ? AND i.active = 1
+       ORDER BY i.created_at DESC LIMIT 1`,
+    )
+      .bind(client.clientId, organizationId)
+      .first<{
+        id: string;
+        purpose: string;
+        user_id: string;
+        membership_id: string;
+        organization_id: string;
+        kind: string;
+        subject_id: string;
+        grant_id: string | null;
+      }>();
+    expect(installation).toMatchObject({
+      purpose: "first_party_browser",
+      user_id: user.userId,
+      organization_id: organizationId,
+      kind: "human",
+      subject_id: user.userId,
+      grant_id: null,
+    });
+
+    const sharedClient = createPlatformClient({
+      baseUrl: testEnv.PLATFORM_BASE_URL,
+      authority: testEnv.PLATFORM_AUTHORITY_ID,
+      audience: service.audience,
+      serviceVerifier: service.verifier,
+      fetch: SELF.fetch,
+    });
+    const authenticated = await sharedClient.authenticate(issued.accessToken);
+    expect(authenticated.status, JSON.stringify(authenticated)).toBe(
+      "authenticated",
+    );
+    if (authenticated.status === "authenticated") {
+      expect(authenticated.principal).toMatchObject({
+        kind: "human",
+        subjectId: user.userId,
+        membershipId: installation?.membership_id,
+        organizationId,
+        audience: service.audience,
+      });
+      expect("grantId" in authenticated.principal).toBe(false);
+    }
+
+    const listedCredentials = await SELF.fetch(
+      `http://localhost/api/credentials?organizationId=${encodeURIComponent(organizationId)}`,
+      { headers: { cookie: user.cookies } },
+    );
+    expect(listedCredentials.status).toBe(200);
+    expect(
+      ((await listedCredentials.json()) as { credentials: Array<{ id: string }> })
+        .credentials,
+    ).not.toContainEqual(expect.objectContaining({ id: expect.any(String) }));
+    const rotate = await SELF.fetch("http://localhost/api/credentials/rotate", {
+      method: "POST",
+      headers: {
+        cookie: user.cookies,
+        origin: testEnv.PLATFORM_BASE_URL,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ organizationId, credentialId: authenticated.status === "authenticated" ? authenticated.principal.credentialId : "" }),
+    });
+    expect(rotate.status).toBe(404);
+    const revoke = await SELF.fetch("http://localhost/api/credentials/revoke", {
+      method: "POST",
+      headers: {
+        cookie: user.cookies,
+        origin: testEnv.PLATFORM_BASE_URL,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ organizationId, credentialId: authenticated.status === "authenticated" ? authenticated.principal.credentialId : "" }),
+    });
+    expect(revoke.status).toBe(404);
+
+    const revokeInstallation = await SELF.fetch(
+      "http://localhost/api/account/oauth-installations/revoke",
+      {
+        method: "POST",
+        headers: {
+          cookie: user.cookies,
+          origin: testEnv.PLATFORM_BASE_URL,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          installationId: installation?.id,
+          organizationId,
+        }),
+      },
+    );
+    expect(revokeInstallation.status).toBe(200);
+    expect((await sharedClient.authenticate(issued.accessToken)).status).toBe(
+      "invalid_credential",
+    );
+  });
+
   it("accepts a confidential client secret stored with the pinned provider crypto", async () => {
     const service = await registerService(testEnv.IDENTITY_DB, {
       serviceId: "t06-confidential-service",

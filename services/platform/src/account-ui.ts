@@ -95,6 +95,7 @@ export interface AccountOAuthInstallation {
   clientName: string;
   serviceId: string;
   audience: string;
+  purpose: "personal_harness" | "first_party_browser";
   organizationName: string;
   capabilities: string[];
   createdAt: number;
@@ -489,8 +490,9 @@ function oauthInstallationMarkup(view: AccountView): string {
         : installation.active && installation.familyState !== "quarantined"
           ? "active"
           : (installation.familyState ?? "pending");
+      const kind = installation.purpose === "first_party_browser" ? "First-party browser" : "Personal harness";
       return `<li class="management-row" data-oauth-installation-id="${escapeHtml(installation.id)}">
-        <div><strong>${escapeHtml(installation.clientName || installation.clientId)}</strong><span>${escapeHtml(installation.organizationName)} · ${escapeHtml(installation.serviceId)} · ${escapeHtml(installation.audience)}</span><small>${escapeHtml(installation.capabilities.join(", "))} · ${escapeHtml(status)} · created ${escapeHtml(new Date(installation.createdAt).toLocaleString())}</small></div>
+        <div><strong>${escapeHtml(installation.clientName || installation.clientId)}</strong><span>${escapeHtml(kind)} · ${escapeHtml(installation.organizationName)} · ${escapeHtml(installation.serviceId)} · ${escapeHtml(installation.audience)}</span><small>${escapeHtml(installation.capabilities.join(", "))} · ${escapeHtml(status)} · created ${escapeHtml(new Date(installation.createdAt).toLocaleString())}</small></div>
         ${status !== "revoked" ? `<button type="button" class="quiet-button" data-revoke-oauth-installation="${escapeHtml(installation.id)}">Revoke</button>` : ""}
       </li>`;
     })

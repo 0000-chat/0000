@@ -2888,6 +2888,10 @@ async function accountRoute(
       clientName: String(installation.client_name ?? installation.client_id),
       serviceId: String(installation.service_id),
       audience: String(installation.audience),
+      purpose:
+        installation.purpose === "first_party_browser"
+          ? "first_party_browser"
+          : "personal_harness",
       organizationName: String(installation.organization_name ?? ""),
       capabilities: parseStringArray(String(installation.capabilities)) ?? [],
       createdAt: Number(installation.created_at),
@@ -3187,13 +3191,11 @@ export async function authenticateCredential(
   if (row.oauth_origin !== null) {
     if (
       row.oauth_origin !== "better-auth" ||
-      row.kind !== "agent" ||
       !row.oauth_installation_id ||
       !row.oauth_provider_row_id ||
       !row.oauth_provider_token_hash ||
       row.membership_id === null ||
       !row.organization_id ||
-      !row.grant_id ||
       resourceIds.length !== 0 ||
       row.expires_at === null
     ) {
@@ -3229,10 +3231,16 @@ export async function authenticateCredential(
     }
     const currentOAuth = await database
       .prepare(
-        `SELECT credential.id, credential.subject_id, credential.organization_id,
+        `SELECT credential.id, credential.kind, credential.subject_id,
+                credential.organization_id,
                 credential.membership_id, credential.grant_id, credential.audience,
                 credential.capabilities, credential.resource_ids, credential.expires_at,
                 installation.id AS installation_id,
+                installation.user_id AS installation_user_id,
+                installation.membership_id AS installation_membership_id,
+                installation.subject_id AS installation_subject_id,
+                installation.grant_id AS installation_grant_id,
+                installation.purpose AS installation_purpose,
                 installation.client_id,
                 installation.capabilities AS installation_capabilities,
                 oauth_client.redirect_uri AS client_redirect_uri,
@@ -3243,6 +3251,9 @@ export async function authenticateCredential(
                 consent.resources AS consent_resources,
                 consent.scopes AS consent_scopes,
                 oauth_client.capabilities AS client_capabilities,
+                oauth_client.purpose AS client_purpose,
+                oauth_client.refresh_enabled AS client_refresh_enabled,
+                registered_client.tokenEndpointAuthMethod AS client_auth_method,
                 registered_client.scopes AS registered_scopes,
                 service.allowed_capabilities AS service_capabilities
          FROM platform_credential AS credential
@@ -3250,11 +3261,12 @@ export async function authenticateCredential(
            ON installation.id = credential.oauth_installation_id
           AND installation.active = 1
           AND installation.revoked_at IS NULL
+          AND installation.purpose IN ('personal_harness', 'first_party_browser')
           AND installation.membership_id = credential.membership_id
           AND installation.organization_id = credential.organization_id
           AND installation.audience = credential.audience
          JOIN oauthAccessToken AS access
-           ON access.id = credential.oauth_provider_row_id
+         ON access.id = credential.oauth_provider_row_id
           AND access.token = credential.oauth_provider_token_hash
           AND access.referenceId = installation.id
           AND access.clientId = installation.client_id
@@ -3263,11 +3275,13 @@ export async function authenticateCredential(
            AND access.refreshId IS NULL
            AND access.expiresAt > ?
          JOIN platform_oauth_client AS oauth_client
-           ON oauth_client.client_id = installation.client_id
+         ON oauth_client.client_id = installation.client_id
           AND oauth_client.service_id = installation.service_id
+          AND oauth_client.purpose = installation.purpose
           AND oauth_client.active = 1
          JOIN platform_oauth_flow AS flow
-           ON flow.installation_id = installation.id
+         ON flow.installation_id = installation.id
+          AND flow.purpose = installation.purpose
           AND flow.status = 'activated'
          JOIN oauthClient AS registered_client
            ON registered_client.clientId = oauth_client.client_id
@@ -3308,15 +3322,21 @@ export async function authenticateCredential(
       )
       .first<{
         id: string;
+        kind: string;
         subject_id: string;
         organization_id: string;
         membership_id: string;
-        grant_id: string;
+        grant_id: string | null;
         audience: string;
         capabilities: string;
         resource_ids: string;
         expires_at: number;
         installation_id: string;
+        installation_user_id: string;
+        installation_membership_id: string;
+        installation_subject_id: string;
+        installation_grant_id: string;
+        installation_purpose: "personal_harness" | "first_party_browser";
         client_id: string;
         installation_capabilities: string;
         client_redirect_uri: string;
@@ -3327,6 +3347,9 @@ export async function authenticateCredential(
         consent_resources: string | null;
         consent_scopes: string;
         client_capabilities: string;
+        client_purpose: "personal_harness" | "first_party_browser";
+        client_refresh_enabled: number;
+        client_auth_method: "none" | "client_secret_post";
         registered_scopes: string;
         service_capabilities: string;
       }>();
@@ -3336,6 +3359,21 @@ export async function authenticateCredential(
     ) {
       return json(401, { status: "invalid_credential" });
     }
+    const oauthShapeMatches =
+      (currentOAuth.installation_purpose === "first_party_browser" &&
+        currentOAuth.client_purpose === "first_party_browser" &&
+        currentOAuth.client_refresh_enabled === 0 &&
+        currentOAuth.client_auth_method === "client_secret_post" &&
+        currentOAuth.kind === "human" &&
+        currentOAuth.subject_id === currentOAuth.installation_user_id &&
+        currentOAuth.membership_id === currentOAuth.installation_membership_id &&
+        currentOAuth.grant_id === null) ||
+      (currentOAuth.installation_purpose === "personal_harness" &&
+        currentOAuth.client_purpose === "personal_harness" &&
+        currentOAuth.kind === "agent" &&
+        currentOAuth.subject_id === currentOAuth.installation_subject_id &&
+        currentOAuth.membership_id === currentOAuth.installation_membership_id &&
+        currentOAuth.grant_id === currentOAuth.installation_grant_id);
     const installationCapabilities = parseStringArray(
       currentOAuth.installation_capabilities,
     );
@@ -3365,6 +3403,7 @@ export async function authenticateCredential(
       !clientCapabilities ||
       !registeredScopes ||
       !binding ||
+      !oauthShapeMatches ||
       currentResourceIds.length !== 0 ||
       !validCapabilities(installationCapabilities) ||
       !validCapabilities(serviceCapabilities) ||
@@ -3396,21 +3435,23 @@ export async function authenticateCredential(
     ) {
       return json(401, { status: "invalid_credential" });
     }
-    return json(200, {
-      status: "authenticated",
-      principal: {
-        version: 1,
-        authority: env.PLATFORM_AUTHORITY_ID,
-        kind: "agent",
-        subjectId: currentOAuth.subject_id,
-        credentialId: currentOAuth.id,
-        organizationId: currentOAuth.organization_id,
-        grantId: currentOAuth.grant_id,
-        audience: currentOAuth.audience,
-        capabilities: currentCapabilities,
-        expiresAt: new Date(currentOAuth.expires_at).toISOString(),
-      },
-    });
+    const principal = {
+      version: 1 as const,
+      authority: env.PLATFORM_AUTHORITY_ID,
+      subjectId: currentOAuth.subject_id,
+      credentialId: currentOAuth.id,
+      organizationId: currentOAuth.organization_id,
+      audience: currentOAuth.audience,
+      capabilities: currentCapabilities,
+      expiresAt: new Date(currentOAuth.expires_at).toISOString(),
+      ...(currentOAuth.installation_purpose === "first_party_browser"
+        ? { kind: "human" as const, membershipId: currentOAuth.membership_id }
+        : {
+            kind: "agent" as const,
+            grantId: currentOAuth.grant_id!,
+          }),
+    };
+    return json(200, { status: "authenticated", principal });
   }
   if (
     row.kind !== "agent" &&
@@ -4105,6 +4146,7 @@ async function platformRoute(
          FROM platform_credential AS credential
          JOIN platform_service AS service ON service.audience = credential.audience
          WHERE credential.id = ? AND credential.kind = 'human'
+           AND credential.oauth_origin IS NULL
            AND credential.subject_id = ? AND credential.organization_id = ?
            AND credential.membership_id = ? AND service.disabled = 0`,
       )

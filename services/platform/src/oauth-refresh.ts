@@ -305,7 +305,9 @@ async function currentRefreshRow(
        FROM platform_oauth_refresh_token AS t
        JOIN platform_oauth_refresh_family AS f ON f.id = t.family_id
        JOIN platform_oauth_installation AS i ON i.id = f.installation_id
+        AND i.purpose = 'personal_harness'
        JOIN platform_oauth_client AS pc ON pc.client_id = f.client_id
+        AND pc.purpose = i.purpose
        JOIN oauthClient AS oc ON oc.clientId = f.client_id
        JOIN platform_service AS service ON service.service_id = f.service_id
         AND service.audience = f.audience
@@ -673,9 +675,11 @@ export async function prepareOAuthRefresh(
             AND token.provider_refresh_token_hash = ?
            JOIN platform_oauth_installation AS installation
              ON installation.id = family.installation_id
+            AND installation.purpose = 'personal_harness'
            JOIN platform_oauth_client AS client
              ON client.client_id = family.client_id
             AND client.service_id = family.service_id
+            AND client.purpose = installation.purpose
             AND client.active = 1 AND client.refresh_enabled = 1
            JOIN oauthClient AS registered_client
              ON registered_client.clientId = family.client_id
@@ -974,7 +978,9 @@ async function currentFamilyAuthority(
        FROM platform_oauth_refresh_family AS f
        JOIN platform_oauth_refresh_token AS t ON t.family_id = f.id AND t.id = ?
        JOIN platform_oauth_installation AS i ON i.id = f.installation_id
+        AND i.purpose = 'personal_harness'
        JOIN platform_oauth_client AS pc ON pc.client_id = f.client_id
+        AND pc.purpose = i.purpose
        JOIN oauthClient AS oc ON oc.clientId = f.client_id
        JOIN platform_service AS service ON service.service_id = f.service_id
         AND service.audience = f.audience
@@ -1178,6 +1184,7 @@ export async function completeOAuthRefresh(
        FROM platform_oauth_refresh_token AS t
        JOIN platform_oauth_refresh_family AS f ON f.id = t.family_id
        JOIN platform_oauth_installation AS i ON i.id = t.installation_id
+        AND i.purpose = 'personal_harness'
        LEFT JOIN platform_credential AS c ON c.oauth_refresh_token_id = t.id
        WHERE t.id = ? AND t.family_id = ? AND t.state = 'pending'
          AND f.state = 'pending' AND f.pending_token_id = ?
@@ -1479,7 +1486,9 @@ export async function completeInitialOAuthRefresh(
               member.id AS current_membership
        FROM platform_oauth_installation AS i
        JOIN platform_oauth_flow AS f ON f.installation_id = i.id
+        AND f.purpose = i.purpose
        JOIN platform_oauth_client AS pc ON pc.client_id = i.client_id
+        AND pc.purpose = i.purpose
        JOIN oauthClient AS oc ON oc.clientId = i.client_id
        JOIN platform_service AS service ON service.service_id = i.service_id
         AND service.audience = i.audience
@@ -1631,6 +1640,7 @@ export async function completeInitialOAuthRefresh(
                 ?, ?, 'pending', ?, ?, NULL, NULL, ?, ?
          FROM platform_oauth_installation AS i
          JOIN platform_oauth_flow AS f ON f.installation_id = i.id
+          AND f.purpose = i.purpose
          WHERE i.id = ? AND i.active = 0 AND i.revoked_at IS NULL
            AND f.id = ? AND f.status = 'consumed'
            AND f.expires_at > ? AND i.expires_at > ?`,
@@ -1700,6 +1710,7 @@ export async function completeInitialOAuthRefresh(
                 i.id, ?, ?, ?
          FROM platform_oauth_installation AS i
          JOIN platform_oauth_refresh_family AS f ON f.installation_id = i.id
+          AND i.purpose = 'personal_harness'
           AND f.id = ? AND f.state = 'pending'
          JOIN platform_oauth_refresh_token AS t ON t.id = ?
           AND t.family_id = f.id AND t.state = 'issued'
@@ -1837,6 +1848,7 @@ export async function findOAuthRefreshCredential(
         AND f.state = 'active'
        JOIN platform_oauth_installation AS i ON i.id = c.oauth_installation_id
         AND i.active = 1 AND i.revoked_at IS NULL
+        AND i.purpose = 'personal_harness'
         AND i.membership_id = c.membership_id
         AND i.organization_id = c.organization_id
         AND i.audience = c.audience
@@ -1850,6 +1862,7 @@ export async function findOAuthRefreshCredential(
         AND json_extract(json_extract(access.resources, '$'), '$[0]') = i.audience
        JOIN platform_oauth_client AS pc ON pc.client_id = i.client_id
         AND pc.service_id = i.service_id AND pc.active = 1
+        AND pc.purpose = i.purpose
         AND pc.refresh_enabled = 1
        JOIN oauthClient AS oc ON oc.clientId = i.client_id AND oc.disabled = 0
         AND oc.grantTypes LIKE '%refresh_token%'
@@ -1878,6 +1891,7 @@ export async function findOAuthRefreshCredential(
        AND registered_service.verifier_hash = ?
         AND registered_service.disabled = 0
          WHERE c.credential_hash = ? AND c.oauth_origin = 'better-auth'
+         AND c.kind = 'agent'
          AND c.oauth_refresh_token_id IS NOT NULL
          AND c.revoked_at IS NULL AND c.expires_at > ?
          AND c.subject_id = f.subject_id
@@ -2013,6 +2027,7 @@ export async function listOAuthInstallations(
   const rows = await database
     .prepare(
       `SELECT i.id, i.client_id, i.service_id, i.audience, i.capabilities,
+              i.purpose,
               i.created_at, i.expires_at, i.active, i.revoked_at,
               i.organization_id, organization.name AS organization_name,
               c.name AS client_name, f.state AS family_state,

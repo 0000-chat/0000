@@ -386,7 +386,8 @@ export async function listHumanCredentials(
       `SELECT id, name, created_at, audience, capabilities, expires_at,
               revoked_at, revoked_reason, replaced_by_id, predecessor_id
        FROM platform_credential
-       WHERE kind = 'human' AND subject_id = ? AND organization_id = ? AND membership_id = ?
+       WHERE kind = 'human' AND oauth_origin IS NULL
+         AND subject_id = ? AND organization_id = ? AND membership_id = ?
        ORDER BY created_at DESC, id`,
     )
     .bind(input.userId, input.organizationId, input.membershipId)
@@ -449,7 +450,8 @@ export async function rotateHumanCredential(
       .prepare(
         `UPDATE platform_credential
          SET revoked_at = ?, revoked_reason = 'rotated', replaced_by_id = ?
-         WHERE id = ? AND kind = 'human' AND subject_id = ?
+         WHERE id = ? AND kind = 'human' AND oauth_origin IS NULL
+           AND subject_id = ?
            AND organization_id = ? AND membership_id = ?
            AND audience = ? AND revoked_at IS NULL
            AND expires_at > ? AND replaced_by_id IS NULL
@@ -488,7 +490,8 @@ export async function rotateHumanCredential(
          SELECT ?, ?, kind, subject_id, organization_id, membership_id, grant_id,
                 audience, capabilities, resource_ids, ?, NULL, name, ?, NULL, NULL, ?
          FROM platform_credential
-         WHERE id = ? AND replaced_by_id = ? AND revoked_at = ?
+         WHERE id = ? AND oauth_origin IS NULL
+           AND replaced_by_id = ? AND revoked_at = ?
            AND ${catalogPredicate("capabilities")}`,
       )
       .bind(
@@ -534,7 +537,8 @@ export async function revokeHumanCredential(
       `UPDATE platform_credential
        SET revoked_at = COALESCE(revoked_at, ?),
            revoked_reason = COALESCE(revoked_reason, 'revoked')
-       WHERE id = ? AND kind = 'human' AND subject_id = ?
+       WHERE id = ? AND kind = 'human' AND oauth_origin IS NULL
+         AND subject_id = ?
          AND organization_id = ? AND membership_id = ?`,
     )
     .bind(

@@ -51,12 +51,19 @@ export function oauthConsentPage(
     .join("");
   const flowId = flow?.id ?? "";
   const callbackOrigin = new URL(client.redirectUri).origin;
+  const firstParty = client.purpose === "first_party_browser";
+  const accessDescription = firstParty
+    ? "uses your signed-in human account and the organization you selected"
+    : "receives delegated personal-harness access through an agent installation";
+  const grantDescription = firstParty
+    ? "The access is tied to your selected organization, current membership and signed-in account."
+    : "The delegated grant is tied to this organization, membership and registered client.";
   return htmlResponse(
     `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Approve access · 0000 Platform</title><link rel="stylesheet" href="/account.css"></head>
 <body><main class="shell"><header class="brand"><p class="eyebrow">0000 Platform</p>
-<h1>Approve access</h1><p class="lede">${escapeHtml(client.clientId)} is requesting access to ${escapeHtml(client.serviceId)}.</p></header>
+<h1>Approve access</h1><p class="lede">${escapeHtml(client.clientId)} is requesting access to ${escapeHtml(client.serviceId)} and ${escapeHtml(accessDescription)}.</p></header>
 <section class="card"><p class="field-label">Capabilities</p><ul>${capabilities}</ul>
 <form method="post" action="/api/auth/oauth2/consent"><input type="hidden" name="accept" value="true">
 <input type="hidden" name="oauth_query" value="${escapeHtml(query)}">
@@ -65,7 +72,7 @@ export function oauthConsentPage(
 <form method="post" action="/api/auth/oauth2/consent"><input type="hidden" name="accept" value="false">
 <input type="hidden" name="oauth_query" value="${escapeHtml(query)}">
 <button class="quiet-button" type="submit">Deny</button></form>
-<p class="hint">The grant is tied to this organization, membership and registered client.</p></section></main></body></html>`,
+<p class="hint">${escapeHtml(grantDescription)}</p></section></main></body></html>`,
     200,
     {
       // The native form posts to Platform, then follows the validated 303 to

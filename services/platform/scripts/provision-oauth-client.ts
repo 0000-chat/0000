@@ -4,6 +4,7 @@ import {
   prepareTrustedOAuthClientRegistration,
   trustedOAuthClientStatements,
   type TrustedOAuthClientInput,
+  type OAuthClientPurpose,
 } from "../src/oauth-installation";
 
 const databaseName = "platform-identity";
@@ -34,7 +35,7 @@ function parse(argv: string[]): {
     }
     if (!arg?.startsWith("--")) {
       throw new Error(
-        "Usage: bun scripts/provision-oauth-client.ts [--remote] --service-id ID --redirect-uri URI --capability NAME [--capability NAME] [--public|--confidential] [--refresh] [--owner-user-id ID]",
+        "Usage: bun scripts/provision-oauth-client.ts [--remote] --service-id ID --redirect-uri URI --capability NAME [--capability NAME] [--purpose personal_harness|first_party_browser] [--public|--confidential] [--refresh] [--owner-user-id ID]",
       );
     }
     const key = arg.slice(2);
@@ -117,6 +118,10 @@ const authMethod = values.get("auth-method") ?? "none";
 if (authMethod !== "none" && authMethod !== "client_secret_post") {
   throw new Error("Choose --public or --confidential.");
 }
+const purpose = values.get("purpose") as OAuthClientPurpose | undefined;
+if (purpose && purpose !== "personal_harness" && purpose !== "first_party_browser") {
+  throw new Error("Choose --purpose personal_harness or --purpose first_party_browser.");
+}
 const secretKey = process.env.BETTER_AUTH_SECRET;
 if (!secretKey)
   throw new Error(
@@ -171,6 +176,7 @@ const input: TrustedOAuthClientInput = {
   redirectUri,
   capabilities,
   authMethod,
+  purpose,
   refreshEnabled: values.get("refresh") === "true",
   ownerUserId: values.get("owner-user-id") ?? null,
   name: values.get("name"),
