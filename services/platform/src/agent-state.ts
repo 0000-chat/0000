@@ -9,8 +9,11 @@ import {
   type ServiceRegistration,
 } from "./platform-state";
 
+export type MachineKind = "agent" | "service";
+
 export interface AgentRecord {
   id: string;
+  kind: MachineKind;
   organizationId: string;
   name: string;
   enabled: boolean;
@@ -31,6 +34,17 @@ export interface AgentGrantRecord {
   revokedReason: string | null;
 }
 
+export interface ServicePrincipalRecord
+  extends Omit<AgentRecord, "id" | "kind"> {
+  subjectId: string;
+  kind: "service";
+}
+
+export interface ServicePrincipalGrantRecord
+  extends Omit<AgentGrantRecord, "agentId"> {
+  subjectId: string;
+}
+
 export interface AgentCredentialMetadata extends CredentialMetadata {
   grantId: string;
 }
@@ -39,9 +53,27 @@ export type AgentGrantMutation =
   | { status: "created" | "narrowed" | "unchanged"; grant: AgentGrantRecord }
   | { status: "not_found" | "conflict" | "widening" | "invalid" };
 
-function credentialName(value: string | undefined): string {
+function machineKind(value: MachineKind | undefined): MachineKind {
+  return value ?? "agent";
+}
+
+function machineCredentialPrefix(kind: MachineKind): string {
+  return kind === "service" ? "0000_service_" : "0000_agent_";
+}
+
+function machineCredentialName(
+  kind: MachineKind,
+  value: string | undefined,
+): string {
   const normalized = value?.trim() ?? "";
-  return normalized || "Agent API credential";
+  return (
+    normalized ||
+    (kind === "service" ? "Service API credential" : "Agent API credential")
+  );
+}
+
+function machineKindPredicate(kind: MachineKind, alias = "machine"): string {
+  return `${alias}.kind = '${kind}'`;
 }
 
 function managerPredicate(): string {
@@ -77,6 +109,7 @@ function catalogPredicate(capabilitiesExpression: string): string {
 
 function parseAgent(row: {
   id: string;
+  kind: string;
   organization_id: string;
   name: string;
   enabled: number;
@@ -84,8 +117,12 @@ function parseAgent(row: {
   created_at: number;
   updated_at: number;
 }): AgentRecord {
+  if (row.kind !== "agent" && row.kind !== "service") {
+    throw new Error("Invalid machine kind");
+  }
   return {
     id: row.id,
+    kind: row.kind,
     organizationId: row.organization_id,
     name: row.name,
     enabled: row.enabled === 1,
@@ -149,18 +186,20 @@ async function readGrant(
 export async function listOrganizationAgents(
   database: D1DatabaseSession,
   organizationId: string,
+  kind: MachineKind = "agent",
 ): Promise<AgentRecord[]> {
   const rows = await database
     .prepare(
-      `SELECT id, organization_id, name, enabled, created_by_user_id,
+      `SELECT id, kind, organization_id, name, enabled, created_by_user_id,
               created_at, updated_at
        FROM platform_agent
-       WHERE organization_id = ?
+       WHERE organization_id = ? AND kind = ?
        ORDER BY lower(name), id`,
     )
-    .bind(organizationId)
+    .bind(organizationId, machineKind(kind))
     .all<{
       id: string;
+      kind: string;
       organization_id: string;
       name: string;
       enabled: number;
@@ -177,19 +216,22 @@ export async function createAgent(
     actorUserId: string;
     organizationId: string;
     name: string;
+    kind?: MachineKind;
   },
 ): Promise<AgentRecord | null> {
+  const kind = machineKind(input.kind);
   const id = crypto.randomUUID();
   const now = Date.now();
   const inserted = await database
     .prepare(
       `INSERT INTO platform_agent
-         (id, organization_id, name, enabled, created_by_user_id, created_at, updated_at)
-       SELECT ?, ?, ?, 1, ?, ?, ?
+         (id, kind, organization_id, name, enabled, created_by_user_id, created_at, updated_at)
+       SELECT ?, ?, ?, ?, 1, ?, ?, ?
        WHERE ${managerPredicate()}`,
     )
     .bind(
       id,
+      kind,
       input.organizationId,
       input.name,
       input.actorUserId,
@@ -202,13 +244,14 @@ export async function createAgent(
   if (inserted.meta.changes !== 1) return null;
   const row = await database
     .prepare(
-      `SELECT id, organization_id, name, enabled, created_by_user_id,
+      `SELECT id, kind, organization_id, name, enabled, created_by_user_id,
               created_at, updated_at
-       FROM platform_agent WHERE id = ? AND organization_id = ?`,
+       FROM platform_agent WHERE id = ? AND organization_id = ? AND kind = ?`,
     )
-    .bind(id, input.organizationId)
+    .bind(id, input.organizationId, kind)
     .first<{
       id: string;
+      kind: string;
       organization_id: string;
       name: string;
       enabled: number;
@@ -226,13 +269,15 @@ export async function renameAgent(
     organizationId: string;
     agentId: string;
     name: string;
+    kind?: MachineKind;
   },
 ): Promise<boolean> {
+  const kind = machineKind(input.kind);
   const result = await database
     .prepare(
       `UPDATE platform_agent
        SET name = ?, updated_at = ?
-       WHERE id = ? AND organization_id = ?
+       WHERE id = ? AND organization_id = ? AND kind = ?
          AND ${managerPredicate()}`,
     )
     .bind(
@@ -240,6 +285,7 @@ export async function renameAgent(
       Date.now(),
       input.agentId,
       input.organizationId,
+      kind,
       input.organizationId,
       input.actorUserId,
     )
@@ -254,13 +300,15 @@ export async function setAgentEnabled(
     organizationId: string;
     agentId: string;
     enabled: boolean;
+    kind?: MachineKind;
   },
 ): Promise<boolean> {
+  const kind = machineKind(input.kind);
   const result = await database
     .prepare(
       `UPDATE platform_agent
        SET enabled = ?, updated_at = ?
-       WHERE id = ? AND organization_id = ?
+       WHERE id = ? AND organization_id = ? AND kind = ?
          AND ${managerPredicate()}`,
     )
     .bind(
@@ -268,6 +316,7 @@ export async function setAgentEnabled(
       Date.now(),
       input.agentId,
       input.organizationId,
+      kind,
       input.organizationId,
       input.actorUserId,
     )
@@ -277,14 +326,20 @@ export async function setAgentEnabled(
 
 export async function listAgentGrants(
   database: D1DatabaseSession,
-  input: { organizationId: string; agentId: string },
+  input: { organizationId: string; agentId: string; kind?: MachineKind },
 ): Promise<AgentGrantRecord[]> {
+  const kind = machineKind(input.kind);
   const rows = await database
     .prepare(
       `SELECT id, agent_id, organization_id, service_id, audience,
               capabilities, created_at, revoked_at, revoked_reason
        FROM platform_agent_grant
        WHERE organization_id = ? AND agent_id = ?
+         AND EXISTS (
+           SELECT 1 FROM platform_agent AS machine
+           WHERE machine.id = platform_agent_grant.agent_id
+             AND ${machineKindPredicate(kind)}
+         )
        ORDER BY created_at DESC, id`,
     )
     .bind(input.organizationId, input.agentId)
@@ -313,8 +368,10 @@ export async function createOrNarrowAgentGrant(
     agentId: string;
     service: ServiceRegistration;
     capabilities: string[];
+    kind?: MachineKind;
   },
 ): Promise<AgentGrantMutation> {
+  const kind = machineKind(input.kind);
   if (
     !validCapabilities(input.capabilities) ||
     input.capabilities.some(
@@ -341,6 +398,7 @@ export async function createOrNarrowAgentGrant(
            SELECT 1 FROM platform_agent
            WHERE platform_agent.id = platform_agent_grant.agent_id
              AND platform_agent.organization_id = ?
+             AND ${machineKindPredicate(kind, "platform_agent")}
          )`,
     )
     .bind(
@@ -382,6 +440,7 @@ export async function createOrNarrowAgentGrant(
            SELECT 1 FROM platform_agent
            WHERE platform_agent.id = platform_agent_grant.agent_id
              AND platform_agent.organization_id = ?
+             AND ${machineKindPredicate(kind, "platform_agent")}
          )
          AND capabilities = ?
            AND ${managerPredicate()}`,
@@ -413,6 +472,7 @@ export async function createOrNarrowAgentGrant(
          AND EXISTS (
            SELECT 1 FROM platform_agent AS agent
            WHERE agent.id = ? AND agent.organization_id = ?
+             AND ${machineKindPredicate(kind, "agent")}
          )
          AND NOT EXISTS (
            SELECT 1 FROM platform_agent_grant AS current_grant
@@ -452,8 +512,10 @@ export async function revokeAgentGrant(
     organizationId: string;
     agentId: string;
     grantId: string;
+    kind?: MachineKind;
   },
 ): Promise<boolean> {
+  const kind = machineKind(input.kind);
   const manager = await database
     .prepare(`SELECT 1 AS authorized WHERE ${managerPredicate()}`)
     .bind(input.organizationId, input.actorUserId)
@@ -467,6 +529,7 @@ export async function revokeAgentGrant(
            SELECT 1 FROM platform_agent
            WHERE platform_agent.id = platform_agent_grant.agent_id
              AND platform_agent.organization_id = ?
+             AND ${machineKindPredicate(kind, "platform_agent")}
          )`,
     )
     .bind(
@@ -489,6 +552,7 @@ export async function revokeAgentGrant(
              SELECT 1 FROM platform_agent
              WHERE platform_agent.id = platform_agent_grant.agent_id
                AND platform_agent.organization_id = ?
+               AND ${machineKindPredicate(kind, "platform_agent")}
            )
            AND ${managerPredicate()}`,
       )
@@ -506,7 +570,7 @@ export async function revokeAgentGrant(
         `UPDATE platform_credential
          SET revoked_at = COALESCE(revoked_at, ?),
              revoked_reason = COALESCE(revoked_reason, 'grant_revoked')
-         WHERE kind = 'agent' AND grant_id = ?
+         WHERE kind = '${kind}' AND grant_id = ?
            AND subject_id = ? AND organization_id = ?
            AND membership_id IS NULL AND revoked_at IS NULL
            AND ${managerPredicate()}`,
@@ -528,6 +592,7 @@ export async function revokeAgentGrant(
            SELECT 1 FROM platform_agent
            WHERE platform_agent.id = platform_agent_grant.agent_id
              AND platform_agent.organization_id = ?
+             AND ${machineKindPredicate(kind, "platform_agent")}
          )
          AND revoked_at IS NOT NULL`,
     )
@@ -552,8 +617,10 @@ export async function issueAgentCredential(
     capabilities: string[];
     name?: string;
     expiresAt: number;
+    kind?: MachineKind;
   },
 ): Promise<{ credential: string; credentialId: string; expiresAt: number }> {
+  const kind = machineKind(input.kind);
   if (
     !validCapabilities(input.capabilities) ||
     input.capabilities.some(
@@ -561,9 +628,9 @@ export async function issueAgentCredential(
     ) ||
     !isSafeCredentialExpiry(input.expiresAt)
   ) {
-    throw new RangeError("Requested agent credential grant is invalid");
+    throw new RangeError("Requested machine credential grant is invalid");
   }
-  const credential = opaqueSecret("0000_agent_");
+  const credential = opaqueSecret(machineCredentialPrefix(kind));
   const credentialHash = await hashOpaque(credential);
   const credentialId = crypto.randomUUID();
   const createdAt = Date.now();
@@ -574,18 +641,24 @@ export async function issueAgentCredential(
        (id, credential_hash, kind, subject_id, organization_id, membership_id, grant_id,
         audience, capabilities, resource_ids, expires_at, revoked_at, name, created_at,
         revoked_reason, replaced_by_id, predecessor_id)
-       SELECT ?, ?, 'agent', ?, ?, NULL, ?, ?, ?, '[]', ?, NULL, ?, ?, NULL, NULL, NULL
+       SELECT ?, ?, '${kind}', ?, ?, NULL, ?, ?, ?, '[]', ?, NULL, ?, ?, NULL, NULL, NULL
        WHERE ${managerPredicate()}
          AND EXISTS (
            SELECT 1 FROM platform_agent AS agent
            JOIN organization AS owning_org ON owning_org.id = agent.organization_id
            WHERE agent.id = ? AND agent.organization_id = ?
+             AND ${machineKindPredicate(kind, "agent")}
              AND agent.enabled = 1 AND owning_org.suspendedAt IS NULL
          )
          AND EXISTS (
            SELECT 1 FROM platform_agent_grant AS agent_grant
            WHERE agent_grant.id = ? AND agent_grant.agent_id = ?
              AND agent_grant.organization_id = ?
+             AND EXISTS (
+               SELECT 1 FROM platform_agent AS grant_machine
+               WHERE grant_machine.id = agent_grant.agent_id
+                 AND ${machineKindPredicate(kind, "grant_machine")}
+             )
              AND agent_grant.service_id = ?
              AND agent_grant.audience = ?
              AND agent_grant.revoked_at IS NULL
@@ -608,7 +681,7 @@ export async function issueAgentCredential(
       input.service.audience,
       requestedCapabilities,
       input.expiresAt,
-      credentialName(input.name),
+      machineCredentialName(kind, input.name),
       createdAt,
       input.organizationId,
       input.actorUserId,
@@ -626,21 +699,22 @@ export async function issueAgentCredential(
     )
     .run();
   if (inserted.meta.changes !== 1) {
-    throw new RangeError("Current agent grant is required");
+    throw new RangeError("Current machine grant is required");
   }
   return { credential, credentialId, expiresAt: input.expiresAt };
 }
 
 export async function listAgentCredentials(
   database: D1DatabaseSession,
-  input: { organizationId: string; agentId: string },
+  input: { organizationId: string; agentId: string; kind?: MachineKind },
 ): Promise<AgentCredentialMetadata[]> {
+  const kind = machineKind(input.kind);
   const rows = await database
     .prepare(
       `SELECT id, name, created_at, grant_id, audience, capabilities, expires_at,
               revoked_at, revoked_reason, replaced_by_id, predecessor_id
        FROM platform_credential
-       WHERE kind = 'agent' AND subject_id = ? AND organization_id = ?
+       WHERE kind = '${kind}' AND subject_id = ? AND organization_id = ?
        ORDER BY created_at DESC, id`,
     )
     .bind(input.agentId, input.organizationId)
@@ -667,7 +741,11 @@ export async function listAgentCredentials(
       ? [
           {
             id: row.id,
-            name: row.name || "Agent API credential",
+            name:
+              row.name ||
+              (kind === "service"
+                ? "Service API credential"
+                : "Agent API credential"),
             createdAt: row.created_at,
             grantId: row.grant_id,
             audience: row.audience,
@@ -693,21 +771,28 @@ export async function rotateAgentCredential(
     grantId: string;
     credentialId: string;
     expiresAt: number;
+    kind?: MachineKind;
   },
 ): Promise<{ credential: string; credentialId: string; expiresAt: number }> {
+  const kind = machineKind(input.kind);
   if (!isSafeCredentialExpiry(input.expiresAt)) {
     throw new RangeError("Requested credential lifetime is invalid");
   }
-  const credential = opaqueSecret("0000_agent_");
+  const credential = opaqueSecret(machineCredentialPrefix(kind));
   const credentialHash = await hashOpaque(credential);
   const replacementId = crypto.randomUUID();
   const now = Date.now();
   const manager = managerPredicate();
   const grantValidity = (credentialCapabilities: string) => `
     EXISTS (
-      SELECT 1 FROM platform_agent_grant AS current_grant
-      WHERE current_grant.id = ? AND current_grant.agent_id = ?
-        AND current_grant.organization_id = ?
+        SELECT 1 FROM platform_agent_grant AS current_grant
+        WHERE current_grant.id = ? AND current_grant.agent_id = ?
+          AND current_grant.organization_id = ?
+          AND EXISTS (
+            SELECT 1 FROM platform_agent AS grant_machine
+            WHERE grant_machine.id = current_grant.agent_id
+              AND ${machineKindPredicate(kind, "grant_machine")}
+          )
         AND current_grant.service_id = ?
         AND current_grant.audience = ?
         AND current_grant.revoked_at IS NULL
@@ -724,7 +809,7 @@ export async function rotateAgentCredential(
       .prepare(
         `UPDATE platform_credential
          SET revoked_at = ?, revoked_reason = 'rotated', replaced_by_id = ?
-         WHERE id = ? AND kind = 'agent' AND subject_id = ?
+         WHERE id = ? AND kind = '${kind}' AND subject_id = ?
            AND organization_id = ? AND membership_id IS NULL AND grant_id = ?
            AND audience = ? AND revoked_at IS NULL
            AND expires_at > ? AND replaced_by_id IS NULL
@@ -733,6 +818,7 @@ export async function rotateAgentCredential(
              SELECT 1 FROM platform_agent AS agent
              JOIN organization AS owning_org ON owning_org.id = agent.organization_id
              WHERE agent.id = ? AND agent.organization_id = ?
+               AND ${machineKindPredicate(kind, "agent")}
                AND agent.enabled = 1 AND owning_org.suspendedAt IS NULL
            )
            AND ${grantValidity("platform_credential.capabilities")}
@@ -768,7 +854,7 @@ export async function rotateAgentCredential(
          SELECT ?, ?, old.kind, old.subject_id, old.organization_id, NULL, old.grant_id,
                 old.audience, old.capabilities, old.resource_ids, ?, NULL, old.name, ?, NULL, NULL, ?
          FROM platform_credential AS old
-         WHERE old.id = ? AND old.kind = 'agent' AND old.subject_id = ?
+         WHERE old.id = ? AND old.kind = '${kind}' AND old.subject_id = ?
            AND old.organization_id = ? AND old.membership_id IS NULL AND old.grant_id = ?
            AND old.audience = ? AND old.replaced_by_id = ? AND old.revoked_at = ?
            AND ${manager}
@@ -776,6 +862,7 @@ export async function rotateAgentCredential(
              SELECT 1 FROM platform_agent AS agent
              JOIN organization AS owning_org ON owning_org.id = agent.organization_id
              WHERE agent.id = ? AND agent.organization_id = ?
+               AND ${machineKindPredicate(kind, "agent")}
                AND agent.enabled = 1 AND owning_org.suspendedAt IS NULL
            )
            AND ${grantValidity("old.capabilities")}
@@ -810,7 +897,7 @@ export async function rotateAgentCredential(
   const replacement = await database
     .prepare(
       `SELECT id FROM platform_credential
-       WHERE id = ? AND kind = 'agent' AND predecessor_id = ?
+       WHERE id = ? AND kind = '${kind}' AND predecessor_id = ?
          AND credential_hash = ? AND revoked_at IS NULL`,
     )
     .bind(replacementId, input.credentialId, credentialHash)
@@ -830,19 +917,22 @@ export async function revokeAgentCredential(
     organizationId: string;
     agentId: string;
     credentialId: string;
+    kind?: MachineKind;
   },
 ): Promise<boolean> {
+  const kind = machineKind(input.kind);
   const result = await database
     .prepare(
       `UPDATE platform_credential
        SET revoked_at = COALESCE(revoked_at, ?),
            revoked_reason = COALESCE(revoked_reason, 'revoked')
-       WHERE id = ? AND kind = 'agent' AND subject_id = ?
+       WHERE id = ? AND kind = '${kind}' AND subject_id = ?
          AND organization_id = ? AND membership_id IS NULL
          AND EXISTS (
            SELECT 1 FROM platform_agent
            WHERE platform_agent.id = platform_credential.subject_id
              AND platform_agent.organization_id = ?
+             AND ${machineKindPredicate(kind, "platform_agent")}
          )
          AND ${managerPredicate()}`,
     )
@@ -857,4 +947,199 @@ export async function revokeAgentCredential(
     )
     .run();
   return result.meta.changes === 1;
+}
+
+/** Service principals use the same durable machine lifecycle with a fixed kind. */
+export async function listServicePrincipals(
+  database: D1DatabaseSession,
+  organizationId: string,
+): Promise<ServicePrincipalRecord[]> {
+  const principals = await listOrganizationAgents(
+    database,
+    organizationId,
+    "service",
+  );
+  return principals.map(({ id, kind, ...principal }) => ({
+    ...principal,
+    subjectId: id,
+    kind: "service",
+  }));
+}
+
+export async function createServicePrincipal(
+  database: D1Database,
+  input: { actorUserId: string; organizationId: string; name: string },
+): Promise<ServicePrincipalRecord | null> {
+  const principal = await createAgent(database, { ...input, kind: "service" });
+  if (!principal) return null;
+  const { id, kind, ...rest } = principal;
+  return { ...rest, subjectId: id, kind: "service" };
+}
+
+export async function renameServicePrincipal(
+  database: D1DatabaseSession,
+  input: {
+    actorUserId: string;
+    organizationId: string;
+    subjectId: string;
+    name: string;
+  },
+): Promise<boolean> {
+  return renameAgent(database, {
+    actorUserId: input.actorUserId,
+    organizationId: input.organizationId,
+    agentId: input.subjectId,
+    name: input.name,
+    kind: "service",
+  });
+}
+
+export async function setServicePrincipalEnabled(
+  database: D1DatabaseSession,
+  input: {
+    actorUserId: string;
+    organizationId: string;
+    subjectId: string;
+    enabled: boolean;
+  },
+): Promise<boolean> {
+  return setAgentEnabled(database, {
+    actorUserId: input.actorUserId,
+    organizationId: input.organizationId,
+    agentId: input.subjectId,
+    enabled: input.enabled,
+    kind: "service",
+  });
+}
+
+export async function listServicePrincipalGrants(
+  database: D1DatabaseSession,
+  input: { organizationId: string; subjectId: string },
+): Promise<ServicePrincipalGrantRecord[]> {
+  const grants = await listAgentGrants(database, {
+    organizationId: input.organizationId,
+    agentId: input.subjectId,
+    kind: "service",
+  });
+  return grants.map(({ agentId, ...grant }) => ({
+    ...grant,
+    subjectId: agentId,
+  }));
+}
+
+export async function createOrNarrowServicePrincipalGrant(
+  database: D1DatabaseSession,
+  input: {
+    actorUserId: string;
+    organizationId: string;
+    subjectId: string;
+    service: ServiceRegistration;
+    capabilities: string[];
+  },
+): Promise<AgentGrantMutation> {
+  return createOrNarrowAgentGrant(database, {
+    actorUserId: input.actorUserId,
+    organizationId: input.organizationId,
+    agentId: input.subjectId,
+    service: input.service,
+    capabilities: input.capabilities,
+    kind: "service",
+  });
+}
+
+export async function revokeServicePrincipalGrant(
+  database: D1DatabaseSession,
+  input: {
+    actorUserId: string;
+    organizationId: string;
+    subjectId: string;
+    grantId: string;
+  },
+): Promise<boolean> {
+  return revokeAgentGrant(database, {
+    actorUserId: input.actorUserId,
+    organizationId: input.organizationId,
+    agentId: input.subjectId,
+    grantId: input.grantId,
+    kind: "service",
+  });
+}
+
+export async function issueServicePrincipalCredential(
+  database: D1Database,
+  input: {
+    actorUserId: string;
+    service: ServiceRegistration;
+    organizationId: string;
+    subjectId: string;
+    grantId: string;
+    capabilities: string[];
+    name?: string;
+    expiresAt: number;
+  },
+): Promise<{ credential: string; credentialId: string; expiresAt: number }> {
+  return issueAgentCredential(database, {
+    actorUserId: input.actorUserId,
+    service: input.service,
+    organizationId: input.organizationId,
+    agentId: input.subjectId,
+    grantId: input.grantId,
+    capabilities: input.capabilities,
+    name: input.name,
+    expiresAt: input.expiresAt,
+    kind: "service",
+  });
+}
+
+export async function listServicePrincipalCredentials(
+  database: D1DatabaseSession,
+  input: { organizationId: string; subjectId: string },
+): Promise<AgentCredentialMetadata[]> {
+  return listAgentCredentials(database, {
+    organizationId: input.organizationId,
+    agentId: input.subjectId,
+    kind: "service",
+  });
+}
+
+export async function rotateServicePrincipalCredential(
+  database: D1Database,
+  input: {
+    actorUserId: string;
+    service: ServiceRegistration;
+    organizationId: string;
+    subjectId: string;
+    grantId: string;
+    credentialId: string;
+    expiresAt: number;
+  },
+): Promise<{ credential: string; credentialId: string; expiresAt: number }> {
+  return rotateAgentCredential(database, {
+    actorUserId: input.actorUserId,
+    service: input.service,
+    organizationId: input.organizationId,
+    agentId: input.subjectId,
+    grantId: input.grantId,
+    credentialId: input.credentialId,
+    expiresAt: input.expiresAt,
+    kind: "service",
+  });
+}
+
+export async function revokeServicePrincipalCredential(
+  database: D1DatabaseSession,
+  input: {
+    actorUserId: string;
+    organizationId: string;
+    subjectId: string;
+    credentialId: string;
+  },
+): Promise<boolean> {
+  return revokeAgentCredential(database, {
+    actorUserId: input.actorUserId,
+    organizationId: input.organizationId,
+    agentId: input.subjectId,
+    credentialId: input.credentialId,
+    kind: "service",
+  });
 }

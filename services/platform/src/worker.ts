@@ -11,6 +11,17 @@ import {
   revokeAgentGrant,
   rotateAgentCredential,
   setAgentEnabled,
+  createServicePrincipal,
+  createOrNarrowServicePrincipalGrant,
+  issueServicePrincipalCredential,
+  listServicePrincipalCredentials,
+  listServicePrincipalGrants,
+  listServicePrincipals,
+  renameServicePrincipal,
+  revokeServicePrincipalCredential,
+  revokeServicePrincipalGrant,
+  rotateServicePrincipalCredential,
+  setServicePrincipalEnabled,
 } from "./agent-state";
 import {
   accountPage,
@@ -832,6 +843,10 @@ function validAgentGrantId(value: unknown): value is string {
   return typeof value === "string" && value.length > 0 && value.length <= 256;
 }
 
+function validServicePrincipalId(value: unknown): value is string {
+  return validAgentId(value);
+}
+
 function isOperator(env: Cloudflare.Env, userId: string): boolean {
   const configuredId = env.PLATFORM_OPERATOR_USER_ID;
   return (
@@ -931,6 +946,598 @@ async function loadAgentManagement(
   };
 }
 
+async function loadServicePrincipalManagement(
+  database: D1DatabaseSession,
+  organizationId: string,
+): Promise<{
+  servicePrincipals: Array<{
+    subjectId: string;
+    kind: "service";
+    organizationId: string;
+    name: string;
+    enabled: boolean;
+    createdByUserId: string;
+    createdAt: number;
+    updatedAt: number;
+    grants: Awaited<ReturnType<typeof listServicePrincipalGrants>>;
+    credentials: Awaited<ReturnType<typeof listServicePrincipalCredentials>>;
+  }>;
+  services: AccountCredentialService[];
+}> {
+  const [principals, services] = await Promise.all([
+    listServicePrincipals(database, organizationId),
+    listActiveServices(database),
+  ]);
+  const managedPrincipals = await Promise.all(
+    principals.map(async (principal) => {
+      const [grants, credentials] = await Promise.all([
+        listServicePrincipalGrants(database, {
+          organizationId,
+          subjectId: principal.subjectId,
+        }),
+        listServicePrincipalCredentials(database, {
+          organizationId,
+          subjectId: principal.subjectId,
+        }),
+      ]);
+      return { ...principal, grants, credentials };
+    }),
+  );
+  return {
+    servicePrincipals: managedPrincipals,
+    services: services.map((service) => ({
+      id: service.serviceId,
+      name: service.displayName || service.serviceId,
+      audience: service.audience,
+      capabilities: service.allowedCapabilities,
+    })),
+  };
+}
+
+async function servicePrincipalManagementRoute(
+  request: Request,
+  env: Cloudflare.Env,
+  pathname: string,
+): Promise<Response | null> {
+  const base = "/api/account/service-principals";
+  if (pathname !== base && !pathname.startsWith(`${base}/`)) return null;
+
+  if (pathname === base && request.method === "GET") {
+    const current = await getSession(request, env);
+    if (!current) return json(401, { error: "unauthenticated" });
+    const organizationId = new URL(request.url).searchParams.get(
+      "organizationId",
+    );
+    if (!validOrganizationId(organizationId)) {
+      return json(400, { error: "invalid_request" });
+    }
+    const authorization = await authorizeOrganizationRequest(
+      request,
+      env,
+      organizationId,
+    );
+    if (authorization instanceof Response) return authorization;
+    if (authorization.authority.role === "member") {
+      return json(403, {
+        error: "organization_manager_required",
+        message:
+          "An organization owner or admin can manage service principals.",
+      });
+    }
+    const management = await loadServicePrincipalManagement(
+      env.IDENTITY_DB.withSession("first-primary"),
+      organizationId,
+    );
+    return json(200, { organizationId, ...management });
+  }
+
+  if (pathname === base && request.method === "POST") {
+    const body = await requestBody(request);
+    if (
+      !body ||
+      !validOrganizationId(body.organizationId) ||
+      !validAgentName(body.name)
+    ) {
+      return json(400, {
+        error: "invalid_service_principal_name",
+        message: "Enter a service principal name of 1 to 100 characters.",
+      });
+    }
+    const authorization = await authorizeOrganizationRequest(
+      request,
+      env,
+      body.organizationId,
+    );
+    if (authorization instanceof Response) return authorization;
+    if (authorization.authority.role === "member") {
+      return json(403, {
+        error: "organization_manager_required",
+        message:
+          "An organization owner or admin can create service principals.",
+      });
+    }
+    const principal = await createServicePrincipal(env.IDENTITY_DB, {
+      actorUserId: authorization.current.user.id,
+      organizationId: body.organizationId,
+      name: body.name.trim(),
+    });
+    return principal
+      ? json(201, principal)
+      : json(409, {
+          error: "service_principal_changed",
+          message:
+            "Service principal authority changed. Refresh and try again.",
+        });
+  }
+
+  if (pathname === `${base}/update` && request.method === "POST") {
+    const body = await requestBody(request);
+    if (
+      !body ||
+      !validOrganizationId(body.organizationId) ||
+      !validServicePrincipalId(body.subjectId) ||
+      !validAgentName(body.name)
+    ) {
+      return json(400, { error: "invalid_request" });
+    }
+    const authorization = await authorizeOrganizationRequest(
+      request,
+      env,
+      body.organizationId,
+    );
+    if (authorization instanceof Response) return authorization;
+    if (authorization.authority.role === "member") {
+      return json(403, {
+        error: "organization_manager_required",
+        message:
+          "An organization owner or admin can rename service principals.",
+      });
+    }
+    const updated = await renameServicePrincipal(
+      env.IDENTITY_DB.withSession("first-primary"),
+      {
+        actorUserId: authorization.current.user.id,
+        organizationId: body.organizationId,
+        subjectId: body.subjectId,
+        name: body.name.trim(),
+      },
+    );
+    return updated
+      ? json(200, { updated: true, organizationId: body.organizationId })
+      : json(404, { error: "service_principal_not_found" });
+  }
+
+  if (pathname === `${base}/lifecycle` && request.method === "POST") {
+    const body = await requestBody(request);
+    if (
+      !body ||
+      !validOrganizationId(body.organizationId) ||
+      !validServicePrincipalId(body.subjectId) ||
+      (body.action !== "disable" && body.action !== "restore")
+    ) {
+      return json(400, { error: "invalid_request" });
+    }
+    const authorization = await authorizeOrganizationRequest(
+      request,
+      env,
+      body.organizationId,
+    );
+    if (authorization instanceof Response) return authorization;
+    if (authorization.authority.role === "member") {
+      return json(403, {
+        error: "organization_manager_required",
+        message:
+          "An organization owner or admin can change service principal state.",
+      });
+    }
+    const changed = await setServicePrincipalEnabled(
+      env.IDENTITY_DB.withSession("first-primary"),
+      {
+        actorUserId: authorization.current.user.id,
+        organizationId: body.organizationId,
+        subjectId: body.subjectId,
+        enabled: body.action === "restore",
+      },
+    );
+    return changed
+      ? json(200, {
+          enabled: body.action === "restore",
+          organizationId: body.organizationId,
+        })
+      : json(404, { error: "service_principal_not_found" });
+  }
+
+  if (pathname === `${base}/grants` && request.method === "GET") {
+    const current = await getSession(request, env);
+    if (!current) return json(401, { error: "unauthenticated" });
+    const url = new URL(request.url);
+    const organizationId = url.searchParams.get("organizationId");
+    const subjectId = url.searchParams.get("subjectId");
+    if (
+      !validOrganizationId(organizationId) ||
+      !validServicePrincipalId(subjectId)
+    ) {
+      return json(400, { error: "invalid_request" });
+    }
+    const authorization = await authorizeOrganizationRequest(
+      request,
+      env,
+      organizationId,
+    );
+    if (authorization instanceof Response) return authorization;
+    if (authorization.authority.role === "member") {
+      return json(403, { error: "organization_manager_required" });
+    }
+    const database = env.IDENTITY_DB.withSession("first-primary");
+    const grants = await listServicePrincipalGrants(database, {
+      organizationId,
+      subjectId,
+    });
+    const principal = await database
+      .prepare(
+        "SELECT id FROM platform_agent WHERE id = ? AND organization_id = ? AND kind = 'service'",
+      )
+      .bind(subjectId, organizationId)
+      .first<{ id: string }>();
+    return principal
+      ? json(200, { organizationId, subjectId, grants })
+      : json(404, { error: "service_principal_not_found" });
+  }
+
+  if (pathname === `${base}/grants` && request.method === "POST") {
+    const body = await requestBody(request);
+    if (
+      !body ||
+      !validOrganizationId(body.organizationId) ||
+      !validServicePrincipalId(body.subjectId) ||
+      !validServiceId(body.serviceId) ||
+      !validCapabilities(body.capabilities)
+    ) {
+      return json(400, {
+        error: "invalid_grant",
+        message: "Choose a service and one or more unique capabilities.",
+      });
+    }
+    const authorization = await authorizeOrganizationRequest(
+      request,
+      env,
+      body.organizationId,
+    );
+    if (authorization instanceof Response) return authorization;
+    if (authorization.authority.role === "member") {
+      return json(403, {
+        error: "organization_manager_required",
+        message:
+          "An organization owner or admin can manage service principal grants.",
+      });
+    }
+    const database = env.IDENTITY_DB.withSession("first-primary");
+    const service = await findActiveServiceById(database, body.serviceId);
+    if (!service)
+      return json(503, { error: "service_registration_unavailable" });
+    const result = await createOrNarrowServicePrincipalGrant(database, {
+      actorUserId: authorization.current.user.id,
+      organizationId: body.organizationId,
+      subjectId: body.subjectId,
+      service,
+      capabilities: body.capabilities,
+    });
+    if (result.status === "created" || result.status === "narrowed") {
+      const { agentId, ...grant } = result.grant;
+      return json(result.status === "created" ? 201 : 200, {
+        ...grant,
+        subjectId: agentId,
+        status: result.status,
+      });
+    }
+    if (result.status === "unchanged") {
+      const { agentId, ...grant } = result.grant;
+      return json(200, { ...grant, subjectId: agentId, status: result.status });
+    }
+    if (result.status === "widening") {
+      return json(409, {
+        error: "grant_widening_requires_reauthorization",
+        message: "Revoke the current grant before requesting wider access.",
+      });
+    }
+    if (result.status === "invalid")
+      return json(400, { error: "invalid_grant" });
+    return json(404, { error: "service_principal_not_found" });
+  }
+
+  if (pathname === `${base}/grants/revoke` && request.method === "POST") {
+    const body = await requestBody(request);
+    if (
+      !body ||
+      !validOrganizationId(body.organizationId) ||
+      !validServicePrincipalId(body.subjectId) ||
+      !validAgentGrantId(body.grantId)
+    ) {
+      return json(400, { error: "invalid_request" });
+    }
+    const authorization = await authorizeOrganizationRequest(
+      request,
+      env,
+      body.organizationId,
+    );
+    if (authorization instanceof Response) return authorization;
+    if (authorization.authority.role === "member") {
+      return json(403, { error: "organization_manager_required" });
+    }
+    const revoked = await revokeServicePrincipalGrant(
+      env.IDENTITY_DB.withSession("first-primary"),
+      {
+        actorUserId: authorization.current.user.id,
+        organizationId: body.organizationId,
+        subjectId: body.subjectId,
+        grantId: body.grantId,
+      },
+    );
+    return revoked
+      ? json(200, { revoked: true, organizationId: body.organizationId })
+      : json(404, { error: "grant_not_found" });
+  }
+
+  if (pathname === `${base}/credentials` && request.method === "GET") {
+    const current = await getSession(request, env);
+    if (!current) return json(401, { error: "unauthenticated" });
+    const url = new URL(request.url);
+    const organizationId = url.searchParams.get("organizationId");
+    const subjectId = url.searchParams.get("subjectId");
+    if (
+      !validOrganizationId(organizationId) ||
+      !validServicePrincipalId(subjectId)
+    ) {
+      return json(400, { error: "invalid_request" });
+    }
+    const authorization = await authorizeOrganizationRequest(
+      request,
+      env,
+      organizationId,
+    );
+    if (authorization instanceof Response) return authorization;
+    if (authorization.authority.role === "member") {
+      return json(403, { error: "organization_manager_required" });
+    }
+    const database = env.IDENTITY_DB.withSession("first-primary");
+    const principal = await database
+      .prepare(
+        "SELECT id FROM platform_agent WHERE id = ? AND organization_id = ? AND kind = 'service'",
+      )
+      .bind(subjectId, organizationId)
+      .first<{ id: string }>();
+    if (!principal) return json(404, { error: "service_principal_not_found" });
+    const credentials = await listServicePrincipalCredentials(database, {
+      organizationId,
+      subjectId,
+    });
+    return json(200, { organizationId, subjectId, credentials });
+  }
+
+  if (pathname === `${base}/credentials` && request.method === "POST") {
+    const body = await requestBody(request);
+    if (
+      !body ||
+      !validOrganizationId(body.organizationId) ||
+      !validServicePrincipalId(body.subjectId) ||
+      !validAgentGrantId(body.grantId) ||
+      (body.serviceId !== undefined && !validServiceId(body.serviceId)) ||
+      (body.capabilities !== undefined &&
+        !validCapabilities(body.capabilities)) ||
+      (body.name !== undefined && !validCredentialName(body.name))
+    ) {
+      return json(400, { error: "invalid_request" });
+    }
+    const maxLifetimeDays = parseConfiguredCredentialLifetimeDays(
+      env.PLATFORM_CREDENTIAL_MAX_LIFETIME_DAYS,
+    );
+    if (maxLifetimeDays === null) {
+      return json(503, { error: "credential_configuration_unavailable" });
+    }
+    const hasRequestedLifetime = Object.hasOwn(body, "lifetimeDays");
+    if (
+      hasRequestedLifetime &&
+      (typeof body.lifetimeDays !== "number" ||
+        !Number.isFinite(body.lifetimeDays) ||
+        body.lifetimeDays <= 0 ||
+        body.lifetimeDays > maxLifetimeDays)
+    ) {
+      return json(400, { error: "invalid_lifetime" });
+    }
+    const expiresAt = resolveCredentialExpiry(
+      maxLifetimeDays,
+      body.lifetimeDays,
+    );
+    if (expiresAt === null) return json(503, { error: "invalid_lifetime" });
+    const authorization = await authorizeOrganizationRequest(
+      request,
+      env,
+      body.organizationId,
+    );
+    if (authorization instanceof Response) return authorization;
+    if (authorization.authority.role === "member") {
+      return json(403, {
+        error: "organization_manager_required",
+        message:
+          "An organization owner or admin can issue service principal credentials.",
+      });
+    }
+    const database = env.IDENTITY_DB.withSession("first-primary");
+    const grants = await listServicePrincipalGrants(database, {
+      organizationId: body.organizationId,
+      subjectId: body.subjectId,
+    });
+    const grant = grants.find(
+      (candidate) =>
+        candidate.id === body.grantId && candidate.revokedAt === null,
+    );
+    if (!grant) return json(404, { error: "grant_not_found" });
+    const serviceId =
+      typeof body.serviceId === "string" ? body.serviceId : grant.serviceId;
+    if (serviceId !== grant.serviceId)
+      return json(404, { error: "grant_not_found" });
+    const service = await findActiveServiceById(database, serviceId);
+    if (!service)
+      return json(503, { error: "service_registration_unavailable" });
+    const capabilities =
+      body.capabilities === undefined ? grant.capabilities : body.capabilities;
+    try {
+      const issued = await issueServicePrincipalCredential(env.IDENTITY_DB, {
+        actorUserId: authorization.current.user.id,
+        service,
+        organizationId: body.organizationId,
+        subjectId: body.subjectId,
+        grantId: body.grantId,
+        capabilities,
+        name: body.name,
+        expiresAt,
+      });
+      return json(201, {
+        ...issued,
+        kind: "service",
+        audience: service.audience,
+        organizationId: body.organizationId,
+        subjectId: body.subjectId,
+        grantId: body.grantId,
+        capabilities,
+      });
+    } catch (error) {
+      if (error instanceof RangeError) {
+        return json(403, {
+          error: "grant_exceeds_service_principal_authority",
+        });
+      }
+      throw error;
+    }
+  }
+
+  if (pathname === `${base}/credentials/rotate` && request.method === "POST") {
+    const body = await requestBody(request);
+    if (
+      !body ||
+      !validOrganizationId(body.organizationId) ||
+      !validServicePrincipalId(body.subjectId) ||
+      !validCredentialId(body.credentialId)
+    ) {
+      return json(400, { error: "invalid_request" });
+    }
+    const maxLifetimeDays = parseConfiguredCredentialLifetimeDays(
+      env.PLATFORM_CREDENTIAL_MAX_LIFETIME_DAYS,
+    );
+    if (maxLifetimeDays === null) {
+      return json(503, { error: "credential_configuration_unavailable" });
+    }
+    const hasRequestedLifetime = Object.hasOwn(body, "lifetimeDays");
+    if (
+      hasRequestedLifetime &&
+      (typeof body.lifetimeDays !== "number" ||
+        !Number.isFinite(body.lifetimeDays) ||
+        body.lifetimeDays <= 0 ||
+        body.lifetimeDays > maxLifetimeDays)
+    ) {
+      return json(400, { error: "invalid_lifetime" });
+    }
+    const expiresAt = resolveCredentialExpiry(
+      maxLifetimeDays,
+      body.lifetimeDays,
+    );
+    if (expiresAt === null) return json(503, { error: "invalid_lifetime" });
+    const authorization = await authorizeOrganizationRequest(
+      request,
+      env,
+      body.organizationId,
+    );
+    if (authorization instanceof Response) return authorization;
+    if (authorization.authority.role === "member") {
+      return json(403, { error: "organization_manager_required" });
+    }
+    const database = env.IDENTITY_DB.withSession("first-primary");
+    const credentials = await listServicePrincipalCredentials(database, {
+      organizationId: body.organizationId,
+      subjectId: body.subjectId,
+    });
+    const old = credentials.find(
+      (credential) => credential.id === body.credentialId,
+    );
+    if (!old) return json(404, { error: "credential_not_found" });
+    const grants = await listServicePrincipalGrants(database, {
+      organizationId: body.organizationId,
+      subjectId: body.subjectId,
+    });
+    const grant = grants.find((candidate) => candidate.id === old.grantId);
+    if (!grant || grant.revokedAt !== null) {
+      return json(404, { error: "credential_not_found" });
+    }
+    const service = await findActiveServiceById(database, grant.serviceId);
+    if (!service) return json(404, { error: "credential_not_found" });
+    try {
+      const rotated = await rotateServicePrincipalCredential(env.IDENTITY_DB, {
+        actorUserId: authorization.current.user.id,
+        service,
+        organizationId: body.organizationId,
+        subjectId: body.subjectId,
+        grantId: grant.id,
+        credentialId: body.credentialId,
+        expiresAt,
+      });
+      return json(201, {
+        ...rotated,
+        kind: "service",
+        audience: service.audience,
+        organizationId: body.organizationId,
+        subjectId: body.subjectId,
+        grantId: grant.id,
+      });
+    } catch (error) {
+      if (error instanceof CredentialRotationConflict) {
+        return json(409, {
+          error: "credential_changed",
+          message:
+            "This service principal credential expired, was revoked, or was rotated already.",
+        });
+      }
+      if (error instanceof RangeError)
+        return json(400, { error: "invalid_lifetime" });
+      throw error;
+    }
+  }
+
+  if (pathname === `${base}/credentials/revoke` && request.method === "POST") {
+    const body = await requestBody(request);
+    if (
+      !body ||
+      !validOrganizationId(body.organizationId) ||
+      !validServicePrincipalId(body.subjectId) ||
+      !validCredentialId(body.credentialId)
+    ) {
+      return json(400, { error: "invalid_request" });
+    }
+    const authorization = await authorizeOrganizationRequest(
+      request,
+      env,
+      body.organizationId,
+    );
+    if (authorization instanceof Response) return authorization;
+    if (authorization.authority.role === "member") {
+      return json(403, { error: "organization_manager_required" });
+    }
+    const revoked = await revokeServicePrincipalCredential(
+      env.IDENTITY_DB.withSession("first-primary"),
+      {
+        actorUserId: authorization.current.user.id,
+        organizationId: body.organizationId,
+        subjectId: body.subjectId,
+        credentialId: body.credentialId,
+      },
+    );
+    return revoked
+      ? json(200, { revoked: true, organizationId: body.organizationId })
+      : json(404, { error: "credential_not_found" });
+  }
+
+  return json(404, { error: "not_found" });
+}
+
 async function accountManagementRoute(
   request: Request,
   env: Cloudflare.Env,
@@ -943,6 +1550,13 @@ async function accountManagementRoute(
       message: "Use the Platform account page to make this change.",
     });
   }
+
+  const servicePrincipalRoute = await servicePrincipalManagementRoute(
+    request,
+    env,
+    pathname,
+  );
+  if (servicePrincipalRoute) return servicePrincipalRoute;
 
   if (
     pathname === "/api/account/oauth-installations" &&
@@ -1230,7 +1844,7 @@ async function accountManagementRoute(
     );
     const agent = await env.IDENTITY_DB.withSession("first-primary")
       .prepare(
-        "SELECT id FROM platform_agent WHERE id = ? AND organization_id = ?",
+        "SELECT id FROM platform_agent WHERE id = ? AND organization_id = ? AND kind = 'agent'",
       )
       .bind(agentId, organizationId)
       .first<{ id: string }>();
@@ -1365,7 +1979,7 @@ async function accountManagementRoute(
     const database = env.IDENTITY_DB.withSession("first-primary");
     const agent = await database
       .prepare(
-        "SELECT id FROM platform_agent WHERE id = ? AND organization_id = ?",
+        "SELECT id FROM platform_agent WHERE id = ? AND organization_id = ? AND kind = 'agent'",
       )
       .bind(agentId, organizationId)
       .first<{ id: string }>();
@@ -2891,7 +3505,8 @@ export async function authenticateCredential(
     });
   }
 
-  if (row.kind === "agent") {
+  if (row.kind === "agent" || row.kind === "service") {
+    const machineKind = row.kind;
     if (
       !row.organization_id ||
       row.membership_id !== null ||
@@ -2916,6 +3531,7 @@ export async function authenticateCredential(
          JOIN platform_agent AS agent
            ON agent.id = credential.subject_id
           AND agent.organization_id = credential.organization_id
+          AND agent.kind = credential.kind
          JOIN organization AS owning_org
            ON owning_org.id = agent.organization_id
          JOIN platform_agent_grant AS agent_grant
@@ -2930,7 +3546,7 @@ export async function authenticateCredential(
           AND registered_service.audience = agent_grant.audience
           AND registered_service.disabled = 0
          WHERE credential.credential_hash = ?
-           AND credential.kind = 'agent'
+           AND credential.kind = agent.kind
            AND credential.organization_id = agent.organization_id
            AND credential.membership_id IS NULL
            AND credential.audience = registered_service.audience
@@ -2997,7 +3613,7 @@ export async function authenticateCredential(
       principal: {
         version: 1,
         authority: env.PLATFORM_AUTHORITY_ID,
-        kind: "agent",
+        kind: machineKind,
         subjectId: currentAgent.subject_id,
         credentialId: currentAgent.id,
         organizationId: currentAgent.organization_id,

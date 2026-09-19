@@ -66,10 +66,19 @@ refresh restart probes, Chromium installation controls, and 142 actual
 Platform-to-msg boundary assertions. Native and bounded Grok reviews close the
 refresh and installation-isolation findings. [The runtime report](T07_RUNTIME_ACCEPTANCE_REPORT.md)
 describes the restart/browser evidence. Provider HTTP remains simulated; these
-checks do not establish external-client adoption. Service-principal issuance,
-Communicator human/browser integration, server safeguards and setup remain open.
+checks do not establish external-client adoption. Communicator human/browser
+integration, server safeguards and setup remain open.
 The full MVP is not implemented or accepted, and these reports do not establish
 production readiness.
+
+[T11_SERVICE_PRINCIPAL_REPORT.md](T11_SERVICE_PRINCIPAL_REPORT.md) records the
+bounded organization-owned service-principal prerequisite, integrated here on
+the existing machine lifecycle. Service principals have an immutable stored
+kind, stable `subjectId` values, fixed-kind owner/admin management routes,
+per-audience grants and opaque credentials, and authoritative current-state
+verification. The report covers Platform Worker/D1 and shared-client evidence;
+Communicator adoption, browser UI, deployment provisioning and full T11
+consumer acceptance remain open.
 
 ## Purpose and deployment
 
@@ -257,6 +266,17 @@ register trusted resource services with the local deployment tool, for example
 `bun run provision:service -- --local register --service-id service-id --audience https://service.example/mcp --capability resource:read`.
 The tool supports metadata updates, verifier rotation and disablement; use
 `--remote` only when an operator intentionally targets a remote D1 database.
+
+Organization-owned service principals use the same owner/admin session and
+origin-protected account boundary as agents. Their management API is rooted at
+`/api/account/service-principals`; lifecycle, grants and credential operations
+use `/update`, `/lifecycle`, `/grants`, `/grants/revoke`, `/credentials`,
+`/credentials/rotate` and `/credentials/revoke`. Service routes fix the machine
+kind to `service` and use `subjectId` for the stable principal identifier;
+request metadata cannot convert an agent or service principal. Credential
+secrets are returned only from issue/rotation responses, while listing returns
+metadata. These routes are a Platform prerequisite and do not add an account
+UI, an OAuth `client_credentials` grant or service-consumer integration.
 
 Rate limits for Platform login, credential issuance and guest bootstrap belong
 to Platform. Anonymous operation quotas and enforcement belong to each resource
