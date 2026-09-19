@@ -3,24 +3,27 @@ import {
   createPlatformClient,
 } from "@0000/platform-client";
 import type { GuestGrantAssertion, GuestGrantResult } from "@0000/contracts";
-import { SELF, env } from "cloudflare:test";
+import type { D1Migration } from "@cloudflare/vitest-plugin";
+import { applyD1Migrations, SELF, env } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import {
   DEFAULT_GUEST_PERMISSION_ID,
   parseGuestAssertion,
 } from "../../src/guest-state";
-import { opaqueSecret } from "../../src/platform-state";
+import { hashOpaque, opaqueSecret } from "../../src/platform-state";
 import { registerTestService, type TestService } from "./fixtures/provision";
 
-const testEnv = env as Cloudflare.Env;
+type TestEnv = Cloudflare.Env & { TEST_MIGRATIONS: D1Migration[] };
 
-function service(): TestService {
+const testEnv = env as TestEnv;
+
+function service(allowedCapabilities = ["resource:read"]): TestService {
   return {
     serviceId: `guest-permission-${crypto.randomUUID()}`,
     audience: `https://guest-permission-${crypto.randomUUID()}.0000.test`,
     verifier: opaqueSecret("service_verify_"),
     guestGrantIssuer: opaqueSecret("service_guest_grant_"),
-    allowedCapabilities: ["resource:read"],
+    allowedCapabilities,
   };
 }
 
@@ -68,19 +71,266 @@ async function grant(
   bootstrapCredential: string,
   resourceId: string,
   permissionId?: string,
+  options: {
+    assertion?: GuestGrantAssertion;
+    capabilities?: string[];
+  } = {},
 ) {
   return client.attestGuestGrant({
     bootstrapCredential,
     resourceId,
-    capabilities: ["resource:read"],
+    capabilities: options.capabilities ?? ["resource:read"],
     assertion:
-      permissionId === undefined
+      options.assertion ??
+      (permissionId === undefined
         ? { kind: "owner", storedOwnerId: guestId }
-        : ownerAssertion(guestId, permissionId),
+        : ownerAssertion(guestId, permissionId)),
   });
 }
 
+function migration(name: string): D1Migration {
+  const found = testEnv.TEST_MIGRATIONS.find(
+    (candidate) => candidate.name === name,
+  );
+  if (!found) throw new Error(`Missing migration ${name}`);
+  return found;
+}
+
+type ExistingGuestGrant = {
+  id: string;
+  guest_id: string;
+  service_id: string;
+  audience: string;
+  resource_id: string;
+  assertion_kind: string;
+  permission_id: string;
+  capabilities: string;
+  created_at: number;
+  revoked_at: number | null;
+  revoked_reason: string | null;
+};
+
+const guestGrantObjects = [
+  "platform_guest_grant_guest_idx",
+  "platform_guest_grant_service_idx",
+  "platform_guest_grant_current_resource_unique",
+  "platform_guest_grant_current_permission_unique",
+  "platform_guest_grant_authority_immutable",
+  "platform_guest_grant_service_match_insert",
+  "platform_guest_grant_service_match_update",
+  "platform_guest_grant_permission_valid_insert",
+  "platform_guest_grant_permission_valid_update",
+] as const;
+
+async function dropGuestGrantObjects(database: D1Database) {
+  await database.batch(
+    guestGrantObjects.map((name) =>
+      name.includes("unique") || name.endsWith("_idx")
+        ? database.prepare(`DROP INDEX IF EXISTS ${name}`)
+        : database.prepare(`DROP TRIGGER IF EXISTS ${name}`),
+    ),
+  );
+}
+
+async function hasGuestGrantPermissionColumn(
+  database: D1Database,
+): Promise<boolean> {
+  const columns = await database
+    .prepare("PRAGMA table_info(platform_guest_grant)")
+    .all<{ name: string }>();
+  return columns.results.some((column) => column.name === "permission_id");
+}
+
+async function restoreGuestGrantTable(
+  database: D1Database,
+  backupTable: string,
+  migrationTable: string,
+  originalRows: ExistingGuestGrant[],
+  temporaryGrantId: string,
+  temporaryCredentialIds: string[],
+): Promise<void> {
+  if (!(await hasGuestGrantPermissionColumn(database))) {
+    await applyD1Migrations(
+      database,
+      [migration("0009_guest_permission_grants.sql")],
+      migrationTable,
+    );
+  }
+  await database
+    .prepare("DELETE FROM platform_credential WHERE id IN (?, ?)")
+    .bind(...temporaryCredentialIds)
+    .run();
+  await database
+    .prepare("DELETE FROM platform_guest_grant WHERE id = ?")
+    .bind(temporaryGrantId)
+    .run();
+  if (originalRows.length > 0) {
+    await database.batch(
+      originalRows.map((row) =>
+        database
+          .prepare(
+            `INSERT INTO platform_guest_grant
+             (id, guest_id, service_id, audience, resource_id, assertion_kind,
+              permission_id, capabilities, created_at, revoked_at, revoked_reason)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          )
+          .bind(
+            row.id,
+            row.guest_id,
+            row.service_id,
+            row.audience,
+            row.resource_id,
+            row.assertion_kind,
+            row.permission_id,
+            row.capabilities,
+            row.created_at,
+            row.revoked_at,
+            row.revoked_reason,
+          ),
+      ),
+    );
+  }
+  await database.prepare(`DROP TABLE IF EXISTS ${backupTable}`).run();
+  await database.prepare(`DROP TABLE IF EXISTS ${migrationTable}`).run();
+}
+
 describe("guest permission grants", () => {
+  it("upgrades a live pre-0009 default grant before authenticating and renewing it", async () => {
+    const registration = service();
+    await registerTestService(testEnv.IDENTITY_DB, registration);
+    const client = guestClient(registration);
+    const guest = await client.createGuest();
+    expect(guest.status).toBe("success");
+    if (guest.status !== "success") return;
+
+    const originalRows = (
+      await testEnv.IDENTITY_DB.prepare(
+        `SELECT id, guest_id, service_id, audience, resource_id,
+                assertion_kind, permission_id, capabilities, created_at,
+                revoked_at, revoked_reason
+         FROM platform_guest_grant`,
+      ).all<ExistingGuestGrant>()
+    ).results;
+    const backupTable = "platform_guest_grant_pre0009_backup";
+    const migrationTable = "guest_permission_upgrade_migrations";
+    const resourceId = `resource-pre0009-${crypto.randomUUID()}`;
+    const grantId = `grant-pre0009-${crypto.randomUUID()}`;
+    const credentialId = `credential-pre0009-${crypto.randomUUID()}`;
+    const credential = opaqueSecret("guest_grant_");
+    let renewedCredentialId = credentialId;
+    let tableMoved = false;
+
+    try {
+      await testEnv.IDENTITY_DB.prepare(
+        `DROP TABLE IF EXISTS ${backupTable}`,
+      ).run();
+      await testEnv.IDENTITY_DB.prepare(
+        `DROP TABLE IF EXISTS ${migrationTable}`,
+      ).run();
+      await dropGuestGrantObjects(testEnv.IDENTITY_DB);
+      await testEnv.IDENTITY_DB.prepare(
+        `ALTER TABLE platform_guest_grant RENAME TO ${backupTable}`,
+      ).run();
+      tableMoved = true;
+
+      await testEnv.IDENTITY_DB.batch(
+        migration("0007_guest_lifecycle.sql").queries.map((query) =>
+          testEnv.IDENTITY_DB.prepare(query),
+        ),
+      );
+      await testEnv.IDENTITY_DB.batch([
+        testEnv.IDENTITY_DB.prepare(
+          `INSERT INTO platform_guest_grant
+             (id, guest_id, service_id, audience, resource_id, assertion_kind,
+              capabilities, created_at, revoked_at, revoked_reason)
+             VALUES (?, ?, ?, ?, ?, 'owner', ?, ?, NULL, NULL)`,
+        ).bind(
+          grantId,
+          guest.guestId,
+          registration.serviceId,
+          registration.audience,
+          resourceId,
+          JSON.stringify(["resource:read"]),
+          Date.now(),
+        ),
+        testEnv.IDENTITY_DB.prepare(
+          `INSERT INTO platform_credential
+             (id, credential_hash, kind, subject_id, organization_id,
+              membership_id, grant_id, audience, capabilities, resource_ids,
+              expires_at, revoked_at, name, created_at, revoked_reason,
+              replaced_by_id, predecessor_id)
+             VALUES (?, ?, 'guest', ?, NULL, NULL, ?, ?, ?, json_array(?),
+                     NULL, NULL, 'Guest resource grant', ?, NULL, NULL, NULL)`,
+        ).bind(
+          credentialId,
+          await hashOpaque(credential),
+          guest.guestId,
+          grantId,
+          registration.audience,
+          JSON.stringify(["resource:read"]),
+          resourceId,
+          Date.now(),
+        ),
+      ]);
+      expect(await hasGuestGrantPermissionColumn(testEnv.IDENTITY_DB)).toBe(
+        false,
+      );
+      expect(
+        await testEnv.IDENTITY_DB.prepare(
+          "SELECT id FROM platform_guest_grant WHERE id = ?",
+        )
+          .bind(grantId)
+          .first<{ id: string }>(),
+      ).toEqual({ id: grantId });
+
+      await applyD1Migrations(
+        testEnv.IDENTITY_DB,
+        [migration("0009_guest_permission_grants.sql")],
+        migrationTable,
+      );
+      expect(
+        await testEnv.IDENTITY_DB.prepare(
+          "SELECT permission_id FROM platform_guest_grant WHERE id = ?",
+        )
+          .bind(grantId)
+          .first<{ permission_id: string }>(),
+      ).toEqual({ permission_id: DEFAULT_GUEST_PERMISSION_ID });
+
+      const platform = platformClient(registration);
+      expect((await platform.authenticate(credential)).status).toBe(
+        "authenticated",
+      );
+      const renewed = successfulGrant(
+        await client.renewGuestGrant({
+          grantId,
+          bootstrapCredential: guest.bootstrapCredential,
+          resourceId,
+          capabilities: ["resource:read"],
+          assertion: { kind: "owner", storedOwnerId: guest.guestId },
+        }),
+      );
+      renewedCredentialId = renewed.credentialId;
+      expect(renewed.grantId).toBe(grantId);
+      expect((await platform.authenticate(credential)).status).toBe(
+        "invalid_credential",
+      );
+      expect((await platform.authenticate(renewed.credential)).status).toBe(
+        "authenticated",
+      );
+    } finally {
+      if (tableMoved) {
+        await restoreGuestGrantTable(
+          testEnv.IDENTITY_DB,
+          backupTable,
+          migrationTable,
+          originalRows,
+          grantId,
+          [credentialId, renewedCredentialId],
+        );
+      }
+    }
+  });
+
   it("supports independent same-resource permissions", async () => {
     const registration = service();
     await registerTestService(testEnv.IDENTITY_DB, registration);
@@ -106,6 +356,7 @@ describe("guest permission grants", () => {
         guest.bootstrapCredential,
         resourceId,
         "public",
+        { assertion: { kind: "participant", permissionId: "public" } },
       ),
     );
     const managementGrant = successfulGrant(
@@ -115,6 +366,9 @@ describe("guest permission grants", () => {
         guest.bootstrapCredential,
         resourceId,
         "management",
+        {
+          assertion: { kind: "participant", permissionId: "management" },
+        },
       ),
     );
     expect(
@@ -224,6 +478,36 @@ describe("guest permission grants", () => {
       "conflict",
       "success",
     ]);
+  });
+
+  it("rejects capability widening when the service permits the wider capability", async () => {
+    const registration = service(["resource:read", "resource:write"]);
+    await registerTestService(testEnv.IDENTITY_DB, registration);
+    const client = guestClient(registration);
+    const guest = await client.createGuest();
+    expect(guest.status).toBe("success");
+    if (guest.status !== "success") return;
+
+    const resourceId = `resource-no-widening-${crypto.randomUUID()}`;
+    const created = successfulGrant(
+      await grant(
+        client,
+        guest.guestId,
+        guest.bootstrapCredential,
+        resourceId,
+        "read-only",
+        { capabilities: ["resource:read"] },
+      ),
+    );
+    expect(
+      await client.renewGuestGrant({
+        grantId: created.grantId,
+        bootstrapCredential: guest.bootstrapCredential,
+        resourceId,
+        capabilities: ["resource:write"],
+        assertion: ownerAssertion(guest.guestId, "read-only"),
+      }),
+    ).toEqual({ status: "grant_denied" });
   });
 
   it("normalizes default permission callers and rejects malformed permission ids", async () => {

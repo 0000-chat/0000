@@ -14,12 +14,10 @@ pnpm exec vitest run --config vitest.worker.config.ts worker/test/guest-permissi
 1 failed: the second same-resource permission grant returned conflict instead of success
 ```
 
-After the correction:
+After the correction and follow-up proof additions:
 
-- `bunx vitest run --config vitest.worker.config.ts worker/test/guest-permissions.test.ts` — 1 file, 3 tests passed.
-- `bunx vitest run --config vitest.worker.config.ts --no-file-parallelism` — 10 files, 25 tests passed.
-- `bun run test:restart` — Miniflare D1 runtime restart persistence probe passed.
-- `bun run check` — formatting and Platform typecheck passed. Its default parallel Worker run reached 9 files and 24 tests before the existing account membership-render race returned the sign-in page; the account test passes alone, and the deterministic no-file-parallelism run above passes all 25 tests.
+- `bunx vitest run --config vitest.worker.config.ts worker/test/guest-permissions.test.ts` — 1 file, 5 tests passed. The suite reconstructs the 0007 schema, seeds a live default grant and credential, applies the real 0009 migration, then authenticates and renews that same grant through the Worker/shared client. It also covers participant public/management assertions and no-widening against a service that permits both read and write.
+- `bun run check` — formatting, Platform typecheck, 10 Worker test files, and 27 tests passed; the Miniflare D1 runtime restart persistence probe also passed.
 - `bun run check` in `packages/contracts` — typecheck and 3 tests passed.
 - `bun run check` in `packages/platform-client` — typecheck and 5 tests passed.
 - `sh scripts/format-check src/guest-state.ts worker/test/guest-permissions.test.ts` — clean.
