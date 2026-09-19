@@ -38,11 +38,14 @@ type BindingInput = {
   revokedAt?: string | null;
 };
 
-async function insertBinding(input: BindingInput): Promise<void> {
+async function insertBinding(
+  input: BindingInput,
+  operation: "INSERT" | "INSERT OR REPLACE" = "INSERT",
+): Promise<void> {
   const platformKind = input.platformKind ?? "human";
   const status = input.status ?? "active";
   await env.CONTROL_DB.prepare(
-    `INSERT INTO platform_bindings (
+    `${operation} INTO platform_bindings (
         binding_id,
         platform_authority,
         platform_kind,
@@ -551,6 +554,149 @@ describe("resolvePlatformBinding", () => {
 });
 
 describe("platform_bindings database boundary", () => {
+  it("rejects INSERT OR REPLACE for an existing binding ID", async () => {
+    await insertBinding({
+      bindingId: "binding-replace-id",
+      platformSubjectId: humanPrincipal.subjectId,
+      platformMembershipId: humanPrincipal.membershipId,
+      localIdentityId: "identity_human",
+      status: "revoked",
+    });
+
+    await expect(
+      insertBinding(
+        {
+          bindingId: "binding-replace-id",
+          platformSubjectId: humanPrincipal.subjectId,
+          platformMembershipId: humanPrincipal.membershipId,
+          localIdentityId: "identity_human",
+        },
+        "INSERT OR REPLACE",
+      ),
+    ).rejects.toThrow();
+
+    const row = await env.CONTROL_DB.prepare(
+      "SELECT status, revoked_at FROM platform_bindings WHERE binding_id = ?",
+    )
+      .bind("binding-replace-id")
+      .first<{ status: string; revoked_at: string | null }>();
+    expect(row).toEqual({ status: "revoked", revoked_at: timestamp });
+  });
+
+  it("rejects INSERT OR REPLACE for an existing Platform tuple", async () => {
+    await insertBinding({
+      bindingId: "binding-replace-tuple",
+      platformSubjectId: humanPrincipal.subjectId,
+      platformMembershipId: humanPrincipal.membershipId,
+      localIdentityId: "identity_human",
+      status: "revoked",
+    });
+
+    await expect(
+      insertBinding(
+        {
+          bindingId: "binding-replace-tuple-new-id",
+          platformSubjectId: humanPrincipal.subjectId,
+          platformMembershipId: humanPrincipal.membershipId,
+          localIdentityId: "identity_human",
+        },
+        "INSERT OR REPLACE",
+      ),
+    ).rejects.toThrow();
+
+    const rows = await env.CONTROL_DB.prepare(
+      "SELECT binding_id, status FROM platform_bindings ORDER BY binding_id",
+    ).all<{ binding_id: string; status: string }>();
+    expect(rows.results).toEqual([
+      { binding_id: "binding-replace-tuple", status: "revoked" },
+    ]);
+  });
+
+  it("rejects INSERT OR REPLACE retargeting both association sides", async () => {
+    await insertOtherTenant();
+    await insertBinding({
+      bindingId: "binding-association-replace",
+      platformSubjectId: "association-subject",
+      platformMembershipId: "association-membership",
+      localIdentityId: "identity_human",
+    });
+
+    await expect(
+      insertBinding(
+        {
+          bindingId: "binding-association-replace",
+          platformOrganizationId: "other-platform-org",
+          platformSubjectId: "association-replacement-subject",
+          platformMembershipId: "association-replacement-membership",
+          localTenantId: "tenant_other",
+          localPrincipalId: "principal_other",
+          localMembershipId: "membership_other",
+        },
+        "INSERT OR REPLACE",
+      ),
+    ).rejects.toThrow();
+
+    const row = await env.CONTROL_DB.prepare(
+      "SELECT platform_organization_id, local_tenant_id FROM platform_bindings WHERE binding_id = ?",
+    )
+      .bind("binding-association-replace")
+      .first<{ platform_organization_id: string; local_tenant_id: string }>();
+    expect(row).toEqual({
+      platform_organization_id: organizationId,
+      local_tenant_id: "tenant_pilot",
+    });
+  });
+
+  it("allows independent binding tuples and tenant associations", async () => {
+    await insertOtherTenant();
+    await insertBinding({
+      bindingId: "binding-independent-one",
+      platformSubjectId: "independent-subject-one",
+      platformMembershipId: "independent-membership-one",
+      localIdentityId: "identity_human",
+    });
+    await insertBinding({
+      bindingId: "binding-independent-two",
+      platformSubjectId: "independent-subject-two",
+      platformMembershipId: "independent-membership-two",
+      localIdentityId: "identity_human",
+    });
+    await insertBinding({
+      bindingId: "binding-independent-other-association",
+      platformOrganizationId: "other-platform-org",
+      platformSubjectId: "independent-subject-other",
+      platformMembershipId: "independent-membership-other",
+      localTenantId: "tenant_other",
+      localPrincipalId: "principal_other",
+      localMembershipId: "membership_other",
+    });
+
+    const rows = await env.CONTROL_DB.prepare(
+      "SELECT binding_id, platform_organization_id, local_tenant_id FROM platform_bindings ORDER BY binding_id",
+    ).all<{
+      binding_id: string;
+      platform_organization_id: string;
+      local_tenant_id: string;
+    }>();
+    expect(rows.results).toEqual([
+      {
+        binding_id: "binding-independent-one",
+        platform_organization_id: organizationId,
+        local_tenant_id: "tenant_pilot",
+      },
+      {
+        binding_id: "binding-independent-other-association",
+        platform_organization_id: "other-platform-org",
+        local_tenant_id: "tenant_other",
+      },
+      {
+        binding_id: "binding-independent-two",
+        platform_organization_id: organizationId,
+        local_tenant_id: "tenant_pilot",
+      },
+    ]);
+  });
+
   it("rejects incoherent discriminants, cross-tenant targets, and association changes", async () => {
     await insertOtherTenant();
     await insertBinding({

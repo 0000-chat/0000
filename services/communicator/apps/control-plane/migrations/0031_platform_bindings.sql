@@ -81,6 +81,29 @@ CREATE INDEX platform_bindings_lookup_idx
 CREATE INDEX platform_bindings_local_tenant_idx
   ON platform_bindings(local_tenant_id, status, binding_id);
 
+-- SQLite's INSERT OR REPLACE deletes a conflicting row before inserting the new
+-- one. With recursive_triggers disabled, that implicit delete does not invoke
+-- the history trigger below, so reserve row IDs and Platform tuples before the
+-- conflict handler can remove their historical rows.
+CREATE TRIGGER platform_bindings_insert_history_immutable
+BEFORE INSERT ON platform_bindings
+WHEN EXISTS (
+  SELECT 1
+  FROM platform_bindings AS existing
+  WHERE existing.binding_id = NEW.binding_id
+     OR (
+       existing.platform_authority = NEW.platform_authority AND
+       existing.platform_kind = NEW.platform_kind AND
+       existing.platform_subject_id = NEW.platform_subject_id AND
+       existing.platform_organization_id = NEW.platform_organization_id AND
+       existing.platform_membership_id IS NEW.platform_membership_id AND
+       existing.platform_grant_id IS NEW.platform_grant_id
+     )
+)
+BEGIN
+  SELECT RAISE(ABORT, 'platform_binding_history_immutable');
+END;
+
 -- Every Platform organization is associated with one local tenant, and a local
 -- tenant is associated with one Platform organization. Keeping this invariant
 -- in a trigger preserves it across pending and terminal rows as well as across
