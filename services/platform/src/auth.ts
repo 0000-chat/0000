@@ -1,5 +1,5 @@
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
-import { APIError } from "better-auth/api";
+import { APIError, getOAuthState } from "better-auth/api";
 import { betterAuth } from "better-auth";
 import { drizzle } from "drizzle-orm/d1";
 import {
@@ -107,6 +107,8 @@ export function createAuth(env: Cloudflare.Env) {
     providerId: "github" | "google",
     profile: object,
   ) => {
+    const oauthState = await getOAuthState();
+    if (oauthState?.link) return {};
     const binding = pendingSocialBindingFromSource(providerId, profile);
     if (!binding) return {};
     await recoverPendingSocialAccount(env.IDENTITY_DB, binding);

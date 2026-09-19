@@ -11,6 +11,12 @@ interface GithubIdentity {
   email: string;
 }
 
+interface GoogleIdentity {
+  subject: string;
+  name: string;
+  email: string;
+}
+
 interface LoginAttempt {
   start: Response;
   callback: Response;
@@ -27,6 +33,11 @@ let githubIdentity: GithubIdentity = {
   login: "platform-human-probe-baseline",
   name: "Human Probe Baseline",
   email: "human-probe-baseline@example.test",
+};
+let googleIdentity: GoogleIdentity = {
+  subject: "human-probe-google-baseline",
+  name: "Human Probe Google Baseline",
+  email: "human-probe-google-baseline@example.test",
 };
 let coordinateSharedLookup = false;
 let sharedLookupCount = 0;
@@ -62,6 +73,31 @@ function mergeCookieStrings(...values: string[]): string {
   return [...cookies.values()].join("; ");
 }
 
+function base64Url(value: string): string {
+  return btoa(value)
+    .replaceAll("+", "-")
+    .replaceAll("/", "_")
+    .replaceAll("=", "");
+}
+
+function googleIdToken(): string {
+  const header = base64Url(JSON.stringify({ alg: "RS256", typ: "JWT" }));
+  const claims = base64Url(
+    JSON.stringify({
+      iss: "https://accounts.google.com",
+      aud: testEnv.GOOGLE_CLIENT_ID,
+      sub: googleIdentity.subject,
+      email: googleIdentity.email,
+      email_verified: true,
+      name: googleIdentity.name,
+      picture: null,
+      iat: Math.floor(Date.now() / 1000),
+      exp: Math.floor(Date.now() / 1000) + 3600,
+    }),
+  );
+  return `${header}.${claims}.synthetic-provider-signature`;
+}
+
 function providerLookupBarrier(): void {
   coordinateSharedLookup = true;
   sharedLookupCount = 0;
@@ -84,7 +120,10 @@ async function boundedProviderLookupBarrier(): Promise<void> {
   ]);
 }
 
-async function startSocialLogin(cookie = ""): Promise<Response> {
+async function startSocialLogin(
+  provider: "github" | "google" = "github",
+  cookie = "",
+): Promise<Response> {
   return SELF.fetch("http://localhost/api/auth/sign-in/social", {
     method: "POST",
     headers: {
@@ -93,7 +132,7 @@ async function startSocialLogin(cookie = ""): Promise<Response> {
       ...(cookie ? { cookie } : {}),
     },
     body: JSON.stringify({
-      provider: "github",
+      provider,
       callbackURL: "http://localhost/account",
     }),
   });
@@ -118,12 +157,13 @@ async function completeSocialCallback(
   start: Response,
   code: string,
   existingCookie = "",
+  provider: "github" | "google" = "github",
 ): Promise<Response> {
   const startBody = (await start.clone().json()) as { url: string };
   const state = new URL(startBody.url).searchParams.get("state");
   expect(state).toBeTruthy();
   return SELF.fetch(
-    `http://localhost/api/auth/callback/github?code=${encodeURIComponent(code)}&state=${encodeURIComponent(state!)}`,
+    `http://localhost/api/auth/callback/${provider}?code=${encodeURIComponent(code)}&state=${encodeURIComponent(state!)}`,
     {
       headers: {
         cookie: mergeCookieStrings(existingCookie, cookiesFrom(start)),
@@ -142,6 +182,17 @@ async function socialLogin(
   const start = await startSocialLogin();
   expect(start.status).toBe(200);
   const callback = await completeSocialCallback(start, code);
+  return { start, callback };
+}
+
+async function googleLogin(
+  identity: GoogleIdentity,
+  code: string,
+): Promise<LoginAttempt> {
+  googleIdentity = identity;
+  const start = await startSocialLogin("google");
+  expect(start.status).toBe(200);
+  const callback = await completeSocialCallback(start, code, "", "google");
   return { start, callback };
 }
 
@@ -189,6 +240,14 @@ async function providerRequest(
       scope: "read:user user:email",
     });
   }
+  if (url.hostname === "oauth2.googleapis.com" && url.pathname === "/token") {
+    return Response.json({
+      access_token: `human-probe-google-token-${googleIdentity.subject}`,
+      expires_in: 3600,
+      id_token: googleIdToken(),
+      token_type: "Bearer",
+    });
+  }
   if (url.hostname === "api.github.com" && url.pathname === "/user") {
     if (coordinateSharedLookup) await boundedProviderLookupBarrier();
     return Response.json({
@@ -210,13 +269,14 @@ async function providerRequest(
 
 async function accountRows(
   accountId: string,
+  providerId = "github",
 ): Promise<
   Array<{ id: string; userId: string; providerId: string; accountId: string }>
 > {
   const rows = await testEnv.IDENTITY_DB.prepare(
-    "SELECT id, userId, providerId, accountId FROM account WHERE providerId = 'github' AND accountId = ? ORDER BY id",
+    "SELECT id, userId, providerId, accountId FROM account WHERE providerId = ? AND accountId = ? ORDER BY id",
   )
-    .bind(accountId)
+    .bind(providerId, accountId)
     .all<{
       id: string;
       userId: string;
@@ -292,6 +352,11 @@ describe("human recovery evidence experiments", () => {
       login: "platform-human-probe-baseline",
       name: "Human Probe Baseline",
       email: "human-probe-baseline@example.test",
+    };
+    googleIdentity = {
+      subject: "human-probe-google-baseline",
+      name: "Human Probe Google Baseline",
+      email: "human-probe-google-baseline@example.test",
     };
     coordinateSharedLookup = false;
     sharedLookupCount = 0;
@@ -434,6 +499,62 @@ describe("human recovery evidence experiments", () => {
         },
       }),
     );
+  });
+
+  it("recovers interrupted Google signup with the exact provider subject", async () => {
+    const identity = {
+      subject: "human-probe-google-recovery",
+      name: "Human Probe Google Recovery",
+      email: "human-probe-google-recovery@example.test",
+    };
+    await testEnv.IDENTITY_DB.prepare(
+      `CREATE TRIGGER human_probe_fail_google_account_insert
+       BEFORE INSERT ON account
+       WHEN NEW.providerId = 'google' AND NEW.accountId = 'human-probe-google-recovery'
+       BEGIN SELECT RAISE(ABORT, 'human recovery Google setup'); END`,
+    ).run();
+    try {
+      const failed = await googleLogin(
+        identity,
+        "human-probe-google-recovery-signin",
+      );
+      expect(failed.callback.status).toBe(302);
+    } finally {
+      await testEnv.IDENTITY_DB.prepare(
+        "DROP TRIGGER human_probe_fail_google_account_insert",
+      ).run();
+    }
+
+    const pendingUser = (await pendingRows(identity.email))[0];
+    expect(pendingUser).toMatchObject({
+      pendingSocialProviderId: "google",
+      pendingSocialSubject: identity.subject,
+      disabledAt: null,
+    });
+    expect(await accountRows(identity.subject, "google")).toHaveLength(0);
+
+    const recovered = await googleLogin(
+      identity,
+      "human-probe-google-recovery-retry",
+    );
+    expect(recovered.callback.status).toBe(302);
+    expect(recovered.callback.headers.get("location")).toBe(
+      "http://localhost/account",
+    );
+    const recoveredCookie = cookiesFrom(recovered.callback);
+    expect((await sessionFor(recoveredCookie)).user?.id).toBe(pendingUser?.id);
+    expect(await accountRows(identity.subject, "google")).toEqual([
+      expect.objectContaining({
+        userId: pendingUser?.id,
+        providerId: "google",
+        accountId: identity.subject,
+      }),
+    ]);
+    expect((await pendingRows(identity.email))[0]).toMatchObject({
+      id: pendingUser?.id,
+      pendingSocialProviderId: null,
+      pendingSocialSubject: null,
+    });
   });
 
   it("rejects wrong subjects, stale state, and unsigned direct id tokens", async () => {
@@ -646,6 +767,230 @@ describe("human recovery evidence experiments", () => {
       pendingSocialSubject: null,
       disabledAt: null,
     });
+  });
+
+  it("does not recover a pending signup during a revoked explicit link callback", async () => {
+    const pendingIdentity = {
+      id: 814920,
+      login: "platform-human-probe-revoked-pending",
+      name: "Human Probe Revoked Pending",
+      email: "human-probe-revoked-pending@example.test",
+    };
+    await testEnv.IDENTITY_DB.prepare(
+      `CREATE TRIGGER human_probe_fail_account_insert_revoked
+       BEFORE INSERT ON account
+       WHEN NEW.providerId = 'github' AND NEW.accountId = '814920'
+       BEGIN SELECT RAISE(ABORT, 'human recovery revoked-link setup'); END`,
+    ).run();
+    try {
+      await socialLogin(pendingIdentity, "human-probe-revoked-pending-signin");
+    } finally {
+      await testEnv.IDENTITY_DB.prepare(
+        "DROP TRIGGER human_probe_fail_account_insert_revoked",
+      ).run();
+    }
+
+    const pendingUser = (await pendingRows(pendingIdentity.email))[0];
+    expect(pendingUser).toMatchObject({
+      pendingSocialProviderId: "github",
+      pendingSocialSubject: "814920",
+      disabledAt: null,
+    });
+    expect(await accountRows("814920")).toHaveLength(0);
+
+    const linkUser = await loginAs(
+      {
+        id: 814921,
+        login: "platform-human-probe-revoked-linker",
+        name: "Human Probe Revoked Linker",
+        email: "human-probe-revoked-linker@example.test",
+      },
+      "human-probe-revoked-linker-signin",
+    );
+    const linkStart = await startLink(linkUser.cookie);
+    expect(linkStart.status).toBe(200);
+    githubIdentity = pendingIdentity;
+
+    const signOut = await SELF.fetch("http://localhost/api/auth/sign-out", {
+      method: "POST",
+      headers: {
+        cookie: linkUser.cookie,
+        origin: testEnv.PLATFORM_BASE_URL,
+      },
+    });
+    expect(signOut.status).toBe(200);
+
+    const revokedCallback = await completeSocialCallback(
+      linkStart,
+      "human-probe-revoked-link-callback",
+      linkUser.cookie,
+    );
+    expect(revokedCallback.status).toBe(302);
+    expect(
+      new URL(revokedCallback.headers.get("location")!).searchParams.get(
+        "error",
+      ),
+    ).toBe("link_session_required");
+    expect(await accountRows("814920")).toHaveLength(0);
+    expect((await pendingRows(pendingIdentity.email))[0]).toMatchObject({
+      id: pendingUser?.id,
+      pendingSocialProviderId: "github",
+      pendingSocialSubject: "814920",
+    });
+  });
+
+  it("keeps a pending owner ahead of a competing explicit link claim", async () => {
+    const pendingIdentity = {
+      id: 814922,
+      login: "platform-human-probe-mixed-pending",
+      name: "Human Probe Mixed Pending",
+      email: "human-probe-mixed-pending@example.test",
+    };
+    await testEnv.IDENTITY_DB.prepare(
+      `CREATE TRIGGER human_probe_fail_account_insert_mixed
+       BEFORE INSERT ON account
+       WHEN NEW.providerId = 'github' AND NEW.accountId = '814922'
+       BEGIN SELECT RAISE(ABORT, 'human recovery mixed setup'); END`,
+    ).run();
+    try {
+      await socialLogin(pendingIdentity, "human-probe-mixed-pending-signin");
+    } finally {
+      await testEnv.IDENTITY_DB.prepare(
+        "DROP TRIGGER human_probe_fail_account_insert_mixed",
+      ).run();
+    }
+
+    const pendingUser = (await pendingRows(pendingIdentity.email))[0];
+    expect(pendingUser).toMatchObject({
+      pendingSocialProviderId: "github",
+      pendingSocialSubject: "814922",
+    });
+
+    const linkUser = await loginAs(
+      {
+        id: 814923,
+        login: "platform-human-probe-mixed-linker",
+        name: "Human Probe Mixed Linker",
+        email: "human-probe-mixed-linker@example.test",
+      },
+      "human-probe-mixed-linker-signin",
+    );
+    const linkStart = await startLink(linkUser.cookie);
+    const retryStart = await startSocialLogin();
+    expect(linkStart.status).toBe(200);
+    expect(retryStart.status).toBe(200);
+
+    githubIdentity = pendingIdentity;
+    providerLookupBarrier();
+    let retryCallback: Response;
+    let linkCallback: Response;
+    try {
+      [linkCallback, retryCallback] = await Promise.all([
+        completeSocialCallback(
+          linkStart,
+          "human-probe-mixed-link-callback",
+          linkUser.cookie,
+        ),
+        completeSocialCallback(retryStart, "human-probe-mixed-retry"),
+      ]);
+    } finally {
+      coordinateSharedLookup = false;
+    }
+
+    expect(sharedLookupOverlap).toBe(true);
+    expect(sharedLookupCount).toBe(2);
+    expect([302, 500]).toContain(linkCallback.status);
+    expect(retryCallback.status).toBe(302);
+    const owners = await accountRows("814922");
+    expect(owners).toHaveLength(1);
+    expect(owners[0]?.userId).toBe(pendingUser?.id);
+    expect((await pendingRows(pendingIdentity.email))[0]).toMatchObject({
+      id: pendingUser?.id,
+      pendingSocialProviderId: null,
+      pendingSocialSubject: null,
+    });
+    expect(await accountRows("814923")).toHaveLength(1);
+    expect((await sessionFor(linkUser.cookie)).user?.id).toBe(linkUser.userId);
+  });
+
+  it("converges simultaneous recovery retries on one pending owner", async () => {
+    const identity = {
+      id: 814924,
+      login: "platform-human-probe-simultaneous-retry",
+      name: "Human Probe Simultaneous Retry",
+      email: "human-probe-simultaneous-retry@example.test",
+    };
+    await testEnv.IDENTITY_DB.prepare(
+      `CREATE TRIGGER human_probe_fail_account_insert_simultaneous
+       BEFORE INSERT ON account
+       WHEN NEW.providerId = 'github' AND NEW.accountId = '814924'
+       BEGIN SELECT RAISE(ABORT, 'human recovery simultaneous setup'); END`,
+    ).run();
+    try {
+      await socialLogin(identity, "human-probe-simultaneous-initial");
+    } finally {
+      await testEnv.IDENTITY_DB.prepare(
+        "DROP TRIGGER human_probe_fail_account_insert_simultaneous",
+      ).run();
+    }
+
+    const pendingUser = (await pendingRows(identity.email))[0];
+    expect(pendingUser).toMatchObject({
+      pendingSocialProviderId: "github",
+      pendingSocialSubject: "814924",
+    });
+    const firstStart = await startSocialLogin();
+    const secondStart = await startSocialLogin();
+    expect(firstStart.status).toBe(200);
+    expect(secondStart.status).toBe(200);
+
+    githubIdentity = identity;
+    providerLookupBarrier();
+    let callbacks: [Response, Response];
+    try {
+      callbacks = (await Promise.all([
+        completeSocialCallback(firstStart, "human-probe-simultaneous-one"),
+        completeSocialCallback(secondStart, "human-probe-simultaneous-two"),
+      ])) as [Response, Response];
+    } finally {
+      coordinateSharedLookup = false;
+    }
+
+    expect(sharedLookupOverlap).toBe(true);
+    expect(sharedLookupCount).toBe(2);
+    expect(callbacks.map((callback) => callback.status)).toEqual([302, 302]);
+    expect(
+      callbacks.map((callback) => callback.headers.get("location")),
+    ).toEqual(["http://localhost/account", "http://localhost/account"]);
+    expect(await accountRows("814924")).toEqual([
+      expect.objectContaining({
+        userId: pendingUser?.id,
+        providerId: "github",
+        accountId: "814924",
+      }),
+    ]);
+    expect((await pendingRows(identity.email))[0]).toMatchObject({
+      id: pendingUser?.id,
+      pendingSocialProviderId: null,
+      pendingSocialSubject: null,
+    });
+    const sessions = await sessionRows(pendingUser!.id);
+    expect(sessions).toHaveLength(2);
+    const firstMe = await meFor(cookiesFrom(callbacks[0]!));
+    const secondMe = await meFor(cookiesFrom(callbacks[1]!));
+    expect(secondMe).toEqual(firstMe);
+    const organizationRows = await testEnv.IDENTITY_DB.prepare(
+      "SELECT organization_id, membership_id FROM platform_default_organization WHERE user_id = ?",
+    )
+      .bind(pendingUser?.id)
+      .all();
+    expect(organizationRows.results).toHaveLength(1);
+    const ownerRows = await testEnv.IDENTITY_DB.prepare(
+      "SELECT id, role FROM member WHERE userId = ? AND role = 'owner'",
+    )
+      .bind(pendingUser?.id)
+      .all();
+    expect(ownerRows.results).toHaveLength(1);
   });
 
   it("does not revive a deliberately unlinked provider account", async () => {

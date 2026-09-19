@@ -44,6 +44,19 @@ BEGIN
   SELECT RAISE(ABORT, 'pending social binding already has an account');
 END;
 
+CREATE TRIGGER platform_pending_social_owner_guard
+BEFORE INSERT ON "account"
+WHEN EXISTS (
+  SELECT 1
+  FROM "user"
+  WHERE pendingSocialProviderId = NEW.providerId
+    AND pendingSocialSubject = NEW.accountId
+    AND id <> NEW.userId
+)
+BEGIN
+  SELECT RAISE(ABORT, 'provider account belongs to a pending user');
+END;
+
 CREATE TRIGGER platform_pending_social_clear
 AFTER INSERT ON "account"
 WHEN EXISTS (

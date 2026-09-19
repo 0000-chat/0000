@@ -21,8 +21,8 @@ function canonicalGithubSubject(value: unknown): string | null {
 
 function canonicalGoogleSubject(value: unknown): string | null {
   if (typeof value !== "string") return null;
-  const subject = value.trim();
-  return subject.length > 0 ? subject : null;
+  if (value.length === 0 || value.trim() !== value) return null;
+  return value;
 }
 
 export function canonicalSocialSubject(
@@ -47,10 +47,10 @@ export function pendingSocialBindingFromSource(
 export async function recoverPendingSocialAccount(
   database: D1Database,
   binding: PendingSocialBinding,
-): Promise<boolean> {
+): Promise<void> {
   const now = Date.now();
   const accountId = crypto.randomUUID();
-  const result = await database
+  await database
     .withSession("first-primary")
     .prepare(
       `INSERT INTO "account"
@@ -78,5 +78,4 @@ export async function recoverPendingSocialAccount(
       binding.subject,
     )
     .run();
-  return result.meta.changes === 1;
 }
