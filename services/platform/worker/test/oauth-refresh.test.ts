@@ -478,6 +478,18 @@ describe("T07 production OAuth refresh lineage", () => {
     expect((await sharedClient.authenticate(initial.access_token)).status).toBe(
       "authenticated",
     );
+    await testEnv.IDENTITY_DB.prepare(
+      "UPDATE oauthAccessToken SET expiresAt = ? WHERE id = ? AND refreshId = ?",
+    )
+      .bind(
+        Date.now() - 1_000,
+        root!.provider_access_row_id,
+        root!.provider_refresh_row_id,
+      )
+      .run();
+    expect((await sharedClient.authenticate(initial.access_token)).status).toBe(
+      "invalid_credential",
+    );
     const rotated = await SELF.fetch("http://localhost/api/auth/oauth2/token", {
       method: "POST",
       headers: { "content-type": "application/x-www-form-urlencoded" },
@@ -501,6 +513,76 @@ describe("T07 production OAuth refresh lineage", () => {
     expect(
       (await sharedClient.authenticate(successor.access_token)).status,
     ).toBe("authenticated");
+    const secondRotation = await SELF.fetch(
+      "http://localhost/api/auth/oauth2/token",
+      {
+        method: "POST",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          grant_type: "refresh_token",
+          client_id: client.clientId,
+          refresh_token: successor.refresh_token,
+          resource: service.audience,
+          client_secret: client.clientSecret!,
+        }),
+      },
+    );
+    expect(secondRotation.status, await secondRotation.clone().text()).toBe(
+      200,
+    );
+    const second = (await secondRotation.json()) as {
+      access_token: string;
+      refresh_token: string;
+    };
+    expect(
+      (await sharedClient.authenticate(successor.access_token)).status,
+    ).toBe("invalid_credential");
+    expect((await sharedClient.authenticate(second.access_token)).status).toBe(
+      "authenticated",
+    );
+    const thirdRotation = await SELF.fetch(
+      "http://localhost/api/auth/oauth2/token",
+      {
+        method: "POST",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          grant_type: "refresh_token",
+          client_id: client.clientId,
+          refresh_token: second.refresh_token,
+          resource: service.audience,
+          client_secret: client.clientSecret!,
+        }),
+      },
+    );
+    expect(thirdRotation.status, await thirdRotation.clone().text()).toBe(200);
+    const third = (await thirdRotation.json()) as {
+      access_token: string;
+      refresh_token: string;
+    };
+    expect((await sharedClient.authenticate(second.access_token)).status).toBe(
+      "invalid_credential",
+    );
+    expect((await sharedClient.authenticate(third.access_token)).status).toBe(
+      "authenticated",
+    );
+    const lineage = await testEnv.IDENTITY_DB.prepare(
+      `SELECT COUNT(*) AS count,
+              MIN(sequence) AS first_sequence, MAX(sequence) AS last_sequence
+       FROM platform_oauth_refresh_token WHERE family_id =
+         (SELECT family_id FROM platform_oauth_refresh_token
+          WHERE id = (SELECT oauth_refresh_token_id FROM platform_credential WHERE id = ?))`,
+    )
+      .bind(root!.credential_id)
+      .first<{
+        count: number;
+        first_sequence: number;
+        last_sequence: number;
+      }>();
+    expect(lineage).toEqual({
+      count: 4,
+      first_sequence: 0,
+      last_sequence: 3,
+    });
     const rotatedIntrospection = await SELF.fetch(
       "http://localhost/api/auth/oauth2/introspect",
       {
@@ -509,7 +591,7 @@ describe("T07 production OAuth refresh lineage", () => {
         body: new URLSearchParams({
           client_id: client.clientId,
           client_secret: client.clientSecret!,
-          token: successor.access_token,
+          token: third.access_token,
         }),
       },
     );

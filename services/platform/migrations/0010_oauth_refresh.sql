@@ -209,90 +209,102 @@ BEGIN
   ) THEN RAISE(ABORT, 'oauth refresh token consume nonce mismatch') END;
 END;
 
-CREATE TRIGGER IF NOT EXISTS platform_oauth_refresh_root_publish_guard
-BEFORE UPDATE OF state ON platform_oauth_refresh_family
-WHEN OLD.state = 'pending' AND NEW.state = 'active'
- AND EXISTS (
-   SELECT 1 FROM platform_oauth_refresh_token
-   WHERE id = OLD.pending_token_id AND family_id = OLD.id
-     AND predecessor_id IS NULL AND state = 'issued'
- )
-BEGIN
-  SELECT CASE WHEN NOT EXISTS (
-    SELECT 1
-    FROM platform_oauth_refresh_token AS t
-    JOIN platform_oauth_installation AS i ON i.id = NEW.installation_id
-    JOIN platform_oauth_flow AS f ON f.installation_id = i.id
-     AND f.status = 'activated'
-    JOIN oauthRefreshToken AS r ON r.id = t.provider_refresh_row_id
-     AND r.token = t.provider_refresh_token_hash
-     AND r.referenceId = i.id AND r.clientId = i.client_id
-     AND r.userId = i.user_id AND r.revoked IS NULL
-    JOIN oauthAccessToken AS a ON a.id = t.provider_access_row_id
-     AND a.refreshId = t.provider_refresh_row_id
-     AND a.referenceId = i.id AND a.revoked IS NULL
-    JOIN platform_credential AS c ON c.oauth_refresh_token_id = t.id
-     AND c.oauth_provider_row_id = a.id AND c.revoked_at IS NULL
-    WHERE t.id = OLD.pending_token_id AND t.family_id = NEW.id
-      AND t.state = 'issued'
-      AND i.id = NEW.installation_id AND i.active = 1
-      AND f.installation_id = i.id
-      AND OLD.pending_consumption_nonce = t.consumption_nonce
-  ) THEN RAISE(ABORT, 'oauth refresh root publication incomplete') END;
-END;
+-- Older drafts used two conditional guards.  The rotation draft treated the
+-- family pending_token_id as the successor and therefore either skipped the
+-- first rotation or rejected every later one.  Keep the slot's documented
+-- role as the predecessor currently fenced, and assert that publication has
+-- either a complete root mapping or a complete successor mapping.
+DROP TRIGGER IF EXISTS platform_oauth_refresh_root_publish_guard;
+DROP TRIGGER IF EXISTS platform_oauth_refresh_successor_publish_guard;
 
-CREATE TRIGGER IF NOT EXISTS platform_oauth_refresh_successor_publish_guard
+CREATE TRIGGER IF NOT EXISTS platform_oauth_refresh_publication_guard
 BEFORE UPDATE OF state ON platform_oauth_refresh_family
 WHEN OLD.state = 'pending' AND NEW.state = 'active'
- AND EXISTS (
-   SELECT 1 FROM platform_oauth_refresh_token AS t
-   WHERE t.id = OLD.pending_token_id AND t.family_id = OLD.id
-     AND t.predecessor_id IS NOT NULL
- )
 BEGIN
-  SELECT CASE WHEN NOT EXISTS (
-    SELECT 1
-    FROM platform_oauth_refresh_token AS successor
-    JOIN platform_oauth_refresh_token AS predecessor
-      ON predecessor.id = successor.predecessor_id
-     AND predecessor.family_id = successor.family_id
-     AND predecessor.state = 'consumed'
-     AND predecessor.consumption_nonce = successor.predecessor_consumption_nonce
-    JOIN platform_oauth_installation AS i ON i.id = NEW.installation_id
-    JOIN platform_oauth_client AS pc ON pc.client_id = i.client_id
-     AND pc.active = 1 AND pc.refresh_enabled = 1
-    JOIN oauthClient AS oc ON oc.clientId = i.client_id AND oc.disabled = 0
-    JOIN platform_service AS service ON service.service_id = i.service_id
-     AND service.audience = i.audience AND service.disabled = 0
-    JOIN oauthResource AS resource ON resource.identifier = i.audience
-     AND resource.disabled = 0 AND resource.refreshTokenTtl IS NOT NULL
-     AND resource.refreshTokenTtl > 0
-    JOIN member AS membership ON membership.id = i.membership_id
-     AND membership.userId = i.user_id AND membership.organizationId = i.organization_id
-    JOIN "user" AS subject_user ON subject_user.id = i.user_id
-     AND subject_user.disabledAt IS NULL
-    JOIN organization AS owning_org ON owning_org.id = i.organization_id
-     AND owning_org.suspendedAt IS NULL
-    JOIN oauthConsent AS consent ON consent.clientId = i.client_id
-     AND consent.userId = i.user_id AND consent.referenceId = i.id
-    JOIN oauthRefreshToken AS r ON r.id = successor.provider_refresh_row_id
-     AND r.token = successor.provider_refresh_token_hash
-     AND r.referenceId = i.id AND r.clientId = i.client_id
-     AND r.userId = i.user_id AND r.revoked IS NULL
-    JOIN oauthAccessToken AS a ON a.id = successor.provider_access_row_id
-     AND a.refreshId = successor.provider_refresh_row_id
-     AND a.referenceId = i.id AND a.revoked IS NULL
-    JOIN platform_credential AS c ON c.oauth_refresh_token_id = successor.id
-     AND c.oauth_provider_row_id = a.id AND c.revoked_at IS NULL
-    JOIN platform_credential AS predecessor_credential
-     ON predecessor_credential.oauth_refresh_token_id = predecessor.id
-     AND predecessor_credential.revoked_at IS NOT NULL
-     AND predecessor_credential.replaced_by_id = successor.id
-    WHERE successor.id = OLD.pending_token_id AND successor.family_id = NEW.id
-      AND successor.state = 'issued'
-      AND OLD.pending_consumption_nonce = successor.predecessor_consumption_nonce
-      AND i.id = NEW.installation_id AND i.active = 1
-  ) THEN RAISE(ABORT, 'oauth refresh successor publication incomplete') END;
+  SELECT CASE WHEN NOT (
+    EXISTS (
+      SELECT 1
+      FROM platform_oauth_refresh_token AS t
+      JOIN platform_oauth_installation AS i ON i.id = t.installation_id
+       AND i.id = NEW.installation_id AND i.active = 1
+       AND i.revoked_at IS NULL
+      JOIN platform_oauth_flow AS oauth_flow
+        ON oauth_flow.installation_id = i.id
+       AND oauth_flow.status = 'activated'
+      JOIN oauthRefreshToken AS r ON r.id = t.provider_refresh_row_id
+       AND r.token = t.provider_refresh_token_hash
+       AND r.referenceId = i.id AND r.clientId = i.client_id
+       AND r.userId = i.user_id AND r.revoked IS NULL
+       AND r.expiresAt > OLD.updated_at
+      JOIN oauthAccessToken AS a ON a.id = t.provider_access_row_id
+       AND a.refreshId = r.id
+       AND a.referenceId = i.id AND a.clientId = i.client_id
+       AND a.userId = i.user_id AND a.revoked IS NULL
+       AND a.expiresAt > OLD.updated_at
+      JOIN platform_credential AS c ON c.oauth_refresh_token_id = t.id
+       AND c.oauth_provider_row_id = a.id
+       AND c.oauth_provider_token_hash = a.token
+       AND c.revoked_at IS NULL AND c.expires_at > OLD.updated_at
+      WHERE t.id = OLD.pending_token_id AND t.family_id = NEW.id
+        AND t.predecessor_id IS NULL AND t.state = 'issued'
+        AND t.consumption_nonce = OLD.pending_consumption_nonce
+    )
+    OR EXISTS (
+      SELECT 1
+      FROM platform_oauth_refresh_token AS successor
+      JOIN platform_oauth_refresh_token AS predecessor
+        ON predecessor.id = successor.predecessor_id
+       AND predecessor.family_id = successor.family_id
+       AND predecessor.state = 'consumed'
+       AND predecessor.consumption_nonce = OLD.pending_consumption_nonce
+       AND successor.predecessor_consumption_nonce = OLD.pending_consumption_nonce
+       AND predecessor.sequence + 1 = successor.sequence
+      JOIN platform_oauth_installation AS i ON i.id = successor.installation_id
+       AND i.id = NEW.installation_id AND i.active = 1
+       AND i.revoked_at IS NULL
+      JOIN platform_oauth_client AS pc ON pc.client_id = i.client_id
+       AND pc.service_id = i.service_id
+       AND pc.active = 1 AND pc.refresh_enabled = 1
+      JOIN oauthClient AS oc ON oc.clientId = i.client_id
+       AND oc.disabled = 0 AND oc.grantTypes LIKE '%refresh_token%'
+      JOIN platform_service AS service ON service.service_id = i.service_id
+       AND service.audience = i.audience AND service.disabled = 0
+      JOIN oauthResource AS resource ON resource.identifier = i.audience
+       AND resource.disabled = 0 AND resource.refreshTokenTtl > 0
+      JOIN member AS membership ON membership.id = i.membership_id
+       AND membership.userId = i.user_id
+       AND membership.organizationId = i.organization_id
+      JOIN "user" AS subject_user ON subject_user.id = i.user_id
+       AND subject_user.disabledAt IS NULL
+      JOIN organization AS owning_org ON owning_org.id = i.organization_id
+       AND owning_org.suspendedAt IS NULL
+      JOIN oauthConsent AS consent ON consent.clientId = i.client_id
+       AND consent.userId = i.user_id AND consent.referenceId = i.id
+      JOIN oauthRefreshToken AS r ON r.id = successor.provider_refresh_row_id
+       AND r.token = successor.provider_refresh_token_hash
+       AND r.referenceId = i.id AND r.clientId = i.client_id
+       AND r.userId = i.user_id AND r.revoked IS NULL
+       AND r.expiresAt > OLD.updated_at
+      JOIN oauthAccessToken AS a ON a.id = successor.provider_access_row_id
+       AND a.refreshId = r.id
+       AND a.referenceId = i.id AND a.clientId = i.client_id
+       AND a.userId = i.user_id AND a.revoked IS NULL
+       AND a.expiresAt > OLD.updated_at
+      JOIN platform_credential AS c ON c.oauth_refresh_token_id = successor.id
+       AND c.oauth_provider_row_id = a.id
+       AND c.oauth_provider_token_hash = a.token
+       AND c.revoked_at IS NULL AND c.expires_at > OLD.updated_at
+      JOIN platform_credential AS predecessor_credential
+        ON predecessor_credential.oauth_refresh_token_id = predecessor.id
+       AND predecessor_credential.revoked_at IS NOT NULL
+       AND predecessor_credential.replaced_by_id = c.id
+      WHERE successor.family_id = NEW.id
+        AND successor.predecessor_id = OLD.pending_token_id
+        AND successor.state = 'issued'
+        AND successor.consumption_nonce IS NULL
+        AND i.id = NEW.installation_id
+    )
+  ) THEN RAISE(ABORT, 'oauth refresh publication incomplete') END;
 END;
 
 CREATE TRIGGER IF NOT EXISTS platform_oauth_refresh_credential_shape_insert

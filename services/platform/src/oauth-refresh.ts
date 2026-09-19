@@ -352,76 +352,74 @@ function authorityMatches(
   const bindingScopes = requestedScopes;
   return Boolean(
     row.state === "issued" &&
-      row.family_state === "active" &&
-      row.family_expires_at > Date.now() &&
-      row.installation_active === 1 &&
-      row.installation_revoked_at === null &&
-      row.client_active === 1 &&
-      row.client_disabled === 0 &&
-      row.client_id === client.clientId &&
-      row.service_id === client.serviceId &&
-      client.refreshEnabled &&
-      row.service_disabled === 0 &&
-      row.org_suspended_at === null &&
-      row.user_disabled_at === null &&
-      row.resource_refresh_ttl !== null &&
-      row.resource_refresh_ttl > 0 &&
-      registeredGrantTypes?.includes("refresh_token") &&
-      row.provider_refresh_revoked === null &&
-      row.provider_refresh_expires !== null &&
-      row.provider_refresh_expires > Date.now() &&
-      row.expires_at > Date.now() &&
-      row.audience === client.audience &&
-      familyResources?.length === 1 &&
-      familyResources[0] === client.audience &&
-      providerResources?.length === 1 &&
-      providerResources[0] === client.audience &&
-      providerAccessResources?.length === 1 &&
-      providerAccessResources[0] === client.audience &&
-      consentResources?.length === 1 &&
-      consentResources[0] === client.audience &&
-      providerScopes !== null &&
-      providerAccessScopes !== null &&
-      providerAccessScopes.includes("offline_access") ===
-        providerScopes.includes("offline_access") &&
-      consentScopes !== null &&
-      clientCapabilities !== null &&
-      registeredScopes !== null &&
-      serviceCapabilities !== null &&
-      rowCapabilities !== null &&
-      familyCapabilities !== null &&
-      subset(rowCapabilities, familyCapabilities) &&
-      subset(rowCapabilities, client.capabilities) &&
-      subset(rowCapabilities, clientCapabilities) &&
-      subset(rowCapabilities, serviceCapabilities) &&
-      subset(
-        rowCapabilities,
-        providerScopes.filter((scope) => scope !== "offline_access"),
-      ) &&
-      subset(
-        rowCapabilities,
-        consentScopes.filter((scope) => scope !== "offline_access"),
-      ) &&
-      subset(
-        rowCapabilities,
-        providerAccessScopes.filter((scope) => scope !== "offline_access"),
-      ) &&
-      row.provider_refresh_id === row.provider_refresh_row_id &&
-      row.provider_refresh_token === row.provider_refresh_token_hash &&
-      row.provider_refresh_client_id === row.client_id &&
-      row.provider_refresh_user_id === row.user_id &&
-      row.provider_refresh_reference_id === row.installation_id &&
-      row.provider_access_id === row.provider_access_row_id &&
-      row.provider_access_token.length > 0 &&
-      row.provider_access_client_id === row.client_id &&
-      row.provider_access_user_id === row.user_id &&
-      row.provider_access_reference_id === row.installation_id &&
-      row.provider_access_refresh_id === row.provider_refresh_row_id &&
-      row.provider_access_revoked === null &&
-      row.provider_access_expires !== null &&
-      row.provider_access_expires > Date.now() &&
-      (requestedResource === null || requestedResource === client.audience) &&
-      (bindingScopes === null || subset(bindingScopes, providerScopes)),
+    row.family_state === "active" &&
+    row.family_expires_at > Date.now() &&
+    row.installation_active === 1 &&
+    row.installation_revoked_at === null &&
+    row.client_active === 1 &&
+    row.client_disabled === 0 &&
+    row.client_id === client.clientId &&
+    row.service_id === client.serviceId &&
+    client.refreshEnabled &&
+    row.service_disabled === 0 &&
+    row.org_suspended_at === null &&
+    row.user_disabled_at === null &&
+    row.resource_refresh_ttl !== null &&
+    row.resource_refresh_ttl > 0 &&
+    registeredGrantTypes?.includes("refresh_token") &&
+    row.provider_refresh_revoked === null &&
+    row.provider_refresh_expires !== null &&
+    row.provider_refresh_expires > Date.now() &&
+    row.expires_at > Date.now() &&
+    row.audience === client.audience &&
+    familyResources?.length === 1 &&
+    familyResources[0] === client.audience &&
+    providerResources?.length === 1 &&
+    providerResources[0] === client.audience &&
+    providerAccessResources?.length === 1 &&
+    providerAccessResources[0] === client.audience &&
+    consentResources?.length === 1 &&
+    consentResources[0] === client.audience &&
+    providerScopes !== null &&
+    providerAccessScopes !== null &&
+    providerAccessScopes.includes("offline_access") ===
+      providerScopes.includes("offline_access") &&
+    consentScopes !== null &&
+    clientCapabilities !== null &&
+    registeredScopes !== null &&
+    serviceCapabilities !== null &&
+    rowCapabilities !== null &&
+    familyCapabilities !== null &&
+    subset(rowCapabilities, familyCapabilities) &&
+    subset(rowCapabilities, client.capabilities) &&
+    subset(rowCapabilities, clientCapabilities) &&
+    subset(rowCapabilities, serviceCapabilities) &&
+    subset(
+      rowCapabilities,
+      providerScopes.filter((scope) => scope !== "offline_access"),
+    ) &&
+    subset(
+      rowCapabilities,
+      consentScopes.filter((scope) => scope !== "offline_access"),
+    ) &&
+    subset(
+      rowCapabilities,
+      providerAccessScopes.filter((scope) => scope !== "offline_access"),
+    ) &&
+    row.provider_refresh_id === row.provider_refresh_row_id &&
+    row.provider_refresh_token === row.provider_refresh_token_hash &&
+    row.provider_refresh_client_id === row.client_id &&
+    row.provider_refresh_user_id === row.user_id &&
+    row.provider_refresh_reference_id === row.installation_id &&
+    row.provider_access_id === row.provider_access_row_id &&
+    row.provider_access_token.length > 0 &&
+    row.provider_access_client_id === row.client_id &&
+    row.provider_access_user_id === row.user_id &&
+    row.provider_access_reference_id === row.installation_id &&
+    row.provider_access_refresh_id === row.provider_refresh_row_id &&
+    row.provider_access_revoked === null &&
+    (requestedResource === null || requestedResource === client.audience) &&
+    (bindingScopes === null || subset(bindingScopes, providerScopes)),
   );
 }
 
@@ -706,10 +704,9 @@ export async function prepareOAuthRefresh(
              ON provider_access.id = token.provider_access_row_id
             AND provider_access.refreshId = provider_refresh.id
             AND provider_access.clientId = family.client_id
-            AND provider_access.userId = family.user_id
+           AND provider_access.userId = family.user_id
             AND provider_access.referenceId = family.installation_id
             AND provider_access.revoked IS NULL
-            AND provider_access.expiresAt > ?
             AND json_array_length(json_extract(provider_access.resources, '$')) = 1
             AND json_extract(json_extract(provider_access.resources, '$'), '$[0]') = family.audience
            WHERE family.id = ? AND family.state = 'active'
@@ -762,7 +759,6 @@ export async function prepareOAuthRefresh(
       tokenHash,
       row.id,
       tokenHash,
-      fenceNow,
       fenceNow,
       row.family_id,
       fenceNow,
@@ -1259,9 +1255,16 @@ export async function completeOAuthRefresh(
   const successorId = crypto.randomUUID();
   const credentialId = crypto.randomUUID();
   const now = Date.now();
-  const successorExpiry = Math.min(
-    rows.access.expiresAt,
+  // The refresh ledger follows the provider refresh lifetime and the
+  // Platform family ceiling.  The access credential has its own, shorter
+  // provider access lifetime.  Coupling them would strand a valid refresh
+  // token as soon as its predecessor access token expires.
+  const refreshLedgerExpires = Math.min(
     rows.refresh.expiresAt,
+    predecessor.family_expires_at,
+  );
+  const accessCredentialExpires = Math.min(
+    rows.access.expiresAt,
     predecessor.family_expires_at,
   );
   const batch = [
@@ -1302,7 +1305,7 @@ export async function completeOAuthRefresh(
         predecessor.sequence + 1,
         JSON.stringify(providerResources),
         JSON.stringify(effectiveCapabilities),
-        successorExpiry,
+        refreshLedgerExpires,
         now,
         now,
       ),
@@ -1327,7 +1330,7 @@ export async function completeOAuthRefresh(
         predecessor.grant_id,
         predecessor.audience,
         JSON.stringify(effectiveCapabilities),
-        successorExpiry,
+        accessCredentialExpires,
         now,
         predecessor.installation_id,
         rows.access.id,
@@ -1597,11 +1600,8 @@ export async function completeInitialOAuthRefresh(
   const now = Date.now();
   const epoch = context.consumed_at ?? now;
   const familyExpires = epoch + FAMILY_LIFETIME_MS;
-  const rootExpires = Math.min(
-    access.expiresAt,
-    refresh.expiresAt,
-    familyExpires,
-  );
+  const rootRefreshExpires = Math.min(refresh.expiresAt, familyExpires);
+  const rootAccessExpires = Math.min(access.expiresAt, familyExpires);
   const capabilitiesJson = JSON.stringify(requestedCapabilities);
   const resourcesJson = JSON.stringify([context.audience]);
   const initialStatements = [
@@ -1657,7 +1657,7 @@ export async function completeInitialOAuthRefresh(
         access.id,
         resourcesJson,
         capabilitiesJson,
-        rootExpires,
+        rootRefreshExpires,
         rootNonce,
         now,
         now,
@@ -1695,7 +1695,7 @@ export async function completeInitialOAuthRefresh(
         credentialId,
         await hashOpaque(returned.accessToken),
         capabilitiesJson,
-        rootExpires,
+        rootAccessExpires,
         now,
         access.id,
         accessHash,

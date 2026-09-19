@@ -13,7 +13,10 @@ provider adoption, consumer integration, or full Platform MVP acceptance.
   refresh-token link on `platform_credential`. SQLite triggers enforce family
   authority snapshots, monotone lineage capabilities, the active-to-pending
   consume fence, separate root and successor publication assertions, and
-  immutable refresh credential bindings.
+  immutable refresh credential bindings. The pending slot always names the
+  predecessor being consumed; one unconditional publication assertion accepts
+  only a complete root mapping or a successor linked to that predecessor and
+  its consumption nonce.
 - Trusted provisioning accepts `--refresh` and writes the provider refresh
   grant, resource refresh lifetime and Platform mirror together. The default
   remains authorization-code access only. `offline_access` is protocol consent
@@ -43,10 +46,10 @@ provider adoption, consumer integration, or full Platform MVP acceptance.
 - A confidential `client_secret_post` client completes PKCE and explicit
   `offline_access` consent, publishes an exact root family and credential,
   verifies through the shared client and introspection, survives deletion of
-  the original flow and browser session, rotates to an exact successor, rejects
-  the predecessor access credential, and terminalizes a replay after deleting
-  the predecessor provider rows. An excess-scope request leaves the active root
-  untouched.
+  the original flow and browser session, rotates three successive times (the
+  first after its predecessor access row is expired), rejects each predecessor
+  access credential, and terminalizes a replay after deleting the original
+  provider rows. An excess-scope request leaves the active root untouched.
 - A public `none` refresh-enabled client receives a normal access-only response
   when `offline_access` is omitted: no family is created, no refresh value is
   returned, and the provider access row has `refreshId = NULL`. A code-only
