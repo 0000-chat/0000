@@ -1,5 +1,18 @@
-import { readFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { spawnSync } from "node:child_process";
+import {
+  copyFileSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { expect, test } from "bun:test";
+import { unstable_getVarsForDev } from "wrangler";
 import {
   buildPlatformMiniflareRateLimits,
   buildPlatformWranglerRateLimits,
@@ -9,6 +22,28 @@ import {
   createPlatformWranglerConfig,
   normalizeGeneratedTypes,
 } from "./wrangler-config";
+
+const sourceServiceRoot = dirname(dirname(fileURLToPath(import.meta.url)));
+
+function runFixtureWrangler(
+  fixtureServiceRoot: string,
+  args: readonly string[],
+): {
+  status: number | null;
+  stdout: string;
+  stderr: string;
+} {
+  const result = spawnSync("bun", ["scripts/wrangler-config.ts", ...args], {
+    cwd: fixtureServiceRoot,
+    encoding: "utf8",
+  });
+  if (result.error) throw result.error;
+  return {
+    status: result.status,
+    stdout: result.stdout,
+    stderr: result.stderr,
+  };
+}
 
 const customPolicy = parsePlatformRateLimitPolicyJson(
   JSON.stringify({
@@ -71,3 +106,110 @@ test("normalizes generated Wrangler provenance without changing source content",
     readFileSync(new URL("../wrangler.jsonc", import.meta.url), "utf8"),
   ).toContain('"PLATFORM_RATE_LIMIT_POLICY": ""');
 });
+
+test("keeps service-relative dev vars and local D1 state across wrapper invocations", async () => {
+  const marker = `t12-wrangler-marker-${randomUUID()}`;
+  const fixtureRoot = join(tmpdir(), `platform-t12-wrangler-${randomUUID()}`);
+  const fixtureServiceRoot = join(fixtureRoot, "services/platform");
+  const devVarsPath = join(fixtureServiceRoot, ".dev.vars");
+  const wranglerConfigPath = join(fixtureServiceRoot, "wrangler.jsonc");
+  const generatedConfigPath = join(
+    fixtureServiceRoot,
+    `.t12-wrangler-config-${randomUUID()}.jsonc`,
+  );
+  const tableName = "platform_t12_wrapper_marker";
+  const writeSql = `DELETE FROM ${tableName}; INSERT INTO ${tableName} (id, marker) VALUES ('probe', '${marker}');`;
+
+  try {
+    mkdirSync(join(fixtureServiceRoot, "scripts"), { recursive: true });
+    mkdirSync(join(fixtureServiceRoot, "src"), { recursive: true });
+    mkdirSync(join(fixtureServiceRoot, "migrations"), { recursive: true });
+    copyFileSync(
+      join(sourceServiceRoot, "scripts/wrangler-config.ts"),
+      join(fixtureServiceRoot, "scripts/wrangler-config.ts"),
+    );
+    copyFileSync(
+      join(sourceServiceRoot, "src/rate-limit-policy.ts"),
+      join(fixtureServiceRoot, "src/rate-limit-policy.ts"),
+    );
+    copyFileSync(join(sourceServiceRoot, "wrangler.jsonc"), wranglerConfigPath);
+    writeFileSync(
+      join(fixtureServiceRoot, "src/worker.ts"),
+      "export default { fetch: () => new Response('ok') };\n",
+    );
+    writeFileSync(
+      join(fixtureServiceRoot, "migrations/0001_fixture.sql"),
+      `CREATE TABLE IF NOT EXISTS ${tableName} (id TEXT PRIMARY KEY, marker TEXT NOT NULL);\n`,
+    );
+    symlinkSync(
+      join(sourceServiceRoot, "../../node_modules"),
+      join(fixtureRoot, "node_modules"),
+      "dir",
+    );
+    writeFileSync(devVarsPath, `PLATFORM_T12_DEV_VARS_MARKER=${marker}\n`);
+    const fixtureWrapper = await import(
+      pathToFileURL(join(fixtureServiceRoot, "scripts/wrangler-config.ts")).href
+    );
+    writeFileSync(
+      generatedConfigPath,
+      fixtureWrapper.createPlatformWranglerConfig(),
+      { mode: 0o600 },
+    );
+    const generatedConfig = JSON.parse(
+      readFileSync(generatedConfigPath, "utf8"),
+    ) as { vars: Record<string, string> };
+    const vars = unstable_getVarsForDev(
+      generatedConfigPath,
+      undefined,
+      generatedConfig.vars,
+      undefined,
+      true,
+    );
+    expect(vars.PLATFORM_T12_DEV_VARS_MARKER).toEqual({
+      type: "secret_text",
+      value: marker,
+    });
+
+    const migration = runFixtureWrangler(fixtureServiceRoot, [
+      "d1",
+      "migrations",
+      "apply",
+      "platform-identity",
+      "--local",
+    ]);
+    expect(migration.status, migration.stderr).toBe(0);
+    const write = runFixtureWrangler(fixtureServiceRoot, [
+      "d1",
+      "execute",
+      "platform-identity",
+      "--local",
+      "--command",
+      writeSql,
+      "--yes",
+    ]);
+    expect(write.status, write.stderr).toBe(0);
+    const read = runFixtureWrangler(fixtureServiceRoot, [
+      "d1",
+      "execute",
+      "platform-identity",
+      "--local",
+      "--command",
+      `SELECT marker FROM ${tableName} WHERE id = 'probe'`,
+      "--json",
+    ]);
+    expect(read.status, read.stderr).toBe(0);
+    expect(read.stdout).toContain(marker);
+    const cleanup = runFixtureWrangler(fixtureServiceRoot, [
+      "d1",
+      "execute",
+      "platform-identity",
+      "--local",
+      "--command",
+      `DROP TABLE IF EXISTS ${tableName}`,
+      "--yes",
+    ]);
+    expect(cleanup.status, cleanup.stderr).toBe(0);
+  } finally {
+    rmSync(fixtureRoot, { recursive: true, force: true });
+  }
+}, 30_000);

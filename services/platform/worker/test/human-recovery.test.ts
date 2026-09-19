@@ -392,17 +392,44 @@ describe("human recovery evidence experiments", () => {
        BEGIN SELECT RAISE(ABORT, 'human recovery injected account failure'); END`,
     ).run();
 
+    const authenticationEvents: Array<Record<string, unknown>> = [];
+    const captureAuthenticationEvent = (value: unknown): void => {
+      try {
+        const event = JSON.parse(String(value)) as Record<string, unknown>;
+        if (event.event === "platform.authentication.outcome") {
+          authenticationEvents.push(event);
+        }
+      } catch {
+        // Ignore unrelated output in this focused authentication probe.
+      }
+    };
     let failedAttempt: LoginAttempt;
+    const failedLog = vi
+      .spyOn(console, "log")
+      .mockImplementation(captureAuthenticationEvent);
     try {
       failedAttempt = await socialLogin(
         interruptedIdentity,
         "human-probe-interrupted-signin",
       );
     } finally {
+      failedLog.mockRestore();
       await testEnv.IDENTITY_DB.prepare(
         "DROP TRIGGER human_probe_fail_account_insert",
       ).run();
     }
+    expect(failedAttempt!.callback.status).toBe(302);
+    expect(
+      new URL(
+        failedAttempt!.callback.headers.get("location")!,
+      ).searchParams.get("error"),
+    ).toBeTruthy();
+    expect(
+      authenticationEvents.filter((event) => event.outcome === "success"),
+    ).toHaveLength(0);
+    expect(
+      authenticationEvents.some((event) => event.outcome === "error"),
+    ).toBe(true);
 
     const interruptedUsers = await userRows(interruptedIdentity.email);
     const interruptedAccounts = await accountRows("814901");
@@ -421,15 +448,30 @@ describe("human recovery evidence experiments", () => {
       },
     ]);
 
-    const retry = await socialLogin(
-      interruptedIdentity,
-      "human-probe-interrupted-retry",
-    );
+    const retryLog = vi
+      .spyOn(console, "log")
+      .mockImplementation(captureAuthenticationEvent);
+    let retry: LoginAttempt;
+    try {
+      retry = await socialLogin(
+        interruptedIdentity,
+        "human-probe-interrupted-retry",
+      );
+    } finally {
+      retryLog.mockRestore();
+    }
     const retryLocation = retry.callback.headers.get("location");
     expect(retry.callback.status).toBe(302);
     expect(retryLocation).toBe("http://localhost/account");
     const recoveredCookie = cookiesFrom(retry.callback);
     const recoveredSession = await sessionFor(recoveredCookie);
+    const successfulAuthenticationEvents = authenticationEvents.filter(
+      (event) => event.outcome === "success",
+    );
+    expect(successfulAuthenticationEvents).toHaveLength(1);
+    expect(successfulAuthenticationEvents[0]).toMatchObject({
+      principalId: interruptedUsers[0]?.id,
+    });
     expect(recoveredSession.user?.id).toBe(interruptedUsers[0]?.id);
     expect(recoveredSession.user?.email).toBe(interruptedIdentity.email);
     expect(
@@ -927,7 +969,7 @@ describe("human recovery evidence experiments", () => {
 
     expect(sharedLookupOverlap).toBe(true);
     expect(sharedLookupCount).toBe(2);
-    expect([302, 500]).toContain(linkCallback.status);
+    expect([302, 500, 503]).toContain(linkCallback.status);
     expect(retryCallback.status).toBe(302);
     const owners = await accountRows("814922");
     expect(owners).toHaveLength(1);

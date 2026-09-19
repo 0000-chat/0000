@@ -175,6 +175,12 @@ function requestAuth(
         signal.failed = true;
         signal.preserveProtocol ||= oauthLink;
       },
+      onSessionCreated: (request, userId) => {
+        emitPlatformDiagnostic("platform.authentication.outcome", "success", {
+          request,
+          principalId: userId,
+        });
+      },
     }),
     signal,
   };
@@ -903,7 +909,14 @@ async function unlinkSocialAccount(
     )
     .bind(body.accountId, current.user.id, current.user.id, body.accountId)
     .run();
-  if (unlinked.meta.changes === 1) return json(200, { status: true });
+  if (unlinked.meta.changes === 1) {
+    emitPlatformDiagnostic("platform.provider.unlinked", "success", {
+      request,
+      principalId: current.user.id,
+      resourceId: body.accountId,
+    });
+    return json(200, { status: true });
+  }
 
   const ownedAccount = await database
     .prepare("SELECT id FROM account WHERE id = ? AND userId = ?")
@@ -4276,17 +4289,30 @@ async function completePlatformResponse(
   response: Response,
 ): Promise<Response> {
   const pathname = normalizedPathname(new URL(request.url).pathname);
-  if (pathname.startsWith("/api/auth/") || pathname === "/login") {
-    const outcome =
-      response.status === 429
-        ? "rate_limited"
-        : response.status === 401 || response.status === 403
-          ? "denied"
-          : response.status >= 500
-            ? "unavailable"
-            : response.status < 400
-              ? "success"
-              : "error";
+  if (!pathname.startsWith("/api/auth/")) return response;
+  const errorRedirect = (() => {
+    if (response.status < 300 || response.status >= 400) return false;
+    const location = response.headers.get("location");
+    if (!location) return false;
+    try {
+      return new URL(location, "http://platform.invalid").searchParams.has(
+        "error",
+      );
+    } catch {
+      return false;
+    }
+  })();
+  const outcome =
+    response.status === 429
+      ? "rate_limited"
+      : response.status === 401 || response.status === 403
+        ? "denied"
+        : response.status >= 500
+          ? "unavailable"
+          : response.status >= 400 || errorRedirect
+            ? "error"
+            : null;
+  if (outcome) {
     emitPlatformDiagnostic("platform.authentication.outcome", outcome, {
       request,
     });

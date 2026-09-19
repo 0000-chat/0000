@@ -278,6 +278,7 @@ export function createAuth(
     oauthScopes?: PlatformOAuthScopes;
     oauthRefreshInstallationId?: string;
     onDatabaseFailure?: (oauthLink: boolean) => void;
+    onSessionCreated?: (request: Request | undefined, userId: string) => void;
   } = {},
 ) {
   const schema = authSchema;
@@ -394,16 +395,6 @@ export function createAuth(
               },
             };
           },
-          after: async (user, context) => {
-            emitPlatformDiagnostic(
-              "platform.authentication.outcome",
-              "success",
-              {
-                request: context?.request,
-                principalId: user.id,
-              },
-            );
-          },
         },
       },
       session: {
@@ -423,6 +414,7 @@ export function createAuth(
             }
           },
           after: async (session, context) => {
+            options.onSessionCreated?.(context?.request, session.userId);
             emitPlatformDiagnostic("platform.session.signed_in", "success", {
               request: context?.request,
               principalId: session.userId,

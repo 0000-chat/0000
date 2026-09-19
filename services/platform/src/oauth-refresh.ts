@@ -437,11 +437,11 @@ async function terminateRefreshFamily(
   reason: string,
   terminalState: "revoked" | "quarantined" = "revoked",
   replayTokenId: string | null = null,
-): Promise<void> {
+): Promise<boolean> {
   const now = Date.now();
   const tokenTerminalState =
     terminalState === "quarantined" ? "quarantined" : "revoked";
-  await database.batch([
+  const results = await database.batch([
     database
       .prepare(
         `UPDATE platform_oauth_refresh_family
@@ -498,6 +498,7 @@ async function terminateRefreshFamily(
       )
       .bind(now, familyId),
   ]);
+  return results.some((entry) => entry.meta.changes > 0);
 }
 
 async function parseReturnedTokens(
@@ -1982,8 +1983,10 @@ export async function revokeOAuthInstallation(
     )
     .bind(installationId)
     .first<{ id: string }>();
-  if (family) {
-    await terminateRefreshFamily(database, family.id, reason);
+  let committed = false;
+  if (family && (await terminateRefreshFamily(database, family.id, reason))) {
+    committed = true;
+    onCommitted?.(installationId);
   }
   const now = Date.now();
   const result = await database.batch([
@@ -2023,7 +2026,7 @@ export async function revokeOAuthInstallation(
       .prepare(`DELETE FROM oauthConsent WHERE referenceId = ?`)
       .bind(installationId),
   ]);
-  if (result.some((entry) => entry.meta.changes > 0)) {
+  if (result.some((entry) => entry.meta.changes > 0) && !committed) {
     onCommitted?.(installationId);
   }
   return result.some((entry) => entry.meta.changes > 0);

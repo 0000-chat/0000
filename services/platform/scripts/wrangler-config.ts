@@ -1,5 +1,5 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync, rmSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -119,8 +119,14 @@ function commandArguments(args: readonly string[]): readonly string[] {
 }
 
 function main(args: readonly string[]): void {
-  const directory = mkdtempSync(join(tmpdir(), "0000-platform-wrangler-"));
-  const generatedConfig = join(directory, "wrangler.platform.jsonc");
+  // Wrangler resolves project-local files and default local persistence from
+  // the generated config's directory. Keep only the policy-specific config
+  // temporary while placing it beside the service-owned wrangler.jsonc so
+  // .dev.vars and .wrangler/state remain the normal Platform roots.
+  const generatedConfig = join(
+    serviceRoot,
+    `.wrangler.platform.${process.pid}.${randomUUID()}.jsonc`,
+  );
   try {
     writeFileSync(
       generatedConfig,
@@ -151,7 +157,7 @@ function main(args: readonly string[]): void {
       );
     }
   } finally {
-    rmSync(directory, { force: true, recursive: true });
+    rmSync(generatedConfig, { force: true });
   }
 }
 
