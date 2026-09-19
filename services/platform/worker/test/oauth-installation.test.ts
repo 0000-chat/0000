@@ -2292,6 +2292,7 @@ describe("T06 production OAuth installation", () => {
     };
 
     await expectAuthenticated();
+    await expectIntrospection(true);
     await testEnv.IDENTITY_DB.prepare(
       "UPDATE platform_oauth_client SET active = 0 WHERE client_id = ?",
     )
@@ -2305,6 +2306,7 @@ describe("T06 production OAuth installation", () => {
       .bind(client.clientId)
       .run();
     await expectAuthenticated();
+    await expectIntrospection(true);
 
     await testEnv.IDENTITY_DB.prepare(
       "UPDATE oauthClient SET disabled = 1 WHERE clientId = ?",
@@ -2319,6 +2321,7 @@ describe("T06 production OAuth installation", () => {
       .bind(client.clientId)
       .run();
     await expectAuthenticated();
+    await expectIntrospection(true);
 
     await testEnv.IDENTITY_DB.prepare(
       "UPDATE platform_service SET disabled = 1 WHERE service_id = ?",
@@ -2333,6 +2336,7 @@ describe("T06 production OAuth installation", () => {
       .bind(service.serviceId)
       .run();
     await expectAuthenticated();
+    await expectIntrospection(true);
 
     await testEnv.IDENTITY_DB.prepare(
       "UPDATE platform_service SET allowed_capabilities = ? WHERE service_id = ?",
@@ -2347,6 +2351,7 @@ describe("T06 production OAuth installation", () => {
       .bind(JSON.stringify(["resource:read"]), service.serviceId)
       .run();
     await expectAuthenticated();
+    await expectIntrospection(true);
 
     await testEnv.IDENTITY_DB.prepare(
       "UPDATE organization SET suspendedAt = ? WHERE id = ?",
@@ -2361,6 +2366,7 @@ describe("T06 production OAuth installation", () => {
       .bind(organizationId)
       .run();
     await expectAuthenticated();
+    await expectIntrospection(true);
 
     await testEnv.IDENTITY_DB.prepare(
       'UPDATE "user" SET disabledAt = ? WHERE id = ?',
@@ -2375,6 +2381,7 @@ describe("T06 production OAuth installation", () => {
       .bind(user.userId)
       .run();
     await expectAuthenticated();
+    await expectIntrospection(true);
 
     await testEnv.IDENTITY_DB.prepare(
       "UPDATE oauthConsent SET scopes = '[]' WHERE referenceId = ?",
@@ -2389,6 +2396,7 @@ describe("T06 production OAuth installation", () => {
       .bind(JSON.stringify(["resource:read"]), installationId)
       .run();
     await expectAuthenticated();
+    await expectIntrospection(true);
   });
 
   it("fails closed at first-party final publication when organization authority changes", async () => {
