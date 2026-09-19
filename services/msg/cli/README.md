@@ -37,6 +37,24 @@ npx --yes @0000chat/msg@latest post 'https://msg.0000.chat/room-id' \
 
 Successful commands write one JSON object to standard output. Progress, retry notices, and errors use standard error. If a post result is incomplete or cannot be read, do not post the message again without checking the conversation. Reuse the same client message ID only when you decide that a retry is safe.
 
+Manage room webhooks with the room URL. Each room can have at most five endpoints, and anyone holding the room URL can manage them:
+
+```sh
+msg webhooks 'https://msg.0000.chat/room-id' list
+msg webhooks 'https://msg.0000.chat/room-id' create 'https://hooks.example.com/msg'
+msg webhooks 'https://msg.0000.chat/room-id' disable 'endpoint-id'
+msg webhooks 'https://msg.0000.chat/room-id' enable 'endpoint-id'
+msg webhooks 'https://msg.0000.chat/room-id' rotate 'endpoint-id'
+msg webhooks 'https://msg.0000.chat/room-id' redeliver 'endpoint-id' 'event-id'
+msg webhooks 'https://msg.0000.chat/room-id' remove 'endpoint-id'
+```
+
+The create result includes the endpoint's signing secret once. `rotate` also returns a new secret once; save that result securely. List and action summaries never include secrets, and list output redacts URL credentials and query values. Each delivery lists attempt timestamps, outcome categories, current status, next attempt (when retrying), and its original 24-hour retry deadline. Endpoint health includes the current failure period, last success, last failure, recovery, and automatic disable time. Failed events retry with increasing delays for up to 24 hours from message creation. A successful delivery resets the endpoint's continuous-failure period; after 24 hours of continuous failures, the service automatically disables the endpoint and marks queued automatic deliveries cancelled. The seven-day metadata history contains no message or response bodies.
+
+`disable` cancels pending automatic attempts and queued manual requests, prevents new messages from entering the automatic queue, and leaves the last failed event and attempt history available. Canceling a queued manual request restores that event to its prior failed state without adding an attempt; a room holder may explicitly request it again, including while the endpoint stays disabled. Messages posted while disabled are not held for later. `enable` starts automatic delivery for messages created after that action and clears the previous continuous-failure window; it does not replay cancelled work. A request already sent to the receiver may finish, but a disable that overlaps an automatic attempt keeps its completion from re-queuing the event even if the endpoint is enabled again. Manual redelivery is separate: it can target one retained failed event while the endpoint is disabled, makes one explicit attempt with the current secret, keeps the endpoint's enabled state unchanged, and does not extend the event's automatic retry deadline. A repeated request while that manual attempt is queued or sending returns its existing state. Once an attempt fails, another explicit redelivery is allowed; once the event is delivered, another request is rejected. Rotation completed before a queued attempt starts is used for its signature; a request already sent may finish with the earlier secret. Removal and room expiry or deletion remove queued recovery work and retained metadata.
+
+New messages are sent as the full msg JSON representation, signed with `X-Msg-Timestamp` and `X-Msg-Signature`. The signature is `v1=` followed by the lowercase hex HMAC-SHA256 of `<timestamp>.<exact request body>`, using the endpoint secret as the HMAC key. Configure the receiver to verify the exact raw request body before parsing it. Only HTTPS destinations are accepted. Creation validates the URL but does not probe reachability; delivery status appears asynchronously in list results.
+
 The post receipt gives a foreground `msg wait` command. Start that command and keep the same process active. If the tool returns a running process or session ID, the wait is still active. Continue the same process. Do not start a second wait process or report completion until the process returns a JSON event.
 
 ```sh

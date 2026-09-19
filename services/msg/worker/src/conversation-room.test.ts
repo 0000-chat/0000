@@ -4,6 +4,7 @@ import { expect, mock, test } from "bun:test";
 import { hashCapability, ROOM_LIMITS } from "./room-domain";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
+type WebhookPayloadSigner = (secret: string, timestamp: string, body: string) => Promise<string>;
 
 mock.module("cloudflare:workers", () => ({
   DurableObject: class {
@@ -51,10 +52,10 @@ class FakeWebSocketPair {
 
 (globalThis as unknown as { WebSocketPair: typeof FakeWebSocketPair }).WebSocketPair = FakeWebSocketPair;
 
-async function room(database = new Database(":memory:"), clock: () => number = Date.now, env: Record<string, string> = {}) {
+async function room(database = new Database(":memory:"), clock: () => number = Date.now, env: Record<string, string> = {}, signWebhook?: WebhookPayloadSigner) {
   const { ConversationRoom } = await import("./conversation-room");
   const context = new Context(database);
-  return { context, room: new ConversationRoom(context as never, env, clock) };
+  return { context, room: new ConversationRoom(context as never, env, clock, signWebhook) };
 }
 
 function request(path: string, value: unknown) {
@@ -97,6 +98,87 @@ test("allows forced deletion only through the internal Durable Object route", as
   expect((await durable.fetch(new Request("https://room/read?after=0"))).status).toBe(410);
 });
 
+test.serial("releases a manual claim without an attempt after repeated signing-key rotations", async () => {
+  const database = new Database(":memory:");
+  const originalFetch = globalThis.fetch;
+  let outboundRequests = 0;
+  const now = 4_000_000_000_000;
+  let endpointId = "";
+  let rotations = 0;
+  let activeRoom: Awaited<ReturnType<typeof room>>["room"] | undefined;
+  globalThis.fetch = (async () => {
+    outboundRequests += 1;
+    return new Response(null, { status: 204 });
+  }) as typeof fetch;
+  const signer: WebhookPayloadSigner = async () => {
+    if (!activeRoom || !endpointId) throw new Error("The test signer was used before the endpoint was ready.");
+    rotations += 1;
+    const rotated = await activeRoom.fetch(new Request(`https://room/webhooks/${endpointId}/rotate-secret`, { method: "POST" }));
+    expect(rotated.status).toBe(200);
+    return `v1=stale-${rotations}`;
+  };
+
+  try {
+    const { room: durable } = await room(database, () => now, {}, signer);
+    activeRoom = durable;
+    await durable.fetch(request("/initialize", { management_hash: "hash", initial: { content: "first", author: "a", display_name: "a", semantic_type: "message" } }));
+    const created = await durable.fetch(request("/webhooks", { url: "https://receiver.example.com/signing-rotation-limit" }));
+    endpointId = (await created.json() as { webhook: { id: string } }).webhook.id;
+    const posted = await durable.fetch(request("/messages", { input: { content: "retained source", author: "b", display_name: "Beta", semantic_type: "message" } }));
+    const eventId = (await posted.json() as { message: { id: string } }).message.id;
+    const delivery = database.query("SELECT id FROM webhook_deliveries WHERE event_id = ?").get(eventId) as { id: string };
+    const priorFailureAt = now - 1_000;
+    const priorAttemptAt = now - 1_500;
+    database.query("UPDATE webhook_endpoints SET status = 'disabled', disabled_at = ?, failure_started_at = ?, last_failure_at = ? WHERE id = ?")
+      .run(priorFailureAt, priorFailureAt, priorFailureAt, endpointId);
+    database.query("UPDATE webhook_deliveries SET status = 'failed', attempt_count = 1, attempted_at = ?, completed_at = ?, failure_category = 'http_status' WHERE id = ?")
+      .run(priorAttemptAt, priorFailureAt, delivery.id);
+    database.query("INSERT INTO webhook_delivery_attempts (delivery_id, attempt_number, attempted_at, completed_at, status, failure_category) VALUES (?, 1, ?, ?, 'failed', 'http_status')")
+      .run(delivery.id, priorAttemptAt, priorFailureAt);
+
+    const redeliver = `https://room/webhooks/${endpointId}/deliveries/${eventId}/redeliver`;
+    const queued = await durable.fetch(new Request(redeliver, { method: "POST" }));
+    expect(await queued.json()).toMatchObject({ result: "queued", delivery: { attempt_count: 1, event_id: eventId, status: "pending" } });
+    await durable.alarm();
+
+    expect(rotations).toBe(8);
+    expect(outboundRequests).toBe(0);
+    expect(database.query("SELECT status, due_at, retry_expires_at, attempt_count, attempted_at, completed_at, cancelled_at, failure_category, manual_redelivery_requested_at FROM webhook_deliveries WHERE id = ?").get(delivery.id))
+      .toEqual({
+        status: "pending",
+        due_at: now + 250,
+        retry_expires_at: 4_000_000_000_000 + 24 * 60 * 60 * 1_000,
+        attempt_count: 1,
+        attempted_at: priorAttemptAt,
+        completed_at: priorFailureAt,
+        cancelled_at: null,
+        failure_category: "http_status",
+        manual_redelivery_requested_at: now,
+      });
+    expect(database.query("SELECT attempt_number, attempted_at, completed_at, status, failure_category FROM webhook_delivery_attempts WHERE delivery_id = ? ORDER BY attempt_number").all(delivery.id))
+      .toEqual([{ attempt_number: 1, attempted_at: priorAttemptAt, completed_at: priorFailureAt, status: "failed", failure_category: "http_status" }]);
+
+    const listed = await durable.fetch(new Request("https://room/webhooks"));
+    expect(await listed.json()).toMatchObject({
+      webhooks: [{
+        status: "disabled",
+        disabled_at: new Date(priorFailureAt).toISOString(),
+        failure_started_at: new Date(priorFailureAt).toISOString(),
+        last_failure_at: new Date(priorFailureAt).toISOString(),
+        deliveries: [{ attempt_count: 1, event_id: eventId, failure_category: "http_status", next_attempt_at: new Date(now + 250).toISOString(), status: "pending" }],
+      }],
+    });
+    const duplicate = await durable.fetch(new Request(redeliver, { method: "POST" }));
+    expect(await duplicate.json()).toMatchObject({ result: "already_queued", delivery: { attempt_count: 1, event_id: eventId, status: "pending" } });
+    await durable.alarm();
+    expect(rotations).toBe(8);
+    expect(outboundRequests).toBe(0);
+  } finally {
+    globalThis.fetch = originalFetch;
+    database.close();
+  }
+});
+
 test("keeps an active room alive past the former absolute deadline", async () => {
   let now = 1_000;
   const { room: durable } = await room(undefined, () => now);
@@ -124,6 +206,8 @@ test("migrates a capped legacy room before its old alarm can expire it", async (
   const oldAbsolute = start + 30 * DAY_MS;
   database.query("DELETE FROM messages").run();
   database.query("DELETE FROM room_state").run();
+  database.exec("DROP TABLE push_deliveries; DROP TABLE push_subscriptions; ALTER TABLE messages DROP COLUMN source_browser_id;");
+  database.exec("DROP TABLE webhook_delivery_attempts; DROP TABLE webhook_deliveries; DROP TABLE webhook_endpoints;");
   database.query("UPDATE room_schema SET version = 2").run();
   database.query("INSERT INTO room_state (singleton, schema_version, protocol_version, created_at, last_message_at, inactivity_expires_at, absolute_expires_at, next_sequence, message_count, total_bytes, status, tombstone_expires_at, management_hash) VALUES (1, 2, 1, ?, ?, ?, ?, 2, 1, 5, 'active', NULL, 'hash')").run(start, lastMessageAt, oldAbsolute, oldAbsolute);
   database.query("INSERT INTO messages (sequence, id, content, author, display_name, client, semantic_type, reply_to, created_at, client_message_id, byte_count, idempotency_key) VALUES (1, 'legacy-message', 'first', 'a', 'a', NULL, 'message', NULL, ?, NULL, 5, NULL)").run(lastMessageAt);

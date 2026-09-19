@@ -23,6 +23,9 @@ import {
 import { applySecurityHeaders } from "./security";
 import { DurableRoomService, type RoomNamespace } from "./room-service";
 import { emitMsgEvent } from "./observability";
+import { normalizeWebhookUrl } from "./webhooks";
+import { PUSH_SERVICE_WORKER_PATH, pushServiceWorkerResponse } from "./push-service-worker";
+import { parsePushBrowserId, parsePushSubscription } from "./push-subscriptions";
 
 export interface MsgWorker {
   fetch(request: Request): Promise<Response>;
@@ -49,6 +52,8 @@ export interface MsgWorkerOptions {
   readonly operations?: Operations;
   readonly operatorToken?: string;
   readonly postDisabled?: boolean;
+  readonly pushConfigured?: boolean;
+  readonly pushVapidPublicKey?: string;
   readonly rateLimits?: MsgRateLimits;
 }
 
@@ -77,12 +82,17 @@ export interface MsgEnvironment {
   readonly ROOM_SERVICE?: RoomService;
   readonly ConversationRoom?: RoomNamespace;
   readonly MSG_PUBLIC_ORIGIN?: string;
+  readonly MSG_VAPID_PRIVATE_KEY?: string;
+  readonly MSG_VAPID_PUBLIC_KEY?: string;
+  readonly MSG_VAPID_SUBJECT?: string;
 }
 
 const MAX_CANONICAL_JSON_DEPTH = 32;
 const MAX_REPORT_CAPABILITY_CHARS = 512;
 const MAX_REPORT_DESCRIPTION_BYTES = 4 * 1024;
 const MAX_REPORT_DESCRIPTION_CHARS = 2_000;
+const MAX_WEBHOOK_REQUEST_BYTES = 4 * 1024;
+const MAX_PUSH_SUBSCRIPTION_REQUEST_BYTES = 4 * 1024;
 const RATE_LIMIT_PERIOD_SECONDS = 60;
 
 export function createWorker(service: RoomService, options: MsgWorkerOptions = {}): MsgWorker {
@@ -213,6 +223,9 @@ async function route(request: Request, service: RoomService, options: MsgWorkerO
   if (request.method === "GET" && url.pathname === "/openapi.json") {
     return jsonResponse(OPENAPI_DOCUMENT);
   }
+  if (request.method === "GET" && url.pathname === PUSH_SERVICE_WORKER_PATH) {
+    return pushServiceWorkerResponse();
+  }
   if (request.method === "GET" && url.pathname.startsWith("/_msg/view/")) {
     return browserViewRedirect(url) ?? notFound();
   }
@@ -290,6 +303,72 @@ async function route(request: Request, service: RoomService, options: MsgWorkerO
     );
   }
 
+  const webhookCollectionMatch = /^\/([^/]+)\/webhooks$/u.exec(url.pathname);
+  if (webhookCollectionMatch && request.method === "GET") {
+    if (!service.listWebhooks) return notFound();
+    await enforceRateLimit(request, options.rateLimits?.reads);
+    return jsonResponse(await service.listWebhooks({ room: webhookCollectionMatch[1]! }));
+  }
+  if (webhookCollectionMatch && request.method === "POST") {
+    if (!service.createWebhook) return notFound();
+    await enforceRateLimit(request, options.rateLimits?.posts);
+    const destination = parseWebhookDestination(await parseRequestBody(request, { maxBytes: MAX_WEBHOOK_REQUEST_BYTES }));
+    return jsonResponse(await service.createWebhook({ room: webhookCollectionMatch[1]!, url: destination }), 201);
+  }
+  const webhookItemMatch = /^\/([^/]+)\/webhooks\/([0-9a-f-]{36})$/iu.exec(url.pathname);
+  if (webhookItemMatch && request.method === "DELETE") {
+    if (!service.removeWebhook) return notFound();
+    await enforceRateLimit(request, options.rateLimits?.posts);
+    return jsonResponse(await service.removeWebhook({ id: webhookItemMatch[2]!, room: webhookItemMatch[1]! }));
+  }
+  const webhookActionMatch = /^\/([^/]+)\/webhooks\/([0-9a-f-]{36})\/(disable|enable|rotate-secret)$/iu.exec(url.pathname);
+  if (webhookActionMatch && request.method === "POST") {
+    await enforceRateLimit(request, options.rateLimits?.posts);
+    const input = { id: webhookActionMatch[2]!, room: webhookActionMatch[1]! };
+    if (webhookActionMatch[3] === "disable") {
+      if (!service.disableWebhook) return notFound();
+      return jsonResponse(await service.disableWebhook(input));
+    }
+    if (webhookActionMatch[3] === "enable") {
+      if (!service.enableWebhook) return notFound();
+      return jsonResponse(await service.enableWebhook(input));
+    }
+    if (!service.rotateWebhookSecret) return notFound();
+    return jsonResponse(await service.rotateWebhookSecret(input));
+  }
+  const webhookRedeliveryMatch = /^\/([^/]+)\/webhooks\/([0-9a-f-]{36})\/deliveries\/([0-9a-f-]{36})\/redeliver$/iu.exec(url.pathname);
+  if (webhookRedeliveryMatch && request.method === "POST") {
+    if (!service.redeliverWebhook) return notFound();
+    await enforceRateLimit(request, options.rateLimits?.posts);
+    const result = await service.redeliverWebhook({ eventId: webhookRedeliveryMatch[3]!, id: webhookRedeliveryMatch[2]!, room: webhookRedeliveryMatch[1]! });
+    return jsonResponse(result, result.result === "queued" ? 202 : 200);
+  }
+
+  const pushSubscriptionMatch = /^\/([^/]+)\/push-subscriptions$/u.exec(url.pathname);
+  if (pushSubscriptionMatch && (request.method === "GET" || request.method === "POST" || request.method === "DELETE")) {
+    const browserId = parsePushBrowserId(request.headers.get("x-msg-browser-id"));
+    if (!browserId) throw new ProtocolError(ERROR_CODES.invalidBody, "A valid X-Msg-Browser-Id header is required.", 400);
+    const room = pushSubscriptionMatch[1]!;
+    if (request.method === "GET") {
+      if (!service.readPushEnrollment) return notFound();
+      await enforceRateLimit(request, options.rateLimits?.reads);
+      return jsonResponse(await service.readPushEnrollment({ browserId, room }));
+    }
+    await enforceRateLimit(request, options.rateLimits?.posts);
+    if (request.method === "DELETE") {
+      if (!service.removePushEnrollment) return notFound();
+      return jsonResponse(await service.removePushEnrollment({ browserId, room }));
+    }
+    if (!service.enrollPush) return notFound();
+    if (!options.pushConfigured || !options.pushVapidPublicKey) {
+      throw new ProtocolError(ERROR_CODES.serviceUnavailable, "Browser push is not configured on this service.", 503);
+    }
+    const pushBody = await parseRequestBody(request, { maxBytes: MAX_PUSH_SUBSCRIPTION_REQUEST_BYTES });
+    const subscription = pushBody.kind === "json" ? await parsePushSubscription(pushBody.value) : undefined;
+    if (!subscription) throw new ProtocolError(ERROR_CODES.invalidBody, "The browser push subscription is invalid.", 400);
+    return jsonResponse(await service.enrollPush({ browserId, room, subscription }), 201);
+  }
+
   const exportMatch = /^\/([^/]+)\/export\.(md|json)$/.exec(url.pathname);
   if (exportMatch && request.method === "GET") {
     if (!service.exportRoom) return notFound();
@@ -323,7 +402,7 @@ async function route(request: Request, service: RoomService, options: MsgWorkerO
         if (selectBrowserView(url, request.headers.get("cookie")) === "agent") {
           return htmlResponse(renderAgentRoomPage(result, url));
         }
-        const page = renderBrowserDocument({ room, title: "Temporary conversation", url });
+        const page = renderBrowserDocument({ pushPublicKey: options.pushConfigured ? options.pushVapidPublicKey : undefined, room, title: "Temporary conversation", url });
         return htmlResponse(page.html, 200, page.styleNonce);
       }
       const etag = roomEtag(result.latest_message, after);
@@ -340,6 +419,7 @@ async function route(request: Request, service: RoomService, options: MsgWorkerO
       await enforceRateLimit(request, options.rateLimits?.posts);
       const result = stripLegacyAbsoluteExpiry(await service.post({
         body: await parseRequestBody(request, { maxBytes: MAX_ROOM_REQUEST_BYTES }),
+        browserId: parseOptionalPushBrowserId(request.headers.get("x-msg-browser-id")),
         idempotencyKey: request.headers.has("idempotency-key") ? validateIdempotencyKey(request.headers.get("idempotency-key") ?? "") : undefined,
         room,
       })) as unknown as import("./protocol").PostMessageResponse;
@@ -429,6 +509,13 @@ function parseReport(body: RequestBody): { capability: string; description?: str
   return description === undefined ? { capability } : { capability, description };
 }
 
+function parseOptionalPushBrowserId(value: string | null): string | undefined {
+  if (value === null) return undefined;
+  const browserId = parsePushBrowserId(value);
+  if (!browserId) throw new ProtocolError(ERROR_CODES.invalidBody, "The X-Msg-Browser-Id header is invalid.", 400);
+  return browserId;
+}
+
 function parseOperatorLimit(value: string | null): number {
   if (value === null) return 25;
   if (!/^[1-9][0-9]*$/u.test(value)) throw new ProtocolError(ERROR_CODES.invalidBody, "The report limit is invalid.", 400);
@@ -446,6 +533,18 @@ function parseReportStatus(body: RequestBody): "closed" | "open" | "reviewed" {
     throw new ProtocolError(ERROR_CODES.invalidBody, "The report update is invalid.", 400);
   }
   return status;
+}
+
+function parseWebhookDestination(body: RequestBody): string {
+  if (body.kind !== "json" || body.value === null || Array.isArray(body.value) || typeof body.value !== "object") {
+    throw new ProtocolError(ERROR_CODES.invalidBody, "The webhook request must be a JSON object containing only url.", 400);
+  }
+  const fields = Object.keys(body.value);
+  const url = normalizeWebhookUrl(body.value.url);
+  if (fields.length !== 1 || fields[0] !== "url" || url === undefined) {
+    throw new ProtocolError(ERROR_CODES.invalidBody, "The webhook destination must be a valid public HTTPS URL.", 400);
+  }
+  return url;
 }
 
 function policyResponse(path: string): Response {
@@ -607,6 +706,10 @@ const unavailableService: RoomService = {
 export default {
   fetch(request: Request, env: MsgEnvironment): Promise<Response> {
     const service = env.ROOM_SERVICE ?? (env.ConversationRoom ? new DurableRoomService(env.ConversationRoom, env.MSG_PUBLIC_ORIGIN ?? "https://msg.0000.chat") : unavailableService);
-    return createWorker(service, { assets: env.ASSETS }).fetch(request);
+    return createWorker(service, {
+      assets: env.ASSETS,
+      pushConfigured: Boolean(env.MSG_VAPID_PUBLIC_KEY && env.MSG_VAPID_PRIVATE_KEY && env.MSG_VAPID_SUBJECT),
+      pushVapidPublicKey: env.MSG_VAPID_PUBLIC_KEY,
+    }).fetch(request);
   },
 };

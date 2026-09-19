@@ -110,6 +110,16 @@ export interface RoomService {
   read?(input: ReadRoomInput): Promise<ReadRoomResponse>;
   post?(input: PostMessageInput): Promise<PostMessageResponse>;
   manage?(input: ManageRoomInput): Promise<ManageRoomResponse>;
+  createWebhook?(input: CreateWebhookInput): Promise<CreateWebhookResponse>;
+  listWebhooks?(input: ListWebhooksInput): Promise<ListWebhooksResponse>;
+  removeWebhook?(input: RemoveWebhookInput): Promise<RemoveWebhookResponse>;
+  disableWebhook?(input: ManageWebhookInput): Promise<ManageWebhookResponse>;
+  enableWebhook?(input: ManageWebhookInput): Promise<ManageWebhookResponse>;
+  rotateWebhookSecret?(input: ManageWebhookInput): Promise<RotateWebhookSecretResponse>;
+  redeliverWebhook?(input: RedeliverWebhookInput): Promise<RedeliverWebhookResponse>;
+  readPushEnrollment?(input: PushEnrollmentInput): Promise<PushEnrollmentResponse>;
+  enrollPush?(input: EnrollPushInput): Promise<PushEnrollmentResponse>;
+  removePushEnrollment?(input: PushEnrollmentInput): Promise<RemovePushEnrollmentResponse>;
   operatorDelete?(room: string): Promise<void>;
   live?(input: LiveRoomInput): Promise<Response>;
   exportRoom?(input: ExportRoomInput): Promise<Response>;
@@ -147,8 +157,34 @@ export type ReadRoomResponse = RoomReadResult;
 
 export interface PostMessageInput {
   readonly body: RequestBody;
+  readonly browserId?: string;
   readonly idempotencyKey?: string;
   readonly room: string;
+}
+
+export interface PushSubscriptionInput {
+  readonly auth: string;
+  readonly endpoint: string;
+  readonly p256dh: string;
+}
+
+export interface PushEnrollmentInput {
+  readonly browserId: string;
+  readonly room: string;
+}
+
+export interface EnrollPushInput extends PushEnrollmentInput {
+  readonly subscription: PushSubscriptionInput;
+}
+
+export interface PushEnrollmentResponse {
+  readonly enrolled: boolean;
+  readonly protocol_version: typeof PROTOCOL_VERSION;
+}
+
+export interface RemovePushEnrollmentResponse {
+  readonly protocol_version: typeof PROTOCOL_VERSION;
+  readonly removed: boolean;
 }
 
 export interface PostMessageResponse {
@@ -168,6 +204,97 @@ export interface ManageRoomResponse {
   readonly deleted?: boolean;
   readonly expires_at?: string;
   readonly protocol_version: typeof PROTOCOL_VERSION;
+}
+
+export interface CreateWebhookInput {
+  readonly room: string;
+  readonly url: string;
+}
+
+export interface ListWebhooksInput {
+  readonly room: string;
+}
+
+export interface RemoveWebhookInput {
+  readonly id: string;
+  readonly room: string;
+}
+
+export interface ManageWebhookInput {
+  readonly id: string;
+  readonly room: string;
+}
+
+export interface RedeliverWebhookInput extends ManageWebhookInput {
+  readonly eventId: string;
+}
+
+export interface WebhookDeliveryMetadata {
+  readonly attempts: readonly WebhookAttemptMetadata[];
+  readonly attempt_count: number;
+  readonly attempted_at: string | null;
+  readonly cancelled_at: string | null;
+  readonly completed_at: string | null;
+  readonly created_at: string;
+  readonly event_id: string;
+  readonly failure_category: string | null;
+  readonly message_id: string;
+  readonly message_sequence: number;
+  readonly next_attempt_at: string | null;
+  readonly retry_expires_at: string;
+  readonly status: "cancelled" | "delivered" | "failed" | "pending" | "retrying" | "sending";
+}
+
+export interface WebhookAttemptMetadata {
+  readonly attempt_number: number;
+  readonly attempted_at: string;
+  readonly completed_at: string | null;
+  readonly failure_category: string | null;
+  readonly status: "delivered" | "failed" | "sending";
+}
+
+export interface WebhookSummary {
+  readonly created_at: string;
+  readonly deliveries: readonly WebhookDeliveryMetadata[];
+  readonly disabled_at: string | null;
+  readonly failure_started_at: string | null;
+  readonly id: string;
+  readonly last_failure_at: string | null;
+  readonly last_success_at: string | null;
+  readonly recovered_at: string | null;
+  readonly status: "active" | "disabled";
+  readonly url: string;
+}
+
+export interface CreateWebhookResponse {
+  readonly protocol_version: typeof PROTOCOL_VERSION;
+  readonly secret: string;
+  readonly webhook: WebhookSummary;
+}
+
+export interface ListWebhooksResponse {
+  readonly protocol_version: typeof PROTOCOL_VERSION;
+  readonly webhooks: readonly WebhookSummary[];
+}
+
+export interface RemoveWebhookResponse {
+  readonly protocol_version: typeof PROTOCOL_VERSION;
+  readonly removed: true;
+}
+
+export interface ManageWebhookResponse {
+  readonly protocol_version: typeof PROTOCOL_VERSION;
+  readonly webhook: WebhookSummary;
+}
+
+export interface RotateWebhookSecretResponse extends ManageWebhookResponse {
+  readonly secret: string;
+}
+
+export interface RedeliverWebhookResponse {
+  readonly delivery: WebhookDeliveryMetadata;
+  readonly protocol_version: typeof PROTOCOL_VERSION;
+  readonly result: "already_queued" | "queued";
 }
 
 export interface LiveRoomInput {

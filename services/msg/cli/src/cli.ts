@@ -2,6 +2,7 @@ import { parsePostCommand, postMessage, PostSignalError } from "./post.js";
 import { joinConversation, JoinSignalError, parseJoinCommand } from "./join.js";
 import type { WaitOptions, WaitSocket } from "./wait.js";
 import { parseWaitCommand, WaitSignalError, waitForMessages } from "./wait.js";
+import { manageWebhooks, parseWebhooksCommand, WebhooksSignalError } from "./webhooks.js";
 import packageManifest from "../package.json" with { type: "json" };
 
 const VERSION = packageManifest.version;
@@ -21,7 +22,7 @@ export interface CliDependencies {
 
 export async function runCli(args: readonly string[], dependencies: CliDependencies): Promise<number> {
   if (args.length === 1 && args[0] === "--help") {
-    dependencies.stdout("Usage: msg join <conversation-url>\nUsage: msg post <conversation-url> --author <author> [--content <content>] [--client-message-id <id>]\nUsage: msg wait <conversation-url> --after <positive integer> [--timeout <duration>]\n");
+    dependencies.stdout("Usage: msg join <conversation-url>\nUsage: msg post <conversation-url> --author <author> [--content <content>] [--client-message-id <id>]\nUsage: msg wait <conversation-url> --after <positive integer> [--timeout <duration>]\nUsage: msg webhooks <conversation-url> list | create <https-url> | remove <endpoint-id> | disable <endpoint-id> | enable <endpoint-id> | rotate <endpoint-id> | redeliver <endpoint-id> <event-id>\n");
     return 0;
   }
   if (args.length === 1 && args[0] === "--version") {
@@ -64,6 +65,12 @@ export async function runCli(args: readonly string[], dependencies: CliDependenc
       dependencies.stdout(`${JSON.stringify(receipt)}\n`);
       return 0;
     }
+    if (args[0] === "webhooks") {
+      const command = parseWebhooksCommand(args);
+      const response = await manageWebhooks({ ...command, fetch: dependencies.fetch, signal: dependencies.signal });
+      dependencies.stdout(`${JSON.stringify(response)}\n`);
+      return 0;
+    }
     const command = parseWaitCommand(args);
     const result = await waitForMessages({
       ...command,
@@ -82,7 +89,7 @@ export async function runCli(args: readonly string[], dependencies: CliDependenc
     return 0;
   } catch (error) {
     dependencies.stderr(`${error instanceof Error ? error.message : "The msg command failed."}\n`);
-    if (error instanceof JoinSignalError || error instanceof WaitSignalError || error instanceof PostSignalError) return 130;
+    if (error instanceof JoinSignalError || error instanceof WaitSignalError || error instanceof PostSignalError || error instanceof WebhooksSignalError) return 130;
     return error instanceof Error && error.message === "The msg wait timed out." ? 2 : 1;
   }
 }
