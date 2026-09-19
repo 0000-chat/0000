@@ -50,10 +50,17 @@ routes and D1 state for:
   subjects, expiry, catalog narrowing, immutable kind and credential-kind
   binding;
 - shared-client audience denial and single-winner concurrent rotation;
+- same-kind subject isolation: two valid service subjects reject attempts to
+  use the other subject's grant or credential for issue, rotate, revoke and
+  grant-revoke operations, while both original credentials remain valid;
 - registered rotation-route races with predecessor/successor lineage checks,
-  replacement-insert rollback, no returned secret on failure, reverse
-  agent/OAuth subject route isolation, wrong-organization and wrong-grant
-  denial, suspended-organization verification, grant narrowing and credential
+  and a replacement-insert fault routed through the production Worker handler
+  with a D1 wrapper around the real binding. The wrapper captured the exact
+  injected `t11 service replacement insert failure` from the real D1 batch;
+  the route returned 503 without a secret, left the predecessor active and
+  created no successor. The same test covers reverse agent/OAuth subject route
+  isolation, wrong-organization and wrong-grant denial,
+  suspended-organization verification, grant narrowing and credential
   revocation, and current-manager/runtime continuity after creator departure.
 
 The focused command passes:

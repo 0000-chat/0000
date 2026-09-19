@@ -8,6 +8,7 @@ import {
 } from "../../src/agent-state";
 import { hashOpaque, opaqueSecret } from "../../src/platform-state";
 import { updateServiceMetadata } from "../../src/service-registration";
+import platformWorker from "../../src/worker";
 import { handleResourceRequest } from "./fixtures/resource-service";
 import { registerTestService, type TestService } from "./fixtures/provision";
 
@@ -730,6 +731,88 @@ describe("T11 organization-owned service principals", () => {
       credentialId: string;
     };
 
+    const secondCreated = await expectRouteStatus(
+      post("/api/account/service-principals", owner.cookie, {
+        organizationId: owner.organizationId,
+        name: "Route boundary service B",
+      }),
+      201,
+    );
+    const secondPrincipal = (await secondCreated.json()) as {
+      subjectId: string;
+    };
+    const secondGrantResponse = await expectRouteStatus(
+      post("/api/account/service-principals/grants", owner.cookie, {
+        organizationId: owner.organizationId,
+        subjectId: secondPrincipal.subjectId,
+        serviceId: service.serviceId,
+        capabilities: ["resource:read"],
+      }),
+      201,
+    );
+    const secondGrant = (await secondGrantResponse.json()) as { id: string };
+    const secondIssueResponse = await expectRouteStatus(
+      post("/api/account/service-principals/credentials", owner.cookie, {
+        organizationId: owner.organizationId,
+        subjectId: secondPrincipal.subjectId,
+        grantId: secondGrant.id,
+        serviceId: service.serviceId,
+        capabilities: ["resource:read"],
+      }),
+      201,
+    );
+    const secondIssued = (await secondIssueResponse.json()) as {
+      credential: string;
+      credentialId: string;
+    };
+    expect((await client(service).authenticate(issued.credential)).status).toBe(
+      "authenticated",
+    );
+    expect(
+      (await client(service).authenticate(secondIssued.credential)).status,
+    ).toBe("authenticated");
+
+    await expectRouteStatus(
+      post("/api/account/service-principals/credentials", owner.cookie, {
+        organizationId: owner.organizationId,
+        subjectId: principal.subjectId,
+        grantId: secondGrant.id,
+        serviceId: service.serviceId,
+        capabilities: ["resource:read"],
+      }),
+      404,
+    );
+    await expectRouteStatus(
+      post("/api/account/service-principals/credentials/rotate", owner.cookie, {
+        organizationId: owner.organizationId,
+        subjectId: principal.subjectId,
+        credentialId: secondIssued.credentialId,
+      }),
+      404,
+    );
+    await expectRouteStatus(
+      post("/api/account/service-principals/credentials/revoke", owner.cookie, {
+        organizationId: owner.organizationId,
+        subjectId: principal.subjectId,
+        credentialId: secondIssued.credentialId,
+      }),
+      404,
+    );
+    await expectRouteStatus(
+      post("/api/account/service-principals/grants/revoke", owner.cookie, {
+        organizationId: owner.organizationId,
+        subjectId: principal.subjectId,
+        grantId: secondGrant.id,
+      }),
+      404,
+    );
+    expect((await client(service).authenticate(issued.credential)).status).toBe(
+      "authenticated",
+    );
+    expect(
+      (await client(service).authenticate(secondIssued.credential)).status,
+    ).toBe("authenticated");
+
     expect((await serviceCredential(service, service.verifier)).status).toBe(
       401,
     );
@@ -1150,15 +1233,55 @@ describe("T11 organization-owned service principals", () => {
        BEGIN SELECT RAISE(ABORT, 't11 service replacement insert failure'); END`,
     ).run();
     let failedRotation: Response | undefined;
+    let observedD1Error: string | null = null;
+    const wrappedDatabase = new Proxy(testEnv.IDENTITY_DB, {
+      get(target, property, receiver) {
+        if (property === "prepare") {
+          return (query: string) => target.prepare(query);
+        }
+        if (property === "batch") {
+          return async (statements: D1PreparedStatement[]) => {
+            try {
+              return await target.batch(statements);
+            } catch (error) {
+              observedD1Error =
+                error instanceof Error ? error.message : String(error);
+              throw error;
+            }
+          };
+        }
+        if (property === "withSession") {
+          return (constraint: unknown) =>
+            target.withSession(constraint as never);
+        }
+        return Reflect.get(target, property, receiver);
+      },
+    }) as unknown as D1Database;
+    const wrappedEnv = new Proxy(testEnv, {
+      get(target, property, receiver) {
+        if (property === "IDENTITY_DB") return wrappedDatabase;
+        return Reflect.get(target, property, receiver);
+      },
+    }) as Cloudflare.Env;
     try {
-      failedRotation = await post(
-        "/api/account/service-principals/credentials/rotate",
-        owner.cookie,
-        {
-          organizationId: owner.organizationId,
-          subjectId: principal.subjectId,
-          credentialId: winner.credentialId,
-        },
+      failedRotation = await platformWorker.fetch(
+        new Request(
+          "http://localhost/api/account/service-principals/credentials/rotate",
+          {
+            method: "POST",
+            headers: {
+              cookie: owner.cookie,
+              origin: testEnv.PLATFORM_BASE_URL,
+              "content-type": "application/json",
+            },
+            body: JSON.stringify({
+              organizationId: owner.organizationId,
+              subjectId: principal.subjectId,
+              credentialId: winner.credentialId,
+            }),
+          },
+        ),
+        wrappedEnv,
       );
     } finally {
       await testEnv.IDENTITY_DB.prepare(
@@ -1166,7 +1289,8 @@ describe("T11 organization-owned service principals", () => {
       ).run();
     }
     if (!failedRotation) throw new Error("service fault rotation missing");
-    expect(failedRotation.status).not.toBe(201);
+    expect(failedRotation.status).toBe(503);
+    expect(observedD1Error).toContain("t11 service replacement insert failure");
     expect(await failedRotation.text()).not.toContain("0000_service_");
     const winnerAfterFault = await testEnv.IDENTITY_DB.prepare(
       "SELECT revoked_at, replaced_by_id FROM platform_credential WHERE id = ?",
