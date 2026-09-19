@@ -27,16 +27,14 @@ describe("retired local OAuth issuer", () => {
     for (const path of routes) {
       const method =
         path === "/oauth/consent" || path === "/oauth/token" ? "POST" : "GET";
+      const init: RequestInit = { method };
+      if (method === "POST") {
+        init.headers = { "Content-Type": "application/json" };
+        init.body = "{}";
+      }
       const response = await app.request(
         `https://communicator.test${path}`,
-        {
-          method,
-          headers:
-            method === "POST"
-              ? { "Content-Type": "application/json" }
-              : undefined,
-          body: method === "POST" ? "{}" : undefined,
-        },
+        init,
         env,
       );
       expect(response.status, path).toBe(503);
