@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { existsSync, readdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -24,6 +25,30 @@ async function waitForFile(path: string): Promise<void> {
     }
   }
   throw new Error(`Timed out waiting for ${path}`);
+}
+
+async function waitForAnyFile(paths: readonly string[]): Promise<number> {
+  const deadline = Date.now() + 2_000;
+  while (Date.now() < deadline) {
+    const index = paths.findIndex((path) => existsSync(path));
+    if (index >= 0) return index;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`Timed out waiting for one of ${paths.join(", ")}`);
+}
+
+async function waitForDirectoryEntry(directory: string, predicate: (name: string) => boolean): Promise<string> {
+  const deadline = Date.now() + 2_000;
+  while (Date.now() < deadline) {
+    try {
+      const name = readdirSync(directory).find(predicate);
+      if (name) return name;
+    } catch {
+      // The child may not have created the barrier directory yet.
+    }
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  throw new Error(`Timed out waiting for an entry in ${directory}`);
 }
 
 test("stores host and path scoped cookies without forwarding room credentials", async () => {
@@ -133,17 +158,200 @@ test("serializes separate-process first-use bootstrap across request and respons
   expect(secondResource).toBe(control);
 });
 
+test("recovers a crashed unique claim while preserving existing jar state", async () => {
+  const { filePath, jar } = await temporaryJar();
+  jar.store("https://msg.0000.chat/room-preserved", new Response(null, { headers: { "set-cookie": "msg_resource=preserved; Path=/room-preserved; Secure" } }));
+  const moduleUrl = new URL("./cookie-jar.ts", import.meta.url).href;
+  const crashSource = `
+    import { PersistentCookieJar } from ${JSON.stringify(moduleUrl)};
+    const jar = new PersistentCookieJar({ filePath: process.env.T09_COOKIE_JAR, serviceOrigin: "https://msg.0000.chat" });
+    const fetcher = jar.wrapFetch(async () => {
+      process.exit(17);
+      return new Response(null);
+    });
+    await fetcher("https://msg.0000.chat/room-crashed");
+  `;
+  const crash = spawn(process.execPath, ["-e", crashSource], { env: { ...process.env, T09_COOKIE_JAR: filePath }, stdio: ["ignore", "ignore", "pipe"] });
+  let crashError = "";
+  crash.stderr.on("data", (chunk: Buffer) => { crashError += chunk.toString(); });
+  const crashCode = await new Promise<number>((resolve, reject) => {
+    crash.once("error", reject);
+    crash.once("close", (code) => resolve(code ?? -1));
+  });
+  expect(crashCode).toBe(17);
+  expect(crashError).toBe("");
+
+  const recoverySource = `
+    import { PersistentCookieJar } from ${JSON.stringify(moduleUrl)};
+    const jar = new PersistentCookieJar({ filePath: process.env.T09_COOKIE_JAR, serviceOrigin: "https://msg.0000.chat" });
+    const fetcher = jar.wrapFetch(async () => new Response(null, { headers: [
+      ["set-cookie", "msg_guest_control=recovered; Path=/; Secure"],
+      ["set-cookie", "msg_resource=recovered; Path=/room-crashed; Secure"],
+    ] }));
+    await fetcher("https://msg.0000.chat/room-crashed");
+  `;
+  await new Promise<void>((resolve, reject) => {
+    const recovery = spawn(process.execPath, ["-e", recoverySource], { env: { ...process.env, T09_COOKIE_JAR: filePath }, stdio: ["ignore", "ignore", "pipe"] });
+    let error = "";
+    recovery.stderr.on("data", (chunk: Buffer) => { error += chunk.toString(); });
+    recovery.once("error", reject);
+    recovery.once("close", (code) => code === 0 ? resolve() : reject(new Error(`Recovery process exited ${code}: ${error}`)));
+  });
+
+  expect(jar.cookieHeader("https://msg.0000.chat/room-crashed")).toContain("msg_guest_control=recovered");
+  expect(jar.cookieHeader("https://msg.0000.chat/room-preserved")).toContain("msg_resource=preserved");
+});
+
+test("orders concurrent choosing claims by their ready ticket and UUID", async () => {
+  const { filePath } = await temporaryJar();
+  const moduleUrl = new URL("./cookie-jar.ts", import.meta.url).href;
+  const goPath = `${filePath}.ticket-go`;
+  const contenders = Array.from({ length: 2 }, (_, index) => {
+    const readyPath = `${filePath}.ticket-${index}-ready`;
+    const enteredPath = `${filePath}.ticket-${index}-entered`;
+    const releasePath = `${filePath}.ticket-${index}-release`;
+    const source = `
+      import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+      import { join } from "node:path";
+      import { PersistentCookieJar } from ${JSON.stringify(moduleUrl)};
+      const filePath = process.env.T09_COOKIE_JAR;
+      const jar = new PersistentCookieJar({ filePath, serviceOrigin: "https://msg.0000.chat" });
+      writeFileSync(process.env.T09_COOKIE_READY, "ready");
+      while (!existsSync(process.env.T09_COOKIE_GO)) await new Promise((resolve) => setTimeout(resolve, 5));
+      const fetcher = jar.wrapFetch(async (_input, init) => {
+        const claimName = readdirSync(filePath + ".locks").find((name) => name.startsWith(process.pid + "-") && name.endsWith(".claim"));
+        if (!claimName) throw new Error("The contender did not retain its unique claim.");
+        const claim = JSON.parse(readFileSync(join(filePath + ".locks", claimName), "utf8"));
+        writeFileSync(process.env.T09_COOKIE_ENTERED, JSON.stringify({ owner: claim.owner, ticket: claim.ticket }));
+        while (!existsSync(process.env.T09_COOKIE_RELEASE)) await new Promise((resolve) => setTimeout(resolve, 5));
+        const cookie = new Headers(init?.headers).get("cookie") ?? "";
+        const control = cookie.split("; ").find((value) => value.startsWith("msg_guest_control="))?.slice("msg_guest_control=".length) ?? ${JSON.stringify(`guest-ticket-${index}`)};
+        return new Response(null, { headers: [
+          ["set-cookie", "msg_guest_control=" + control + "; Path=/; Secure"],
+          ["set-cookie", "msg_resource=" + control + "; Path=/room-ticket-${index}; Secure"],
+        ] });
+      });
+      await fetcher("https://msg.0000.chat/room-ticket-${index}");
+    `;
+    return { readyPath, enteredPath, releasePath, source };
+  });
+  const start = (entry: typeof contenders[number]): { pid: number; done: Promise<void> } => {
+    let error = "";
+    let resolveDone: () => void = () => undefined;
+    let rejectDone: (error: Error) => void = () => undefined;
+    const done = new Promise<void>((resolve, reject) => { resolveDone = resolve; rejectDone = reject; });
+    const child = spawn(process.execPath, ["-e", entry.source], {
+      env: {
+        ...process.env,
+        T09_COOKIE_JAR: filePath,
+        T09_COOKIE_READY: entry.readyPath,
+        T09_COOKIE_GO: goPath,
+        T09_COOKIE_ENTERED: entry.enteredPath,
+        T09_COOKIE_RELEASE: entry.releasePath,
+      },
+      stdio: ["ignore", "ignore", "pipe"],
+    });
+    child.stderr.on("data", (chunk: Buffer) => { error += chunk.toString(); });
+    child.once("error", rejectDone);
+    child.once("close", (code) => code === 0 ? resolveDone() : rejectDone(new Error(`Ticket contender exited ${code}: ${error}`)));
+    if (!child.pid) throw new Error("Could not allocate ticket contender process.");
+    return { pid: child.pid, done };
+  };
+  const children = contenders.map(start);
+  await Promise.all(contenders.map(({ readyPath }) => waitForFile(readyPath)));
+  await writeFile(goPath, "go");
+
+  const firstIndex = await waitForAnyFile(contenders.map(({ enteredPath }) => enteredPath));
+  const secondIndex = firstIndex === 0 ? 1 : 0;
+  expect(existsSync(contenders[secondIndex].enteredPath)).toBe(false);
+  const first = JSON.parse(await readFile(contenders[firstIndex].enteredPath, "utf8")) as { owner: string; ticket: number };
+  await writeFile(contenders[firstIndex].releasePath, "release");
+  await waitForFile(contenders[secondIndex].enteredPath);
+  const second = JSON.parse(await readFile(contenders[secondIndex].enteredPath, "utf8")) as { owner: string; ticket: number };
+  await writeFile(contenders[secondIndex].releasePath, "release");
+  await Promise.all(children.map(({ done }) => done));
+
+  expect(first.ticket < second.ticket || (first.ticket === second.ticket && first.owner < second.owner)).toBe(true);
+});
+
+test("waits for a choosing entrant published during ticket selection", async () => {
+  const { filePath } = await temporaryJar();
+  const lockDirectory = `${filePath}.locks`;
+  const barrierDirectory = `${filePath}.barriers`;
+  await mkdir(lockDirectory, { mode: 0o700 });
+  const entrantOwner = "00000000-0000-4000-8000-000000000000";
+  const entrantClaim = join(lockDirectory, `${process.pid}-${entrantOwner}.claim`);
+  await writeFile(entrantClaim, JSON.stringify({ owner: entrantOwner, pid: process.pid, startedAt: Date.now(), state: "choosing" }), { mode: 0o600 });
+
+  const moduleUrl = new URL("./cookie-jar.ts", import.meta.url).href;
+  const enteredPath = `${filePath}.entrant-entered`;
+  const releasePath = `${filePath}.entrant-release`;
+  const source = `
+    import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+    import { join } from "node:path";
+    import { PersistentCookieJar } from ${JSON.stringify(moduleUrl)};
+    const filePath = process.env.T09_COOKIE_JAR;
+    const jar = new PersistentCookieJar({ filePath, serviceOrigin: "https://msg.0000.chat" });
+    const fetcher = jar.wrapFetch(async (_input, init) => {
+      const claimName = readdirSync(filePath + ".locks").find((name) => name.startsWith(process.pid + "-") && name.endsWith(".claim"));
+      if (!claimName) throw new Error("The entrant contender did not retain its unique claim.");
+      const claim = JSON.parse(readFileSync(join(filePath + ".locks", claimName), "utf8"));
+      writeFileSync(process.env.T09_COOKIE_ENTERED, JSON.stringify({ owner: claim.owner, ticket: claim.ticket }));
+      while (!existsSync(process.env.T09_COOKIE_RELEASE)) await new Promise((resolve) => setTimeout(resolve, 5));
+      const cookie = new Headers(init?.headers).get("cookie") ?? "";
+      const control = cookie.split("; ").find((value) => value.startsWith("msg_guest_control="))?.slice("msg_guest_control=".length) ?? "guest-entrant";
+      return new Response(null, { headers: [
+        ["set-cookie", "msg_guest_control=" + control + "; Path=/; Secure"],
+        ["set-cookie", "msg_resource=" + control + "; Path=/room-entrant; Secure"],
+      ] });
+    });
+    await fetcher("https://msg.0000.chat/room-entrant");
+  `;
+  let error = "";
+  const child = spawn(process.execPath, ["-e", source], {
+    env: {
+      ...process.env,
+      T09_COOKIE_JAR: filePath,
+      T09_COOKIE_LOCK_BARRIER_DIR: barrierDirectory,
+      T09_COOKIE_ENTERED: enteredPath,
+      T09_COOKIE_RELEASE: releasePath,
+    },
+    stdio: ["ignore", "ignore", "pipe"],
+  });
+  child.stderr.on("data", (chunk: Buffer) => { error += chunk.toString(); });
+  const done = new Promise<void>((resolve, reject) => {
+    child.once("error", reject);
+    child.once("close", (code) => code === 0 ? resolve() : reject(new Error(`Entrant contender exited ${code}: ${error}`)));
+  });
+  if (!child.pid) throw new Error("Could not allocate entrant contender process.");
+
+  const choosingMarker = await waitForDirectoryEntry(barrierDirectory, (name) => name.startsWith(`${child.pid}-`) && name.endsWith(".choosing.ready"));
+  await writeFile(join(barrierDirectory, choosingMarker.replace(/\.ready$/u, ".go")), "go");
+  const readyMarker = await waitForDirectoryEntry(barrierDirectory, (name) => name.startsWith(`${child.pid}-`) && name.endsWith(".ready.ready"));
+
+  const readyEntrant = { owner: entrantOwner, pid: process.pid, startedAt: Date.now(), state: "ready", ticket: 1 };
+  const replacement = `${entrantClaim}.${entrantOwner}.ready.tmp`;
+  writeFileSync(replacement, `${JSON.stringify(readyEntrant)}\n`, { mode: 0o600 });
+  renameSync(replacement, entrantClaim);
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  expect(existsSync(enteredPath)).toBe(false);
+  unlinkSync(entrantClaim);
+  await writeFile(join(barrierDirectory, readyMarker.replace(/\.ready$/u, ".go")), "go");
+  await waitForFile(enteredPath);
+  await writeFile(releasePath, "release");
+  await done;
+});
+
 test("does not steal a live owner whose lock looks stale during delayed first use", async () => {
   const { filePath } = await temporaryJar();
   const readyPath = `${filePath}.ready`;
   const moduleUrl = new URL("./cookie-jar.ts", import.meta.url).href;
   const ownerSource = `
-    import { utimesSync, writeFileSync } from "node:fs";
+    import { writeFileSync } from "node:fs";
     import { PersistentCookieJar } from ${JSON.stringify(moduleUrl)};
     const filePath = process.env.T09_COOKIE_JAR;
     const jar = new PersistentCookieJar({ filePath, serviceOrigin: "https://msg.0000.chat" });
     const fetcher = jar.wrapFetch(async (_input, init) => {
-      utimesSync(filePath + ".lock", new Date(0), new Date(0));
       writeFileSync(process.env.T09_COOKIE_READY, "ready");
       await new Promise((resolve) => setTimeout(resolve, 250));
       const cookie = new Headers(init?.headers).get("cookie") ?? "";
@@ -199,7 +407,7 @@ test("does not steal a live owner whose lock looks stale during delayed first us
 
 test("competing dead-owner reclaimers preserve the replacement owner", async () => {
   const { filePath } = await temporaryJar();
-  const lockPath = `${filePath}.lock`;
+  const lockPath = `${filePath}.locks`;
   const deadOwner = spawn(process.execPath, ["-e", ""], { stdio: "ignore" });
   const deadPid = deadOwner.pid;
   if (!deadPid) throw new Error("Could not allocate a dead lock owner process.");
@@ -208,7 +416,7 @@ test("competing dead-owner reclaimers preserve the replacement owner", async () 
     deadOwner.once("close", () => resolve());
   });
   await mkdir(lockPath, { mode: 0o700 });
-  await writeFile(join(lockPath, "owner.json"), JSON.stringify({ owner: "dead-owner", pid: deadPid, startedAt: 0 }), { mode: 0o600 });
+  await writeFile(join(lockPath, `${deadPid}-dead-owner.claim`), JSON.stringify({ owner: "dead-owner", pid: deadPid, startedAt: 0, state: "choosing" }), { mode: 0o600 });
 
   const moduleUrl = new URL("./cookie-jar.ts", import.meta.url).href;
   const goPath = `${filePath}.go`;

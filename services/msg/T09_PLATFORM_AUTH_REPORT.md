@@ -39,14 +39,21 @@ credentials use `msg_management` at `/manage/{room}`. The CLI stores these
 cookies in a private JSON jar with host, path, expiry, and Secure filtering,
 manual redirect handling, and explicit `MSG_SERVICE_ORIGIN` self-hosting. Its
 `wss:` lookup is normalized to HTTPS before matching Secure cookies, and each
-write reloads under an owner-aware lock and atomically replaces the mode-0600
-file so two CLI processes merge rather than overwrite each other's state. The
-lock records an owner token and PID, waits for a live owner even when its
-metadata is old, removes only dead-owner locks, and releases only when the
-token still belongs to that process. Dead-owner reclamation uses an atomic
-same-directory rename to a unique quarantine path before cleanup, which keeps
-replacement acquisition independent of competing reclamation. No Platform
-credential is put in a URL, JavaScript storage, or a message author.
+write reloads under a private bakery lock and atomically replaces the mode-0600
+file so two CLI processes merge rather than overwrite each other's state. Each
+lock attempt publishes a PID-plus-unpredictable-UUID claim in
+`${cookieFile}.locks`, chooses a bounded ready ticket, atomically replaces its
+own choosing claim with complete ready metadata, and waits on the defined
+post-ready snapshot ordered by `(ticket, UUID)`. A claim filename is never
+reused; liveness errors including `EPERM` are treated as alive, unknown or
+corrupt metadata fails closed, and cleanup unlinks only the exact dead claim
+that was read. Release happens after cookie persistence and cannot remove a
+different owner's claim. This protocol requires a coherent local filesystem;
+NFS and other filesystems without local directory/rename coherence are not
+supported. If a process crashes after the server commits but before the jar
+persists the response cookie, one remote guest cannot be guaranteed; the
+existing jar file remains intact. No Platform credential is put in a URL,
+JavaScript storage, or a message author.
 An invalid presented resource cookie remains a denial; an explicit `?recover=1`
 request rechecks the current control and room link before replacing that cookie.
 When the room already has an active local grant for that source, recovery renews
@@ -90,7 +97,7 @@ to read through the same guest's independent `msg-public` grant.
 Commands and results on this branch:
 
 - `bun run check:application` from `services/msg`: passed 192 Worker tests,
-  17 tooling tests, 61 CLI tests, build, pack, typecheck, and lint. The
+  17 tooling tests, 64 CLI tests, build, pack, typecheck, and lint. The
   existing `production-synthetic.ts:142` constant-condition warning remains.
 - `bun test src/t09-platform.integration.test.ts` from `services/msg/worker`:
   passed 1 actual boundary test with 46 assertions, including D1 creation
@@ -103,11 +110,15 @@ Commands and results on this branch:
 - `bun test src/operations.test.ts`:
   passed the guest-scoped D1 operation tests, including the persisted owner
   grant reference.
-- `bun test src/cookie-jar.test.ts` from `services/msg/cli`: passed 8 tests
+- `bun test src/cookie-jar.test.ts` from `services/msg/cli`: passed 11 tests
   covering persistence, path/Secure, redirect, `wss:` lookup, concurrent
-  merge behavior, separate-process first-use bootstrap overlap, and a delayed
-  live owner whose lock metadata appears stale; competing dead-owner
-  reclaimers preserve a replacement owner.
+  merge behavior, ticket/UUID acquisition order, a choosing entrant crossing
+  the ready boundary, separate-process first-use bootstrap overlap, crash
+  recovery with preserved jar state, a delayed live owner, and competing
+  dead-owner reclaimers preserving a replacement owner.
+  The choosing-entrant case uses the unset-by-default
+  `T09_COOKIE_LOCK_BARRIER_DIR` test-only environment barrier at the actual
+  choosing and ready publications.
 - `T09_PLAYWRIGHT_MODULE=/path/to/@playwright/test/index.mjs bun
   services/msg/worker/scripts/t09-platform-browser-smoke.mjs`: passed the real
   Chromium bridge against the actual Platform Worker/D1 and msg Worker/DO. It

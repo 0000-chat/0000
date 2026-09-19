@@ -1,7 +1,7 @@
-import { chmodSync, mkdirSync, readFileSync, renameSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, linkSync, mkdirSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 
 interface StoredCookie {
   readonly domain: string;
@@ -103,7 +103,8 @@ export class PersistentCookieJar {
 
 interface FileLock {
   readonly owner: string;
-  readonly path: string;
+  readonly claimPath: string;
+  readonly ticket: number;
 }
 
 function storeSetCookie(cookies: StoredCookie[], url: URL, header: string, serviceOrigin: URL): void {
@@ -158,78 +159,217 @@ function cookieRequestUrl(value: string | URL): URL {
   return url;
 }
 
+const LOCK_TIMEOUT_MS = 5_000;
+const LOCK_POLL_MS = 10;
+const MAX_TICKET = Number.MAX_SAFE_INTEGER - 1;
+const CLAIM_SUFFIX = ".claim";
+
+type ClaimState = "choosing" | "ready";
+
+interface ClaimRecord {
+  readonly owner: string;
+  readonly pid: number;
+  readonly startedAt: number;
+  readonly state: ClaimState;
+  readonly ticket?: number;
+}
+
+type ClaimRead =
+  | { readonly status: "missing" }
+  | { readonly status: "unknown" }
+  | { readonly record: ClaimRecord; readonly status: "record" };
+
 function acquireFileLock(path: string): FileLock {
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-  const lockPath = `${path}.lock`;
-  const started = Date.now();
-  const waitBuffer = new Int32Array(new SharedArrayBuffer(4));
+  const lockDirectoryPath = lockDirectory(path);
+  mkdirSync(lockDirectoryPath, { recursive: true, mode: 0o700 });
+
   const owner = randomUUID();
-  while (true) {
-    try {
-      const candidate = `${lockPath}.${owner}.tmp`;
-      mkdirSync(candidate, { mode: 0o700 });
-      writeFileSync(join(candidate, "owner.json"), JSON.stringify({ owner, pid: process.pid, startedAt: Date.now() }), { mode: 0o600 });
-      renameSync(candidate, lockPath);
-      return { owner, path: lockPath };
-    } catch (error) {
-      removeLockDirectory(`${lockPath}.${owner}.tmp`);
-      if (!isLockExistsError(error)) throw error;
-    }
-    removeDeadLock(lockPath);
-    if (Date.now() - started > 5_000) throw new Error("The msg cookie jar is locked by another process.");
-    Atomics.wait(waitBuffer, 0, 0, 10);
+  const claimPath = join(lockDirectoryPath, `${process.pid}-${owner}${CLAIM_SUFFIX}`);
+  const choosing: ClaimRecord = { owner, pid: process.pid, startedAt: Date.now(), state: "choosing" };
+  publishChoosingClaim(claimPath, choosing);
+  waitForTestBarrier("choosing", claimPath);
+
+  try {
+    const ticket = chooseTicket(lockDirectoryPath);
+    const ready: ClaimRecord = { ...choosing, state: "ready", ticket };
+    // Replacing this same unique claim path publishes the complete ready state atomically.
+    publishClaim(claimPath, ready);
+    waitForTestBarrier("ready", claimPath);
+    const lock = { claimPath, owner, ticket };
+    waitForDefinedSnapshot(lockDirectoryPath, lock);
+    return lock;
+  } catch (error) {
+    releaseFileLock({ claimPath, owner, ticket: 0 });
+    throw error;
   }
 }
 
 function releaseFileLock(lock: FileLock): void {
-  const ownsLock = readLock(lock.path)?.owner === lock.owner;
-  if (ownsLock) {
-    removeLockDirectory(lock.path);
-  }
-}
-
-interface LockRecord {
-  readonly owner: string;
-  readonly pid: number;
-  readonly startedAt: number;
-}
-
-function readLock(path: string): LockRecord | undefined {
+  const current = readClaim(lock.claimPath);
+  if (current.status !== "record" || current.record.owner !== lock.owner) return;
   try {
-    const parsed: unknown = JSON.parse(readFileSync(join(path, "owner.json"), "utf8"));
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
-    const record = parsed as Record<string, unknown>;
-    return typeof record.owner === "string" && record.owner.length > 0 && typeof record.pid === "number" && Number.isInteger(record.pid) && record.pid > 0 && typeof record.startedAt === "number" && Number.isFinite(record.startedAt)
-      ? { owner: record.owner, pid: record.pid, startedAt: record.startedAt }
-      : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-function removeDeadLock(path: string): void {
-  const lock = readLock(path);
-  if (!lock || processAlive(lock.pid)) return;
-  const quarantine = `${path}.${lock.owner}.${randomUUID()}.reclaim`;
-  try {
-    renameSync(path, quarantine);
+    unlinkSync(lock.claimPath);
   } catch (error) {
-    if (!isPathRace(error)) throw error;
+    if (!isMissingPath(error)) throw error;
+  }
+}
+
+function lockDirectory(path: string): string {
+  return `${path}.locks`;
+}
+
+function publishClaim(claimPath: string, record: ClaimRecord): void {
+  const temporary = `${claimPath}.${randomUUID()}.tmp`;
+  try {
+    writeFileSync(temporary, `${JSON.stringify(record)}\n`, { mode: 0o600 });
+    renameSync(temporary, claimPath);
+  } finally {
+    try { unlinkSync(temporary); } catch { /* The atomic rename already removed it. */ }
+  }
+}
+
+function publishChoosingClaim(claimPath: string, record: ClaimRecord): void {
+  const temporary = `${claimPath}.${randomUUID()}.tmp`;
+  try {
+    writeFileSync(temporary, `${JSON.stringify(record)}\n`, { mode: 0o600 });
+    // A hard-link publish is atomic and refuses to replace another unique claim.
+    linkSync(temporary, claimPath);
+  } finally {
+    try { unlinkSync(temporary); } catch { /* The temporary name was already cleaned up. */ }
+  }
+}
+
+function chooseTicket(lockDirectoryPath: string): number {
+  let highest = 0;
+  for (const claimPath of claimPaths(lockDirectoryPath)) {
+    const claim = readClaim(claimPath);
+    if (claim.status === "unknown") throw new Error("The msg cookie jar contains invalid claim metadata.");
+    if (claim.status !== "record" || claim.record.state !== "ready" || claim.record.ticket === undefined) continue;
+    highest = Math.max(highest, claim.record.ticket);
+  }
+  if (highest >= MAX_TICKET) throw new Error("The msg cookie jar ticket space is exhausted.");
+  return highest + 1;
+}
+
+function waitForDefinedSnapshot(lockDirectoryPath: string, own: FileLock): void {
+  const waitBuffer = new Int32Array(new SharedArrayBuffer(4));
+  const snapshot = new Set(claimPaths(lockDirectoryPath).filter((claimPath) => claimPath !== own.claimPath));
+  const started = Date.now();
+  if (snapshot.size === 0) {
+    assertNoUnknownClaims(lockDirectoryPath, own, snapshot);
     return;
   }
-  removeLockDirectory(quarantine);
+  while (snapshot.size > 0) {
+    assertNoUnknownClaims(lockDirectoryPath, own, snapshot);
+    let blocked = false;
+    for (const claimPath of snapshot) {
+      const claim = readClaim(claimPath);
+      if (claim.status === "missing") {
+        snapshot.delete(claimPath);
+        continue;
+      }
+      if (claim.status === "unknown") {
+        throw new Error("The msg cookie jar contains invalid claim metadata.");
+      }
+      if (claim.record.state === "choosing") {
+        if (removeDeadClaim(claimPath, claim.record)) snapshot.delete(claimPath);
+        else blocked = true;
+        continue;
+      }
+      if (claimIsBefore(claim.record, own)) {
+        if (removeDeadClaim(claimPath, claim.record)) snapshot.delete(claimPath);
+        else blocked = true;
+      } else snapshot.delete(claimPath);
+    }
+    if (snapshot.size === 0) {
+      assertNoUnknownClaims(lockDirectoryPath, own, snapshot);
+      return;
+    }
+    if (Date.now() - started > LOCK_TIMEOUT_MS) throw new Error("The msg cookie jar is locked by another process.");
+    if (!blocked) continue;
+    Atomics.wait(waitBuffer, 0, 0, LOCK_POLL_MS);
+  }
 }
 
-function removeLockDirectory(path: string): void {
-  try { rmSync(path, { force: true, recursive: true }); } catch { /* Another waiter completed reclamation. */ }
+function assertNoUnknownClaims(lockDirectoryPath: string, own: FileLock, snapshot: ReadonlySet<string>): void {
+  for (const claimPath of claimPaths(lockDirectoryPath)) {
+    if (claimPath === own.claimPath || snapshot.has(claimPath)) continue;
+    if (readClaim(claimPath).status === "unknown") throw new Error("The msg cookie jar contains invalid claim metadata.");
+  }
 }
 
-function isLockExistsError(error: unknown): boolean {
-  return error instanceof Error && "code" in error && (error.code === "EEXIST" || error.code === "ENOTEMPTY");
+function claimPaths(lockDirectoryPath: string): string[] {
+  try {
+    return readdirSync(lockDirectoryPath, { withFileTypes: true })
+      .filter((entry) => entry.isFile() && entry.name.endsWith(CLAIM_SUFFIX))
+      .map((entry) => join(lockDirectoryPath, entry.name));
+  } catch (error) {
+    if (isMissingPath(error)) return [];
+    throw error;
+  }
 }
 
-function isPathRace(error: unknown): boolean {
-  return error instanceof Error && "code" in error && (error.code === "ENOENT" || error.code === "EEXIST" || error.code === "ENOTEMPTY");
+function readClaim(claimPath: string): ClaimRead {
+  let text: string;
+  try {
+    text = readFileSync(claimPath, "utf8");
+  } catch (error) {
+    return isMissingPath(error) ? { status: "missing" } : { status: "unknown" };
+  }
+  try {
+    const parsed: unknown = JSON.parse(text);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return { status: "unknown" };
+    const record = parsed as Record<string, unknown>;
+    if (typeof record.owner !== "string" || record.owner.length === 0 || typeof record.pid !== "number" || !Number.isInteger(record.pid) || record.pid <= 0 || typeof record.startedAt !== "number" || !Number.isFinite(record.startedAt)) return { status: "unknown" };
+    if (record.state !== "choosing" && record.state !== "ready") return { status: "unknown" };
+    if (record.state === "ready" && (typeof record.ticket !== "number" || !Number.isSafeInteger(record.ticket) || record.ticket < 1 || record.ticket > MAX_TICKET)) return { status: "unknown" };
+    return {
+      record: {
+        owner: record.owner,
+        pid: record.pid,
+        startedAt: record.startedAt,
+        state: record.state,
+        ...(record.state === "ready" ? { ticket: record.ticket as number } : {}),
+      },
+      status: "record",
+    };
+  } catch {
+    return { status: "unknown" };
+  }
+}
+
+function removeDeadClaim(claimPath: string, expected: ClaimRecord): boolean {
+  const current = readClaim(claimPath);
+  if (current.status !== "record" || current.record.owner !== expected.owner || processAlive(current.record.pid)) return false;
+  try {
+    // Claim paths are unique and never reused, so this exact unlink cannot remove a replacement owner.
+    unlinkSync(claimPath);
+    return true;
+  } catch (error) {
+    if (isMissingPath(error)) return true;
+    throw error;
+  }
+}
+
+function claimIsBefore(left: ClaimRecord, right: FileLock): boolean {
+  if (left.state !== "ready" || left.ticket === undefined) return false;
+  return left.ticket < right.ticket || (left.ticket === right.ticket && left.owner < right.owner);
+}
+
+function isMissingPath(error: unknown): boolean {
+  return error instanceof Error && "code" in error && error.code === "ENOENT";
+}
+
+/** Test-only synchronization at the two claim publication boundaries. */
+function waitForTestBarrier(phase: "choosing" | "ready", claimPath: string): void {
+  const directory = process.env.T09_COOKIE_LOCK_BARRIER_DIR;
+  if (!directory) return;
+  mkdirSync(directory, { recursive: true, mode: 0o700 });
+  const marker = join(directory, `${basename(claimPath)}.${phase}`);
+  writeFileSync(`${marker}.ready`, "ready");
+  const waitBuffer = new Int32Array(new SharedArrayBuffer(4));
+  while (!existsSync(`${marker}.go`)) Atomics.wait(waitBuffer, 0, 0, LOCK_POLL_MS);
 }
 
 function processAlive(pid: number): boolean {
