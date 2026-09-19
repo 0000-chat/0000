@@ -10,6 +10,11 @@ export const MSG_READ = "msg:read";
 export const MSG_WRITE = "msg:write";
 export const MSG_MANAGE = "msg:manage";
 export const MSG_OPERATOR = "msg:operator";
+export const MSG_PERMISSION_IDS = {
+  owner: "msg-owner",
+  public: "msg-public",
+  management: "msg-management",
+} as const;
 
 export type AccessSource = "owner" | "public" | "management";
 
@@ -154,13 +159,13 @@ export function createMsgAuthenticator(
           grantId: local.grantId,
           resourceId: input.room,
           capabilities: [MSG_READ, MSG_WRITE],
-          assertion: { kind: "owner", storedOwnerId: input.storedOwnerId },
+          assertion: { kind: "owner", storedOwnerId: input.storedOwnerId, permissionId: MSG_PERMISSION_IDS.owner },
         })
         : await guestClient.attestGuestGrant({
           bootstrapCredential: control.bootstrapCredential,
           resourceId: input.room,
           capabilities: [MSG_READ, MSG_WRITE],
-          assertion: { kind: "owner", storedOwnerId: input.storedOwnerId },
+          assertion: { kind: "owner", storedOwnerId: input.storedOwnerId, permissionId: MSG_PERMISSION_IDS.owner },
         });
       if (grant.status === "authority_unavailable") throw authorityError();
       if (grant.status !== "success") throw authError("The creator grant could not be issued.", 403);
@@ -208,12 +213,23 @@ export function createMsgAuthenticator(
 
       const proof = await rooms.proveLink({ room: input.room, source: input.source, token: input.token });
       if (!proof) throw authError("The requested resource was not found.", 404);
-      const grant = await guestClient.attestGuestGrant({
-        bootstrapCredential: control.bootstrapCredential,
-        resourceId: input.room,
-        capabilities: needed,
-        assertion: { kind: "participant" },
-      });
+      const local = await rooms.findGrant({ room: input.room, guestId: control.guestId, source: input.source });
+      if (local && !local.active) throw authError("The resource permission is no longer valid.", 403);
+      const assertion = { kind: "participant" as const, permissionId: MSG_PERMISSION_IDS[input.source] };
+      const grant = local?.grantId
+        ? await guestClient.renewGuestGrant({
+          bootstrapCredential: control.bootstrapCredential,
+          grantId: local.grantId,
+          resourceId: input.room,
+          capabilities: needed,
+          assertion,
+        })
+        : await guestClient.attestGuestGrant({
+          bootstrapCredential: control.bootstrapCredential,
+          resourceId: input.room,
+          capabilities: needed,
+          assertion,
+        });
       if (grant.status === "authority_unavailable") throw authorityError();
       if (grant.status !== "success") throw authError("The resource permission is not valid.", 403);
       await rooms.recordGrant({ room: input.room, guestId: control.guestId, source: input.source, capabilities: needed, grantId: grant.value.grantId });

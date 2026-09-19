@@ -363,7 +363,19 @@ test.serial("crosses the actual Platform Worker/D1 and msg Worker/DO boundary", 
     const invalidManagement = await firstMsg.miniflare.dispatchFetch(`https://msg.0000.chat/manage/${created.room.id}/wrong`, roomRequest(participantCookies));
     expect(invalidManagement.status).toBe(404);
     const management = await firstMsg.miniflare.dispatchFetch(created.manage_url, roomRequest(ownerCookies));
-    expect(management.status).toBe(403);
+    expect(management.status).toBe(200);
+    let managementCookies = mergeCookieHeader(ownerCookies, management);
+    const managementGrantBeforeRecovery = await database.prepare(
+      "SELECT id FROM platform_guest_grant WHERE service_id = ? AND resource_id = ? AND permission_id = 'msg-management' AND revoked_at IS NULL",
+    ).bind(service.serviceId, created.room.id).first<{ id: string }>();
+    expect(managementGrantBeforeRecovery?.id).toBeString();
+    const recoveredManagement = await firstMsg.miniflare.dispatchFetch(`${created.manage_url}?recover=1`, roomRequest(managementCookies));
+    expect(recoveredManagement.status).toBe(200);
+    managementCookies = mergeCookieHeader(managementCookies, recoveredManagement);
+    const managementGrantAfterRecovery = await database.prepare(
+      "SELECT id FROM platform_guest_grant WHERE service_id = ? AND resource_id = ? AND permission_id = 'msg-management' AND revoked_at IS NULL",
+    ).bind(service.serviceId, created.room.id).first<{ id: string }>();
+    expect(managementGrantAfterRecovery?.id).toBe(managementGrantBeforeRecovery?.id);
 
     const ownerGrant = await database.prepare(
       "SELECT id FROM platform_guest_grant WHERE service_id = ? AND resource_id = ? AND assertion_kind = 'owner' AND revoked_at IS NULL",
@@ -393,6 +405,30 @@ test.serial("crosses the actual Platform Worker/D1 and msg Worker/DO boundary", 
     expect(revokedOwner.status).toBe(401);
     const recoveredOwner = await firstMsg.miniflare.dispatchFetch(`https://msg.0000.chat/${created.room.id}?recover=1`, roomRequest(ownerCookies));
     expect(recoveredOwner.status).toBe(200);
+    ownerCookies = mergeCookieHeader(ownerCookies, recoveredOwner);
+    const managementGrant = await database.prepare(
+      "SELECT id FROM platform_guest_grant WHERE service_id = ? AND resource_id = ? AND permission_id = 'msg-management' AND revoked_at IS NULL",
+    ).bind(service.serviceId, created.room.id).first<{ id: string }>();
+    const publicGrant = await database.prepare(
+      "SELECT id FROM platform_guest_grant WHERE service_id = ? AND resource_id = ? AND permission_id = 'msg-public' AND revoked_at IS NULL",
+    ).bind(service.serviceId, created.room.id).first<{ id: string }>();
+    expect(managementGrant?.id).toBeString();
+    expect(publicGrant?.id).toBeString();
+    const ownerControl = cookieValue(ownerCookies, "msg_guest_control");
+    expect(ownerControl).toBeString();
+    const recoveredPublic = await firstMsg.miniflare.dispatchFetch(`https://msg.0000.chat/${created.room.id}?recover=1`, roomRequest(`msg_guest_control=${ownerControl}`));
+    expect(recoveredPublic.status).toBe(200);
+    ownerCookies = mergeCookieHeader(ownerCookies, recoveredPublic);
+    const publicGrantAfterRecovery = await database.prepare(
+      "SELECT id FROM platform_guest_grant WHERE service_id = ? AND resource_id = ? AND permission_id = 'msg-public' AND revoked_at IS NULL",
+    ).bind(service.serviceId, created.room.id).first<{ id: string }>();
+    expect(publicGrantAfterRecovery?.id).toBe(publicGrant.id);
+    if (!managementGrant) throw new Error("The actual Platform management grant was not stored.");
+    expect(await platformGuest.revokeGuestGrant(managementGrant.id)).toEqual({ status: "success", revoked: true });
+    const revokedManagement = await firstMsg.miniflare.dispatchFetch(created.manage_url, roomRequest(managementCookies));
+    expect(revokedManagement.status).toBe(401);
+    const unrelatedPublic = await firstMsg.miniflare.dispatchFetch(`https://msg.0000.chat/${created.room.id}`, roomRequest(ownerCookies));
+    expect(unrelatedPublic.status).toBe(200);
     const unrelatedParticipant = await firstMsg.miniflare.dispatchFetch(`https://msg.0000.chat/${created.room.id}`, roomRequest(participantCookies));
     expect(unrelatedParticipant.status).toBe(200);
 

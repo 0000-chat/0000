@@ -78,3 +78,44 @@ test("merges concurrent cookie writers from separate CLI processes", async () =>
   const merged = new PersistentCookieJar({ filePath, serviceOrigin: "https://msg.0000.chat" }).cookieHeader("https://msg.0000.chat/room-overlap") ?? "";
   for (let index = 0; index < 8; index += 1) expect(merged).toContain(`msg_worker_${index}=worker-${index}`);
 });
+
+test("serializes separate-process first-use bootstrap across request and response", async () => {
+  const { filePath } = await temporaryJar();
+  const moduleUrl = new URL("./cookie-jar.ts", import.meta.url).href;
+  const requests = Array.from({ length: 2 }, (_, index) => {
+    const room = `room-first-use-${index}`;
+    const source = `
+      import { PersistentCookieJar } from ${JSON.stringify(moduleUrl)};
+      const jar = new PersistentCookieJar({ filePath: process.env.T09_COOKIE_JAR, serviceOrigin: "https://msg.0000.chat" });
+      const fetcher = jar.wrapFetch(async (_input, init) => {
+        const cookie = new Headers(init?.headers).get("cookie") ?? "";
+        const control = cookie.split("; ").find((value) => value.startsWith("msg_guest_control="))?.slice("msg_guest_control=".length) ?? ${JSON.stringify(`guest-${index}`)};
+        await new Promise((resolve) => setTimeout(resolve, 150));
+        return new Response(null, { headers: [
+          ["set-cookie", "msg_guest_control=" + control + "; Path=/; Secure"],
+          ["set-cookie", "msg_resource=" + control + "; Path=/${room}; Secure"],
+        ] });
+      });
+      await fetcher(${JSON.stringify(`https://msg.0000.chat/${room}`)});
+    `;
+    return new Promise<void>((resolve, reject) => {
+      const child = spawn(process.execPath, ["-e", source], {
+        env: { ...process.env, T09_COOKIE_JAR: filePath },
+        stdio: ["ignore", "ignore", "pipe"],
+      });
+      let error = "";
+      child.stderr.on("data", (chunk: Buffer) => { error += chunk.toString(); });
+      child.once("error", reject);
+      child.once("close", (code) => code === 0 ? resolve() : reject(new Error(`First-use process exited ${code}: ${error}`)));
+    });
+  });
+  await Promise.all(requests);
+
+  const jar = new PersistentCookieJar({ filePath, serviceOrigin: "https://msg.0000.chat" });
+  const control = jar.cookieHeader("https://msg.0000.chat/room-first-use-0")?.match(/(?:^|; )msg_guest_control=([^;]+)/u)?.[1];
+  const firstResource = jar.cookieHeader("https://msg.0000.chat/room-first-use-0")?.match(/(?:^|; )msg_resource=([^;]+)/u)?.[1];
+  const secondResource = jar.cookieHeader("https://msg.0000.chat/room-first-use-1")?.match(/(?:^|; )msg_resource=([^;]+)/u)?.[1];
+  expect(control).toBeString();
+  expect(firstResource).toBe(control);
+  expect(secondResource).toBe(control);
+});

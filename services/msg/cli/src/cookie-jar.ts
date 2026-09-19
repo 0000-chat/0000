@@ -37,11 +37,7 @@ export class PersistentCookieJar {
     this.cookies = load(this.filePath);
     const now = Date.now();
     this.purge(now);
-    const matches = this.cookies.filter((cookie) => {
-      const domainMatches = cookie.hostOnly ? cookie.domain === url.hostname : domainMatchesHost(cookie.domain, url.hostname);
-      return domainMatches && pathMatches(cookie.path, url.pathname) && (!cookie.secure || url.protocol === "https:");
-    });
-    return matches.length === 0 ? undefined : matches.map((cookie) => `${cookie.name}=${encodeURIComponent(cookie.value)}`).join("; ");
+    return cookieHeaderFor(this.cookies, url, this.serviceOrigin);
   }
 
   store(urlValue: string | URL, response: Response): void {
@@ -52,18 +48,14 @@ export class PersistentCookieJar {
     if (values.length === 0) return;
     const lock = acquireFileLock(this.filePath);
     try {
-      const cookies = load(this.filePath);
-      for (const value of values) storeSetCookie(cookies, url, value, this.serviceOrigin);
-      this.cookies = cookies;
-      this.purge(Date.now());
-      writeAtomic(this.filePath, this.cookies);
+      this.storeLocked(url, response, load(this.filePath));
     } finally {
       releaseFileLock(lock);
     }
   }
 
   wrapFetch(baseFetch: typeof fetch): typeof fetch {
-    return async (input, init) => {
+    const request = async (input: RequestInfo | URL, init?: RequestInit, lockHeld = false): Promise<Response> => {
       const url = new URL(typeof input === "string" || input instanceof URL ? input.toString() : input.url);
       const headers = new Headers(input instanceof Request ? input.headers : undefined);
       for (const [name, value] of new Headers(init?.headers).entries()) headers.set(name, value);
@@ -75,8 +67,20 @@ export class PersistentCookieJar {
         const redirected = new URL(location, url);
         if (!sameOrigin(redirected, this.serviceOrigin)) throw new Error("The msg service returned an unexpected cross-origin redirect.");
       }
-      this.store(url, response);
+      if (lockHeld) this.storeLocked(cookieRequestUrl(url), response, load(this.filePath));
+      else this.store(url, response);
       return response;
+    };
+    return async (input, init) => {
+      const url = new URL(typeof input === "string" || input instanceof URL ? input.toString() : input.url);
+      const existing = this.cookieHeader(url);
+      if (existing?.split("; ").some((cookie) => cookie.startsWith(`${CONTROL_COOKIE}=`))) return request(input, init);
+      const lock = acquireFileLock(this.filePath);
+      try {
+        return await request(input, init, true);
+      } finally {
+        releaseFileLock(lock);
+      }
     };
   }
 
@@ -87,6 +91,13 @@ export class PersistentCookieJar {
 
   private purge(now: number): void {
     this.cookies = this.cookies.filter((cookie) => cookie.expiresAt === undefined || cookie.expiresAt > now);
+  }
+
+  private storeLocked(url: URL, response: Response, cookies: StoredCookie[]): void {
+    for (const value of responseCookies(response)) storeSetCookie(cookies, url, value, this.serviceOrigin);
+    this.cookies = cookies;
+    this.purge(Date.now());
+    writeAtomic(this.filePath, this.cookies);
   }
 }
 
@@ -130,6 +141,14 @@ function storeSetCookie(cookies: StoredCookie[], url: URL, header: string, servi
   if (index >= 0) cookies.splice(index, 1);
   if (expiresAt !== undefined && expiresAt <= Date.now()) return;
   cookies.push({ name, value, domain, hostOnly, path, secure, ...(expiresAt === undefined ? {} : { expiresAt }) });
+}
+
+function responseCookies(response: Response): string[] {
+  const headers = response.headers as Headers & { getSetCookie?: () => string[] };
+  const values = headers.getSetCookie?.();
+  if (values && values.length > 0) return values;
+  const value = response.headers.get("set-cookie");
+  return value ? [value] : [];
 }
 
 function cookieRequestUrl(value: string | URL): URL {
@@ -201,3 +220,13 @@ function sameOrigin(left: URL, right: URL): boolean { return left.protocol === r
 function domainMatchesHost(domain: string, host: string): boolean { return host === domain || host.endsWith(`.${domain}`); }
 function pathMatches(cookiePath: string, requestPath: string): boolean { return requestPath === cookiePath || requestPath.startsWith(cookiePath.endsWith("/") ? cookiePath : `${cookiePath}/`); }
 function defaultPath(path: string): string { const slash = path.lastIndexOf("/"); return slash <= 0 ? "/" : path.slice(0, slash); }
+function cookieHeaderFor(cookies: readonly StoredCookie[], url: URL, serviceOrigin: URL): string | undefined {
+  if (!sameOrigin(url, serviceOrigin) || url.protocol !== "https:") return undefined;
+  const matches = cookies.filter((cookie) => {
+    const domainMatches = cookie.hostOnly ? cookie.domain === url.hostname : domainMatchesHost(cookie.domain, url.hostname);
+    return domainMatches && pathMatches(cookie.path, url.pathname) && (!cookie.secure || url.protocol === "https:");
+  });
+  return matches.length === 0 ? undefined : matches.map((cookie) => `${cookie.name}=${encodeURIComponent(cookie.value)}`).join("; ");
+}
+
+const CONTROL_COOKIE = "msg_guest_control";

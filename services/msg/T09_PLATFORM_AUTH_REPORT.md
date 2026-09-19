@@ -26,6 +26,13 @@ next broadcast. Creation receipts retain the owner grant reference so replay
 renews that grant with a fresh local ACL check instead of re-attesting a
 conflicting permission.
 
+The accepted Platform permission migration is present in this branch. Msg
+chooses stable service-owned permission IDs `msg-owner`, `msg-public`, and
+`msg-management` when it attests or renews grants; callers cannot select these
+IDs. The local ACL records the returned grant ID and the DO checks that exact
+ID together with its source and action, so public and management grants for the
+same guest remain independently revocable.
+
 The host-only `msg_guest_control` cookie is HttpOnly, Secure, SameSite=Lax and
 Path=/; public room credentials use `msg_resource` at `/{room}` and management
 credentials use `msg_management` at `/manage/{room}`. The CLI stores these
@@ -37,6 +44,12 @@ CLI processes merge rather than overwrite each other's state. No Platform
 credential is put in a URL, JavaScript storage, or a message author.
 An invalid presented resource cookie remains a denial; an explicit `?recover=1`
 request rechecks the current control and room link before replacing that cookie.
+When the room already has an active local grant for that source, recovery renews
+that exact Platform grant with its stable permission ID; it does not re-attest a
+revoked local ACL or widen capabilities. The wrapped CLI fetch holds the jar
+lock across a first-use request and its response, so concurrent processes share
+one newly established control guest instead of merging credentials from
+different guests.
 Operator routes authenticate an issued Platform human or agent bearer and then
 require the configured local allowlist tuple; the old static
 `MSG_OPERATOR_TOKEN` path is removed.
@@ -62,42 +75,42 @@ Worker. It proves:
   guest, wrong-audience, revoked, and disabled operator are denied; and
   authority outage maps to `503`.
 
-The same test deliberately records one current shared-contract blocker:
-management access after a public or owner grant receives `403` on this branch.
-The accepted shared Platform permission discriminator change is integrated
-separately by the parent; this branch keeps management fail-closed until that
-contract is adopted and the returned management grant is proven against the
-local source ACL. A local msg capability widening would violate the intended
-source-specific ACL boundary.
+The accepted Platform permission discriminator now allows management access
+after a public or owner grant without widening msg's local ACL. The actual
+integration test receives a `200` management response, revokes that
+`msg-management` grant, observes `401` on the management link, and continues
+to read through the same guest's independent `msg-public` grant.
 
 Commands and results on this branch:
 
-- `bun run check` from `services/msg`: passed the workspace check, 190 Worker
-  tests, 17 tooling tests, 57 CLI tests, build, pack, typecheck, and lint. The
+- `bun run check` from `services/msg`: passed the workspace check, 192 Worker
+  tests, 17 tooling tests, 59 CLI tests, build, pack, typecheck, and lint. The
   existing `production-synthetic.ts:142` constant-condition warning remains.
 - `bun test src/t09-platform.integration.test.ts` from `services/msg/worker`:
-  passed 1 actual boundary test with 33 assertions, including D1 creation
-  receipt replay/renewal and an actual CLI-cookie WebSocket handshake.
+  passed 1 actual boundary test with 44 assertions, including D1 creation
+  receipt replay/renewal, public and management recovery renewal, positive
+  management, independent management/public revocation, and an actual
+  CLI-cookie WebSocket handshake.
 - `bun test src/auth.test.ts src/conversation-room.test.ts src/room-schema.test.ts src/worker.test.ts`:
   passed the focused Worker/DO/auth suite.
 - `bun test src/operations.test.ts`:
   passed the guest-scoped D1 operation tests, including the persisted owner
   grant reference.
-- `bun test src/cookie-jar.test.ts` from `services/msg/cli`: passed 5 tests
-  covering persistence, path/Secure, redirect, `wss:` lookup, and concurrent
-  merge behavior.
+- `bun test src/cookie-jar.test.ts` from `services/msg/cli`: passed 6 tests
+  covering persistence, path/Secure, redirect, `wss:` lookup, concurrent
+  merge behavior, and separate-process first-use bootstrap overlap.
 - `bun services/msg/worker/scripts/t09-platform-browser-smoke.mjs`: passed the
   real Chromium bridge against the actual Platform Worker/D1 and msg
   Worker/DO. It covers owner/participant create, read, post, reload/reconnect,
-  revocation and live close, denied owner post with visible preserved draft,
-  explicit recovery, and authority outage `503`; no uncaught page errors.
+  positive management, revocation and live close, denied owner post with
+  visible preserved draft, explicit recovery, and authority outage `503`; no
+  uncaught page errors.
 - `bun install --frozen-lockfile` and `git diff --check`: passed. The lockfile
   change is limited to msg's two workspace client dependencies.
 
-The management result above is a shared Platform contract limitation rather
-than evidence of a completed management integration. Positive management
-browser evidence remains pending the parent's accepted permission discriminator
-integration and exact source association check.
+The parent-owned Platform permission commits are included as `620a317` and
+`f930214` in this worktree; their native permission migration and lifecycle
+tests remain separately attributable to Platform.
 
 T10 still owns atomic ownership claim and former-owner/control revocation; this
 branch only stores immutable creation ownership and source-separated ACL facts.

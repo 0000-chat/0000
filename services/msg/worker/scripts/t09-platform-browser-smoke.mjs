@@ -203,6 +203,12 @@ async function main() {
     const ownerRoomResponse = await owner.goto(humanRoomUrl);
     assert.equal(ownerRoomResponse?.status(), 200);
     await waitForMessage(owner, "owner initial");
+    const managementPath = new URL(created.body.manage_url).pathname;
+    const management = await owner.evaluate(async (path) => {
+      const response = await fetch(path, { headers: { accept: "application/json" } });
+      return { status: response.status, body: await response.text() };
+    }, managementPath);
+    assert.equal(management.status, 200);
     await participant.goto(humanRoomUrl);
     assert.equal((await participant.locator("#messages").count()), 1);
     await waitForMessage(participant, "owner initial");
