@@ -10,6 +10,7 @@ import {
 import { readD1Migrations } from "@cloudflare/vitest-plugin";
 import { convertV4MiniflareOptions, Miniflare } from "miniflare";
 import { opaqueSecret } from "../src/platform-state.ts";
+import { PLATFORM_TEST_MINIFLARE_RATE_LIMITS } from "./test-rate-limits.ts";
 import { handleResourceRequest } from "../worker/test/fixtures/resource-service.ts";
 import { registerTestService } from "../worker/test/fixtures/provision.ts";
 
@@ -54,6 +55,8 @@ function createRuntime(script, persistenceDirectory) {
       PLATFORM_BASE_URL: platformBaseUrl,
       PLATFORM_AUTHORITY_ID: authority,
       PLATFORM_CREDENTIAL_MAX_LIFETIME_DAYS: "90",
+      PLATFORM_SERVER_DEADLINE_MS: "8000",
+      PLATFORM_RATE_LIMIT_POLICY: "",
       GITHUB_CLIENT_ID: "platform-t01-probe",
       GITHUB_CLIENT_SECRET: "local-probe-only",
       BETTER_AUTH_SECRET: "local-probe-secret-not-for-deployment",
@@ -61,6 +64,7 @@ function createRuntime(script, persistenceDirectory) {
     compatibilityDate,
     compatibilityFlags: ["nodejs_compat"],
     d1Databases: { IDENTITY_DB: "platform-identity" },
+    ratelimits: PLATFORM_TEST_MINIFLARE_RATE_LIMITS,
     host: "127.0.0.1",
     modules: true,
     name: "platform-t01-restart-probe",

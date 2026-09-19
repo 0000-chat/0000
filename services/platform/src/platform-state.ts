@@ -437,6 +437,7 @@ export async function rotateHumanCredential(
     credentialId: string;
     expiresAt: number;
   },
+  onCommitted?: (credentialId: string) => void,
 ): Promise<{ credential: string; credentialId: string; expiresAt: number }> {
   if (!isSafeCredentialExpiry(input.expiresAt)) {
     throw new RangeError("Requested credential lifetime is invalid");
@@ -445,7 +446,7 @@ export async function rotateHumanCredential(
   const credentialHash = await hashOpaque(credential);
   const replacementId = crypto.randomUUID();
   const now = Date.now();
-  await database.batch([
+  const results = await database.batch([
     database
       .prepare(
         `UPDATE platform_credential
@@ -507,6 +508,9 @@ export async function rotateHumanCredential(
         input.service.audience,
       ),
   ]);
+  if (results[0]?.meta.changes === 1 && results[1]?.meta.changes === 1) {
+    onCommitted?.(replacementId);
+  }
   const replacement = await database
     .prepare(
       `SELECT id FROM platform_credential

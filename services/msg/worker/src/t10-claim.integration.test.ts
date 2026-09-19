@@ -356,6 +356,14 @@ test.serial("proves atomic guest-to-organization claim across Platform, DO resta
     expect(otherManagement.status).toBe(403);
     const preservedParticipant = await firstMsg.miniflare.dispatchFetch(`https://msg.0000.chat/${room}`, roomRequest(participantCookies));
     expect(preservedParticipant.status).toBe(200);
+    const preservedParticipantWebhook = await firstMsg.miniflare.dispatchFetch(`https://msg.0000.chat/${room}/webhooks`, roomRequest(participantCookies, {
+      method: "POST",
+      body: JSON.stringify({ url: "https://example.com/msg-t10-participant" }),
+    }));
+    expect(preservedParticipantWebhook.status).toBe(201);
+    const preservedParticipantWebhookList = await firstMsg.miniflare.dispatchFetch(`https://msg.0000.chat/${room}/webhooks`, roomRequest(participantCookies));
+    expect(preservedParticipantWebhookList.status).toBe(200);
+    expect((await preservedParticipantWebhookList.json() as { webhooks: unknown[] }).webhooks).toHaveLength(1);
 
     const orgHeaders = { authorization: `Bearer ${claimant.credential}` };
     const organizationRead = await firstMsg.miniflare.dispatchFetch(`https://msg.0000.chat/${room}`, roomRequest("", { headers: orgHeaders }));

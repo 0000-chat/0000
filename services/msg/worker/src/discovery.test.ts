@@ -49,6 +49,14 @@ Accept: application/json
   "client_message_id": "stable-id-for-this-message"
 }`);
   expect(AGENT_INSTRUCTIONS).toContain("The JSON post response returns wait.command");
+  expect(AGENT_INSTRUCTIONS).toContain("POST <conversation_url>/webhooks");
+  expect(AGENT_INSTRUCTIONS).toContain("DELETE <conversation_url>/webhooks/<endpoint_id>");
+  expect(AGENT_INSTRUCTIONS).toContain("POST <conversation_url>/webhooks/<endpoint_id>/disable");
+  expect(AGENT_INSTRUCTIONS).toContain("POST <conversation_url>/webhooks/<endpoint_id>/rotate-secret");
+  expect(AGENT_INSTRUCTIONS).toContain("POST <conversation_url>/webhooks/<endpoint_id>/deliveries/<event_id>/redeliver");
+  expect(AGENT_INSTRUCTIONS).toContain("The matching CLI commands are npx --yes @0000chat/msg@latest webhooks <conversation_url> list, create <https_url>, remove <endpoint_id>, disable <endpoint_id>, enable <endpoint_id>, rotate <endpoint_id>, and redeliver <endpoint_id> <event_id>.");
+  expect(AGENT_INSTRUCTIONS).toContain("shown only in that response");
+  expect(AGENT_INSTRUCTIONS).toContain("HMAC-SHA256");
 });
 
 test("renders root discovery in every supported representation", async () => {
@@ -85,6 +93,29 @@ test("publishes a complete JSON message contract and create example", () => {
   expect(createJson.example).toMatchObject({ author: "My agent", content: "The message to share" });
   expect(postJson.schema).toBe(createJson.schema);
   expect(postJson.example).toBe(createJson.example);
+});
+
+test("documents room webhook management and targeted recovery operations", () => {
+  const webhooks = OPENAPI_DOCUMENT.paths["/{room}/webhooks"];
+  const remove = OPENAPI_DOCUMENT.paths["/{room}/webhooks/{id}"].delete;
+  const disable = OPENAPI_DOCUMENT.paths["/{room}/webhooks/{id}/disable"].post;
+  const enable = OPENAPI_DOCUMENT.paths["/{room}/webhooks/{id}/enable"].post;
+  const rotate = OPENAPI_DOCUMENT.paths["/{room}/webhooks/{id}/rotate-secret"].post;
+  const redeliver = OPENAPI_DOCUMENT.paths["/{room}/webhooks/{id}/deliveries/{event_id}/redeliver"].post;
+
+  expect(webhooks.get.responses["200"].content["application/json"].schema.properties.webhooks.maxItems).toBe(5);
+  expect(webhooks.post.requestBody.content["application/json"].schema).toMatchObject({
+    additionalProperties: false,
+    required: ["url"],
+  });
+  expect(webhooks.post.responses["201"].content["application/json"].schema.required).toEqual(["protocol_version", "secret", "webhook"]);
+  expect(webhooks.get.responses["200"].content["application/json"].schema.properties.webhooks.items.properties).not.toHaveProperty("secret");
+  expect(remove.responses["200"].content["application/json"].schema.properties.removed.const).toBe(true);
+  expect(disable.responses["200"].description).toContain("new messages are not queued while it is disabled");
+  expect(enable.responses["200"].description).toContain("not replayed");
+  expect(rotate.responses["200"].content["application/json"].schema.required).toEqual(["protocol_version", "secret", "webhook"]);
+  expect(redeliver.responses["202"].content["application/json"].schema.properties.result.enum).toEqual(["queued", "already_queued"]);
+  expect(redeliver.description).toContain("does not change endpoint enablement");
 });
 
 test("documents the create response handoff contract", () => {
@@ -136,5 +167,5 @@ test("documents responses for every OpenAPI operation", () => {
   expect(OPENAPI_DOCUMENT.paths["/{room}/live"].get.responses["400"]).toBeDefined();
   expect(OPENAPI_DOCUMENT.paths["/{room}/agent"].get.responses["200"]).toBeDefined();
   expect(OPENAPI_DOCUMENT.paths["/{room}"].get.responses["304"].description).toContain("normalized after cursor");
-  expect(Object.keys(OPENAPI_DOCUMENT.paths).sort()).toEqual(["/", "/healthz", "/manage/{room}/{token}", "/{room}", "/{room}/agent", "/{room}/claim", "/{room}/export.json", "/{room}/export.md", "/{room}/live", "/{room}/manage"]);
+  expect(Object.keys(OPENAPI_DOCUMENT.paths).sort()).toEqual(["/", "/healthz", "/manage/{room}/{token}", "/{room}", "/{room}/agent", "/{room}/claim", "/{room}/export.json", "/{room}/export.md", "/{room}/live", "/{room}/manage", "/{room}/webhooks", "/{room}/webhooks/{id}", "/{room}/webhooks/{id}/deliveries/{event_id}/redeliver", "/{room}/webhooks/{id}/disable", "/{room}/webhooks/{id}/enable", "/{room}/webhooks/{id}/rotate-secret"]);
 });

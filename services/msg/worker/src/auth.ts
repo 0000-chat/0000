@@ -268,7 +268,7 @@ export function createMsgAuthenticator(
       // A public room's read credential is also the browser/CLI's durable
       // participant credential for subsequent posts.  The link proof still
       // gates issuance, while the DO ACL checks the requested action.
-      const needed = input.source === "public"
+      const defaultCapabilities = input.source === "public"
         ? [MSG_READ, MSG_WRITE]
         : input.action === "manage"
           ? [MSG_MANAGE]
@@ -279,7 +279,8 @@ export function createMsgAuthenticator(
         if (authentication.status === "invalid_credential") throw authError("The resource credential is invalid.", 401);
         if (authentication.status === "authority_unavailable") throw authorityError();
         const principal = authentication.principal;
-        if (principal.kind !== "guest" || principal.subjectId !== control.guestId || !principal.resourceIds.includes(input.room) || needed.some((capability) => !principal.capabilities.includes(capability))) {
+        const requiredCapabilities = input.source === "public" && input.action === "read" ? [MSG_READ] : defaultCapabilities;
+        if (principal.kind !== "guest" || principal.subjectId !== control.guestId || !principal.resourceIds.includes(input.room) || requiredCapabilities.some((capability) => !principal.capabilities.includes(capability))) {
           throw authError("The resource credential is not valid for this request.", 403);
         }
         const local = await rooms.findGrant({ room: input.room, guestId: control.guestId, grantId: principal.grantId });
@@ -297,6 +298,12 @@ export function createMsgAuthenticator(
       if (!proof) throw authError("The requested resource was not found.", 404);
       const local = await rooms.findGrant({ room: input.room, guestId: control.guestId, source: input.source });
       if (local && !local.active) throw authError("The resource permission is no longer valid.", 403);
+      // A previously issued read-only public grant can still read the room.
+      // A fresh public link keeps the usual read/write participant grant, and
+      // any write request still requires both capabilities.
+      const needed = input.source === "public" && input.action === "read" && local
+        ? [...local.capabilities]
+        : defaultCapabilities;
       const assertion = { kind: "participant" as const, permissionId: MSG_PERMISSION_IDS[input.source] };
       const grant = local?.grantId
         ? await guestClient.renewGuestGrant({

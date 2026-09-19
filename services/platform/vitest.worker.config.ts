@@ -1,6 +1,10 @@
 import { cloudflareTest, readD1Migrations } from "@cloudflare/vitest-plugin";
 import { fileURLToPath } from "node:url";
 import { defineConfig } from "vitest/config";
+import {
+  buildPlatformMiniflareRateLimits,
+  buildPlatformTestRateLimitPolicy,
+} from "./src/rate-limit-policy.js";
 
 const testSecrets = {
   GOOGLE_CLIENT_SECRET: "test-only-google-client-secret",
@@ -29,10 +33,15 @@ export default defineConfig(async () => {
             PLATFORM_DEPLOYMENT_MODE: "self-hosted",
             PLATFORM_SIGNUP_POLICY: "open",
             PLATFORM_CREDENTIAL_MAX_LIFETIME_DAYS: "90",
+            PLATFORM_SERVER_DEADLINE_MS: "8000",
+            PLATFORM_RATE_LIMIT_POLICY: "",
             ...testSecrets,
             TEST_MIGRATIONS: identityMigrations,
             TEST_FIXTURE_MIGRATIONS: fixtureMigrations,
           },
+          ratelimits: buildPlatformMiniflareRateLimits(
+            buildPlatformTestRateLimitPolicy(),
+          ),
         },
       }),
     ],

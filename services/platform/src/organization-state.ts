@@ -287,12 +287,16 @@ export async function createOwnedOrganization(
   database: D1Database,
   user: { id: string; name: string },
   name: string,
+  onCommitted?: (result: {
+    organizationId: string;
+    membershipId: string;
+  }) => void,
 ): Promise<{ organizationId: string; membershipId: string } | null> {
   const organizationId = crypto.randomUUID();
   const membershipId = crypto.randomUUID();
   const slug = `org-${organizationId.replaceAll("-", "").slice(0, 24)}`;
   const createdAt = Date.now();
-  await database.batch([
+  const results = await database.batch([
     database
       .prepare(
         `INSERT INTO organization (id, name, slug, createdAt)
@@ -312,6 +316,9 @@ export async function createOwnedOrganization(
       )
       .bind(membershipId, user.id, createdAt, user.id, organizationId),
   ]);
+  if (results[0]?.meta.changes === 1 && results[1]?.meta.changes === 1) {
+    onCommitted?.({ organizationId, membershipId });
+  }
   const owner = await database
     .prepare(
       `SELECT id FROM member
@@ -591,6 +598,10 @@ export async function acceptOrganizationInvitation(
   database: D1Database,
   userId: string,
   invitationId: string,
+  onCommitted?: (result: {
+    organizationId: string;
+    membershipId: string;
+  }) => void,
 ): Promise<AcceptInvitationResult> {
   const recipient = await database
     .prepare(
@@ -657,7 +668,7 @@ export async function acceptOrganizationInvitation(
 
   const membershipId = crypto.randomUUID();
   const now = Date.now();
-  await database.batch([
+  const results = await database.batch([
     database
       .prepare(
         `INSERT OR IGNORE INTO member (id, organizationId, userId, role, createdAt)
@@ -704,6 +715,12 @@ export async function acceptOrganizationInvitation(
       )
       .bind(invitationId, now, userId, userId),
   ]);
+  if (results[0]?.meta.changes === 1 && results[1]?.meta.changes === 1) {
+    onCommitted?.({
+      organizationId: invitation.organizationId,
+      membershipId,
+    });
+  }
 
   const finalState = await database
     .prepare("SELECT status FROM invitation WHERE id = ?")

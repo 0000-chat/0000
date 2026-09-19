@@ -25,9 +25,11 @@ permission. Msg binds each grant to its local permission source.
 The [shared client](../../packages/platform-client/README.md) transport follow-up
 is integrated at `82e6181`: verification and guest operations have a configurable
 deadline covering fetch and body parsing, reject redirects, and preserve
-failure categories. Twelve client tests and the twenty-seven-test Platform
-suite plus restart pass independently; native and adversarial reviews found no
-confirmed defect. T12's server-side rate limits and audit remain outstanding.
+failure categories. The [T12 server safeguards report](T12_SERVER_SAFEGUARDS_REPORT.md)
+records Platform's native endpoint limits, finite protected-request deadline and
+credential-safe diagnostics. Local native cross-worker and independent-key
+checks, the Worker/D1 suite and restart probes pass; the actual Communicator
+consumer boundary and full T12 acceptance remain separate gates.
 T03 aggregate checks passed at `c51d285`; T04 checks passed at `dc30cd4`.
 [T14_RECONNECT_REPORT.md](T14_RECONNECT_REPORT.md) records the independently
 reviewed reconnect fixture, integrated and verified at `166e54d`.
@@ -43,6 +45,9 @@ auth integration at `be5b001`. Parent combined checks pass the full msg package,
 the actual Platform Worker/D1-to-msg Worker/DO boundary with 59 assertions, and
 Platform's 32 tests plus restart. Chromium guest, management, recovery,
 revocation and outage flows pass independently.
+[T09_NOTIFICATIONS_MERGE_REPORT.md](T09_NOTIFICATIONS_MERGE_REPORT.md) records
+the upstream notification merge, forward schema reconciliation and participant
+recovery correction, with combined actual Platform/msg boundary evidence.
 [Msg's claim report](../msg/T10_CLAIM_REPORT.md) records atomic guest-to-organization
 transfer, exact authorized retries, preserved participants and explicit link
 revocation, reviewed and integrated at `c54d884`. Parent checks pass the full
@@ -67,7 +72,7 @@ Platform-to-msg boundary assertions. Native and bounded Grok reviews close the
 refresh and installation-isolation findings. [The runtime report](T07_RUNTIME_ACCEPTANCE_REPORT.md)
 describes the restart/browser evidence. Provider HTTP remains simulated; these
 checks do not establish external-client adoption. Communicator human/browser
-integration, server safeguards and setup remain open.
+integration and full T12 acceptance remain open.
 The full MVP is not implemented or accepted, and these reports do not establish
 production readiness.
 
@@ -167,8 +172,8 @@ and T04 reports for bounded local evidence and review status. T05 adds
 organization-owned agent creation, lifecycle, per-service grants and agent
 credential controls to this account UI. T06 covers the bounded
 authorization-code/PKCE personal-harness
-consent and installation path; T07 refresh rotation and installation
-revocation remain later Platform work. Platform does not own product
+consent and installation path; T07 adds verified refresh rotation and installation
+revocation. Platform does not own product
 Spaces, threads, agent execution or the full product's agent-control
 experience.
 
@@ -334,8 +339,9 @@ Google/GitHub
 HTTP responses are simulated at the provider boundary. The service and
 protected-resource checks remain fixtures. This is not a deployed identity
 service or a complete shared-auth integration. T06 does not claim a live
-external provider/client or consumer adoption; managed deployment ownership and
-aggregate T07 acceptance remain later work.
+external provider/client or consumer adoption. T07 is reviewed, integrated and
+independently verified at `1d519cd`; managed deployment setup and live external
+client acceptance remain separate work.
 Database is also a scaffold.
 The message service now uses shared Platform authentication with local resource
 ACLs; Communicator still needs that migration. No

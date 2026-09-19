@@ -218,6 +218,7 @@ export async function createAgent(
     name: string;
     kind?: MachineKind;
   },
+  onCommitted?: (agentId: string) => void,
 ): Promise<AgentRecord | null> {
   const kind = machineKind(input.kind);
   const id = crypto.randomUUID();
@@ -242,6 +243,7 @@ export async function createAgent(
     )
     .run();
   if (inserted.meta.changes !== 1) return null;
+  onCommitted?.(id);
   const row = await database
     .prepare(
       `SELECT id, kind, organization_id, name, enabled, created_by_user_id,
@@ -370,6 +372,10 @@ export async function createOrNarrowAgentGrant(
     capabilities: string[];
     kind?: MachineKind;
   },
+  onCommitted?: (result: {
+    status: "created" | "narrowed";
+    grantId: string;
+  }) => void,
 ): Promise<AgentGrantMutation> {
   const kind = machineKind(input.kind);
   if (
@@ -457,6 +463,7 @@ export async function createOrNarrowAgentGrant(
       )
       .run();
     if (narrowed.meta.changes !== 1) return { status: "conflict" };
+    onCommitted?.({ status: "narrowed", grantId: current.id });
     const grant = await readGrant(database, current.id);
     return grant ? { status: "narrowed", grant } : { status: "conflict" };
   }
@@ -501,6 +508,7 @@ export async function createOrNarrowAgentGrant(
     )
     .run();
   if (inserted.meta.changes !== 1) return { status: "conflict" };
+  onCommitted?.({ status: "created", grantId });
   const grant = await readGrant(database, grantId);
   return grant ? { status: "created", grant } : { status: "conflict" };
 }
@@ -514,6 +522,7 @@ export async function revokeAgentGrant(
     grantId: string;
     kind?: MachineKind;
   },
+  onCommitted?: (grantId: string) => void,
 ): Promise<boolean> {
   const kind = machineKind(input.kind);
   const manager = await database
@@ -541,7 +550,7 @@ export async function revokeAgentGrant(
     .first<{ id: string }>();
   if (!target) return false;
   const now = Date.now();
-  await database.batch([
+  const results = await database.batch([
     database
       .prepare(
         `UPDATE platform_agent_grant
@@ -584,6 +593,7 @@ export async function revokeAgentGrant(
         input.actorUserId,
       ),
   ]);
+  if (results[0]?.meta.changes === 1) onCommitted?.(input.grantId);
   const active = await database
     .prepare(
       `SELECT id FROM platform_agent_grant
@@ -773,6 +783,7 @@ export async function rotateAgentCredential(
     expiresAt: number;
     kind?: MachineKind;
   },
+  onCommitted?: (credentialId: string) => void,
 ): Promise<{ credential: string; credentialId: string; expiresAt: number }> {
   const kind = machineKind(input.kind);
   if (!isSafeCredentialExpiry(input.expiresAt)) {
@@ -804,7 +815,7 @@ export async function rotateAgentCredential(
           )
         )
     )`;
-  await database.batch([
+  const results = await database.batch([
     database
       .prepare(
         `UPDATE platform_credential
@@ -894,6 +905,9 @@ export async function rotateAgentCredential(
         input.service.audience,
       ),
   ]);
+  if (results[0]?.meta.changes === 1 && results[1]?.meta.changes === 1) {
+    onCommitted?.(replacementId);
+  }
   const replacement = await database
     .prepare(
       `SELECT id FROM platform_credential
@@ -919,6 +933,7 @@ export async function revokeAgentCredential(
     credentialId: string;
     kind?: MachineKind;
   },
+  onCommitted?: (credentialId: string) => void,
 ): Promise<boolean> {
   const kind = machineKind(input.kind);
   const result = await database
@@ -946,7 +961,9 @@ export async function revokeAgentCredential(
       input.actorUserId,
     )
     .run();
-  return result.meta.changes === 1;
+  const changed = result.meta.changes === 1;
+  if (changed) onCommitted?.(input.credentialId);
+  return changed;
 }
 
 /** Service principals use the same durable machine lifecycle with a fixed kind. */
@@ -969,8 +986,13 @@ export async function listServicePrincipals(
 export async function createServicePrincipal(
   database: D1Database,
   input: { actorUserId: string; organizationId: string; name: string },
+  onCommitted?: (subjectId: string) => void,
 ): Promise<ServicePrincipalRecord | null> {
-  const principal = await createAgent(database, { ...input, kind: "service" });
+  const principal = await createAgent(
+    database,
+    { ...input, kind: "service" },
+    onCommitted,
+  );
   if (!principal) return null;
   const { id, kind, ...rest } = principal;
   return { ...rest, subjectId: id, kind: "service" };
@@ -1036,15 +1058,23 @@ export async function createOrNarrowServicePrincipalGrant(
     service: ServiceRegistration;
     capabilities: string[];
   },
+  onCommitted?: (result: {
+    status: "created" | "narrowed";
+    grantId: string;
+  }) => void,
 ): Promise<AgentGrantMutation> {
-  return createOrNarrowAgentGrant(database, {
-    actorUserId: input.actorUserId,
-    organizationId: input.organizationId,
-    agentId: input.subjectId,
-    service: input.service,
-    capabilities: input.capabilities,
-    kind: "service",
-  });
+  return createOrNarrowAgentGrant(
+    database,
+    {
+      actorUserId: input.actorUserId,
+      organizationId: input.organizationId,
+      agentId: input.subjectId,
+      service: input.service,
+      capabilities: input.capabilities,
+      kind: "service",
+    },
+    onCommitted,
+  );
 }
 
 export async function revokeServicePrincipalGrant(
@@ -1055,14 +1085,19 @@ export async function revokeServicePrincipalGrant(
     subjectId: string;
     grantId: string;
   },
+  onCommitted?: (grantId: string) => void,
 ): Promise<boolean> {
-  return revokeAgentGrant(database, {
-    actorUserId: input.actorUserId,
-    organizationId: input.organizationId,
-    agentId: input.subjectId,
-    grantId: input.grantId,
-    kind: "service",
-  });
+  return revokeAgentGrant(
+    database,
+    {
+      actorUserId: input.actorUserId,
+      organizationId: input.organizationId,
+      agentId: input.subjectId,
+      grantId: input.grantId,
+      kind: "service",
+    },
+    onCommitted,
+  );
 }
 
 export async function issueServicePrincipalCredential(
@@ -1113,17 +1148,22 @@ export async function rotateServicePrincipalCredential(
     credentialId: string;
     expiresAt: number;
   },
+  onCommitted?: (credentialId: string) => void,
 ): Promise<{ credential: string; credentialId: string; expiresAt: number }> {
-  return rotateAgentCredential(database, {
-    actorUserId: input.actorUserId,
-    service: input.service,
-    organizationId: input.organizationId,
-    agentId: input.subjectId,
-    grantId: input.grantId,
-    credentialId: input.credentialId,
-    expiresAt: input.expiresAt,
-    kind: "service",
-  });
+  return rotateAgentCredential(
+    database,
+    {
+      actorUserId: input.actorUserId,
+      service: input.service,
+      organizationId: input.organizationId,
+      agentId: input.subjectId,
+      grantId: input.grantId,
+      credentialId: input.credentialId,
+      expiresAt: input.expiresAt,
+      kind: "service",
+    },
+    onCommitted,
+  );
 }
 
 export async function revokeServicePrincipalCredential(
@@ -1134,12 +1174,17 @@ export async function revokeServicePrincipalCredential(
     subjectId: string;
     credentialId: string;
   },
+  onCommitted?: (credentialId: string) => void,
 ): Promise<boolean> {
-  return revokeAgentCredential(database, {
-    actorUserId: input.actorUserId,
-    organizationId: input.organizationId,
-    agentId: input.subjectId,
-    credentialId: input.credentialId,
-    kind: "service",
-  });
+  return revokeAgentCredential(
+    database,
+    {
+      actorUserId: input.actorUserId,
+      organizationId: input.organizationId,
+      agentId: input.subjectId,
+      credentialId: input.credentialId,
+      kind: "service",
+    },
+    onCommitted,
+  );
 }

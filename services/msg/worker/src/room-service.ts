@@ -1,6 +1,6 @@
 import { ERROR_CODES, ProtocolError } from "./errors";
 import { hashCapability, parseMessageInput, randomCapability, validateIdempotencyKey } from "./room-domain";
-import { buildShareMessage, foregroundWait, PROTOCOL_VERSION, stripLegacyAbsoluteExpiry, type ClaimRoomInput, type ClaimRoomResponse, type CreateRoomInput, type CreateRoomResponse, type ExportRoomInput, type LiveRoomInput, type ManageRoomInput, type ManageRoomResponse, type PostMessageInput, type PostMessageResponse, type ReadRoomInput, type ReadRoomResponse, type RoomAccessContext, type RoomAccessSource, type RoomService } from "./protocol";
+import { buildShareMessage, foregroundWait, PROTOCOL_VERSION, stripLegacyAbsoluteExpiry, type ClaimRoomInput, type ClaimRoomResponse, type CreateRoomInput, type CreateRoomResponse, type CreateWebhookInput, type CreateWebhookResponse, type EnrollPushInput, type ExportRoomInput, type ListWebhooksInput, type ListWebhooksResponse, type LiveRoomInput, type ManageRoomInput, type ManageRoomResponse, type ManageWebhookInput, type ManageWebhookResponse, type PostMessageInput, type PostMessageResponse, type PushEnrollmentInput, type PushEnrollmentResponse, type ReadRoomInput, type ReadRoomResponse, type RedeliverWebhookInput, type RedeliverWebhookResponse, type RemovePushEnrollmentResponse, type RemoveWebhookInput, type RemoveWebhookResponse, type RotateWebhookSecretResponse, type RoomAccessContext, type RoomAccessSource, type RoomService } from "./protocol";
 
 export interface RoomStub { fetch(request: Request): Promise<Response>; }
 export interface RoomNamespace { getByName(name: string): RoomStub; }
@@ -64,14 +64,65 @@ export class DurableRoomService implements RoomService {
 
   async post(input: PostMessageInput): Promise<PostMessageResponse> {
     const value = stripLegacyAbsoluteExpiry(await responseJson(await this.room(input.room).fetch(jsonRequest(`/messages?resource=${encodeURIComponent(input.room)}`, {
-      input: parseMessageInput(input.body), ...(input.idempotencyKey !== undefined ? { idempotency_key: validateIdempotencyKey(input.idempotencyKey) } : {}),
+      input: parseMessageInput(input.body), ...(input.browserId !== undefined ? { browser_id: input.browserId } : {}), ...(input.idempotencyKey !== undefined ? { idempotency_key: validateIdempotencyKey(input.idempotencyKey) } : {}),
     }, input.auth))));
     const message = value.message as { sequence: number };
     return { ...value, wait: foregroundWait(this.origin, input.room, message.sequence) } as unknown as PostMessageResponse;
   }
 
+  async readPushEnrollment(input: PushEnrollmentInput): Promise<PushEnrollmentResponse> {
+    const response = await this.room(input.room).fetch(new Request(`https://room/push-subscriptions?resource=${encodeURIComponent(input.room)}`, {
+      headers: { "x-msg-browser-id": input.browserId, ...authHeaders(input.auth) },
+    }));
+    return await responseJson(response) as unknown as PushEnrollmentResponse;
+  }
+
+  async enrollPush(input: EnrollPushInput): Promise<PushEnrollmentResponse> {
+    const response = await this.room(input.room).fetch(jsonRequest(`/push-subscriptions?resource=${encodeURIComponent(input.room)}`, {
+      browser_id: input.browserId,
+      subscription: input.subscription,
+    }, input.auth));
+    return await responseJson(response) as unknown as PushEnrollmentResponse;
+  }
+
+  async removePushEnrollment(input: PushEnrollmentInput): Promise<RemovePushEnrollmentResponse> {
+    const response = await this.room(input.room).fetch(new Request(`https://room/push-subscriptions?resource=${encodeURIComponent(input.room)}`, {
+      headers: { "x-msg-browser-id": input.browserId, ...authHeaders(input.auth) },
+      method: "DELETE",
+    }));
+    return await responseJson(response) as unknown as RemovePushEnrollmentResponse;
+  }
+
   async manage(input: ManageRoomInput): Promise<ManageRoomResponse> {
     return responseJson(await this.room(input.room).fetch(new Request(`https://room/manage?token=${encodeURIComponent(input.token)}&resource=${encodeURIComponent(input.room)}`, { method: input.method, headers: authHeaders(input.auth) }))) as unknown as ManageRoomResponse;
+  }
+
+  async createWebhook(input: CreateWebhookInput): Promise<CreateWebhookResponse> {
+    return responseJson(await this.room(input.room).fetch(jsonRequest(`/webhooks?resource=${encodeURIComponent(input.room)}`, { url: input.url }, input.auth))) as unknown as CreateWebhookResponse;
+  }
+
+  async listWebhooks(input: ListWebhooksInput): Promise<ListWebhooksResponse> {
+    return responseJson(await this.room(input.room).fetch(new Request(`https://room/webhooks?resource=${encodeURIComponent(input.room)}`, { headers: authHeaders(input.auth) }))) as unknown as ListWebhooksResponse;
+  }
+
+  async removeWebhook(input: RemoveWebhookInput): Promise<RemoveWebhookResponse> {
+    return responseJson(await this.room(input.room).fetch(new Request(`https://room/webhooks/${encodeURIComponent(input.id)}?resource=${encodeURIComponent(input.room)}`, { headers: authHeaders(input.auth), method: "DELETE" }))) as unknown as RemoveWebhookResponse;
+  }
+
+  async disableWebhook(input: ManageWebhookInput): Promise<ManageWebhookResponse> {
+    return responseJson(await this.room(input.room).fetch(new Request(`https://room/webhooks/${encodeURIComponent(input.id)}/disable?resource=${encodeURIComponent(input.room)}`, { headers: authHeaders(input.auth), method: "POST" }))) as unknown as ManageWebhookResponse;
+  }
+
+  async enableWebhook(input: ManageWebhookInput): Promise<ManageWebhookResponse> {
+    return responseJson(await this.room(input.room).fetch(new Request(`https://room/webhooks/${encodeURIComponent(input.id)}/enable?resource=${encodeURIComponent(input.room)}`, { headers: authHeaders(input.auth), method: "POST" }))) as unknown as ManageWebhookResponse;
+  }
+
+  async rotateWebhookSecret(input: ManageWebhookInput): Promise<RotateWebhookSecretResponse> {
+    return responseJson(await this.room(input.room).fetch(new Request(`https://room/webhooks/${encodeURIComponent(input.id)}/rotate-secret?resource=${encodeURIComponent(input.room)}`, { headers: authHeaders(input.auth), method: "POST" }))) as unknown as RotateWebhookSecretResponse;
+  }
+
+  async redeliverWebhook(input: RedeliverWebhookInput): Promise<RedeliverWebhookResponse> {
+    return responseJson(await this.room(input.room).fetch(new Request(`https://room/webhooks/${encodeURIComponent(input.id)}/deliveries/${encodeURIComponent(input.eventId)}/redeliver?resource=${encodeURIComponent(input.room)}`, { headers: authHeaders(input.auth), method: "POST" }))) as unknown as RedeliverWebhookResponse;
   }
 
   async operatorDelete(room: string): Promise<void> {

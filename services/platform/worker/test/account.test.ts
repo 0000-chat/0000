@@ -782,53 +782,85 @@ describe("Platform human account providers", () => {
     );
     expect(crossOriginUnlink.status).toBe(403);
 
-    const concurrentUnlinks = await Promise.all([
-      SELF.fetch("http://localhost/api/auth/unlink-account", {
-        method: "POST",
-        headers: {
-          cookie: cookies,
-          origin: testEnv.PLATFORM_BASE_URL,
-          "content-type": "application/json",
-        },
-        body: JSON.stringify({ accountId: linkedAccounts.results[0]?.id }),
-      }),
-      SELF.fetch("http://localhost/api/auth/unlink-account/", {
-        method: "POST",
-        headers: {
-          cookie: cookies,
-          origin: testEnv.PLATFORM_BASE_URL,
-          "content-type": "application/json",
-        },
-        body: JSON.stringify({ accountId: linkedAccounts.results[1]?.id }),
-      }),
-    ]);
-    expect(concurrentUnlinks.map((response) => response.status).sort()).toEqual(
-      [200, 400],
-    );
-    const remainingProviderAccounts = await testEnv.IDENTITY_DB.prepare(
-      "SELECT id, providerId, accountId FROM account WHERE userId = ?",
-    )
-      .bind(session.user?.id)
-      .all<{ id: string; providerId: string; accountId: string }>();
-    expect(remainingProviderAccounts.results).toHaveLength(1);
-    const unlinkLastProvider = await SELF.fetch(
-      "http://localhost/api/auth/unlink-account",
-      {
-        method: "POST",
-        headers: {
-          cookie: cookies,
-          origin: testEnv.PLATFORM_BASE_URL,
-          "content-type": "application/json",
-        },
-        body: JSON.stringify({
-          accountId: remainingProviderAccounts.results[0]?.id,
-        }),
-      },
-    );
-    expect(unlinkLastProvider.status).toBe(400);
-    expect(await unlinkLastProvider.json()).toEqual({
-      error: "failed_to_unlink_last_account",
+    let remainingProviderAccounts: {
+      results: Array<{
+        id: string;
+        providerId: string;
+        accountId: string;
+      }>;
+    };
+    const unlinkEvents: Array<Record<string, unknown>> = [];
+    const unlinkLog = vi.spyOn(console, "log").mockImplementation((value) => {
+      try {
+        const event = JSON.parse(String(value)) as Record<string, unknown>;
+        if (event.event === "platform.provider.unlinked") {
+          unlinkEvents.push(event);
+        }
+      } catch {
+        // Ignore unrelated diagnostic output in this focused lifecycle probe.
+      }
     });
+    try {
+      const concurrentUnlinks = await Promise.all([
+        SELF.fetch("http://localhost/api/auth/unlink-account", {
+          method: "POST",
+          headers: {
+            cookie: cookies,
+            origin: testEnv.PLATFORM_BASE_URL,
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({ accountId: linkedAccounts.results[0]?.id }),
+        }),
+        SELF.fetch("http://localhost/api/auth/unlink-account/", {
+          method: "POST",
+          headers: {
+            cookie: cookies,
+            origin: testEnv.PLATFORM_BASE_URL,
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({ accountId: linkedAccounts.results[1]?.id }),
+        }),
+      ]);
+      expect(
+        concurrentUnlinks.map((response) => response.status).sort(),
+      ).toEqual([200, 400]);
+      remainingProviderAccounts = await testEnv.IDENTITY_DB.prepare(
+        "SELECT id, providerId, accountId FROM account WHERE userId = ?",
+      )
+        .bind(session.user?.id)
+        .all<{ id: string; providerId: string; accountId: string }>();
+      expect(remainingProviderAccounts.results).toHaveLength(1);
+      const unlinkLastProvider = await SELF.fetch(
+        "http://localhost/api/auth/unlink-account",
+        {
+          method: "POST",
+          headers: {
+            cookie: cookies,
+            origin: testEnv.PLATFORM_BASE_URL,
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({
+            accountId: remainingProviderAccounts.results[0]?.id,
+          }),
+        },
+      );
+      expect(unlinkLastProvider.status).toBe(400);
+      expect(await unlinkLastProvider.json()).toEqual({
+        error: "failed_to_unlink_last_account",
+      });
+      expect(unlinkEvents).toHaveLength(1);
+      expect(unlinkEvents[0]).toMatchObject({
+        outcome: "success",
+        principalId: session.user?.id,
+      });
+      expect(
+        linkedAccounts.results
+          .map((account) => account.id)
+          .filter((id) => id !== remainingProviderAccounts.results[0]?.id),
+      ).toContain(unlinkEvents[0]?.resourceId);
+    } finally {
+      unlinkLog.mockRestore();
+    }
     expect(
       (
         await testEnv.IDENTITY_DB.prepare(

@@ -7,6 +7,7 @@ import { createPlatformClient } from "@0000/platform-client";
 import { readD1Migrations } from "@cloudflare/vitest-plugin";
 import { convertV4MiniflareOptions, Miniflare } from "miniflare";
 import { opaqueSecret } from "../src/platform-state.ts";
+import { PLATFORM_TEST_MINIFLARE_RATE_LIMITS } from "./test-rate-limits.ts";
 import { registerTestService } from "../worker/test/fixtures/provision.ts";
 
 const platformRoot = fileURLToPath(new URL("../", import.meta.url));
@@ -84,6 +85,8 @@ function createRuntime(script, persistenceDirectory) {
       PLATFORM_BASE_URL: platformBaseUrl,
       PLATFORM_AUTHORITY_ID: authority,
       PLATFORM_CREDENTIAL_MAX_LIFETIME_DAYS: "90",
+      PLATFORM_SERVER_DEADLINE_MS: "8000",
+      PLATFORM_RATE_LIMIT_POLICY: "",
       PLATFORM_DEPLOYMENT_MODE: "self-hosted",
       PLATFORM_SIGNUP_POLICY: "open",
       GITHUB_CLIENT_ID: "human-recovery-probe",
@@ -93,6 +96,7 @@ function createRuntime(script, persistenceDirectory) {
     compatibilityDate,
     compatibilityFlags: ["nodejs_compat"],
     d1Databases: { IDENTITY_DB: "platform-identity" },
+    ratelimits: PLATFORM_TEST_MINIFLARE_RATE_LIMITS,
     host: "127.0.0.1",
     modules: true,
     name: "platform-human-recovery-probe",
