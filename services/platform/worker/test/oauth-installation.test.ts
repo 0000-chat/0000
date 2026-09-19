@@ -278,14 +278,13 @@ async function submitBrowserConsent(
   return { response, location, pageText, pageHeaders: page.headers };
 }
 
-async function completeFlow(input: {
+async function prepareAuthorizationCode(input: {
   cookies: string;
   userId: string;
   organizationId: string;
   client: Awaited<ReturnType<typeof provisionTrustedOAuthClient>>;
   audience: string;
-  clientSecret?: string;
-}): Promise<{ accessToken: string; verifier: string; code: string }> {
+}): Promise<{ verifier: string; code: string; flowId: string }> {
   const verifier = opaqueSecret("t06-flow-verifier_");
   const query = new URLSearchParams({
     client_id: input.client.clientId,
@@ -361,12 +360,24 @@ async function completeFlow(input: {
   );
   const code = callback.searchParams.get("code");
   expect(code).toBeTruthy();
+  return { verifier, code: code!, flowId: flow!.id };
+}
+
+async function completeFlow(input: {
+  cookies: string;
+  userId: string;
+  organizationId: string;
+  client: Awaited<ReturnType<typeof provisionTrustedOAuthClient>>;
+  audience: string;
+  clientSecret?: string;
+}): Promise<{ accessToken: string; verifier: string; code: string }> {
+  const prepared = await prepareAuthorizationCode(input);
   const tokenValues: Record<string, string> = {
     grant_type: "authorization_code",
     client_id: input.client.clientId,
     redirect_uri: input.client.redirectUri,
-    code: code!,
-    code_verifier: verifier,
+    code: prepared.code,
+    code_verifier: prepared.verifier,
     resource: input.audience,
   };
   if (input.clientSecret) tokenValues.client_secret = input.clientSecret;
@@ -382,7 +393,22 @@ async function completeFlow(input: {
   };
   expect(tokenBody.access_token).toBeTruthy();
   expect(tokenBody.refresh_token).toBeUndefined();
-  return { accessToken: tokenBody.access_token, verifier, code: code! };
+  return {
+    accessToken: tokenBody.access_token,
+    verifier: prepared.verifier,
+    code: prepared.code,
+  };
+}
+
+async function latestOAuthInstallationId(clientId: string): Promise<string> {
+  const installation = await testEnv.IDENTITY_DB.prepare(
+    `SELECT id FROM platform_oauth_installation
+     WHERE client_id = ? ORDER BY created_at DESC, id DESC LIMIT 1`,
+  )
+    .bind(clientId)
+    .first<{ id: string }>();
+  expect(installation).toBeTruthy();
+  return installation!.id;
 }
 
 describe("T06 production OAuth installation", () => {
@@ -1541,6 +1567,45 @@ describe("T06 production OAuth installation", () => {
       }
     }
 
+    const purposeSpoofState = `purpose-spoof-${crypto.randomUUID()}`;
+    const purposeSpoofQuery = new URLSearchParams({
+      client_id: client.clientId,
+      response_type: "code",
+      redirect_uri: client.redirectUri,
+      scope: "resource:read",
+      resource: service.audience,
+      purpose: "personal_harness",
+      state: purposeSpoofState,
+      code_challenge: await challenge(opaqueSecret("t11-purpose-spoof_")),
+      code_challenge_method: "S256",
+    });
+    const purposeSpoof = await SELF.fetch(
+      `http://localhost/api/auth/oauth2/authorize?${purposeSpoofQuery}`,
+      { headers: { cookie: user.cookies }, redirect: "manual" },
+    );
+    expect(purposeSpoof.status).toBe(302);
+    const purposeSpoofRedirect = new URL(
+      purposeSpoof.headers.get("location")!,
+      "http://localhost",
+    );
+    expect(purposeSpoofRedirect.pathname).toBe("/oauth2/selection");
+    const purposeSpoofSelectionPage = await SELF.fetch(purposeSpoofRedirect, {
+      headers: { cookie: user.cookies },
+    });
+    expect(purposeSpoofSelectionPage.status).toBe(200);
+    const purposeSpoofFlow = await testEnv.IDENTITY_DB.prepare(
+      "SELECT purpose FROM platform_oauth_flow WHERE state = ?",
+    )
+      .bind(purposeSpoofState)
+      .first<{ purpose: string }>();
+    expect(purposeSpoofFlow?.purpose).toBe("first_party_browser");
+    const purposeSpoofInstallation = await testEnv.IDENTITY_DB.prepare(
+      "SELECT id FROM platform_oauth_installation WHERE client_id = ? AND purpose = 'personal_harness'",
+    )
+      .bind(client.clientId)
+      .first<{ id: string }>();
+    expect(purposeSpoofInstallation).toBeNull();
+
     const preview = await beginSelection({
       cookies: user.cookies,
       userId: user.userId,
@@ -1673,6 +1738,23 @@ describe("T06 production OAuth installation", () => {
       },
     );
     expect(wrongPkce.status).toBe(400);
+    const wrongAudience = await SELF.fetch(
+      "http://localhost/api/auth/oauth2/token",
+      {
+        method: "POST",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          grant_type: "authorization_code",
+          client_id: client.clientId,
+          client_secret: client.clientSecret!,
+          redirect_uri: client.redirectUri,
+          code: invalidBindingCode!,
+          code_verifier: invalidBinding.verifier,
+          resource: "https://other-service.0000.test",
+        }),
+      },
+    );
+    expect(wrongAudience.status).toBe(400);
 
     const installation = await testEnv.IDENTITY_DB.prepare(
       `SELECT i.id, i.purpose, i.user_id, i.membership_id, i.organization_id,
@@ -1875,6 +1957,57 @@ describe("T06 production OAuth installation", () => {
     expect(listed.credentials).not.toContainEqual(
       expect.objectContaining({ id: installation?.credential_id }),
     );
+    const manualRotation = await SELF.fetch(
+      "http://localhost/api/credentials/rotate",
+      {
+        method: "POST",
+        headers: {
+          cookie: user.cookies,
+          origin: testEnv.PLATFORM_BASE_URL,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          organizationId,
+          credentialId: manual.credentialId,
+        }),
+      },
+    );
+    expect(manualRotation.status).toBe(201);
+    const rotatedManual = (await manualRotation.json()) as {
+      credential: string;
+      credentialId: string;
+    };
+    expect((await sharedClient.authenticate(manual.credential)).status).toBe(
+      "invalid_credential",
+    );
+    expect(
+      (await sharedClient.authenticate(rotatedManual.credential)).status,
+    ).toBe("authenticated");
+    expect((await sharedClient.authenticate(issued.accessToken)).status).toBe(
+      "authenticated",
+    );
+    const manualRevocation = await SELF.fetch(
+      "http://localhost/api/credentials/revoke",
+      {
+        method: "POST",
+        headers: {
+          cookie: user.cookies,
+          origin: testEnv.PLATFORM_BASE_URL,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          organizationId,
+          credentialId: rotatedManual.credentialId,
+        }),
+      },
+    );
+    expect(manualRevocation.status).toBe(200);
+    expect(
+      (await sharedClient.authenticate(rotatedManual.credential)).status,
+    ).toBe("invalid_credential");
+    expect((await sharedClient.authenticate(issued.accessToken)).status).toBe(
+      "authenticated",
+    );
     const oauthCredentialId = installation!.credential_id;
     const rotate = await SELF.fetch("http://localhost/api/credentials/rotate", {
       method: "POST",
@@ -2011,6 +2144,279 @@ describe("T06 production OAuth installation", () => {
     expect(
       (await sharedClient.authenticate(secondIssued.accessToken)).status,
     ).toBe("authenticated");
+  });
+
+  it("invalidates first-party access when current client, user, organization, catalog or consent changes", async () => {
+    const suffix = crypto.randomUUID().slice(0, 8);
+    const service = await registerService(testEnv.IDENTITY_DB, {
+      serviceId: `t11-current-authority-${suffix}`,
+      audience: `https://t11-current-authority-${suffix}.0000.test`,
+      capabilities: ["resource:read"],
+    });
+    const user = await signIn({
+      id: 816421,
+      login: `t11-current-authority-${suffix}`,
+      email: `t11-current-authority-${suffix}@example.test`,
+    });
+    const organizationId = await ownerOrganization(user.cookies);
+    const client = await provisionTrustedOAuthClient(
+      testEnv.IDENTITY_DB,
+      testEnv.BETTER_AUTH_SECRET,
+      {
+        serviceId: service.serviceId,
+        clientId: `t11-current-client-${suffix}`,
+        redirectUri: `https://t11-current-client-${suffix}.example.test/callback`,
+        capabilities: ["resource:read"],
+        authMethod: "client_secret_post",
+        purpose: "first_party_browser",
+      },
+    );
+    const issued = await completeFlow({
+      cookies: user.cookies,
+      userId: user.userId,
+      organizationId,
+      client,
+      audience: service.audience,
+      clientSecret: client.clientSecret!,
+    });
+    const installationId = await latestOAuthInstallationId(client.clientId);
+    const sharedClient = createPlatformClient({
+      baseUrl: testEnv.PLATFORM_BASE_URL,
+      authority: testEnv.PLATFORM_AUTHORITY_ID,
+      audience: service.audience,
+      serviceVerifier: service.verifier,
+      fetch: SELF.fetch,
+    });
+    const expectAuthenticated = async () => {
+      expect((await sharedClient.authenticate(issued.accessToken)).status).toBe(
+        "authenticated",
+      );
+    };
+    const expectInvalid = async () => {
+      expect((await sharedClient.authenticate(issued.accessToken)).status).toBe(
+        "invalid_credential",
+      );
+    };
+    const expectUnavailable = async () => {
+      expect((await sharedClient.authenticate(issued.accessToken)).status).toBe(
+        "authority_unavailable",
+      );
+    };
+    const expectIntrospection = async (active: boolean) => {
+      const response = await SELF.fetch(
+        "http://localhost/api/auth/oauth2/introspect",
+        {
+          method: "POST",
+          headers: { "content-type": "application/x-www-form-urlencoded" },
+          body: new URLSearchParams({
+            token: issued.accessToken,
+            client_id: client.clientId,
+            client_secret: client.clientSecret!,
+          }),
+        },
+      );
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({ active });
+    };
+
+    await expectAuthenticated();
+    await testEnv.IDENTITY_DB.prepare(
+      "UPDATE platform_oauth_client SET active = 0 WHERE client_id = ?",
+    )
+      .bind(client.clientId)
+      .run();
+    await expectInvalid();
+    await expectIntrospection(false);
+    await testEnv.IDENTITY_DB.prepare(
+      "UPDATE platform_oauth_client SET active = 1 WHERE client_id = ?",
+    )
+      .bind(client.clientId)
+      .run();
+    await expectAuthenticated();
+
+    await testEnv.IDENTITY_DB.prepare(
+      "UPDATE oauthClient SET disabled = 1 WHERE clientId = ?",
+    )
+      .bind(client.clientId)
+      .run();
+    await expectInvalid();
+    await testEnv.IDENTITY_DB.prepare(
+      "UPDATE oauthClient SET disabled = 0 WHERE clientId = ?",
+    )
+      .bind(client.clientId)
+      .run();
+    await expectAuthenticated();
+
+    await testEnv.IDENTITY_DB.prepare(
+      "UPDATE platform_service SET disabled = 1 WHERE service_id = ?",
+    )
+      .bind(service.serviceId)
+      .run();
+    await expectUnavailable();
+    await testEnv.IDENTITY_DB.prepare(
+      "UPDATE platform_service SET disabled = 0 WHERE service_id = ?",
+    )
+      .bind(service.serviceId)
+      .run();
+    await expectAuthenticated();
+
+    await testEnv.IDENTITY_DB.prepare(
+      "UPDATE platform_service SET allowed_capabilities = ? WHERE service_id = ?",
+    )
+      .bind("[]", service.serviceId)
+      .run();
+    await expectUnavailable();
+    await testEnv.IDENTITY_DB.prepare(
+      "UPDATE platform_service SET allowed_capabilities = ? WHERE service_id = ?",
+    )
+      .bind(JSON.stringify(["resource:read"]), service.serviceId)
+      .run();
+    await expectAuthenticated();
+
+    await testEnv.IDENTITY_DB.prepare(
+      "UPDATE organization SET suspendedAt = ? WHERE id = ?",
+    )
+      .bind(Date.now(), organizationId)
+      .run();
+    await expectInvalid();
+    await testEnv.IDENTITY_DB.prepare(
+      "UPDATE organization SET suspendedAt = NULL WHERE id = ?",
+    )
+      .bind(organizationId)
+      .run();
+    await expectAuthenticated();
+
+    await testEnv.IDENTITY_DB.prepare(
+      'UPDATE "user" SET disabledAt = ? WHERE id = ?',
+    )
+      .bind(Date.now(), user.userId)
+      .run();
+    await expectInvalid();
+    await testEnv.IDENTITY_DB.prepare(
+      'UPDATE "user" SET disabledAt = NULL WHERE id = ?',
+    )
+      .bind(user.userId)
+      .run();
+    await expectAuthenticated();
+
+    await testEnv.IDENTITY_DB.prepare(
+      "UPDATE oauthConsent SET scopes = '[]' WHERE referenceId = ?",
+    )
+      .bind(installationId)
+      .run();
+    await expectInvalid();
+    await expectIntrospection(false);
+    await testEnv.IDENTITY_DB.prepare(
+      "UPDATE oauthConsent SET scopes = ? WHERE referenceId = ?",
+    )
+      .bind(JSON.stringify(["resource:read"]), installationId)
+      .run();
+    await expectAuthenticated();
+  });
+
+  it("fails closed at first-party final publication when organization authority changes", async () => {
+    const suffix = crypto.randomUUID().slice(0, 8);
+    const service = await registerService(testEnv.IDENTITY_DB, {
+      serviceId: `t11-publication-boundary-${suffix}`,
+      audience: `https://t11-publication-boundary-${suffix}.0000.test`,
+      capabilities: ["resource:read"],
+    });
+    const user = await signIn({
+      id: 816422,
+      login: `t11-publication-boundary-${suffix}`,
+      email: `t11-publication-boundary-${suffix}@example.test`,
+    });
+    const organizationId = await ownerOrganization(user.cookies);
+    const client = await provisionTrustedOAuthClient(
+      testEnv.IDENTITY_DB,
+      testEnv.BETTER_AUTH_SECRET,
+      {
+        serviceId: service.serviceId,
+        clientId: `t11-publication-client-${suffix}`,
+        redirectUri: `https://t11-publication-client-${suffix}.example.test/callback`,
+        capabilities: ["resource:read"],
+        authMethod: "client_secret_post",
+        purpose: "first_party_browser",
+      },
+    );
+    const prepared = await prepareAuthorizationCode({
+      cookies: user.cookies,
+      userId: user.userId,
+      organizationId,
+      client,
+      audience: service.audience,
+    });
+    const providerTokenResponse = await createAuth(testEnv, {
+      oauthPlatform: true,
+      oauthGrantTypes: ["authorization_code"],
+      oauthScopes: ["resource:read"],
+    }).handler(
+      new Request("http://localhost/api/auth/oauth2/token", {
+        method: "POST",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          grant_type: "authorization_code",
+          client_id: client.clientId,
+          client_secret: client.clientSecret!,
+          redirect_uri: client.redirectUri,
+          code: prepared.code,
+          code_verifier: prepared.verifier,
+          resource: service.audience,
+        }),
+      }),
+    );
+    expect(providerTokenResponse.status).toBe(200);
+    let authorityRead = false;
+    const interleavedDatabase = interleavedOAuthAuthorityDatabase(
+      testEnv.IDENTITY_DB,
+      async () => {
+        authorityRead = true;
+        await testEnv.IDENTITY_DB.prepare(
+          "UPDATE organization SET suspendedAt = ? WHERE id = ?",
+        )
+          .bind(Date.now(), organizationId)
+          .run();
+      },
+    );
+    try {
+      const publication = await completeInitialOAuthAccess(
+        interleavedDatabase.withSession("first-primary"),
+        providerTokenResponse,
+      );
+      expect(authorityRead).toBe(true);
+      expect(publication?.status).toBe(400);
+      const durable = await testEnv.IDENTITY_DB.prepare(
+        `SELECT i.active, i.revoked_at, f.status, c.id AS credential_id,
+                a.revoked
+         FROM platform_oauth_installation AS i
+         JOIN platform_oauth_flow AS f ON f.id = ? AND f.installation_id = i.id
+         LEFT JOIN platform_credential AS c ON c.oauth_installation_id = i.id
+         LEFT JOIN oauthAccessToken AS a ON a.referenceId = i.id
+         WHERE i.client_id = ?
+         ORDER BY i.created_at DESC, i.id DESC LIMIT 1`,
+      )
+        .bind(prepared.flowId, client.clientId)
+        .first<{
+          active: number;
+          revoked_at: number | null;
+          status: string;
+          credential_id: string | null;
+          revoked: number | null;
+        }>();
+      expect(durable).toMatchObject({
+        active: 0,
+        status: "rejected",
+        credential_id: null,
+        revoked: 1,
+      });
+      expect(durable?.revoked_at).toBeNull();
+    } finally {
+      await testEnv.IDENTITY_DB.prepare(
+        "UPDATE organization SET suspendedAt = NULL WHERE id = ?",
+      )
+        .bind(organizationId)
+        .run();
+    }
   });
 
   it("accepts a confidential client secret stored with the pinned provider crypto", async () => {

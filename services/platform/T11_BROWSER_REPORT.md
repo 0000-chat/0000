@@ -32,19 +32,38 @@ The passing Chromium run proves:
   valid cookie is present, denies cross-origin unsafe logout, and clears only
   the service cookie on same-origin logout;
 - the credential cookie's observed Chromium expiry is no later than the
-  Platform access expiry, and DOM, URL, `localStorage` and `sessionStorage`
-  contain no access, refresh or client secret;
+  Platform access expiry, and the actual issued access token, cookie value and
+  confidential client secret are absent from the DOM, URL, `localStorage` and
+  `sessionStorage`;
+- a distinct value typed into the mounted consumer input survives in-place
+  authenticated 401 and 503 responses without navigation; 401 offers sign-in
+  again while 503 keeps the sign-in control hidden;
 - expiry and installation revocation return 401 while preserving the draft;
   an authority outage is classified as `authority_unavailable` during the
-  real callback and preserves the draft; and no browser page errors occur.
+  real callback and preserves the return draft; and no browser page errors
+  occur.
 
-The shared-client unit suite passes 16 tests and 100 assertions, including a
-delayed callback regression for post-verification cookie expiry and the
-default consumer-origin CSRF rule. The separate
+The shared-client unit suite passes 18 tests and 140 assertions, including
+malformed, duplicate, mixed and configuration-mismatch callback rejection;
+rejected human, agent-principal, authority, audience, capability, expiry,
+invalid-grant and refresh responses; callback body-delay, redirect and late
+transport regressions; a delayed callback regression for post-verification
+cookie expiry; and the default consumer-origin CSRF rule. The Worker/D1 acceptance suite
+passes 10 tests across the OAuth installation and browser OAuth fixtures. It
+proves first-party provisioning constraints, request and purpose binding,
+stale-flow and PKCE/audience rejection, two-audience and two-organization
+isolation, current client/user/organization/catalog/consent invalidation,
+the final publication authority boundary, and manual API-key rotation and
+revocation alongside a live OAuth credential. It also covers consent copy and
+the rejection of OAuth credentials by ordinary human-key controls. The
+separate
 `bun scripts/test-oauth-refresh-restart.mjs` probe exits 0 after reusing its
 persistent D1 directory and proves the injected refresh write failure remains
 pending across restart, a healthy sibling remains usable, and reauthorization
 creates a new active family without resurrecting the old pending family.
+
+The refresh probe is a separate restart regression; the browser script does
+not claim to prove refresh-token issuance.
 
 The evidence is local Worker/Miniflare/D1 and simulated-provider evidence. It
 does not claim live provider behavior, deployed cookie behavior behind a

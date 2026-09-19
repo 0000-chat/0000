@@ -357,6 +357,48 @@ function browserOptions(
   };
 }
 
+async function callbackWithBrowserToken(input: {
+  token: Record<string, unknown>;
+  verification?: unknown;
+  verificationStatus?: number;
+  tokenStatus?: number;
+}): Promise<Awaited<ReturnType<ReturnType<typeof createPlatformBrowserClient>["callback"]>>> {
+  const fetch = mock(async (request: RequestInfo | URL) => {
+    const path = new URL(String(request)).pathname;
+    if (path.endsWith("/token")) {
+      return Response.json(input.token, { status: input.tokenStatus ?? 200 });
+    }
+    return Response.json(
+      input.verification ?? { status: "authenticated", principal: validPrincipal },
+      { status: input.verificationStatus ?? 200 },
+    );
+  }) as unknown as typeof globalThis.fetch;
+  return callbackWithBrowserFetch(fetch);
+}
+
+async function callbackWithBrowserFetch(
+  fetch: typeof globalThis.fetch,
+): Promise<Awaited<ReturnType<ReturnType<typeof createPlatformBrowserClient>["callback"]>>> {
+  const store = new MemoryBrowserTransactionStore();
+  const nowValue = Date.now();
+  const client = createPlatformBrowserClient(
+    browserOptions(store, fetch, () => nowValue),
+  );
+  const started = await client.start();
+  expect(started.status).toBe("started");
+  if (started.status !== "started") throw new Error("browser flow did not start");
+  const authorization = new URL(started.authorizationUrl);
+  return client.callback(
+    new Request(
+      `https://browser.test/oauth/callback?${new URLSearchParams({
+        code: "authorization-code",
+        state: authorization.searchParams.get("state")!,
+      })}`,
+      { headers: { cookie: cookiePair(started.setCookie) } },
+    ),
+  );
+}
+
 describe("Platform browser OAuth client", () => {
   it("binds PKCE and browser state, verifies a human token, and issues only a host cookie", async () => {
     const store = new MemoryBrowserTransactionStore();
@@ -469,8 +511,10 @@ describe("Platform browser OAuth client", () => {
       );
     }
 
+    const omittedOriginOptions = { ...options };
+    delete omittedOriginOptions.returnOrigin;
     const noExplicitOrigin = createPlatformBrowserClient({
-      ...options,
+      ...omittedOriginOptions,
       transactionStore: new MemoryBrowserTransactionStore(),
     });
     expect(
@@ -496,6 +540,260 @@ describe("Platform browser OAuth client", () => {
         transactionStore: new MemoryBrowserTransactionStore(),
       }),
     ).toThrow("return origin");
+  });
+
+  it("rejects malformed callbacks and every non-human or unsafe token response", async () => {
+    const store = new MemoryBrowserTransactionStore();
+    const nowValue = Date.now();
+    const fetch = mock(async (request: RequestInfo | URL) => {
+      const path = new URL(String(request)).pathname;
+      return path.endsWith("/token")
+        ? Response.json({
+            access_token: "opaque-human-access",
+            token_type: "Bearer",
+            expires_in: 60,
+          })
+        : Response.json({ status: "authenticated", principal: validPrincipal });
+    }) as unknown as typeof globalThis.fetch;
+    const client = createPlatformBrowserClient(
+      browserOptions(store, fetch, () => nowValue),
+    );
+    const started = await client.start();
+    expect(started.status).toBe("started");
+    if (started.status !== "started") return;
+    const authorization = new URL(started.authorizationUrl);
+    const state = authorization.searchParams.get("state")!;
+    const cookie = cookiePair(started.setCookie);
+    for (const [label, query] of [
+      ["duplicate state", `state=${state}&state=${state}&code=code`],
+      ["duplicate code", `state=${state}&code=code&code=code`],
+      ["mixed success and error", `state=${state}&code=code&error=access_denied`],
+      ["missing success or error", `state=${state}`],
+    ] as const) {
+      const result = await client.callback(
+        new Request(`https://browser.test/oauth/callback?${query}`, {
+          headers: { cookie },
+        }),
+      );
+      expect(result, label).toMatchObject({
+        status: "invalid_login",
+        reason: "invalid_callback",
+      });
+    }
+    expect(store.size()).toBe(1);
+    const mismatchedClient = createPlatformBrowserClient({
+      ...browserOptions(store, fetch, () => nowValue),
+      clientId: "different-first-party-client",
+    });
+    const mismatchedConfiguration = await mismatchedClient.callback(
+      new Request(
+        `https://browser.test/oauth/callback?${new URLSearchParams({
+          code: "code",
+          state,
+        })}`,
+        { headers: { cookie } },
+      ),
+    );
+    expect(mismatchedConfiguration).toMatchObject({
+      status: "invalid_login",
+      reason: "invalid_state",
+    });
+    expect(
+      await client.callback(
+        new Request("https://browser.test/wrong-route?code=code", {
+          headers: { cookie },
+        }),
+      ),
+    ).toMatchObject({ status: "invalid_login", reason: "invalid_callback" });
+
+    const invalidResponses = [
+      {
+        label: "rejected credential",
+        verification: { status: "invalid_credential" },
+        verificationStatus: 401,
+        expected: { status: "invalid_login", reason: "invalid_response" },
+      },
+      {
+        label: "wrong authority",
+        verification: {
+          status: "authenticated",
+          principal: { ...validPrincipal, authority: "other-authority" },
+        },
+        expected: { status: "authority_unavailable" },
+      },
+      {
+        label: "wrong audience",
+        verification: {
+          status: "authenticated",
+          principal: { ...validPrincipal, audience: "https://other.test" },
+        },
+        expected: { status: "authority_unavailable" },
+      },
+      {
+        label: "agent principal",
+        verification: {
+          status: "authenticated",
+          principal: {
+            ...validPrincipal,
+            kind: "agent",
+            grantId: "agent-grant",
+          },
+        },
+        expected: { status: "invalid_login", reason: "invalid_response" },
+      },
+      {
+        label: "excess capability",
+        verification: {
+          status: "authenticated",
+          principal: {
+            ...validPrincipal,
+            capabilities: ["resource:write"],
+          },
+        },
+        expected: { status: "invalid_login", reason: "invalid_response" },
+      },
+      {
+        label: "expired principal",
+        verification: {
+          status: "authenticated",
+          principal: {
+            ...validPrincipal,
+            expiresAt: new Date(Date.now() - 1).toISOString(),
+          },
+        },
+        expected: { status: "authority_unavailable" },
+      },
+      {
+        label: "unexpected refresh",
+        token: {
+          access_token: "opaque-human-access",
+          refresh_token: "unexpected-refresh",
+          token_type: "Bearer",
+          expires_in: 60,
+        },
+        expected: { status: "invalid_login", reason: "unexpected_refresh" },
+      },
+      {
+        label: "invalid grant response",
+        token: { error: "invalid_grant" },
+        tokenStatus: 400,
+        expected: { status: "invalid_login", reason: "invalid_grant" },
+      },
+      {
+        label: "token endpoint outage",
+        token: { error: "temporarily unavailable" },
+        tokenStatus: 503,
+        expected: { status: "authority_unavailable" },
+      },
+    ] as const;
+    for (const response of invalidResponses) {
+      const result = await callbackWithBrowserToken({
+        token: response.token ?? {
+          access_token: "opaque-human-access",
+          token_type: "Bearer",
+          expires_in: 60,
+        },
+        verification: response.verification,
+        verificationStatus: response.verificationStatus,
+        tokenStatus: response.tokenStatus,
+      });
+      expect(result, response.label).toMatchObject(response.expected);
+    }
+    await expect(
+      callbackWithBrowserToken({
+        token: { token_type: "Bearer", expires_in: 60 },
+      }),
+    ).resolves.toMatchObject({
+      status: "invalid_login",
+      reason: "invalid_response",
+    });
+    await expect(
+      callbackWithBrowserToken({
+        token: { access_token: "opaque-human-access", token_type: "Basic", expires_in: 60 },
+      }),
+    ).resolves.toMatchObject({
+      status: "invalid_login",
+      reason: "invalid_response",
+    });
+    await expect(
+      callbackWithBrowserToken({
+        token: {
+          access_token: "opaque-human-access",
+          token_type: "Bearer",
+          expires_in: 0,
+        },
+      }),
+    ).resolves.toMatchObject({
+      status: "invalid_login",
+      reason: "invalid_response",
+    });
+  });
+
+  it("fails closed on callback body delays, redirects and late transport results", async () => {
+    let resolveBody!: (value: unknown) => void;
+    const delayedBody = new Promise<unknown>((resolve) => {
+      resolveBody = resolve;
+    });
+    const delayedFetch = mock(async (request: RequestInfo | URL) => {
+      const path = new URL(String(request)).pathname;
+      if (path.endsWith("/token")) {
+        return {
+          status: 200,
+          ok: true,
+          redirected: false,
+          url: "https://platform.test/api/auth/oauth2/token",
+          json: () => delayedBody,
+        } as unknown as Response;
+      }
+      return Response.json({ status: "authenticated", principal: validPrincipal });
+    }) as unknown as typeof globalThis.fetch;
+    const delayedResult = await callbackWithBrowserFetch(delayedFetch);
+    expect(delayedResult).toMatchObject({ status: "authority_unavailable" });
+    resolveBody({
+      access_token: "late-access-token",
+      token_type: "Bearer",
+      expires_in: 60,
+    });
+    await wait(35);
+    expect(delayedResult).toMatchObject({ status: "authority_unavailable" });
+
+    const redirectFetch = mock(async (request: RequestInfo | URL) => {
+      const path = new URL(String(request)).pathname;
+      if (path.endsWith("/token")) {
+        return new Response(null, {
+          status: 302,
+          headers: { location: "https://attacker.test/oauth/token" },
+        });
+      }
+      return Response.json({ status: "authenticated", principal: validPrincipal });
+    }) as unknown as typeof globalThis.fetch;
+    await expect(callbackWithBrowserFetch(redirectFetch)).resolves.toMatchObject(
+      { status: "authority_unavailable" },
+    );
+
+    let resolveLate!: (response: Response) => void;
+    const lateFetch = mock((request: RequestInfo | URL) => {
+      const path = new URL(String(request)).pathname;
+      if (path.endsWith("/token")) {
+        return new Promise<Response>((resolve) => {
+          resolveLate = resolve;
+        });
+      }
+      return Promise.resolve(
+        Response.json({ status: "authenticated", principal: validPrincipal }),
+      );
+    }) as unknown as typeof globalThis.fetch;
+    const lateResult = await callbackWithBrowserFetch(lateFetch);
+    expect(lateResult).toMatchObject({ status: "authority_unavailable" });
+    resolveLate(
+      Response.json({
+        access_token: "late-access-token",
+        token_type: "Bearer",
+        expires_in: 60,
+      }),
+    );
+    await wait(35);
+    expect(lateResult).toMatchObject({ status: "authority_unavailable" });
   });
 
   it("preserves a transaction for the wrong browser and lets only one concurrent callback win", async () => {

@@ -305,26 +305,34 @@ function appPage(draft, resourceId) {
     const status = document.querySelector("#status");
     const login = document.querySelector("#login-link");
     login.hidden = true;
-    fetch(${JSON.stringify(`/api/resource/${resourceId}`)}, { credentials: "include" })
-      .then(async (response) => {
+    async function loadResource() {
+      try {
+        const response = await fetch(${JSON.stringify(`/api/resource/${resourceId}`)}, { credentials: "include" });
         const body = await response.json().catch(() => ({}));
         if (response.status === 200) {
           status.textContent = "authenticated";
+          login.hidden = true;
           return;
         }
         if (response.status === 401) {
           status.textContent = body.error === "invalid_credential" ? "session expired; sign in again" : "sign in required";
-        } else if (response.status === 503) {
-          status.textContent = "service unavailable; sign in again";
-        } else {
-          status.textContent = "service request failed";
+          login.hidden = false;
+          return;
         }
-        login.hidden = false;
-      })
-      .catch(() => {
-        status.textContent = "service unavailable; sign in again";
-        login.hidden = false;
-      });
+        if (response.status === 503) {
+          status.textContent = "service unavailable";
+          login.hidden = true;
+          return;
+        }
+        status.textContent = "service request failed";
+        login.hidden = true;
+      } catch {
+        status.textContent = "service unavailable";
+        login.hidden = true;
+      }
+    }
+    window.reloadResource = loadResource;
+    loadResource();
   </script>
 </body></html>`;
 }
@@ -354,11 +362,13 @@ async function listenConsumerFixture({
   resourceId,
 }) {
   const state = {
+    apiMode: "normal",
     outageMode: false,
     csrfDenied: false,
     browserCsrfDenied: false,
     lastCallbackStatus: null,
     lastCallbackExpiresAt: null,
+    lastIssuedAccessToken: null,
   };
   const server = createServer((request, response) => {
     void (async () => {
@@ -400,7 +410,20 @@ async function listenConsumerFixture({
       state.outageMode = false;
       throw new Error("controlled Platform outage");
     }
-    return globalThis.fetch(input, init);
+    const response = await globalThis.fetch(input, init);
+    const url = new URL(
+      typeof input === "string" || input instanceof URL ? input : input.url,
+    );
+    if (url.pathname === "/api/auth/oauth2/token" && response.ok) {
+      const body = await response
+        .clone()
+        .json()
+        .catch(() => ({}));
+      if (typeof body.access_token === "string") {
+        state.lastIssuedAccessToken = body.access_token;
+      }
+    }
+    return response;
   };
   let client = createPlatformBrowserClient({
     baseUrl: platformBaseUrl,
@@ -468,6 +491,15 @@ async function listenConsumerFixture({
       );
     }
     if (url.pathname.startsWith("/api/resource/") && request.method === "GET") {
+      if (state.apiMode === "unauthorized") {
+        return Response.json({ error: "invalid_credential" }, { status: 401 });
+      }
+      if (state.apiMode === "outage") {
+        return Response.json(
+          { error: "authority_unavailable" },
+          { status: 503 },
+        );
+      }
       return handleBrowserFixtureRequest(request, resourceConfig);
     }
     if (url.pathname === "/logout" && request.method === "POST") {
@@ -734,7 +766,12 @@ async function revokeInstallation(page, platformBaseUrl, installationId) {
   );
 }
 
-async function assertNoCredentialSurfaces(context, page, consumerBaseUrl) {
+async function assertNoCredentialSurfaces(
+  context,
+  page,
+  consumerBaseUrl,
+  secrets,
+) {
   const cookies = await context.cookies(consumerBaseUrl);
   const credentialCookies = cookies.filter(
     (cookie) => cookie.name === "__Host-0000-access",
@@ -745,10 +782,25 @@ async function assertNoCredentialSurfaces(context, page, consumerBaseUrl) {
   assert.equal(credentialCookies[0].sameSite, "Lax");
   assert.equal(credentialCookies[0].domain.startsWith("."), false);
   const surfaces = await page.evaluate(() => ({
+    url: location.href,
     html: document.documentElement.outerHTML,
+    links: [...document.querySelectorAll("[href]")]
+      .map((element) => element.href)
+      .join("\n"),
     local: JSON.stringify(localStorage),
     session: JSON.stringify(sessionStorage),
   }));
+  for (const secret of [...secrets, credentialCookies[0].value]) {
+    assert.equal(typeof secret, "string");
+    assert.ok(secret.length > 0);
+    for (const surface of Object.values(surfaces)) {
+      assert.equal(
+        surface.includes(secret),
+        false,
+        "credential value absent from browser-visible surfaces",
+      );
+    }
+  }
   for (const surface of Object.values(surfaces)) {
     for (const marker of [
       "access_token",
@@ -863,10 +915,12 @@ try {
     database,
     clientRegistration.clientId,
   );
+  assert.equal(typeof consumer.state.lastIssuedAccessToken, "string");
   const firstCookie = await assertNoCredentialSurfaces(
     context,
     page,
     consumer.baseUrl,
+    [clientRegistration.clientSecret, consumer.state.lastIssuedAccessToken],
   );
   assert.ok(firstCookie.expires > Math.floor(Date.now() / 1000));
   assert.ok(
@@ -888,6 +942,29 @@ try {
     status: 401,
     body: { error: "invalid_credential" },
   });
+
+  const retainedDraft = `typed-browser-draft-${crypto.randomUUID()}`;
+  await page.locator("#work-input").fill(retainedDraft);
+  const appUrlBeforeFailures = page.url();
+  consumer.state.apiMode = "unauthorized";
+  await page.evaluate(() => window.reloadResource());
+  await page.waitForFunction(
+    () =>
+      document.querySelector("#status")?.textContent ===
+      "session expired; sign in again",
+  );
+  assert.equal(await page.locator("#work-input").inputValue(), retainedDraft);
+  assert.equal(page.url(), appUrlBeforeFailures);
+  consumer.state.apiMode = "outage";
+  await page.evaluate(() => window.reloadResource());
+  await page.waitForFunction(
+    () =>
+      document.querySelector("#status")?.textContent === "service unavailable",
+  );
+  assert.equal(await page.locator("#work-input").inputValue(), retainedDraft);
+  assert.equal(page.url(), appUrlBeforeFailures);
+  assert.equal(await page.locator("#login-link").isHidden(), true);
+  consumer.state.apiMode = "normal";
 
   const attackerUrl = new URL("/test/csrf-attacker", platformBridge.baseUrl);
   attackerUrl.searchParams.set("target", `${consumer.baseUrl}/logout`);
@@ -994,10 +1071,28 @@ try {
     true,
   );
   const callbackSurfaces = await page.evaluate(() => ({
+    url: location.href,
     html: document.documentElement.outerHTML,
+    links: [...document.querySelectorAll("[href]")]
+      .map((element) => element.href)
+      .join("\n"),
     local: JSON.stringify(localStorage),
     session: JSON.stringify(sessionStorage),
   }));
+  for (const secret of [
+    clientRegistration.clientSecret,
+    consumer.state.lastIssuedAccessToken,
+  ]) {
+    assert.equal(typeof secret, "string");
+    assert.ok(secret.length > 0);
+    for (const surface of Object.values(callbackSurfaces)) {
+      assert.equal(
+        surface.includes(secret),
+        false,
+        "credential value absent from callback browser-visible surfaces",
+      );
+    }
+  }
   for (const surface of Object.values(callbackSurfaces)) {
     assert.equal(surface.includes("access_token"), false);
     assert.equal(surface.includes("refresh_token"), false);
@@ -1022,11 +1117,13 @@ try {
         cookie:
           "host-only Secure HttpOnly SameSite=Lax with absolute expiry bounded by Platform access",
         surfaces:
-          "no access/refresh/client secret in DOM, localStorage, sessionStorage or URL",
+          "actual issued access/cookie values and client secret absent from DOM, localStorage, sessionStorage or URL",
         authorizationPrecedence:
           "invalid explicit Authorization denied over a valid cookie",
         csrf: "cross-origin unsafe logout denied; same-origin logout clears service cookie",
         invalidation: ["expired access", "installation revoke"],
+        draft:
+          "typed mounted input retained across in-place authenticated 401 and 503; 503 keeps sign-in hidden",
         outage:
           "callback classified authority_unavailable and preserved return draft",
       },
