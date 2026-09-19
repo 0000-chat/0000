@@ -7,7 +7,7 @@
 | T01 | [#55](https://github.com/0000-chat/0000/issues/55) | Trace runtime and resolve the first auth contracts | ready-for-agent |
 | T02 | [#56](https://github.com/0000-chat/0000/issues/56) | Deliver social sign-in, default organization, profile and logout | ready-for-agent |
 | T03 | [#57](https://github.com/0000-chat/0000/issues/57) | Administer organizations and memberships | ready-for-agent |
-| T04 | [#58](https://github.com/0000-chat/0000/issues/58) | Register a consumer and use a scoped human API credential | needs-info |
+| T04 | [#58](https://github.com/0000-chat/0000/issues/58) | Register a consumer and use a scoped human API credential | ready-for-agent |
 | T05 | [#59](https://github.com/0000-chat/0000/issues/59) | Add organization-owned agents across service audiences | ready-for-agent |
 | T06 | [#60](https://github.com/0000-chat/0000/issues/60) | Authorize a personal harness with OAuth consent | needs-info |
 | T07 | [#61](https://github.com/0000-chat/0000/issues/61) | Rotate and revoke OAuth installations | needs-info |
@@ -20,7 +20,7 @@
 | T14 | [#68](https://github.com/0000-chat/0000/issues/68) | Prove reconnect authorization without building offline sync | ready-for-agent |
 | T15 | [#69](https://github.com/0000-chat/0000/issues/69) | Make self-hosted and managed deployment setup reproducible | ready-for-agent |
 
-T03 worker commits `2804448` and `05b899f` are reviewed and integrated as `077ca0e` and `c51d285`; parent Platform and Chromium checks pass on the aggregate. T04 is now eligible for final preparation against the verified explicit-organization authority boundary; dispatch still requires its completed implementation brief. The ready-for-agent label means the ticket is reviewable for dispatch; it does not mean its dependencies are complete. Remaining needs-info labels require their specific contract decisions and integrated blockers; OAuth concurrency is not resolved by T01's sequential probe.
+T03 worker commits `2804448` and `05b899f` are reviewed and integrated as `077ca0e` and `c51d285`; parent Platform and Chromium checks pass on the aggregate. T04 is dispatched to isolated `codex/platform-t04` from acceptance checkpoint `b2e5802`, with a completed parent-owned brief and frozen dependency installation. The ready-for-agent label means the ticket is reviewable for dispatch; it does not mean its dependencies are complete. Remaining needs-info labels require their specific contract decisions and integrated blockers; OAuth concurrency is not resolved by T01's sequential probe.
 
 ## Existing issue disposition
 
@@ -78,7 +78,7 @@ T03 worker commits `2804448` and `05b899f` are reviewed and integrated as `077ca
 
 ### T04. Register a consumer and use a scoped human API credential
 
-**Readiness:** T01/T02 dependencies are integrated and verified; consumer-binding and credential-lifecycle preparation remains before dispatch.
+**Readiness:** Dispatched from verified `b2e5802`; T01/T02 dependencies and T03 explicit-organization authority are integrated. Parent brief preparation and frozen dependency installation passed.
 
 **Blocked by (contract):** T01 principal, authority, audience, error and service-verifier contract; T02 supplies the human. This ticket defines the bearer source: a human issues a scoped opaque API credential in the Platform account UI.
 
@@ -86,7 +86,7 @@ T03 worker commits `2804448` and `05b899f` are reviewed and integrated as `077ca
 
 **Existing pattern:** Preserve Communicator's strict human/delegated separation; fixture is not production adoption.
 
-**Open decisions:** T01 wire/transport and D1 credential-verification findings.
+**Open decisions:** Resolved from integrated evidence: opaque audience-specific credentials, current membership, verifier-bound shared-client transport and strict failure categories. T04 implements own-human key lifecycle, finite expiry, atomic rotation and deployment-controlled service registration; its two-audience verification remains pending.
 
 **Verification:** The issued human credential accesses only its fixture audience/actions; wrong audience, expired or revoked credentials deny at the next check. Verifier credentials cannot issue user credentials or enumerate organizations; outage returns 503.
 
