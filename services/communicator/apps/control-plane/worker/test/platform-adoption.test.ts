@@ -377,51 +377,43 @@ async function seedPlatformMachineBindings() {
 async function seedUnboundHumanAccount() {
   const timestamp = new Date().toISOString();
   await env.CONTROL_DB.batch([
-    env.CONTROL_DB
-      .prepare(
-        "INSERT INTO gateway_routes (id, service_principal_id, status, created_at, updated_at) VALUES (?, ?, 'active', ?, ?)",
-      )
-      .bind(
-        "gateway_route_human_secondary",
-        "principal_operator",
-        timestamp,
-        timestamp,
-      ),
-    env.CONTROL_DB
-      .prepare(
-        "INSERT INTO connections (id, tenant_id, identity_id, provider, display_label, status, created_at, updated_at) VALUES (?, ?, ?, 'whatsapp', ?, 'ready', ?, ?)",
-      )
-      .bind(
-        "connection_human_secondary",
-        "tenant_pilot",
-        "identity_human",
-        "Human secondary WhatsApp",
-        timestamp,
-        timestamp,
-      ),
-    env.CONTROL_DB
-      .prepare(
-        "INSERT INTO connection_routes (connection_id, gateway_route_id, bridge_instance_id, matrix_user_id, matrix_room_namespace, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-      )
-      .bind(
-        "connection_human_secondary",
-        "gateway_route_human_secondary",
-        "bridge-human-secondary",
-        "route-user-human-secondary",
-        "route-room-human-secondary",
-        timestamp,
-        timestamp,
-      ),
-    env.CONTROL_DB
-      .prepare(
-        "INSERT INTO connection_accounts (account_id, connection_id, status, created_at, updated_at) VALUES (?, ?, 'active', ?, ?)",
-      )
-      .bind(
-        "account_human_secondary",
-        "connection_human_secondary",
-        timestamp,
-        timestamp,
-      ),
+    env.CONTROL_DB.prepare(
+      "INSERT INTO gateway_routes (id, service_principal_id, status, created_at, updated_at) VALUES (?, ?, 'active', ?, ?)",
+    ).bind(
+      "gateway_route_human_secondary",
+      "principal_operator",
+      timestamp,
+      timestamp,
+    ),
+    env.CONTROL_DB.prepare(
+      "INSERT INTO connections (id, tenant_id, identity_id, provider, display_label, status, created_at, updated_at) VALUES (?, ?, ?, 'whatsapp', ?, 'ready', ?, ?)",
+    ).bind(
+      "connection_human_secondary",
+      "tenant_pilot",
+      "identity_human",
+      "Human secondary WhatsApp",
+      timestamp,
+      timestamp,
+    ),
+    env.CONTROL_DB.prepare(
+      "INSERT INTO connection_routes (connection_id, gateway_route_id, bridge_instance_id, matrix_user_id, matrix_room_namespace, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+    ).bind(
+      "connection_human_secondary",
+      "gateway_route_human_secondary",
+      "bridge-human-secondary",
+      "route-user-human-secondary",
+      "route-room-human-secondary",
+      timestamp,
+      timestamp,
+    ),
+    env.CONTROL_DB.prepare(
+      "INSERT INTO connection_accounts (account_id, connection_id, status, created_at, updated_at) VALUES (?, ?, 'active', ?, ?)",
+    ).bind(
+      "account_human_secondary",
+      "connection_human_secondary",
+      timestamp,
+      timestamp,
+    ),
   ]);
 }
 
@@ -767,7 +759,11 @@ describe("Platform to Communicator adoption boundary", () => {
               { identity_id: "identity_human", families: ["projection"] },
             ],
             resume: [
-              { identity_id: "identity_human", generation: 1, after_sequence: 0 },
+              {
+                identity_id: "identity_human",
+                generation: 1,
+                after_sequence: 0,
+              },
             ],
           } satisfies RealtimeTicketRequest),
         },
@@ -848,14 +844,17 @@ describe("Platform to Communicator adoption boundary", () => {
       const hibernatedClose = waitForRealtimeClose(socket);
       await evictDurableObject(projection, { webSockets: "hibernate" });
       await projection.applyBatch(
-        platformProjectionBatch([
-          platformProjectionEvent(
-            "a_after_hibernation",
-            "account_human",
-            "connection_human_whatsapp",
-            "conversation_allowed_after_hibernation",
-          ),
-        ], [platformProjectionBindings[0]!]),
+        platformProjectionBatch(
+          [
+            platformProjectionEvent(
+              "a_after_hibernation",
+              "account_human",
+              "connection_human_whatsapp",
+              "conversation_allowed_after_hibernation",
+            ),
+          ],
+          [platformProjectionBindings[0]!],
+        ),
       );
       expect(await hibernatedClose).toBe(1008);
 
@@ -873,7 +872,11 @@ describe("Platform to Communicator adoption boundary", () => {
               { identity_id: "identity_human", families: ["projection"] },
             ],
             resume: [
-              { identity_id: "identity_human", generation: 1, after_sequence: 4 },
+              {
+                identity_id: "identity_human",
+                generation: 1,
+                after_sequence: 4,
+              },
             ],
           } satisfies RealtimeTicketRequest),
         },
@@ -897,7 +900,8 @@ describe("Platform to Communicator adoption boundary", () => {
       );
       expect(reconnectUpgrade.status).toBe(101);
       socket = reconnectUpgrade.webSocket;
-      if (socket === null) throw new Error("missing hibernation reconnect socket");
+      if (socket === null)
+        throw new Error("missing hibernation reconnect socket");
       const reconnectFrames = receiveRealtimeFrames(socket, 2);
       socket.accept();
       const reconnected = await reconnectFrames;
@@ -915,14 +919,17 @@ describe("Platform to Communicator adoption boundary", () => {
       const revokedClose = waitForRealtimeClose(socket);
       revokeHumanCredential();
       await projection.applyBatch(
-        platformProjectionBatch([
-          platformProjectionEvent(
-            "a_after_platform_revocation",
-            "account_human",
-            "connection_human_whatsapp",
-            "conversation_after_platform_revocation",
-          ),
-        ], [platformProjectionBindings[0]!]),
+        platformProjectionBatch(
+          [
+            platformProjectionEvent(
+              "a_after_platform_revocation",
+              "account_human",
+              "connection_human_whatsapp",
+              "conversation_after_platform_revocation",
+            ),
+          ],
+          [platformProjectionBindings[0]!],
+        ),
       );
       expect(await revokedClose).toBe(1008);
       const revokedSession = await request(
@@ -1021,7 +1028,10 @@ describe("Platform to Communicator adoption boundary", () => {
     };
     const crossOrigin = await app.request(
       "https://communicator.test/api/v1/grants",
-      { ...mutation, headers: { ...mutation.headers, Origin: "https://evil.test" } },
+      {
+        ...mutation,
+        headers: { ...mutation.headers, Origin: "https://evil.test" },
+      },
       platformEnvironment(),
     );
     expect(crossOrigin.status).toBe(401);
