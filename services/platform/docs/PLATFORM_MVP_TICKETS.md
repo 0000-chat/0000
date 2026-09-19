@@ -20,7 +20,7 @@
 | T14 | [#68](https://github.com/0000-chat/0000/issues/68) | Prove reconnect authorization without building offline sync | ready-for-agent |
 | T15 | [#69](https://github.com/0000-chat/0000/issues/69) | Make self-hosted and managed deployment setup reproducible | ready-for-agent |
 
-T03 is reviewed and verified at `c51d285`. T04 worker commits `24507b2`, `109e44f` and `9b3842a` are integrated as `454894b`, `5426c2c` and `dc30cd4`; parent Platform, root manifest and combined Chromium checks pass. Native reviewers confirmed fixes and the bounded external SQL review found no confirmed defect. [T04_CREDENTIAL_REPORT.md](../T04_CREDENTIAL_REPORT.md) records the evidence and limits. T05, T06, T08 and T14 are eligible for preparation against this verified boundary; each still requires its parent-owned brief and any remaining contract decisions before dispatch. The ready-for-agent label does not assert completed dependencies or production adoption. OAuth concurrency remains unresolved by T01's sequential probe.
+T03 is reviewed and verified at `c51d285`. T04 worker commits `24507b2`, `109e44f` and `9b3842a` are integrated as `454894b`, `5426c2c` and `dc30cd4`; parent Platform, root manifest and combined Chromium checks pass. Native reviewers confirmed fixes and the bounded external SQL review found no confirmed defect. [T04_CREDENTIAL_REPORT.md](../T04_CREDENTIAL_REPORT.md) records the evidence and limits. T14's focused reconnect proof is accepted at `166e54d`. T05 review fixes and T02 interrupted-signup recovery are underway in isolated worktrees. T06 and T08 remain in parent-owned contract preparation; OAuth request-scoped consent binding and guest lifecycle contracts must be settled before dispatch. The ready-for-agent label does not assert completed dependencies or production adoption.
 
 ## Existing issue disposition
 
@@ -92,7 +92,7 @@ T03 is reviewed and verified at `c51d285`. T04 worker commits `24507b2`, `109e44
 
 ### T05. Add organization-owned agents across service audiences
 
-**Readiness:** Delivered at isolated `0ed62d2`; native reviews identified concurrent narrowing authority restoration and missing resource/rollback/departure proofs. Fixes are underway on `codex/platform-t05`; external review and aggregate acceptance remain pending.
+**Readiness:** Delivered at isolated `0ed62d2`, with narrowing and resource/departure fixes independently confirmed at `500db9b`. External review and native triage identified an inconsistent credential/agent snapshot: separately read states can authorize a combination that was never valid. A joint verification snapshot and precise replacement-INSERT failure proof are underway on `codex/platform-t05`. Aggregate acceptance remains pending.
 
 **Blocked by (contract):** T03 supplies current administrator/membership controls; T04 supplies credential and verifier flows; T01's agreed machine-principal/grant contract is prerequisite.
 
@@ -106,7 +106,7 @@ T03 is reviewed and verified at `c51d285`. T04 worker commits `24507b2`, `109e44
 
 ### T06. Authorize a personal harness with OAuth consent
 
-**Readiness:** Not ready until T01's OAuth component findings are reviewed.
+**Readiness:** T01 findings are reviewed; a later isolated lifecycle probe exercises installation-scoped replay and supported hooks. Per-request auth construction, initial consent/reference binding and concurrent browser-flow isolation still require proof before production dispatch.
 
 **Blocked by (contract):** T01 OAuth feasibility/resource-binding result; T03 current membership; T04 live consumer verification.
 
@@ -134,7 +134,7 @@ T03 is reviewed and verified at `c51d285`. T04 worker commits `24507b2`, `109e44
 
 ### T08. Create and renew per-client guest access through the verifier
 
-**Readiness:** Not ready until T01's guest grant-proof contract is reviewed.
+**Readiness:** T01's owner-attested fixture is reviewed. Parent preparation must settle the shared owner/participant grant lifecycle, issuer provisioning and retry outcomes, then verify the post-T05 boundary before dispatch.
 
 **Blocked by (contract):** T01 guest principal, bootstrap purpose/audience and resource-grant exchange; T04 shared verifier.
 
