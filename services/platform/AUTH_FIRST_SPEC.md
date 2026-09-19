@@ -24,6 +24,15 @@ interrupted-signup repair, integrated and independently verified at `54fc212`.
 Combined checks pass eight Worker/D1 files/twenty tests and both guest/resource
 and actual human runtime restart probes with simulated provider HTTP.
 
+[T08_GUEST_REPORT.md](T08_GUEST_REPORT.md) and
+[GUEST_PERMISSION_REPORT.md](GUEST_PERMISSION_REPORT.md) record the reviewed
+guest lifecycle and independent resource permissions, integrated at `ddf93ad`.
+The integrated tree matches the independently tested checkpoint: ten Worker/D1
+files, twenty-seven tests, format/typecheck and restart persistence pass.
+Native reviews and a bounded Grok adversarial review found no confirmed defect.
+Actual msg adoption, management access and grant-to-local-permission binding
+remain acceptance gates; these results do not establish consumer readiness.
+
 ## MVP outcome and deployment
 
 Use the same open-source Platform for self-hosted deployments and managed 0000

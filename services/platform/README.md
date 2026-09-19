@@ -16,6 +16,12 @@ twenty tests and separate guest/resource and human runtime restart probes.
 Combined checks at `1d221bb` pass nine Worker/D1 files, twenty-two tests,
 format/typecheck and guest/resource runtime restart. This establishes the shared
 guest boundary for msg integration; msg adoption remains outstanding.
+[GUEST_PERMISSION_REPORT.md](GUEST_PERMISSION_REPORT.md) records the reviewed
+permission follow-up integrated at `ddf93ad`. Independent checks pass ten
+Worker/D1 files, twenty-seven tests, format/typecheck and restart persistence.
+Distinct owner and participant permissions can coexist on one resource without
+widening or revoking each other; pre-migration grants retain their default
+permission. Msg must still bind each grant to its local permission source.
 T03 aggregate checks passed at `c51d285`; T04 checks passed at `dc30cd4`.
 [T14_RECONNECT_REPORT.md](T14_RECONNECT_REPORT.md) records the independently
 reviewed reconnect fixture, integrated and verified at `166e54d`.
