@@ -1919,7 +1919,7 @@ async function findServiceByGrantIssuer(
   return serviceFromRow(row);
 }
 
-async function authenticateCredential(
+export async function authenticateCredential(
   request: Request,
   env: Cloudflare.Env,
 ): Promise<Response> {
@@ -1976,47 +1976,98 @@ async function authenticateCredential(
   const resourceIds = parseStringArray(row.resource_ids);
   if (!capabilities || !resourceIds)
     return json(503, { status: "authority_unavailable" });
+  if (!validCapabilities(capabilities)) {
+    return json(401, { status: "invalid_credential" });
+  }
   if (
-    !validCapabilities(capabilities) ||
+    row.kind !== "agent" &&
     capabilities.some(
       (capability) => !service.allowedCapabilities.includes(capability),
     )
-  ) {
+  )
     return json(401, { status: "invalid_credential" });
-  }
 
   if (row.kind === "human") {
     if (!row.organization_id || !row.membership_id) {
       return json(503, { status: "authority_unavailable" });
     }
-    const membership = await database
+    const currentHuman = await database
       .prepare(
-        `SELECT membership.id
-         FROM member AS membership
+        `SELECT credential.id, credential.subject_id,
+                credential.organization_id, credential.membership_id,
+                credential.audience, credential.capabilities,
+                credential.expires_at,
+                live_service.allowed_capabilities AS service_capabilities
+         FROM platform_credential AS credential
+         JOIN member AS membership ON membership.id = credential.membership_id
          JOIN "user" AS subject_user ON subject_user.id = membership.userId
          JOIN organization AS owning_org ON owning_org.id = membership.organizationId
-         WHERE membership.id = ?
-           AND membership.organizationId = ?
-           AND membership.userId = ?
+         JOIN platform_service AS live_service
+           ON live_service.service_id = ?
+          AND live_service.audience = ?
+          AND live_service.verifier_hash = ?
+          AND live_service.disabled = 0
+         WHERE credential.credential_hash = ?
+           AND credential.kind = 'human'
+           AND credential.subject_id = membership.userId
+           AND credential.organization_id = membership.organizationId
+           AND credential.audience = live_service.audience
+           AND credential.revoked_at IS NULL
+           AND credential.expires_at > ?
            AND subject_user.disabledAt IS NULL
            AND owning_org.suspendedAt IS NULL`,
       )
-      .bind(row.membership_id, row.organization_id, row.subject_id)
-      .first<{ id: string }>();
-    if (!membership) return json(401, { status: "invalid_credential" });
+      .bind(
+        service.serviceId,
+        service.audience,
+        service.verifierHash,
+        credentialHash,
+        Date.now(),
+      )
+      .first<{
+        id: string;
+        subject_id: string;
+        organization_id: string;
+        membership_id: string;
+        audience: string;
+        capabilities: string;
+        expires_at: number;
+        service_capabilities: string;
+      }>();
+    if (!currentHuman) return json(401, { status: "invalid_credential" });
+    const currentCapabilities = parseStringArray(currentHuman.capabilities);
+    const serviceCapabilities = parseStringArray(
+      currentHuman.service_capabilities,
+    );
+    if (
+      !currentCapabilities ||
+      !serviceCapabilities ||
+      !validCapabilities(currentCapabilities) ||
+      !validCapabilities(serviceCapabilities) ||
+      !isSafeCredentialExpiry(currentHuman.expires_at)
+    ) {
+      return json(503, { status: "authority_unavailable" });
+    }
+    if (
+      currentCapabilities.some(
+        (capability) => !serviceCapabilities.includes(capability),
+      )
+    ) {
+      return json(401, { status: "invalid_credential" });
+    }
     return json(200, {
       status: "authenticated",
       principal: {
         version: 1,
         authority: env.PLATFORM_AUTHORITY_ID,
         kind: "human",
-        subjectId: row.subject_id,
-        credentialId: row.id,
-        audience: service.audience,
-        capabilities,
-        expiresAt: new Date(row.expires_at!).toISOString(),
-        organizationId: row.organization_id,
-        membershipId: membership.id,
+        subjectId: currentHuman.subject_id,
+        credentialId: currentHuman.id,
+        audience: currentHuman.audience,
+        capabilities: currentCapabilities,
+        expiresAt: new Date(currentHuman.expires_at).toISOString(),
+        organizationId: currentHuman.organization_id,
+        membershipId: currentHuman.membership_id,
       },
     });
   }
@@ -2032,48 +2083,93 @@ async function authenticateCredential(
     ) {
       return json(503, { status: "authority_unavailable" });
     }
-    const agent = await database
+    const currentAgent = await database
       .prepare(
-        `SELECT agent.id, agent_grant.id AS grant_id,
-                agent_grant.capabilities AS grant_capabilities
-         FROM platform_agent AS agent
-         JOIN organization AS owning_org ON owning_org.id = agent.organization_id
+        `SELECT credential.id, credential.subject_id,
+                credential.organization_id, credential.membership_id,
+                credential.grant_id, credential.audience,
+                credential.capabilities, credential.resource_ids,
+                credential.expires_at,
+                agent_grant.id AS current_grant_id,
+                agent_grant.capabilities AS grant_capabilities,
+                registered_service.allowed_capabilities AS service_capabilities
+         FROM platform_credential AS credential
+         JOIN platform_agent AS agent
+           ON agent.id = credential.subject_id
+          AND agent.organization_id = credential.organization_id
+         JOIN organization AS owning_org
+           ON owning_org.id = agent.organization_id
          JOIN platform_agent_grant AS agent_grant
-           ON agent_grant.agent_id = agent.id
+           ON agent_grant.id = credential.grant_id
+          AND agent_grant.agent_id = agent.id
           AND agent_grant.organization_id = agent.organization_id
          JOIN platform_service AS registered_service
-           ON registered_service.service_id = agent_grant.service_id
+           ON registered_service.service_id = ?
+          AND registered_service.audience = ?
+          AND registered_service.verifier_hash = ?
+          AND registered_service.service_id = agent_grant.service_id
           AND registered_service.audience = agent_grant.audience
-         WHERE agent.id = ? AND agent.organization_id = ?
+          AND registered_service.disabled = 0
+         WHERE credential.credential_hash = ?
+           AND credential.kind = 'agent'
+           AND credential.organization_id = agent.organization_id
+           AND credential.membership_id IS NULL
+           AND credential.audience = registered_service.audience
            AND agent.enabled = 1
            AND owning_org.suspendedAt IS NULL
-           AND agent_grant.id = ?
            AND agent_grant.revoked_at IS NULL
-           AND agent_grant.audience = ?
-           AND registered_service.service_id = ?
-           AND registered_service.disabled = 0`,
+           AND credential.revoked_at IS NULL
+           AND credential.expires_at > ?`,
       )
       .bind(
-        row.subject_id,
-        row.organization_id,
-        row.grant_id,
-        service.audience,
         service.serviceId,
+        service.audience,
+        service.verifierHash,
+        credentialHash,
+        Date.now(),
       )
       .first<{
         id: string;
+        subject_id: string;
+        organization_id: string;
+        membership_id: string | null;
         grant_id: string;
+        audience: string;
+        capabilities: string;
+        resource_ids: string;
+        expires_at: number;
+        current_grant_id: string;
         grant_capabilities: string;
+        service_capabilities: string;
       }>();
-    if (!agent || agent.grant_id !== row.grant_id) {
+    if (!currentAgent || currentAgent.current_grant_id !== row.grant_id) {
       return json(401, { status: "invalid_credential" });
     }
-    const grantCapabilities = parseStringArray(agent.grant_capabilities);
-    if (!grantCapabilities || !validCapabilities(grantCapabilities)) {
+    const currentCapabilities = parseStringArray(currentAgent.capabilities);
+    const currentResourceIds = parseStringArray(currentAgent.resource_ids);
+    const grantCapabilities = parseStringArray(currentAgent.grant_capabilities);
+    const serviceCapabilities = parseStringArray(
+      currentAgent.service_capabilities,
+    );
+    if (
+      !currentCapabilities ||
+      !currentResourceIds ||
+      !grantCapabilities ||
+      !serviceCapabilities ||
+      !validCapabilities(currentCapabilities) ||
+      !validCapabilities(grantCapabilities) ||
+      !validCapabilities(serviceCapabilities) ||
+      currentResourceIds.length !== 0 ||
+      !isSafeCredentialExpiry(currentAgent.expires_at)
+    ) {
       return json(503, { status: "authority_unavailable" });
     }
     if (
-      capabilities.some((capability) => !grantCapabilities.includes(capability))
+      currentCapabilities.some(
+        (capability) =>
+          !grantCapabilities.includes(capability) ||
+          !serviceCapabilities.includes(capability),
+      )
     ) {
       return json(401, { status: "invalid_credential" });
     }
@@ -2083,13 +2179,13 @@ async function authenticateCredential(
         version: 1,
         authority: env.PLATFORM_AUTHORITY_ID,
         kind: "agent",
-        subjectId: row.subject_id,
-        credentialId: row.id,
-        organizationId: row.organization_id,
-        grantId: row.grant_id,
-        audience: service.audience,
-        capabilities,
-        expiresAt: new Date(row.expires_at).toISOString(),
+        subjectId: currentAgent.subject_id,
+        credentialId: currentAgent.id,
+        organizationId: currentAgent.organization_id,
+        grantId: currentAgent.grant_id,
+        audience: currentAgent.audience,
+        capabilities: currentCapabilities,
+        expiresAt: new Date(currentAgent.expires_at).toISOString(),
       },
     });
   }
@@ -2103,26 +2199,82 @@ async function authenticateCredential(
     ) {
       return json(503, { status: "authority_unavailable" });
     }
-    const guest = await database
+    const currentGuest = await database
       .prepare(
-        "SELECT id FROM platform_guest WHERE id = ? AND disabled_at IS NULL",
+        `SELECT credential.id, credential.subject_id, credential.grant_id,
+                credential.audience, credential.capabilities,
+                credential.resource_ids, credential.expires_at,
+                live_service.allowed_capabilities AS service_capabilities
+         FROM platform_credential AS credential
+         JOIN platform_guest AS guest
+           ON guest.id = credential.subject_id
+          AND guest.disabled_at IS NULL
+         JOIN platform_service AS live_service
+           ON live_service.service_id = ?
+          AND live_service.audience = ?
+          AND live_service.verifier_hash = ?
+          AND live_service.disabled = 0
+         WHERE credential.credential_hash = ?
+           AND credential.kind = 'guest'
+           AND credential.organization_id IS NULL
+           AND credential.membership_id IS NULL
+           AND credential.grant_id IS NOT NULL
+           AND credential.audience = live_service.audience
+           AND credential.expires_at IS NULL
+           AND credential.revoked_at IS NULL`,
       )
-      .bind(row.subject_id)
-      .first<{ id: string }>();
-    if (!guest) return json(401, { status: "invalid_credential" });
+      .bind(
+        service.serviceId,
+        service.audience,
+        service.verifierHash,
+        credentialHash,
+      )
+      .first<{
+        id: string;
+        subject_id: string;
+        grant_id: string;
+        audience: string;
+        capabilities: string;
+        resource_ids: string;
+        expires_at: number | null;
+        service_capabilities: string;
+      }>();
+    if (!currentGuest) return json(401, { status: "invalid_credential" });
+    const currentCapabilities = parseStringArray(currentGuest.capabilities);
+    const currentResourceIds = parseStringArray(currentGuest.resource_ids);
+    const serviceCapabilities = parseStringArray(
+      currentGuest.service_capabilities,
+    );
+    if (!currentCapabilities || !currentResourceIds || !serviceCapabilities) {
+      return json(503, { status: "authority_unavailable" });
+    }
+    if (
+      !validCapabilities(currentCapabilities) ||
+      !validCapabilities(serviceCapabilities) ||
+      currentResourceIds.length === 0
+    ) {
+      return json(503, { status: "authority_unavailable" });
+    }
+    if (
+      currentCapabilities.some(
+        (capability) => !serviceCapabilities.includes(capability),
+      )
+    ) {
+      return json(401, { status: "invalid_credential" });
+    }
     return json(200, {
       status: "authenticated",
       principal: {
         version: 1,
         authority: env.PLATFORM_AUTHORITY_ID,
         kind: "guest",
-        subjectId: row.subject_id,
-        credentialId: row.id,
-        audience: service.audience,
-        capabilities,
-        expiresAt: null,
-        grantId: row.grant_id,
-        resourceIds,
+        subjectId: currentGuest.subject_id,
+        credentialId: currentGuest.id,
+        audience: currentGuest.audience,
+        capabilities: currentCapabilities,
+        expiresAt: currentGuest.expires_at,
+        grantId: currentGuest.grant_id,
+        resourceIds: currentResourceIds,
       },
     });
   }

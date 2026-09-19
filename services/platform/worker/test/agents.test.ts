@@ -3,10 +3,12 @@ import { SELF, env } from "cloudflare:test";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   createOrNarrowAgentGrant,
+  revokeAgentCredential,
   rotateAgentCredential,
 } from "../../src/agent-state";
 import { opaqueSecret } from "../../src/platform-state";
 import { updateServiceMetadata } from "../../src/service-registration";
+import { authenticateCredential } from "../../src/worker";
 import { handleResourceRequest } from "./fixtures/resource-service";
 import { registerTestService, type TestService } from "./fixtures/provision";
 
@@ -214,19 +216,52 @@ function interleavedNarrowingDatabase(
   }) as unknown as D1DatabaseSession;
 }
 
-function failingBatchDatabase(database: D1Database): D1Database {
+function interleavedCredentialReadDatabase(
+  database: D1Database,
+  afterCredentialRead: () => Promise<void>,
+): D1Database {
+  let callbackComplete = false;
+  const wrapStatement = (
+    statement: D1PreparedStatement,
+    query: string,
+  ): D1PreparedStatement => {
+    const isCredentialLookup = query.includes(
+      "FROM platform_credential WHERE credential_hash = ?",
+    );
+    return {
+      bind: (...values: unknown[]) =>
+        wrapStatement(statement.bind(...values), query),
+      first: async <T = Record<string, unknown>>(columnName?: string) => {
+        const result =
+          columnName === undefined
+            ? await statement.first<T>()
+            : await statement.first<T>(columnName);
+        if (isCredentialLookup && result && !callbackComplete) {
+          callbackComplete = true;
+          await afterCredentialRead();
+        }
+        return result;
+      },
+      run: <T = Record<string, unknown>>() => statement.run<T>(),
+      all: <T = Record<string, unknown>>() => statement.all<T>(),
+      raw: <T = unknown[]>(options?: { columnNames?: boolean }) =>
+        statement.raw<T>(options as never),
+    } as unknown as D1PreparedStatement;
+  };
+  const wrapSession = (session: D1DatabaseSession): D1DatabaseSession =>
+    new Proxy(session, {
+      get(target, property, receiver) {
+        if (property === "prepare") {
+          return (query: string) => wrapStatement(target.prepare(query), query);
+        }
+        return Reflect.get(target, property, receiver);
+      },
+    }) as unknown as D1DatabaseSession;
   return new Proxy(database, {
     get(target, property, receiver) {
-      if (property === "batch") {
-        return (statements: D1PreparedStatement[]) =>
-          target.batch([
-            ...statements,
-            target
-              .prepare(
-                "INSERT INTO platform_agent_rotation_failure (id) VALUES (?)",
-              )
-              .bind("injected-rotation-failure"),
-          ]);
+      if (property === "withSession") {
+        return (constraint: string) =>
+          wrapSession(target.withSession(constraint as never));
       }
       return Reflect.get(target, property, receiver);
     },
@@ -563,6 +598,123 @@ describe("T05 organization-owned agents", () => {
     expect(
       (await client(first).authenticate(firstCredential.credential)).status,
     ).toBe("invalid_credential");
+    const agentRaceIssued = await post(
+      "/api/account/agents/credentials",
+      owner.cookie,
+      {
+        organizationId: owner.organizationId,
+        agentId: agent.id,
+        grantId: firstGrant.id,
+        serviceId: first.serviceId,
+        capabilities: ["resource:read"],
+        name: "Agent verification race",
+      },
+    );
+    expect(agentRaceIssued.status, await agentRaceIssued.clone().text()).toBe(
+      201,
+    );
+    const agentRaceCredential = (await agentRaceIssued.json()) as {
+      credential: string;
+      credentialId: string;
+    };
+    let agentRaceInitialRead = false;
+    const agentRaceDatabase = interleavedCredentialReadDatabase(
+      testEnv.IDENTITY_DB,
+      async () => {
+        agentRaceInitialRead = true;
+        await testEnv.IDENTITY_DB.prepare(
+          "UPDATE platform_agent SET enabled = 0 WHERE id = ? AND organization_id = ?",
+        )
+          .bind(agent.id, owner.organizationId)
+          .run();
+        expect(
+          await revokeAgentCredential(
+            testEnv.IDENTITY_DB.withSession("first-primary"),
+            {
+              actorUserId: owner.id,
+              organizationId: owner.organizationId,
+              agentId: agent.id,
+              credentialId: agentRaceCredential.credentialId,
+            },
+          ),
+        ).toBe(true);
+        await testEnv.IDENTITY_DB.prepare(
+          "UPDATE platform_agent SET enabled = 1 WHERE id = ? AND organization_id = ?",
+        )
+          .bind(agent.id, owner.organizationId)
+          .run();
+      },
+    );
+    const agentRaceAuthentication = await authenticateCredential(
+      new Request("http://localhost/internal/v1/authenticate", {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${first.verifier}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ credential: agentRaceCredential.credential }),
+      }),
+      { ...testEnv, IDENTITY_DB: agentRaceDatabase } as Cloudflare.Env,
+    );
+    expect(agentRaceInitialRead).toBe(true);
+    expect(agentRaceAuthentication.status).toBe(401);
+    expect(await agentRaceAuthentication.json()).toEqual({
+      status: "invalid_credential",
+    });
+
+    const humanRaceIssued = await post("/api/credentials", owner.cookie, {
+      organizationId: owner.organizationId,
+      serviceId: first.serviceId,
+      capabilities: ["resource:read"],
+      name: "Human verification race",
+    });
+    expect(humanRaceIssued.status, await humanRaceIssued.clone().text()).toBe(
+      201,
+    );
+    const humanRaceCredential = (await humanRaceIssued.json()) as {
+      credential: string;
+      credentialId: string;
+    };
+    let humanRaceInitialRead = false;
+    const humanRaceDatabase = interleavedCredentialReadDatabase(
+      testEnv.IDENTITY_DB,
+      async () => {
+        humanRaceInitialRead = true;
+        const suspendedAt = Date.now();
+        await testEnv.IDENTITY_DB.prepare(
+          "UPDATE organization SET suspendedAt = ? WHERE id = ?",
+        )
+          .bind(suspendedAt, owner.organizationId)
+          .run();
+        await testEnv.IDENTITY_DB.prepare(
+          "UPDATE platform_credential SET revoked_at = ?, revoked_reason = 't05_verification_race' WHERE id = ? AND revoked_at IS NULL",
+        )
+          .bind(suspendedAt, humanRaceCredential.credentialId)
+          .run();
+        await testEnv.IDENTITY_DB.prepare(
+          "UPDATE organization SET suspendedAt = NULL WHERE id = ?",
+        )
+          .bind(owner.organizationId)
+          .run();
+      },
+    );
+    const humanRaceAuthentication = await authenticateCredential(
+      new Request("http://localhost/internal/v1/authenticate", {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${first.verifier}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ credential: humanRaceCredential.credential }),
+      }),
+      { ...testEnv, IDENTITY_DB: humanRaceDatabase } as Cloudflare.Env,
+    );
+    expect(humanRaceInitialRead).toBe(true);
+    expect(humanRaceAuthentication.status).toBe(401);
+    expect(await humanRaceAuthentication.json()).toEqual({
+      status: "invalid_credential",
+    });
+
     expect(
       (
         await fixtureRead(
@@ -787,9 +939,26 @@ describe("T05 organization-owned agents", () => {
       credential: string;
     };
 
+    const rotationFailureTrigger = "t05_agent_rotation_insert_failure";
+    const predecessorLiteral = firstReadCredential.credentialId.replaceAll(
+      "'",
+      "''",
+    );
+    await testEnv.IDENTITY_DB.prepare(
+      `DROP TRIGGER IF EXISTS ${rotationFailureTrigger}`,
+    ).run();
+    await testEnv.IDENTITY_DB.prepare(
+      `CREATE TRIGGER ${rotationFailureTrigger}
+       BEFORE INSERT ON platform_credential
+       WHEN NEW.kind = 'agent'
+         AND NEW.predecessor_id = '${predecessorLiteral}'
+       BEGIN
+         SELECT RAISE(ABORT, 'injected replacement insert failure');
+       END`,
+    ).run();
     let rotationFailureObserved = false;
     try {
-      await rotateAgentCredential(failingBatchDatabase(testEnv.IDENTITY_DB), {
+      await rotateAgentCredential(testEnv.IDENTITY_DB, {
         actorUserId: owner.id,
         service: agentService(first),
         organizationId: owner.organizationId,
@@ -800,6 +969,10 @@ describe("T05 organization-owned agents", () => {
       });
     } catch {
       rotationFailureObserved = true;
+    } finally {
+      await testEnv.IDENTITY_DB.prepare(
+        `DROP TRIGGER IF EXISTS ${rotationFailureTrigger}`,
+      ).run();
     }
     expect(rotationFailureObserved).toBe(true);
     const rolledBackPredecessor = await testEnv.IDENTITY_DB.prepare(

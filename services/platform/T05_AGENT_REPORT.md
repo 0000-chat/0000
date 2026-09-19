@@ -23,8 +23,10 @@ separate.
 - Agent credentials use the existing protected `platform_credential` table with
   `kind='agent'`, the stable agent ID as `subject_id`, organization and grant
   bindings, and `membership_id=NULL`. Secrets are returned once. Verification
-  checks agent state, organization state, exact current grant and service
-  catalog, finite expiry, revocation and capability subsets on every request.
+  reads the current credential, agent, organization, grant and service catalog
+  in one joined authority snapshot, checking finite expiry, revocation and
+  capability subsets on every request. Human and guest verification use the
+  same current credential plus authority snapshot pattern for their state.
 - The Platform account UI exposes agent, grant and credential lifecycle controls
   for the selected organization and clears displayed secrets when the selected
   organization changes. Late agent UI results are scoped to the request's
@@ -47,15 +49,19 @@ with simulated Google provider HTTP:
   credential capabilities;
 - concurrent grant narrowing uses a stored-capability compare-and-set, so a
   stale request cannot reintroduce a capability under the same grant ID;
+- deterministic verification interleavings revoke an agent credential while
+  its agent is disabled and revoke a human credential while its organization
+  is suspended, then restore the authority state; both requests remain
+  invalid after the initial credential read observed an otherwise-live key;
 - invalid lifetime configuration blocks issue and rotation while allowing
   metadata listing and revocation;
 - shared-client requests through the real protected-resource fixture prove
   separate audience access, wrong audience, missing capability and foreign
   organization-owner denials; both current grants remain usable after creator
   departure;
-- an injected replacement INSERT failure in the real D1 rotation batch rolls
-  back predecessor revocation and leaves the old bearer usable with no
-  replacement row;
+- a temporary D1 `BEFORE INSERT` trigger aborting the targeted replacement row
+  in the real rotation batch rolls back predecessor revocation and leaves the
+  old bearer usable with no replacement row;
 - an admin can manage an agent after its creator leaves, while member,
   foreign-tenant, machine-bearer and untrusted-origin administration fails.
 
