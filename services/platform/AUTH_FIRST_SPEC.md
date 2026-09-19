@@ -30,8 +30,13 @@ guest lifecycle and independent resource permissions, integrated at `ddf93ad`.
 The integrated tree matches the independently tested checkpoint: ten Worker/D1
 files, twenty-seven tests, format/typecheck and restart persistence pass.
 Native reviews and a bounded Grok adversarial review found no confirmed defect.
-Actual msg adoption, management access and grant-to-local-permission binding
-remain acceptance gates; these results do not establish consumer readiness.
+Msg adoption, management access and exact grant-to-local-permission binding are
+reviewed and verified at `be5b001`; [the msg report](../msg/T09_PLATFORM_AUTH_REPORT.md)
+records the actual Worker/D1-to-Worker/DO evidence. Parent combined checks pass
+59 boundary assertions, the full msg package and Platform's 32 tests plus
+restart. Independent Chromium flows pass. Final review's CLI recovery,
+credential-persistence race and live-socket corrections are verified. Atomic
+ownership claims, quotas and Communicator adoption remain separate gates.
 
 The shared-client transport portion of T12 is integrated at `82e6181` with
 independently verified deadlines, late-result suppression and redirect refusal.

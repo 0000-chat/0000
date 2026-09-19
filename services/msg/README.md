@@ -19,6 +19,16 @@ issued and verified by Platform; msg stores only the guest owner and
 source-separated public or management ACL rows in the room Durable Object.
 If a resource cookie is stale, append `?recover=1` to the checked room or
 management link to explicitly replace it after the link is verified again.
+The CLI exposes this as `msg join <url> --recover`; failed authentication does
+not silently recover. Authenticated live sockets keep credentials in memory and
+use standard WebSockets, with current verification before broadcasts. This
+incurs active duration charges; normal eviction still requires reconnect.
+
+[T09_PLATFORM_AUTH_REPORT.md](T09_PLATFORM_AUTH_REPORT.md) records the reviewed
+integration at `be5b001`. Combined checks pass the full msg package and 59
+assertions across actual Platform Worker/D1 and msg Worker/DO routes. Browser
+flows pass independently. Atomic organization claims and managed anonymous
+quotas remain separate work; this change is not a deployment.
 
 Operator routes require an issued Platform bearer with `msg:operator` and a
 matching `MSG_OPERATOR_ALLOWLIST` entry for the human or agent subject and

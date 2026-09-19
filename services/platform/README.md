@@ -15,13 +15,13 @@ twenty tests and separate guest/resource and human runtime restart probes.
 [T08_GUEST_REPORT.md](T08_GUEST_REPORT.md) records the reviewed guest lifecycle.
 Combined checks at `1d221bb` pass nine Worker/D1 files, twenty-two tests,
 format/typecheck and guest/resource runtime restart. This establishes the shared
-guest boundary for msg integration; msg adoption remains outstanding.
+guest boundary used by the msg integration described below.
 [GUEST_PERMISSION_REPORT.md](GUEST_PERMISSION_REPORT.md) records the reviewed
 permission follow-up integrated at `ddf93ad`. Independent checks pass ten
 Worker/D1 files, twenty-seven tests, format/typecheck and restart persistence.
 Distinct owner and participant permissions can coexist on one resource without
 widening or revoking each other; pre-migration grants retain their default
-permission. Msg must still bind each grant to its local permission source.
+permission. Msg binds each grant to its local permission source.
 The [shared client](../../packages/platform-client/README.md) transport follow-up
 is integrated at `82e6181`: verification and guest operations have a configurable
 deadline covering fetch and body parsing, reject redirects, and preserve
@@ -39,8 +39,14 @@ tests, formatting/typecheck and restart persistence. Independent browser
 approve/deny and trusted CLI rollback checks pass. Final review's login-error
 retry regression is corrected and independently verified. Provider HTTP remains
 simulated; these checks do not establish external-client adoption.
+[Msg's report](../msg/T09_PLATFORM_AUTH_REPORT.md) records its reviewed shared
+auth integration at `be5b001`. Parent combined checks pass the full msg package,
+the actual Platform Worker/D1-to-msg Worker/DO boundary with 59 assertions, and
+Platform's 32 tests plus restart. Chromium guest, management, recovery,
+revocation and outage flows pass independently. Atomic claims and managed
+quotas remain T10/T13; Communicator integration remains T11.
 The full MVP is not implemented or accepted, and these reports do not establish
-production readiness or consumer adoption.
+production readiness.
 
 ## Purpose and deployment
 
@@ -268,8 +274,8 @@ service or a complete shared-auth integration. T06 does not claim a live
 external provider/client or consumer adoption; refresh rotation, installation
 revocation and managed deployment ownership remain later work.
 Database is also a scaffold.
-Communicator and the message service still need to move their authentication
-paths to the shared Platform path while leaving resource ACLs local. No
+The message service now uses shared Platform authentication with local resource
+ACLs; Communicator still needs that migration. No
 apps/0000 implementation was found, so its login and offline-sync integration
 is neither implemented nor required for this MVP. Platform's own account UI is
 in scope.
