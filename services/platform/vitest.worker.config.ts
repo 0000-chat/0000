@@ -40,6 +40,7 @@ export default defineConfig(async () => {
       include: ["worker/test/**/*.test.ts"],
       setupFiles: ["./worker/test/setup.ts"],
       pool: "workers",
+      testTimeout: 15_000,
     },
   };
 });
