@@ -1,4 +1,4 @@
-import type { GuestPrincipal } from "@0000/contracts";
+import { type GuestGrantAssertion, type GuestPrincipal } from "@0000/contracts";
 import {
   hashOpaque,
   opaqueSecret,
@@ -7,9 +7,7 @@ import {
   type ServiceRegistration,
 } from "./platform-state";
 
-export type GuestGrantAssertion =
-  | { kind: "owner"; storedOwnerId: string }
-  | { kind: "participant" };
+export type { GuestGrantAssertion } from "@0000/contracts";
 
 export interface GuestIssuer {
   service: ServiceRegistration;
@@ -57,19 +55,40 @@ function validGuestResourceId(value: unknown): value is string {
   );
 }
 
+export const DEFAULT_GUEST_PERMISSION_ID = "default";
+
+function validGuestPermissionId(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    value.length > 0 &&
+    value.length <= 512 &&
+    !/[\u0000-\u001f\u007f]/.test(value)
+  );
+}
+
 export function parseGuestAssertion(
   value: unknown,
 ): GuestGrantAssertion | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const assertion = value as Record<string, unknown>;
+  const permissionId = Object.hasOwn(assertion, "permissionId")
+    ? assertion.permissionId
+    : DEFAULT_GUEST_PERMISSION_ID;
+  if (!validGuestPermissionId(permissionId)) return null;
   if (assertion.kind === "owner") {
     return typeof assertion.storedOwnerId === "string" &&
       assertion.storedOwnerId.length > 0 &&
       assertion.storedOwnerId.length <= 512
-      ? { kind: "owner", storedOwnerId: assertion.storedOwnerId }
+      ? {
+          kind: "owner",
+          storedOwnerId: assertion.storedOwnerId,
+          permissionId,
+        }
       : null;
   }
-  return assertion.kind === "participant" ? { kind: "participant" } : null;
+  return assertion.kind === "participant"
+    ? { kind: "participant", permissionId }
+    : null;
 }
 
 function issuerAuthorityPredicate(capabilitiesExpression: string): string {
@@ -272,10 +291,11 @@ export async function issueGuestGrant(
     assertion: GuestGrantAssertion;
   },
 ): Promise<GuestGrantMutationResult> {
+  const assertion = parseGuestAssertion(input.assertion);
   if (
     !validGuestResourceId(input.resourceId) ||
     !validCapabilities(input.capabilities) ||
-    !parseGuestAssertion(input.assertion) ||
+    !assertion ||
     input.capabilities.some(
       (capability) =>
         !input.issuer.service.allowedCapabilities.includes(capability),
@@ -290,8 +310,8 @@ export async function issueGuestGrant(
   );
   if (!control) return { status: "invalid_guest_control" };
   if (
-    input.assertion.kind === "owner" &&
-    input.assertion.storedOwnerId !== control.guestId
+    assertion.kind === "owner" &&
+    assertion.storedOwnerId !== control.guestId
   ) {
     return { status: "grant_denied" };
   }
@@ -305,8 +325,8 @@ export async function issueGuestGrant(
     .prepare(
       `INSERT INTO platform_guest_grant
        (id, guest_id, service_id, audience, resource_id, assertion_kind,
-        capabilities, created_at, revoked_at, revoked_reason)
-       SELECT ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL
+        permission_id, capabilities, created_at, revoked_at, revoked_reason)
+       SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL
        WHERE EXISTS (
          SELECT 1 FROM platform_guest_bootstrap AS bootstrap
          JOIN platform_guest AS guest ON guest.id = bootstrap.guest_id
@@ -319,6 +339,7 @@ export async function issueGuestGrant(
          AND NOT EXISTS (
            SELECT 1 FROM platform_guest_grant
            WHERE guest_id = ? AND service_id = ? AND resource_id = ?
+             AND permission_id = ?
              AND revoked_at IS NULL
          )`,
     )
@@ -328,7 +349,8 @@ export async function issueGuestGrant(
       input.issuer.service.serviceId,
       input.issuer.service.audience,
       input.resourceId,
-      input.assertion.kind,
+      assertion.kind,
+      assertion.permissionId,
       capabilities,
       now,
       control.bootstrapHash,
@@ -340,6 +362,7 @@ export async function issueGuestGrant(
       control.guestId,
       input.issuer.service.serviceId,
       input.resourceId,
+      assertion.permissionId,
     );
   const credentialInsert = database
     .prepare(
@@ -395,10 +418,11 @@ export async function renewGuestGrant(
     assertion: GuestGrantAssertion;
   },
 ): Promise<GuestGrantMutationResult> {
+  const assertion = parseGuestAssertion(input.assertion);
   if (
     !validGuestResourceId(input.resourceId) ||
     !validCapabilities(input.capabilities) ||
-    !parseGuestAssertion(input.assertion)
+    !assertion
   ) {
     return { status: "grant_denied" };
   }
@@ -412,7 +436,8 @@ export async function renewGuestGrant(
     .prepare(
       `SELECT guest_grant.guest_id, guest_grant.service_id,
               guest_grant.audience, guest_grant.resource_id,
-              guest_grant.assertion_kind, guest_grant.capabilities,
+              guest_grant.assertion_kind, guest_grant.permission_id,
+              guest_grant.capabilities,
               credential.id AS credential_id
        FROM platform_guest_grant AS guest_grant
        JOIN platform_credential AS credential
@@ -425,6 +450,7 @@ export async function renewGuestGrant(
          AND guest_grant.service_id = ?
          AND guest_grant.audience = ?
          AND guest_grant.resource_id = ?
+         AND guest_grant.permission_id = ?
          AND guest_grant.revoked_at IS NULL`,
     )
     .bind(
@@ -433,6 +459,7 @@ export async function renewGuestGrant(
       input.issuer.service.serviceId,
       input.issuer.service.audience,
       input.resourceId,
+      assertion.permissionId,
     )
     .first<{
       guest_id: string;
@@ -440,14 +467,14 @@ export async function renewGuestGrant(
       audience: string;
       resource_id: string;
       assertion_kind: string;
+      permission_id: string;
       capabilities: string;
       credential_id: string;
     }>();
   if (!current) return { status: "grant_denied" };
   if (
-    current.assertion_kind !== input.assertion.kind ||
-    (input.assertion.kind === "owner" &&
-      input.assertion.storedOwnerId !== control.guestId)
+    current.assertion_kind !== assertion.kind ||
+    (assertion.kind === "owner" && assertion.storedOwnerId !== control.guestId)
   ) {
     return { status: "grant_denied" };
   }
@@ -476,6 +503,7 @@ export async function renewGuestGrant(
         AND current_grant.service_id = ?
         AND current_grant.audience = ?
         AND current_grant.resource_id = ?
+        AND current_grant.permission_id = ?
         AND current_grant.assertion_kind = ?
         AND current_grant.revoked_at IS NULL
         AND ${grantCapabilityPredicate("?", "current_grant.capabilities")}
@@ -514,7 +542,8 @@ export async function renewGuestGrant(
       input.issuer.service.serviceId,
       input.issuer.service.audience,
       input.resourceId,
-      input.assertion.kind,
+      assertion.permissionId,
+      assertion.kind,
       requestedCapabilities,
       input.issuer.service.serviceId,
       input.issuer.service.audience,
@@ -554,7 +583,8 @@ export async function renewGuestGrant(
       input.issuer.service.serviceId,
       input.issuer.service.audience,
       input.resourceId,
-      input.assertion.kind,
+      assertion.permissionId,
+      assertion.kind,
       requestedCapabilities,
     );
   const results = await database.batch([update, insert]);

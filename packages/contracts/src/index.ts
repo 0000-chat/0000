@@ -38,8 +38,8 @@ export interface GuestPrincipal extends PrincipalBase {
 }
 
 export type GuestGrantAssertion =
-  | { kind: "owner"; storedOwnerId: string }
-  | { kind: "participant" };
+  | { kind: "owner"; storedOwnerId: string; permissionId?: string }
+  | { kind: "participant"; permissionId?: string };
 
 export type GuestOperationFailure =
   | { status: "invalid_guest_control" }
