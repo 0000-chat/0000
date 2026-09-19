@@ -2,7 +2,9 @@ import { SELF, env } from "cloudflare:test";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   completeInitialOAuthAccess,
+  prepareTrustedOAuthClientRegistration,
   provisionTrustedOAuthClient,
+  trustedOAuthClientStatements,
 } from "../../src/oauth-installation";
 import { registerService } from "../../src/service-registration";
 import { opaqueSecret } from "../../src/platform-state";
@@ -175,7 +177,12 @@ async function submitBrowserConsent(
   cookies: string,
   flowId: string,
   accept: boolean,
-): Promise<{ response: Response; location: URL; pageText: string }> {
+): Promise<{
+  response: Response;
+  location: URL;
+  pageText: string;
+  pageHeaders: Headers;
+}> {
   const continued = await continueFlow(cookies, flowId);
   expect(continued.status).toBe(302);
   const location = new URL(
@@ -202,7 +209,7 @@ async function submitBrowserConsent(
       redirect: "manual",
     },
   );
-  return { response, location, pageText };
+  return { response, location, pageText, pageHeaders: page.headers };
 }
 
 async function completeFlow(input: {
@@ -650,9 +657,35 @@ describe("T06 production OAuth installation", () => {
       "SELECT membership_id FROM platform_oauth_installation WHERE active = 1 LIMIT 1",
     ).first<{ membership_id: string }>();
     expect(installation).toBeTruthy();
-    await testEnv.IDENTITY_DB.prepare("DELETE FROM member WHERE id = ?")
-      .bind(installation!.membership_id)
+    const operatorMembershipId = crypto.randomUUID();
+    await testEnv.IDENTITY_DB.prepare(
+      "INSERT INTO member (id, organizationId, userId, role, createdAt) VALUES (?, ?, ?, 'owner', ?)",
+    )
+      .bind(operatorMembershipId, organizationId, operator.userId, Date.now())
       .run();
+    const leaveSession = await signIn({
+      id: 816345,
+      login: "t06-consenter",
+      email: "consenter-t06@example.test",
+    });
+    const leave = await SELF.fetch(
+      "http://localhost/api/account/members/leave",
+      {
+        method: "POST",
+        headers: {
+          cookie: leaveSession.cookies,
+          origin: testEnv.PLATFORM_BASE_URL,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ organizationId }),
+      },
+    );
+    expect(leave.status, await leave.clone().text()).toBe(200);
+    expect(
+      await testEnv.IDENTITY_DB.prepare("SELECT id FROM member WHERE id = ?")
+        .bind(installation!.membership_id)
+        .first(),
+    ).toBeNull();
     expect(
       (await sharedClient.authenticate(tokenBody.access_token)).status,
     ).toBe("invalid_credential");
@@ -856,24 +889,36 @@ describe("T06 production OAuth installation", () => {
         })
       ).status,
     ).toBe(403);
+    const concurrentSelections = await Promise.all(
+      [organizationId, secondOrganizationId].map(
+        async (selectedOrganizationId) => ({
+          organizationId: selectedOrganizationId,
+          response: await selectFlow({
+            cookies: user.cookies,
+            flowId: pending.flowId,
+            organizationId: selectedOrganizationId,
+          }),
+        }),
+      ),
+    );
     expect(
-      (
-        await Promise.all([
-          selectFlow({
-            cookies: user.cookies,
-            flowId: pending.flowId,
-            organizationId,
-          }),
-          selectFlow({
-            cookies: user.cookies,
-            flowId: pending.flowId,
-            organizationId: secondOrganizationId,
-          }),
-        ])
-      )
-        .map((response) => response.status)
-        .sort(),
+      concurrentSelections.map(({ response }) => response.status).sort(),
     ).toEqual([303, 409]);
+    const winner = concurrentSelections.find(
+      ({ response }) => response.status === 303,
+    );
+    expect(winner).toBeTruthy();
+    const winnerLocation = new URL(
+      winner!.response.headers.get("location")!,
+      "http://localhost",
+    );
+    expect(winnerLocation.searchParams.get("flow_id")).toBe(pending.flowId);
+    const persistedWinner = await testEnv.IDENTITY_DB.prepare(
+      "SELECT organization_id FROM platform_oauth_flow WHERE id = ?",
+    )
+      .bind(pending.flowId)
+      .first<{ organization_id: string }>();
+    expect(persistedWinner?.organization_id).toBe(winner!.organizationId);
     expect(
       (
         await selectFlow({
@@ -883,6 +928,62 @@ describe("T06 production OAuth installation", () => {
         })
       ).status,
     ).toBe(409);
+
+    const preAuthority = await beginSelection({
+      cookies: user.cookies,
+      userId: user.userId,
+      client,
+      audience: service.audience,
+    });
+    const preAuthorityTrigger = `t06_preselect_${crypto.randomUUID().replaceAll("-", "")}`;
+    await testEnv.IDENTITY_DB.prepare(
+      `CREATE TRIGGER "${preAuthorityTrigger}"
+       BEFORE INSERT ON platform_oauth_installation
+       WHEN NEW.organization_id = '${organizationId}'
+       BEGIN
+         UPDATE organization
+         SET suspendedAt = CAST(strftime('%s', 'now') AS INTEGER) * 1000
+         WHERE id = NEW.organization_id;
+       END`,
+    ).run();
+    try {
+      const staleAuthoritySelection = await selectFlow({
+        cookies: user.cookies,
+        flowId: preAuthority.flowId,
+        organizationId,
+      });
+      expect(staleAuthoritySelection.status).toBe(409);
+      expect(
+        await testEnv.IDENTITY_DB.prepare(
+          "SELECT status, organization_id, installation_id FROM platform_oauth_flow WHERE id = ?",
+        )
+          .bind(preAuthority.flowId)
+          .first(),
+      ).toMatchObject({
+        status: "pending",
+        organization_id: null,
+        installation_id: null,
+      });
+      expect(
+        await testEnv.IDENTITY_DB.prepare(
+          `SELECT COUNT(*) AS count
+           FROM platform_oauth_installation AS installation
+           LEFT JOIN platform_oauth_flow AS flow
+             ON flow.installation_id = installation.id
+           WHERE installation.user_id = ? AND installation.organization_id = ?
+             AND flow.id IS NULL`,
+        )
+          .bind(user.userId, organizationId)
+          .first<{ count: number }>(),
+      ).toMatchObject({ count: 0 });
+    } finally {
+      await testEnv.IDENTITY_DB.batch([
+        testEnv.IDENTITY_DB.prepare(`DROP TRIGGER "${preAuthorityTrigger}"`),
+        testEnv.IDENTITY_DB.prepare(
+          "UPDATE organization SET suspendedAt = NULL WHERE id = ?",
+        ).bind(organizationId),
+      ]);
+    }
 
     const expired = await beginSelection({
       cookies: user.cookies,
@@ -959,6 +1060,117 @@ describe("T06 production OAuth installation", () => {
         .first<{ status: string }>(),
     ).toMatchObject({ status: "rejected" });
 
+    const preActivation = await beginSelection({
+      cookies: user.cookies,
+      userId: user.userId,
+      client,
+      audience: service.audience,
+    });
+    expect(
+      (
+        await selectFlow({
+          cookies: user.cookies,
+          flowId: preActivation.flowId,
+          organizationId,
+        })
+      ).status,
+    ).toBe(303);
+    const preActivationConsent = await continueFlow(
+      user.cookies,
+      preActivation.flowId,
+    );
+    const preActivationConsentUrl = new URL(
+      preActivationConsent.headers.get("location")!,
+      "http://localhost",
+    );
+    const preActivationResponse = await SELF.fetch(
+      "http://localhost/api/auth/oauth2/consent",
+      {
+        method: "POST",
+        headers: {
+          cookie: user.cookies,
+          origin: testEnv.PLATFORM_BASE_URL,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          accept: true,
+          oauth_query: preActivationConsentUrl.search.slice(1),
+        }),
+      },
+    );
+    expect(preActivationResponse.status).toBe(200);
+    const preActivationBody = (await preActivationResponse.json()) as {
+      redirect_uri?: string;
+      url?: string;
+    };
+    const preActivationCode = new URL(
+      preActivationBody.redirect_uri ?? preActivationBody.url ?? "",
+    ).searchParams.get("code");
+    expect(preActivationCode).toBeTruthy();
+    const preBatchAuthority = await testEnv.IDENTITY_DB.prepare(
+      `SELECT service.service_id, service.disabled, client.active
+       FROM platform_service AS service
+       JOIN platform_oauth_client AS client ON client.service_id = service.service_id
+       WHERE service.service_id = ? AND client.client_id = ?`,
+    )
+      .bind(service.serviceId, client.clientId)
+      .first<{ service_id: string; disabled: number; active: number }>();
+    expect(preBatchAuthority).toMatchObject({
+      service_id: service.serviceId,
+      disabled: 0,
+      active: 1,
+    });
+    await testEnv.IDENTITY_DB.prepare(
+      "UPDATE platform_service SET disabled = 1 WHERE service_id = ?",
+    )
+      .bind(service.serviceId)
+      .run();
+    try {
+      const staleActivation = await SELF.fetch(
+        "http://localhost/api/auth/oauth2/token",
+        {
+          method: "POST",
+          headers: { "content-type": "application/x-www-form-urlencoded" },
+          body: new URLSearchParams({
+            grant_type: "authorization_code",
+            client_id: client.clientId,
+            redirect_uri: client.redirectUri,
+            code: preActivationCode!,
+            code_verifier: preActivation.verifier,
+            resource: service.audience,
+          }),
+        },
+      );
+      expect(staleActivation.status).toBe(400);
+      const staleBinding = await testEnv.IDENTITY_DB.prepare(
+        `SELECT installation.active, access.revoked,
+                COUNT(credential.id) AS credential_count
+         FROM platform_oauth_installation AS installation
+         JOIN platform_oauth_flow AS flow ON flow.installation_id = installation.id
+         LEFT JOIN oauthAccessToken AS access ON access.referenceId = installation.id
+         LEFT JOIN platform_credential AS credential
+           ON credential.oauth_installation_id = installation.id
+         WHERE flow.id = ?`,
+      )
+        .bind(preActivation.flowId)
+        .first<{
+          active: number;
+          revoked: number | null;
+          credential_count: number;
+        }>();
+      expect(staleBinding).toMatchObject({
+        active: 0,
+        revoked: 1,
+        credential_count: 0,
+      });
+    } finally {
+      await testEnv.IDENTITY_DB.prepare(
+        "UPDATE platform_service SET disabled = 0 WHERE service_id = ?",
+      )
+        .bind(service.serviceId)
+        .run();
+    }
+
     const browserDenied = await beginSelection({
       cookies: user.cookies,
       userId: user.userId,
@@ -980,6 +1192,12 @@ describe("T06 production OAuth installation", () => {
       false,
     );
     expect(browserDenial.pageText).toContain("resource:read");
+    expect(browserDenial.pageHeaders.get("referrer-policy")).toBe(
+      "strict-origin",
+    );
+    expect(browserDenial.pageHeaders.get("content-security-policy")).toContain(
+      `form-action 'self' ${new URL(client.redirectUri).origin}`,
+    );
     expect(browserDenial.response.status).toBe(303);
     expect(
       new URL(browserDenial.response.headers.get("location")!).searchParams.get(
@@ -1108,6 +1326,36 @@ describe("T06 production OAuth installation", () => {
         "UPDATE platform_service SET disabled = 1 WHERE service_id = ?",
       ).bind(service.serviceId),
     ]);
+    const disabledJsonIntrospection = await SELF.fetch(
+      "http://localhost/api/auth/oauth2/introspect",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          token: result.accessToken,
+          client_id: client.clientId,
+          client_secret: client.clientSecret,
+        }),
+      },
+    );
+    expect(disabledJsonIntrospection.status).toBe(415);
+    const disabledJsonToken = await SELF.fetch(
+      "http://localhost/api/auth/oauth2/token",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          grant_type: "refresh_token",
+          client_id: client.clientId,
+          client_secret: client.clientSecret,
+          refresh_token: "not-issued",
+        }),
+      },
+    );
+    expect(disabledJsonToken.status).toBe(400);
+    expect(await disabledJsonToken.json()).toMatchObject({
+      error: "unsupported_grant_type",
+    });
     const disabledIntrospection = await SELF.fetch(
       "http://localhost/api/auth/oauth2/introspect",
       {
@@ -1363,5 +1611,42 @@ describe("T06 production OAuth installation", () => {
     expect(readPageText).not.toContain("resource:write");
     expect(readOnlyClient.clientId).not.toBe(clientWithWrite.clientId);
     expect(organizationId).toBeTruthy();
+
+    const staleRegistration = await prepareTrustedOAuthClientRegistration(
+      {
+        serviceId: service.serviceId,
+        redirectUri: "https://t06-resource-stale.example.test/callback",
+        capabilities: ["resource:write"],
+        authMethod: "none",
+        ownerUserId: operator.userId,
+        clientId: "t06-stale-catalog-client",
+      },
+      {
+        serviceId: service.serviceId,
+        audience: service.audience,
+        catalog: ["resource:read", "resource:write"],
+      },
+      testEnv.BETTER_AUTH_SECRET,
+    );
+    await testEnv.IDENTITY_DB.prepare(
+      "UPDATE platform_service SET allowed_capabilities = ? WHERE service_id = ?",
+    )
+      .bind(JSON.stringify(["resource:read"]), service.serviceId)
+      .run();
+    const staleWrites = await testEnv.IDENTITY_DB.batch(
+      trustedOAuthClientStatements(staleRegistration).map((statement) =>
+        testEnv.IDENTITY_DB.prepare(statement.sql).bind(...statement.values),
+      ),
+    );
+    expect(staleWrites.map((result) => result.meta.changes)).toEqual([
+      0, 0, 0, 0,
+    ]);
+    expect(
+      await testEnv.IDENTITY_DB.prepare(
+        "SELECT COUNT(*) AS count FROM platform_oauth_client WHERE client_id = ?",
+      )
+        .bind(staleRegistration.clientId)
+        .first<{ count: number }>(),
+    ).toMatchObject({ count: 0 });
   });
 });

@@ -56,7 +56,10 @@ OAuth installation boundary; it does not complete T07 or the full Platform MVP.
   while membership, organization, service, client, consent, catalog or expiry
   changes deny the next check. Browser consent forms are normalized to the
   provider's boolean JSON input and their validated provider redirect is
-  returned as a 303 response.
+  returned as a 303 response. Account HTML uses `strict-origin` so Chromium's
+  native same-origin forms retain a non-opaque Origin; consent pages further
+  scope `form-action` to the exact registered callback origin so the browser
+  can follow the validated redirect without opening arbitrary form targets.
 
 ## Focused Worker/D1 evidence
 
@@ -72,18 +75,35 @@ OAuth installation boundary; it does not complete T07 or the full Platform MVP.
   the provider returns 400 and the normalized credential count does not grow;
 - forged redirect/resource/client/scope requests, canonical-path aliases,
   cross-session/user/origin flow selection, expired flows, repeated selection,
-  and concurrent two-tab selection are denied. JSON denial, browser-form
-  denial, browser-form approval with a real 303 redirect, unbound successful
-  responses and malformed token responses are covered;
+  and concurrent two-tab selection are denied. The concurrent test records
+  which tab received 303 and asserts that the same organization's ID is the
+  one persisted in the flow. A pre-selection SQLite trigger suspends the
+  organization after the initial authority read; the guarded batch returns
+  409 and leaves no selected flow or orphan installation. JSON denial,
+  browser-form denial, browser-form approval with a real 303 redirect,
+  unbound successful responses and malformed token responses are covered;
 - a `client_secret_post` client completes the same initial flow, proves the
   stored Better Auth secret is encrypted, and passes provider-backed
   introspection before inactive-client/service fail-closed checks;
-- a real SQLite trigger suspends the organization between the activation
-  predicates and the active update. The exchange fails closed and leaves the
-  provider row, installation, credential and flow invalidated;
+- the same confidential route returns `active: false` for a form introspection
+  after client/service disablement; the pinned provider rejects a JSON
+  introspection body with 415, so it cannot reach the default provider
+  fallback. A JSON token request is still classified as the disabled Platform
+  client and returns the code-only `unsupported_grant_type` response rather
+  than reaching the default provider;
+- a pre-activation authority read followed by service disablement leaves no
+  credential: the provider row is revoked and the pending installation stays
+  inactive. A second real SQLite trigger suspends the organization between
+  the activation predicates and the active update; that exchange also fails
+  closed and leaves the provider row, installation, credential and flow
+  invalidated;
 - two clients for one service prove that the service `oauthResource` catalog
   remains the union catalog while each client's requested scope page is its
-  own ceiling.
+  own ceiling. A prepared stale registration run after service narrowing
+  produces four zero-change guarded statements and no Platform client row.
+  The live member removal check uses `/api/account/members/leave` after
+  installation and then rejoins with a new membership ID; the old credential
+  remains invalid.
 
 The first test also fetches Worker-owned authorization metadata and checks the
 code-only grant, `none`/`client_secret_post` methods and S256 discovery. The
@@ -101,12 +121,14 @@ fixture and its refresh-token probe is not part of this code-only boundary.
   A deliberately invalid owner foreign key failed through the `--file` path,
   and a follow-up query found zero rows for the attempted client name, proving
   no partial registration was left behind;
-- a bounded Chromium/Miniflare smoke rendered the real selection and consent
-  pages, but the supplied runtime's native form navigation emitted
-  `Origin: null`; the Worker correctly rejected that mutation as
-  `untrusted_origin`. The explicit-origin Worker/D1 form test passes, but this
-  branch does not claim a production-browser navigation proof until that
-  runtime harness behavior is resolved;
+- a real Chromium/Miniflare navigation rendered the selection and consent
+  pages, sent native form POSTs with `Origin: http://localhost:18792`, and
+  completed both approve and deny cases against a separate local callback
+  server. Approve followed a 303 with a code and state; deny followed a 303
+  with `error=access_denied` and state. The earlier `Origin: null` result was
+  caused by the account page's `Referrer-Policy: no-referrer`; the matrix
+  reproduced that behavior and the `strict-origin` policy removed it without
+  adding a null-origin allowlist;
 - package `bun run check` passed: format check, typecheck, 10 Worker/D1 files
   and 27 tests, plus the Miniflare D1 runtime restart persistence probe.
 

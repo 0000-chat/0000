@@ -236,11 +236,14 @@ export async function provisionTrustedOAuthClient(
     { serviceId: service.service_id, audience: service.audience, catalog },
     secretKey,
   );
-  await database.batch(
+  const results = await database.batch(
     trustedOAuthClientStatements(registration).map((statement) =>
       database.prepare(statement.sql).bind(...statement.values),
     ),
   );
+  if (results.some((result) => result.meta.changes !== 1)) {
+    throw new Error("service_changed_during_provisioning");
+  }
   return {
     clientId: registration.clientId,
     clientSecret: registration.clientSecret,
@@ -358,16 +361,46 @@ export function trustedOAuthClientStatements(
 ): OAuthClientProvisionStatement[] {
   const capabilities = JSON.stringify(registration.capabilities);
   const catalog = JSON.stringify(registration.catalog);
+  // Every write rechecks the exact service snapshot used to prepare this
+  // registration. A service disable or capability change between the read
+  // and this batch therefore produces zero writes instead of publishing a
+  // stale resource/client pair.
+  const serviceGuard = `EXISTS (
+    SELECT 1 FROM platform_service
+    WHERE service_id = ? AND audience = ? AND disabled = 0
+      AND NOT EXISTS (
+        SELECT 1 FROM json_each(?) AS expected
+        WHERE NOT EXISTS (
+          SELECT 1 FROM json_each(platform_service.allowed_capabilities) AS current
+          WHERE current.value = expected.value
+        )
+      )
+      AND NOT EXISTS (
+        SELECT 1 FROM json_each(platform_service.allowed_capabilities) AS current
+        WHERE NOT EXISTS (
+          SELECT 1 FROM json_each(?) AS expected
+          WHERE expected.value = current.value
+        )
+      )
+  )`;
+  const serviceGuardValues = [
+    registration.serviceId,
+    registration.audience,
+    catalog,
+    catalog,
+  ];
   return [
     {
       sql: `INSERT INTO oauthResource
        (id, identifier, name, accessTokenTtl, refreshTokenTtl,
         allowedScopes, disabled, createdAt, updatedAt)
-       VALUES (?, ?, ?, ?, NULL, ?, 0, ?, ?)
+       SELECT ?, ?, ?, ?, NULL, ?, 0, ?, ?
+       WHERE ${serviceGuard}
        ON CONFLICT(identifier) DO UPDATE SET
          allowedScopes = excluded.allowedScopes,
          disabled = 0,
-         updatedAt = excluded.updatedAt`,
+         updatedAt = excluded.updatedAt
+       WHERE ${serviceGuard}`,
       values: [
         crypto.randomUUID(),
         registration.resourceId,
@@ -376,6 +409,8 @@ export function trustedOAuthClientStatements(
         catalog,
         registration.now,
         registration.now,
+        ...serviceGuardValues,
+        ...serviceGuardValues,
       ],
     },
     {
@@ -384,7 +419,8 @@ export function trustedOAuthClientStatements(
         clientCredentialsScopes, userId, createdAt, updatedAt, name,
         redirectUris, grantTypes, responseTypes, tokenEndpointAuthMethod,
         applicationType, requirePKCE, dpopBoundAccessTokens)
-       VALUES (?, ?, ?, 0, 0, ?, '[]', ?, ?, ?, ?, ?, ?, ?, ?, 'web', 1, 0)`,
+       SELECT ?, ?, ?, 0, 0, ?, '[]', ?, ?, ?, ?, ?, ?, ?, ?, 'web', 1, 0
+       WHERE ${serviceGuard}`,
       values: [
         crypto.randomUUID(),
         registration.clientId,
@@ -398,23 +434,27 @@ export function trustedOAuthClientStatements(
         JSON.stringify(["authorization_code"]),
         JSON.stringify(["code"]),
         registration.authMethod,
+        ...serviceGuardValues,
       ],
     },
     {
       sql: `INSERT INTO oauthClientResource (id, clientId, resourceId, createdAt)
-       VALUES (?, ?, ?, ?)`,
+       SELECT ?, ?, ?, ?
+       WHERE ${serviceGuard}`,
       values: [
         crypto.randomUUID(),
         registration.clientId,
         registration.resourceId,
         registration.now,
+        ...serviceGuardValues,
       ],
     },
     {
       sql: `INSERT INTO platform_oauth_client
        (client_id, service_id, owner_user_id, redirect_uri, capabilities,
         active, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, 1, ?, ?)`,
+       SELECT ?, ?, ?, ?, ?, 1, ?, ?
+       WHERE ${serviceGuard}`,
       values: [
         registration.clientId,
         registration.serviceId,
@@ -423,6 +463,7 @@ export function trustedOAuthClientStatements(
         capabilities,
         registration.now,
         registration.now,
+        ...serviceGuardValues,
       ],
     },
   ];
@@ -714,6 +755,19 @@ export async function selectOAuthFlow(
        ) AND EXISTS (
          SELECT 1 FROM platform_service
          WHERE service_id = ? AND audience = ? AND disabled = 0
+           AND NOT EXISTS (
+             SELECT 1 FROM json_each(?) AS requested
+             WHERE NOT EXISTS (
+               SELECT 1 FROM json_each(platform_service.allowed_capabilities) AS catalog
+               WHERE catalog.value = requested.value
+             )
+           )
+       ) AND EXISTS (
+         SELECT 1 FROM oauthClient
+         WHERE clientId = ? AND disabled = 0
+       ) AND EXISTS (
+         SELECT 1 FROM oauthResource
+         WHERE identifier = ? AND disabled = 0
        )`,
     )
     .bind(
@@ -737,6 +791,9 @@ export async function selectOAuthFlow(
       client.serviceId,
       client.serviceId,
       client.audience,
+      JSON.stringify(binding.scopes),
+      client.clientId,
+      client.audience,
     );
   const updated = await database
     .prepare(
@@ -745,9 +802,36 @@ export async function selectOAuthFlow(
            status = 'selected'
        WHERE id = ? AND status = 'pending' AND user_id = ? AND session_id = ?
          AND expires_at > ?
-         AND EXISTS (
+       AND EXISTS (
            SELECT 1 FROM platform_oauth_installation
            WHERE id = ? AND active = 0
+         ) AND EXISTS (
+           SELECT 1 FROM "user"
+           WHERE id = ? AND disabledAt IS NULL
+         ) AND EXISTS (
+           SELECT 1 FROM member
+           JOIN organization ON organization.id = member.organizationId
+           WHERE member.id = ? AND member.organizationId = ?
+             AND member.userId = ? AND organization.suspendedAt IS NULL
+         ) AND EXISTS (
+           SELECT 1 FROM platform_oauth_client
+           WHERE client_id = ? AND service_id = ? AND active = 1
+         ) AND EXISTS (
+           SELECT 1 FROM oauthClient
+           WHERE clientId = ? AND disabled = 0
+         ) AND EXISTS (
+           SELECT 1 FROM oauthResource
+           WHERE identifier = ? AND disabled = 0
+         ) AND EXISTS (
+           SELECT 1 FROM platform_service
+           WHERE service_id = ? AND audience = ? AND disabled = 0
+             AND NOT EXISTS (
+               SELECT 1 FROM json_each(?) AS requested
+               WHERE NOT EXISTS (
+                 SELECT 1 FROM json_each(platform_service.allowed_capabilities) AS catalog
+                 WHERE catalog.value = requested.value
+               )
+             )
          )`,
     )
     .bind(
@@ -759,6 +843,17 @@ export async function selectOAuthFlow(
       input.sessionId,
       now,
       installationId,
+      input.userId,
+      currentMembership.id,
+      input.organizationId,
+      input.userId,
+      client.clientId,
+      client.serviceId,
+      client.clientId,
+      client.audience,
+      client.serviceId,
+      client.audience,
+      JSON.stringify(binding.scopes),
     );
   const results = await database.batch([installation, updated]);
   if (results[0]?.meta.changes !== 1 || results[1]?.meta.changes !== 1) {

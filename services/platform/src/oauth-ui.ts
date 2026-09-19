@@ -50,7 +50,9 @@ export function oauthConsentPage(
     .map((capability) => `<li>${escapeHtml(capability)}</li>`)
     .join("");
   const flowId = flow?.id ?? "";
-  return htmlResponse(`<!doctype html>
+  const callbackOrigin = new URL(client.redirectUri).origin;
+  return htmlResponse(
+    `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Approve access · 0000 Platform</title><link rel="stylesheet" href="/account.css"></head>
 <body><main class="shell"><header class="brand"><p class="eyebrow">0000 Platform</p>
@@ -63,7 +65,14 @@ export function oauthConsentPage(
 <form method="post" action="/api/auth/oauth2/consent"><input type="hidden" name="accept" value="false">
 <input type="hidden" name="oauth_query" value="${escapeHtml(query)}">
 <button class="quiet-button" type="submit">Deny</button></form>
-<p class="hint">The grant is tied to this organization, membership and registered client.</p></section></main></body></html>`);
+<p class="hint">The grant is tied to this organization, membership and registered client.</p></section></main></body></html>`,
+    200,
+    {
+      // The native form posts to Platform, then follows the validated 303 to
+      // the registered client. Keep every other form destination same-origin.
+      "content-security-policy": `default-src 'self'; img-src 'self' https:; style-src 'self'; script-src 'self'; base-uri 'none'; form-action 'self' ${callbackOrigin}; frame-ancestors 'none'`,
+    },
+  );
 }
 
 export function oauthErrorPage(message: string, status = 400): Response {

@@ -117,7 +117,7 @@ const securityHeaders = {
   "cache-control": "no-store",
   "content-security-policy":
     "default-src 'self'; img-src 'self' https:; style-src 'self'; script-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
-  "referrer-policy": "no-referrer",
+  "referrer-policy": "strict-origin",
   "x-content-type-options": "nosniff",
 };
 
@@ -166,11 +166,16 @@ function document(title: string, body: string): string {
 </html>`;
 }
 
-export function htmlResponse(body: string, status = 200): Response {
+export function htmlResponse(
+  body: string,
+  status = 200,
+  overrides: Record<string, string> = {},
+): Response {
   return new Response(body, {
     status,
     headers: {
       ...securityHeaders,
+      ...overrides,
       "content-type": "text/html; charset=utf-8",
     },
   });
