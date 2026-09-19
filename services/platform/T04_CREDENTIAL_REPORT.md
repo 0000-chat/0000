@@ -1,8 +1,9 @@
 # T04 human credentials and registered service boundary
 
 **Date:** 2026-09-19  
-**Status:** implementation complete on `codex/platform-t04`; parent review and
-aggregate integration are pending. This report records bounded local evidence,
+**Status:** reviewed, integrated and independently verified on `codex/platform-mvp`
+at `dc30cd4`. Worker commits `24507b2`, `109e44f` and `9b3842a` map to aggregate
+`454894b`, `5426c2c` and `dc30cd4`. This report records bounded local evidence,
 not deployment or full MVP acceptance.
 
 T04 adds personal opaque API credentials to the existing Platform account
@@ -183,6 +184,25 @@ The follow-up focused command after the review fixes passed 1 file and 3 tests:
 ```text
 bun x vitest run --config vitest.worker.config.ts worker/test/credentials.test.ts
 ```
+
+## Independent review and aggregate verification
+
+Independent Standards and Spec reviews used Astra medium. Invalid lifetime
+configuration now preserves metadata and revocation; CLI and D1 helpers share
+validated SQL builders; pending credential completions check organization and
+generation before changing the UI. Both reviewers confirmed the fixes at
+`9b3842a`. Lifetime-validation duplication remains an optional P3 suggestion.
+
+One bounded authenticated Grok4.6 high review of credential SQL concurrency,
+live authority/catalog checks and provisioning found no confirmed defect. It
+used an isolated source snapshot with tools, web and subagents disabled.
+
+The parent independently passed the full Platform check at aggregate `dc30cd4`
+(five Worker/D1 files, seven tests and persistent restart), the root manifest
+check (11 manifests), and combined Chromium credential, organization,
+disabled-member, navigation and controlled delayed-completion flows. Browser
+sessions are seeded and provider navigation intercepted. These checks do not
+claim full human-signup process restart or OAuth installation concurrency.
 
 ## Limits
 

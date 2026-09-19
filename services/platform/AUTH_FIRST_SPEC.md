@@ -1,8 +1,7 @@
 # Platform authentication MVP
 
-Date: 2026-09-19. Status: agreed MVP design; T01/T02/T03 reviewed and verified
-on the aggregate; T04 implementation has bounded local Worker/D1 evidence on
-its isolated branch; full MVP not accepted.
+Date: 2026-09-19. Status: agreed MVP design; T01 through T04 reviewed and verified
+on the aggregate; full MVP not accepted.
 
 [README.md](README.md) defines Platform's ownership. This specification records
 the agreed product and security decisions for the implementation.
@@ -13,7 +12,8 @@ records local evidence for the initial account slice. [T03_ORGANIZATION_REPORT.m
 records the organization and lifecycle slice, reviewed and verified on the
 aggregate at `c51d285`. [T04_CREDENTIAL_REPORT.md](T04_CREDENTIAL_REPORT.md)
 records the bounded human credential, service registration and two-audience
-fixture evidence. The evidence does not complete the design's acceptance gates
+fixture evidence, reviewed and verified at aggregate `dc30cd4`. The evidence
+does not complete the design's acceptance gates
 or establish production authentication.
 
 ## MVP outcome and deployment
@@ -317,8 +317,10 @@ T02 login, account and signup-policy behavior is reviewed and verified on the
 aggregate at `7152bcd`, with provider HTTP simulated in Worker/D1 tests. T03
 organization, invitation and operator behavior and review fixes are integrated
 and independently verified at `c51d285` with real Worker/D1 route tests and
-Chromium organization flows. T04's local credential and registration evidence
-does not establish deployed provisioning, live provider behavior or consumer
+Chromium organization flows. T04 is reviewed, integrated and independently
+verified at `dc30cd4`, including credential and organization browser flows.
+Its local credential and registration evidence does not establish deployed
+provisioning, live provider behavior or consumer
 adoption. The full Platform authentication MVP remains unimplemented until
 every acceptance gate passes. Each report limits its claims to the named flows
 and fixtures.

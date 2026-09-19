@@ -20,7 +20,7 @@
 | T14 | [#68](https://github.com/0000-chat/0000/issues/68) | Prove reconnect authorization without building offline sync | ready-for-agent |
 | T15 | [#69](https://github.com/0000-chat/0000/issues/69) | Make self-hosted and managed deployment setup reproducible | ready-for-agent |
 
-T03 worker commits `2804448` and `05b899f` are reviewed and integrated as `077ca0e` and `c51d285`; parent Platform and Chromium checks pass on the aggregate. T04 was dispatched from verified `b2e5802` and delivered with bounded Worker/D1, browser and local provisioning evidence in [T04_CREDENTIAL_REPORT.md](../T04_CREDENTIAL_REPORT.md). Native review fixes are confirmed; aggregate verification and the bounded external SQL review remain acceptance gates. The ready-for-agent label does not assert completed dependencies or production adoption. Remaining needs-info labels require their specific contract decisions and integrated blockers; OAuth concurrency is not resolved by T01's sequential probe.
+T03 is reviewed and verified at `c51d285`. T04 worker commits `24507b2`, `109e44f` and `9b3842a` are integrated as `454894b`, `5426c2c` and `dc30cd4`; parent Platform, root manifest and combined Chromium checks pass. Native reviewers confirmed fixes and the bounded external SQL review found no confirmed defect. [T04_CREDENTIAL_REPORT.md](../T04_CREDENTIAL_REPORT.md) records the evidence and limits. T05, T06, T08 and T14 are eligible for preparation against this verified boundary; each still requires its parent-owned brief and any remaining contract decisions before dispatch. The ready-for-agent label does not assert completed dependencies or production adoption. OAuth concurrency remains unresolved by T01's sequential probe.
 
 ## Existing issue disposition
 
@@ -78,7 +78,7 @@ T03 worker commits `2804448` and `05b899f` are reviewed and integrated as `077ca
 
 ### T04. Register a consumer and use a scoped human API credential
 
-**Readiness:** T01/T02/T03 dependencies are integrated and verified. T04 delivery and native review fixes are being integrated; aggregate checks and the bounded external review must finish before accepting this slice or dispatching dependents.
+**Readiness:** Reviewed, integrated and independently verified at aggregate `dc30cd4`. T04 supplies the scoped credential and registered verifier boundary for dependent preparation; this does not claim production consumer adoption.
 
 **Blocked by (contract):** T01 principal, authority, audience, error and service-verifier contract; T02 supplies the human. This ticket defines the bearer source: a human issues a scoped opaque API credential in the Platform account UI.
 

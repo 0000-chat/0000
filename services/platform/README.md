@@ -6,10 +6,9 @@ agreed authentication MVP and its acceptance gates. [T01_RUNTIME_REPORT.md](T01_
 [T02_ACCOUNT_REPORT.md](T02_ACCOUNT_REPORT.md),
 [T03_ORGANIZATION_REPORT.md](T03_ORGANIZATION_REPORT.md), and
 [T04_CREDENTIAL_REPORT.md](T04_CREDENTIAL_REPORT.md) record bounded
-Worker/D1 evidence. T01, T02 and T03 are reviewed and verified on the aggregate
-branch. T03 aggregate checks passed at `c51d285`; T04 implementation evidence
-is recorded on its isolated branch pending parent review and integration. The
-full MVP is not implemented or accepted, and these reports do not establish
+Worker/D1 evidence. T01 through T04 are reviewed and verified on the aggregate
+branch. T03 aggregate checks passed at `c51d285`; T04 checks passed at `dc30cd4`.
+The full MVP is not implemented or accepted, and these reports do not establish
 production readiness or consumer adoption.
 
 ## Purpose and deployment
@@ -217,7 +216,8 @@ membership administration, invitation acceptance and explicitly configured
 operator lifecycle controls; its implementation and review fixes are integrated
 and verified at `c51d285`. T04 adds bounded personal credential lifecycle UI,
 validated local service registration tooling and a two-audience Worker/D1
-fixture; its exact evidence and limits are in `T04_CREDENTIAL_REPORT.md`.
+fixture, reviewed and independently verified at `dc30cd4`; its exact evidence
+and limits are in `T04_CREDENTIAL_REPORT.md`.
 Local Worker tests exercise Better Auth callbacks, sessions, D1 persistence,
 signup policy, profile, organization and credential controls; Google/GitHub
 HTTP responses are simulated at the provider boundary. The service and
