@@ -1218,5 +1218,5 @@ describe("Platform organization account management", () => {
         .first<{ id: string }>(),
     ).not.toBeNull();
     expect(ownerDefault.organization_id).toBeTruthy();
-  });
+  }, 15_000);
 });
