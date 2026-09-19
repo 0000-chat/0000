@@ -46,7 +46,7 @@ function main(args: readonly string[]): void {
   const generatedConfig = join(directory, "wrangler.msg.jsonc");
   try {
     writeFileSync(generatedConfig, createMsgWranglerConfig(databaseId), { mode: 0o600 });
-    const result = spawnSync("bunx", ["wrangler", ...args, "--config", generatedConfig], { cwd: monorepoRoot, stdio: "inherit" });
+    const result = spawnSync("bunx", ["wrangler", ...args, "--config", generatedConfig], { cwd: serviceRoot, stdio: "inherit" });
     if (result.error) throw result.error;
     if (result.status !== 0) process.exitCode = result.status ?? 1;
   } finally {
