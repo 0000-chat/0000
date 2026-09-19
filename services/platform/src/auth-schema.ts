@@ -15,8 +15,17 @@ const serverOwnedTimestamp = {
   returned: false,
 };
 
+const pendingSocialBindingField = {
+  type: "string" as const,
+  required: false,
+  input: false,
+  returned: false,
+};
+
 export const platformUserAdditionalFields = {
   disabledAt: serverOwnedTimestamp,
+  pendingSocialProviderId: pendingSocialBindingField,
+  pendingSocialSubject: pendingSocialBindingField,
 };
 
 export const createAuthPlugins = () => [

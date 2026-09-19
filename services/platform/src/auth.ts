@@ -7,6 +7,10 @@ import {
   createAuthPlugins,
   platformUserAdditionalFields,
 } from "./auth-schema";
+import {
+  pendingSocialBindingFromSource,
+  recoverPendingSocialAccount,
+} from "./social-signup-recovery";
 
 export const PLATFORM_SESSION_FRESH_AGE_SECONDS = 24 * 60 * 60;
 
@@ -97,6 +101,17 @@ async function hasActiveLinkSession(
 
 export function createAuth(env: Cloudflare.Env) {
   const schema = authSchema;
+  let pendingSocialBinding: ReturnType<typeof pendingSocialBindingFromSource> =
+    null;
+  const recoverSocialProfile = async (
+    providerId: "github" | "google",
+    profile: object,
+  ) => {
+    const binding = pendingSocialBindingFromSource(providerId, profile);
+    if (!binding) return {};
+    await recoverPendingSocialAccount(env.IDENTITY_DB, binding);
+    return {};
+  };
   return betterAuth({
     appName: "0000 Platform",
     baseURL: env.PLATFORM_BASE_URL,
@@ -106,6 +121,19 @@ export function createAuth(env: Cloudflare.Env) {
     user: {
       additionalFields: platformUserAdditionalFields,
       validateUserInfo: async ({ user, source }, context) => {
+        if (source.action === "create-user" && source.method === "oauth") {
+          pendingSocialBinding = pendingSocialBindingFromSource(
+            source.oauth?.providerId,
+            source.oauth?.profile,
+          );
+          if (!pendingSocialBinding) {
+            return {
+              error: "social_identity_unavailable",
+              errorDescription:
+                "A verified provider subject is required for signup.",
+            };
+          }
+        }
         if (source.action !== "link-account" || source.method !== "oauth") {
           return;
         }
@@ -132,15 +160,25 @@ export function createAuth(env: Cloudflare.Env) {
       user: {
         create: {
           before: async (user) => {
-            if (!requiresSignupInvitation(env)) return;
-            if (!user.emailVerified) {
+            const capturedSocialBinding = pendingSocialBinding;
+            pendingSocialBinding = null;
+            if (requiresSignupInvitation(env) && !user.emailVerified) {
               throw new APIError("FORBIDDEN", {
                 code: "email_not_verified",
                 message:
                   "Verify your provider email before signing in to Platform.",
               });
             }
-            await requireCurrentInvitation(env, user.email);
+            if (requiresSignupInvitation(env)) {
+              await requireCurrentInvitation(env, user.email);
+            }
+            if (!capturedSocialBinding) return;
+            return {
+              data: {
+                pendingSocialProviderId: capturedSocialBinding.providerId,
+                pendingSocialSubject: capturedSocialBinding.subject,
+              },
+            };
           },
         },
       },
@@ -177,10 +215,14 @@ export function createAuth(env: Cloudflare.Env) {
       google: {
         clientId: env.GOOGLE_CLIENT_ID,
         clientSecret: env.GOOGLE_CLIENT_SECRET,
+        mapProfileToUser: async (profile) =>
+          recoverSocialProfile("google", profile),
       },
       github: {
         clientId: env.GITHUB_CLIENT_ID,
         clientSecret: env.GITHUB_CLIENT_SECRET,
+        mapProfileToUser: async (profile) =>
+          recoverSocialProfile("github", profile),
       },
     },
     plugins: createAuthPlugins(),
