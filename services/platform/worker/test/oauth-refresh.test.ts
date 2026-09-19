@@ -978,11 +978,6 @@ describe("T07 production OAuth refresh lineage", () => {
         refreshEnabled: true,
       },
     );
-    await testEnv.IDENTITY_DB.prepare(
-      "UPDATE oauthResource SET accessTokenTtl = 1 WHERE identifier = ?",
-    )
-      .bind(service.audience)
-      .run();
     const issued = await issueHarnessFlow({
       cookies: user.cookies,
       userId: user.userId,
@@ -994,8 +989,10 @@ describe("T07 production OAuth refresh lineage", () => {
     const root = await testEnv.IDENTITY_DB.prepare(
       `SELECT t.expires_at AS ledger_expires_at,
               c.expires_at AS credential_expires_at,
+              f.expires_at AS family_expires_at,
               access.expiresAt AS provider_access_expires
        FROM platform_oauth_refresh_token AS t
+       JOIN platform_oauth_refresh_family AS f ON f.id = t.family_id
        JOIN platform_credential AS c ON c.oauth_refresh_token_id = t.id
        JOIN oauthAccessToken AS access ON access.id = t.provider_access_row_id
        WHERE t.installation_id = ? AND t.sequence = 0`,
@@ -1004,26 +1001,53 @@ describe("T07 production OAuth refresh lineage", () => {
       .first<{
         ledger_expires_at: number;
         credential_expires_at: number;
+        family_expires_at: number;
         provider_access_expires: number;
       }>();
     expect(root).toBeTruthy();
     expect(root!.ledger_expires_at).toBeGreaterThan(
       root!.credential_expires_at,
     );
-    await new Promise((resolve) => setTimeout(resolve, 1_300));
-    expect(root!.credential_expires_at).toBeLessThanOrEqual(Date.now());
-    expect(root!.provider_access_expires).toBeLessThanOrEqual(Date.now());
-    const rotated = await SELF.fetch("http://localhost/api/auth/oauth2/token", {
-      method: "POST",
-      headers: { "content-type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({
-        grant_type: "refresh_token",
-        client_id: client.clientId,
-        refresh_token: issued.refreshToken!,
-        resource: service.audience,
-      }),
-    });
-    expect(rotated.status, await rotated.clone().text()).toBe(200);
+    const advancedNow =
+      Math.max(root!.credential_expires_at, root!.provider_access_expires) + 1;
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(advancedNow);
+      expect(root!.credential_expires_at).toBeLessThanOrEqual(Date.now());
+      expect(root!.provider_access_expires).toBeLessThanOrEqual(Date.now());
+      expect(root!.ledger_expires_at).toBeGreaterThan(Date.now());
+      expect(root!.family_expires_at).toBeGreaterThan(Date.now());
+      const rotated = await platformWorker.fetch(
+        new Request("http://localhost/api/auth/oauth2/token", {
+          method: "POST",
+          headers: { "content-type": "application/x-www-form-urlencoded" },
+          body: new URLSearchParams({
+            grant_type: "refresh_token",
+            client_id: client.clientId,
+            refresh_token: issued.refreshToken!,
+            resource: service.audience,
+          }),
+        }),
+        testEnv,
+      );
+      expect(rotated.status, await rotated.clone().text()).toBe(200);
+      const successor = (await rotated.json()) as {
+        access_token: string;
+      };
+      const sharedClient = createPlatformClient({
+        baseUrl: testEnv.PLATFORM_BASE_URL,
+        authority: testEnv.PLATFORM_AUTHORITY_ID,
+        audience: service.audience,
+        serviceVerifier: service.verifier,
+        fetch: (input, init) =>
+          platformWorker.fetch(new Request(input, init), testEnv),
+      });
+      expect(
+        (await sharedClient.authenticate(successor.access_token)).status,
+      ).toBe("authenticated");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("does not inherit the original installation or flow deadline", async () => {
