@@ -232,11 +232,21 @@ async function issueHarnessFlow(input: {
   };
 }
 
-function interleavedRefreshDatabase(
+type RefreshPhaseCallbacks = {
+  onCurrentRead?: () => Promise<void>;
+  onPendingFence?: () => Promise<void>;
+  onProviderRowsRead?: () => Promise<void>;
+  onPublicationRead?: () => Promise<void>;
+};
+
+function phaseRefreshDatabase(
   database: D1DatabaseSession,
-  onCurrentRead: () => Promise<void>,
+  callbacks: RefreshPhaseCallbacks,
 ): D1DatabaseSession {
-  let callbackComplete = false;
+  let currentReadComplete = false;
+  let pendingFenceComplete = false;
+  let providerRowsReadComplete = false;
+  let publicationReadComplete = false;
   const originals = new WeakMap<object, D1PreparedStatement>();
   const wrapStatement = (
     statement: D1PreparedStatement,
@@ -245,17 +255,39 @@ function interleavedRefreshDatabase(
     const isCurrentRefreshRead =
       query.includes("provider_refresh.id AS provider_refresh_id") &&
       query.includes("provider_access.id AS provider_access_id");
+    const isPendingFenceRead =
+      query.includes("SELECT f.state, f.pending_token_id") &&
+      query.includes("f.pending_consumption_nonce");
+    const isProviderRefreshRead = query.includes(
+      "FROM oauthRefreshToken WHERE token = ?",
+    );
+    const isPublicationRead =
+      query.includes(
+        "SELECT f.state AS family_state, f.capabilities AS family_capabilities",
+      ) && query.includes("provider_refresh.id AS refresh_id");
     const wrapped = {
       bind: (...values: unknown[]) =>
         wrapStatement(statement.bind(...values), query),
       first: async <T = Record<string, unknown>>(columnName?: string) => {
+        if (isPublicationRead && !publicationReadComplete) {
+          publicationReadComplete = true;
+          await callbacks.onPublicationRead?.();
+        }
         const result =
           columnName === undefined
             ? await statement.first<T>()
             : await statement.first<T>(columnName);
-        if (isCurrentRefreshRead && result && !callbackComplete) {
-          callbackComplete = true;
-          await onCurrentRead();
+        if (isCurrentRefreshRead && result && !currentReadComplete) {
+          currentReadComplete = true;
+          await callbacks.onCurrentRead?.();
+        }
+        if (isPendingFenceRead && result && !pendingFenceComplete) {
+          pendingFenceComplete = true;
+          await callbacks.onPendingFence?.();
+        }
+        if (isProviderRefreshRead && result && !providerRowsReadComplete) {
+          providerRowsReadComplete = true;
+          await callbacks.onProviderRowsRead?.();
         }
         return result;
       },
@@ -285,6 +317,13 @@ function interleavedRefreshDatabase(
   }) as unknown as D1DatabaseSession;
 }
 
+function interleavedRefreshDatabase(
+  database: D1DatabaseSession,
+  onCurrentRead: () => Promise<void>,
+): D1DatabaseSession {
+  return phaseRefreshDatabase(database, { onCurrentRead });
+}
+
 function afterFirstBatchDatabase(
   database: D1DatabaseSession,
   afterBatch: () => Promise<void>,
@@ -310,13 +349,19 @@ function afterFirstBatchDatabase(
 function workerRefreshRaceEnv(
   onCurrentRead: () => Promise<void>,
 ): Cloudflare.Env {
+  return workerRefreshPhaseEnv({ onCurrentRead });
+}
+
+function workerRefreshPhaseEnv(
+  callbacks: RefreshPhaseCallbacks,
+): Cloudflare.Env {
   const wrappedDatabase = new Proxy(testEnv.IDENTITY_DB, {
     get(target, property, receiver) {
       if (property === "withSession") {
         return (constraint: unknown) =>
-          interleavedRefreshDatabase(
+          phaseRefreshDatabase(
             target.withSession(constraint as never),
-            onCurrentRead,
+            callbacks,
           );
       }
       return Reflect.get(target, property, receiver);
@@ -939,6 +984,146 @@ describe("T07 production OAuth refresh lineage", () => {
     expect(rotated.status, await rotated.clone().text()).toBe(200);
   });
 
+  it("does not inherit the original installation or flow deadline", async () => {
+    const suffix = crypto.randomUUID().slice(0, 8);
+    const service = await registerService(testEnv.IDENTITY_DB, {
+      serviceId: `t07-flow-deadline-service-${suffix}`,
+      audience: `https://t07-flow-deadline-${suffix}.0000.test`,
+      capabilities: ["resource:read"],
+    });
+    const user = await signIn();
+    const organization = await organizationId(user.cookies);
+    const client = await provisionTrustedOAuthClient(
+      testEnv.IDENTITY_DB,
+      testEnv.BETTER_AUTH_SECRET,
+      {
+        serviceId: service.serviceId,
+        clientId: `t07-flow-deadline-client-${suffix}`,
+        redirectUri: `https://t07-flow-deadline-client-${suffix}.example.test/callback`,
+        capabilities: ["resource:read"],
+        authMethod: "none",
+        refreshEnabled: true,
+      },
+    );
+    const issued = await issueHarnessFlow({
+      cookies: user.cookies,
+      userId: user.userId,
+      organizationId: organization,
+      client,
+      audience: service.audience,
+      offline: true,
+    });
+    const flow = await testEnv.IDENTITY_DB.prepare(
+      "SELECT id FROM platform_oauth_flow WHERE installation_id = ?",
+    )
+      .bind(issued.installationId)
+      .first<{ id: string }>();
+    expect(flow).toBeTruthy();
+    await testEnv.IDENTITY_DB.prepare(
+      "DROP TRIGGER platform_oauth_installation_authority_immutable",
+    ).run();
+    try {
+      await testEnv.IDENTITY_DB.batch([
+        testEnv.IDENTITY_DB.prepare(
+          "UPDATE platform_oauth_installation SET expires_at = 0 WHERE id = ?",
+        ).bind(issued.installationId),
+        testEnv.IDENTITY_DB.prepare(
+          "UPDATE platform_oauth_flow SET expires_at = 0 WHERE id = ?",
+        ).bind(flow!.id),
+      ]);
+    } finally {
+      await testEnv.IDENTITY_DB.prepare(
+        `CREATE TRIGGER platform_oauth_installation_authority_immutable
+         BEFORE UPDATE OF client_id, user_id, membership_id, organization_id,
+           service_id, audience, capabilities, subject_id, grant_id, expires_at
+         ON platform_oauth_installation
+         BEGIN
+           SELECT RAISE(ABORT, 'oauth installation authority is immutable');
+         END`,
+      ).run();
+    }
+    const rotated = await SELF.fetch("http://localhost/api/auth/oauth2/token", {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        grant_type: "refresh_token",
+        client_id: client.clientId,
+        refresh_token: issued.refreshToken!,
+        resource: service.audience,
+      }),
+    });
+    expect(rotated.status, await rotated.clone().text()).toBe(200);
+    const rotatedBody = (await rotated.json()) as {
+      refresh_token?: string;
+    };
+    expect(rotatedBody.refresh_token).toBeTruthy();
+    const family = await testEnv.IDENTITY_DB.prepare(
+      `SELECT f.id AS family_id, successor.state AS successor_state
+       FROM platform_oauth_refresh_family AS f
+            LEFT JOIN platform_oauth_refresh_token AS successor
+               ON successor.family_id = f.id AND successor.sequence = 1
+       WHERE f.installation_id = ?`,
+    )
+      .bind(issued.installationId)
+      .first<{ family_id: string; successor_state: string }>();
+    expect(family).toEqual({
+      family_id: expect.any(String),
+      successor_state: "issued",
+    });
+    await testEnv.IDENTITY_DB.prepare(
+      "DROP TRIGGER platform_oauth_refresh_family_immutable",
+    ).run();
+    try {
+      await testEnv.IDENTITY_DB.prepare(
+        "UPDATE platform_oauth_refresh_family SET expires_at = 0 WHERE id = ?",
+      )
+        .bind(family!.family_id)
+        .run();
+    } finally {
+      await testEnv.IDENTITY_DB.prepare(
+        `CREATE TRIGGER platform_oauth_refresh_family_immutable
+         BEFORE UPDATE OF installation_id, client_id, user_id, membership_id,
+           organization_id, service_id, audience, subject_id, grant_id,
+           capabilities, family_epoch_at, expires_at, created_at
+         ON platform_oauth_refresh_family
+         BEGIN
+           SELECT RAISE(ABORT, 'oauth refresh family authority is immutable');
+         END`,
+      ).run();
+    }
+    const expired = await SELF.fetch("http://localhost/api/auth/oauth2/token", {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        grant_type: "refresh_token",
+        client_id: client.clientId,
+        refresh_token: rotatedBody.refresh_token!,
+        resource: service.audience,
+      }),
+    });
+    expect(expired.status, await expired.clone().text()).toBe(503);
+    const expiredBody = (await expired.json()) as Record<string, unknown>;
+    expect(expiredBody).toMatchObject({
+      status: "authority_unavailable",
+      error: "temporarily_unavailable",
+    });
+    expect(expiredBody.access_token).toBeUndefined();
+    expect(expiredBody.refresh_token).toBeUndefined();
+    const state = await testEnv.IDENTITY_DB.prepare(
+      `SELECT f.state AS family_state, t.state AS successor_state
+       FROM platform_oauth_refresh_family AS f
+       JOIN platform_oauth_refresh_token AS t
+         ON t.family_id = f.id AND t.sequence = 1
+       WHERE f.id = ?`,
+    )
+      .bind(family!.family_id)
+      .first<{ family_state: string; successor_state: string }>();
+    expect(state).toEqual({
+      family_state: "active",
+      successor_state: "issued",
+    });
+  });
+
   it("keeps initial zero-row and partial root publication fail-closed", async () => {
     const suffix = crypto.randomUUID().slice(0, 8);
     const service = await registerService(testEnv.IDENTITY_DB, {
@@ -1173,6 +1358,244 @@ describe("T07 production OAuth refresh lineage", () => {
     expect((await rejectedRefresh.json()) as { error?: string }).toMatchObject({
       error: "unsupported_grant_type",
     });
+  });
+
+  it("rejects malformed refresh presentations before provider cleanup", async () => {
+    const suffix = crypto.randomUUID().slice(0, 8);
+    const service = await registerService(testEnv.IDENTITY_DB, {
+      serviceId: `t07-malformed-service-${suffix}`,
+      audience: `https://t07-malformed-${suffix}.0000.test`,
+      capabilities: ["resource:read"],
+    });
+    const user = await signIn();
+    const organization = await organizationId(user.cookies);
+    const client = await provisionTrustedOAuthClient(
+      testEnv.IDENTITY_DB,
+      testEnv.BETTER_AUTH_SECRET,
+      {
+        serviceId: service.serviceId,
+        clientId: `t07-malformed-client-${suffix}`,
+        redirectUri: `https://t07-malformed-client-${suffix}.example.test/callback`,
+        capabilities: ["resource:read"],
+        authMethod: "none",
+        refreshEnabled: true,
+      },
+    );
+    const issued = await issueHarnessFlow({
+      cookies: user.cookies,
+      userId: user.userId,
+      organizationId: organization,
+      client,
+      audience: service.audience,
+      offline: true,
+    });
+    const sibling = await issueHarnessFlow({
+      cookies: user.cookies,
+      userId: user.userId,
+      organizationId: organization,
+      client,
+      audience: service.audience,
+      offline: true,
+    });
+    const request = (overrides: Record<string, string> = {}) =>
+      new Request("http://localhost/api/auth/oauth2/token", {
+        method: "POST",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          grant_type: "refresh_token",
+          client_id: client.clientId,
+          refresh_token: issued.refreshToken!,
+          resource: service.audience,
+          ...overrides,
+        }),
+      });
+    const firstRefresh = await SELF.fetch(request());
+    expect(firstRefresh.status, await firstRefresh.clone().text()).toBe(200);
+    const firstBody = (await firstRefresh.json()) as {
+      access_token: string;
+      refresh_token: string;
+    };
+    expect(firstBody.access_token).toBeTruthy();
+    expect(firstBody.refresh_token).toBeTruthy();
+    const root = await testEnv.IDENTITY_DB.prepare(
+      `SELECT f.id AS family_id, root.id AS root_id, successor.id AS successor_id,
+              root.provider_refresh_row_id, root.provider_access_row_id
+       FROM platform_oauth_refresh_family AS f
+       JOIN platform_oauth_refresh_token AS root
+         ON root.family_id = f.id AND root.sequence = 0
+       JOIN platform_oauth_refresh_token AS successor
+         ON successor.family_id = f.id AND successor.sequence = 1
+       WHERE f.installation_id = ?`,
+    )
+      .bind(issued.installationId)
+      .first<{
+        family_id: string;
+        root_id: string;
+        successor_id: string;
+        provider_refresh_row_id: string;
+        provider_access_row_id: string;
+      }>();
+    expect(root).toBeTruthy();
+    const baseline = await testEnv.IDENTITY_DB.prepare(
+      `SELECT f.state AS family_state, root.state AS root_state,
+              successor.state AS successor_state, COUNT(all_tokens.id) AS token_count,
+              access.revoked AS access_revoked,
+              refresh.revoked AS refresh_revoked
+       FROM platform_oauth_refresh_family AS f
+       JOIN platform_oauth_refresh_token AS root
+         ON root.id = ? AND root.family_id = f.id
+       JOIN platform_oauth_refresh_token AS successor
+         ON successor.id = ? AND successor.family_id = f.id
+       JOIN platform_oauth_refresh_token AS all_tokens
+         ON all_tokens.family_id = f.id
+       JOIN oauthAccessToken AS access ON access.id = ?
+       JOIN oauthRefreshToken AS refresh ON refresh.id = ?
+       WHERE f.id = ?
+       GROUP BY f.state, root.state, successor.state,
+                access.revoked, refresh.revoked`,
+    )
+      .bind(
+        root!.root_id,
+        root!.successor_id,
+        root!.provider_access_row_id,
+        root!.provider_refresh_row_id,
+        root!.family_id,
+      )
+      .first<{
+        family_state: string;
+        root_state: string;
+        successor_state: string;
+        token_count: number;
+        access_revoked: number | null;
+        refresh_revoked: number | null;
+      }>();
+    expect(baseline).toBeTruthy();
+    const assertUnchanged = async () => {
+      const state = await testEnv.IDENTITY_DB.prepare(
+        `SELECT f.state AS family_state, root.state AS root_state,
+                successor.state AS successor_state, COUNT(all_tokens.id) AS token_count,
+                access.revoked AS access_revoked,
+                refresh.revoked AS refresh_revoked
+         FROM platform_oauth_refresh_family AS f
+         JOIN platform_oauth_refresh_token AS root
+           ON root.id = ? AND root.family_id = f.id
+         JOIN platform_oauth_refresh_token AS successor
+           ON successor.id = ? AND successor.family_id = f.id
+         JOIN platform_oauth_refresh_token AS all_tokens
+           ON all_tokens.family_id = f.id
+         JOIN oauthAccessToken AS access ON access.id = ?
+         JOIN oauthRefreshToken AS refresh ON refresh.id = ?
+         WHERE f.id = ?
+         GROUP BY f.state, root.state, successor.state,
+                  access.revoked, refresh.revoked`,
+      )
+        .bind(
+          root!.root_id,
+          root!.successor_id,
+          root!.provider_access_row_id,
+          root!.provider_refresh_row_id,
+          root!.family_id,
+        )
+        .first<{
+          family_state: string;
+          root_state: string;
+          successor_state: string;
+          token_count: number;
+          access_revoked: number | null;
+          refresh_revoked: number | null;
+        }>();
+      expect(state).toEqual(baseline);
+    };
+    const assertMalformed = async (response: Response, error: string) => {
+      expect(response.status, await response.clone().text()).toBe(400);
+      const body = (await response.json()) as Record<string, unknown>;
+      expect(body).toMatchObject({ error });
+      expect(body.access_token).toBeUndefined();
+      expect(body.refresh_token).toBeUndefined();
+      await assertUnchanged();
+    };
+
+    await assertMalformed(
+      await SELF.fetch("http://localhost/api/auth/oauth2/token", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          grant_type: "refresh_token",
+          client_id: client.clientId,
+          refresh_token: issued.refreshToken,
+          resource: service.audience,
+        }),
+      }),
+      "invalid_request",
+    );
+    await assertMalformed(
+      await SELF.fetch(request({ grant_type: " refresh_token " })),
+      "invalid_request",
+    );
+    for (const scope of ["resource:read resource:read", "resource:invalid"]) {
+      await assertMalformed(
+        await SELF.fetch(request({ scope })),
+        "invalid_scope",
+      );
+    }
+
+    const replay = await SELF.fetch(request());
+    expect(replay.status, await replay.clone().text()).toBe(400);
+    const replayBody = (await replay.json()) as Record<string, unknown>;
+    expect(replayBody).toMatchObject({ error: "invalid_grant" });
+    expect(replayBody.access_token).toBeUndefined();
+    expect(replayBody.refresh_token).toBeUndefined();
+    const terminal = await testEnv.IDENTITY_DB.prepare(
+      `SELECT f.state AS family_state, root.state AS root_state,
+              successor.state AS successor_state,
+              access.revoked AS access_revoked,
+              refresh.revoked AS refresh_revoked
+       FROM platform_oauth_refresh_family AS f
+       JOIN platform_oauth_refresh_token AS root
+         ON root.id = ? AND root.family_id = f.id
+       JOIN platform_oauth_refresh_token AS successor
+         ON successor.id = ? AND successor.family_id = f.id
+       JOIN oauthAccessToken AS access ON access.id = ?
+       JOIN oauthRefreshToken AS refresh ON refresh.id = ?
+       WHERE f.id = ?`,
+    )
+      .bind(
+        root!.root_id,
+        root!.successor_id,
+        root!.provider_access_row_id,
+        root!.provider_refresh_row_id,
+        root!.family_id,
+      )
+      .first<{
+        family_state: string;
+        root_state: string;
+        successor_state: string;
+        access_revoked: number | null;
+        refresh_revoked: number | null;
+      }>();
+    expect(terminal).toEqual({
+      family_state: "revoked",
+      root_state: "replayed",
+      successor_state: "revoked",
+      access_revoked: expect.any(Number),
+      refresh_revoked: expect.any(Number),
+    });
+    const siblingRefresh = await SELF.fetch(
+      "http://localhost/api/auth/oauth2/token",
+      {
+        method: "POST",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          grant_type: "refresh_token",
+          client_id: client.clientId,
+          refresh_token: sibling.refreshToken!,
+          resource: service.audience,
+        }),
+      },
+    );
+    expect(siblingRefresh.status, await siblingRefresh.clone().text()).toBe(
+      200,
+    );
   });
 
   it("keeps provider and Platform mapping failures fail-closed after the consume fence", async () => {
@@ -1787,6 +2210,168 @@ describe("T07 production OAuth refresh lineage", () => {
     );
   });
 
+  it("withholds provider completion after a pending family is terminalized", async () => {
+    const suffix = crypto.randomUUID().slice(0, 8);
+    const service = await registerService(testEnv.IDENTITY_DB, {
+      serviceId: `t07-before-provider-service-${suffix}`,
+      audience: `https://t07-before-provider-${suffix}.0000.test`,
+      capabilities: ["resource:read"],
+    });
+    const user = await signIn();
+    const organization = await organizationId(user.cookies);
+    const client = await provisionTrustedOAuthClient(
+      testEnv.IDENTITY_DB,
+      testEnv.BETTER_AUTH_SECRET,
+      {
+        serviceId: service.serviceId,
+        clientId: `t07-before-provider-client-${suffix}`,
+        redirectUri: `https://t07-before-provider-client-${suffix}.example.test/callback`,
+        capabilities: ["resource:read"],
+        authMethod: "none",
+        refreshEnabled: true,
+      },
+    );
+    const issued = await issueHarnessFlow({
+      cookies: user.cookies,
+      userId: user.userId,
+      organizationId: organization,
+      client,
+      audience: service.audience,
+      offline: true,
+    });
+    const sibling = await issueHarnessFlow({
+      cookies: user.cookies,
+      userId: user.userId,
+      organizationId: organization,
+      client,
+      audience: service.audience,
+      offline: true,
+    });
+    let terminalized = false;
+    const envWithBarrier = workerRefreshPhaseEnv({
+      onPendingFence: async () => {
+        const pending = await testEnv.IDENTITY_DB.prepare(
+          `SELECT f.id AS family_id, f.pending_token_id,
+                  f.pending_consumption_nonce,
+                  t.provider_refresh_row_id, t.provider_access_row_id
+           FROM platform_oauth_refresh_family AS f
+           JOIN platform_oauth_refresh_token AS t ON t.id = f.pending_token_id
+           WHERE f.state = 'pending' AND f.pending_token_id IS NOT NULL
+             AND f.pending_consumption_nonce IS NOT NULL
+             AND f.installation_id = ?`,
+        )
+          .bind(issued.installationId)
+          .first<{
+            family_id: string;
+            pending_token_id: string;
+            pending_consumption_nonce: string;
+            provider_refresh_row_id: string;
+            provider_access_row_id: string;
+          }>();
+        expect(pending).toBeTruthy();
+        const now = Date.now();
+        await testEnv.IDENTITY_DB.batch([
+          testEnv.IDENTITY_DB.prepare(
+            `UPDATE platform_oauth_refresh_family
+             SET state = 'revoked', pending_token_id = NULL,
+                 pending_consumption_nonce = NULL, revoked_at = ?,
+                 revoked_reason = 't07_after_consume_terminalization', updated_at = ?
+             WHERE id = ? AND state = 'pending'`,
+          ).bind(now, now, pending!.family_id),
+          testEnv.IDENTITY_DB.prepare(
+            `UPDATE platform_oauth_refresh_token
+             SET state = 'replayed', replayed_at = ?,
+                 revoked_reason = 't07_after_consume_terminalization', updated_at = ?
+             WHERE id = ? AND family_id = ? AND state = 'pending'`,
+          ).bind(now, now, pending!.pending_token_id, pending!.family_id),
+          testEnv.IDENTITY_DB.prepare(
+            `UPDATE platform_credential
+             SET revoked_at = ?, revoked_reason = 't07_after_consume_terminalization'
+             WHERE oauth_refresh_token_id = ?`,
+          ).bind(now, pending!.pending_token_id),
+          testEnv.IDENTITY_DB.prepare(
+            `UPDATE platform_oauth_installation
+             SET active = 0, revoked_at = COALESCE(revoked_at, ?)
+             WHERE id = (SELECT installation_id
+                         FROM platform_oauth_refresh_family WHERE id = ?)`,
+          ).bind(now, pending!.family_id),
+        ]);
+        terminalized = true;
+      },
+    });
+    const response = await platformWorker.fetch(
+      new Request("http://localhost/api/auth/oauth2/token", {
+        method: "POST",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          grant_type: "refresh_token",
+          client_id: client.clientId,
+          refresh_token: issued.refreshToken!,
+          resource: service.audience,
+        }),
+      }),
+      envWithBarrier,
+    );
+    expect(terminalized).toBe(true);
+    expect(response.status, await response.clone().text()).toBe(503);
+    const body = (await response.json()) as Record<string, unknown>;
+    expect(body).toMatchObject({
+      status: "authority_unavailable",
+      error: "temporarily_unavailable",
+    });
+    expect(body.access_token).toBeUndefined();
+    expect(body.refresh_token).toBeUndefined();
+    const terminal = await testEnv.IDENTITY_DB.prepare(
+      `SELECT i.active, f.state AS family_state, t.state AS token_state,
+              COUNT(all_tokens.id) AS token_count,
+              (SELECT COUNT(*) FROM oauthAccessToken
+               WHERE referenceId = i.id AND revoked IS NULL) AS live_access,
+              (SELECT COUNT(*) FROM oauthRefreshToken
+               WHERE referenceId = i.id AND revoked IS NULL) AS live_refresh
+       FROM platform_oauth_installation AS i
+       JOIN platform_oauth_refresh_family AS f ON f.installation_id = i.id
+       JOIN platform_oauth_refresh_token AS t
+         ON t.id = f.pending_token_id OR
+            (t.family_id = f.id AND t.sequence = 0)
+       JOIN platform_oauth_refresh_token AS all_tokens ON all_tokens.family_id = f.id
+       WHERE i.id = ?
+       GROUP BY i.id, i.active, f.state, t.state`,
+    )
+      .bind(issued.installationId)
+      .first<{
+        active: number;
+        family_state: string;
+        token_state: string;
+        token_count: number;
+        live_access: number;
+        live_refresh: number;
+      }>();
+    expect(terminal).toEqual({
+      active: 0,
+      family_state: "revoked",
+      token_state: "replayed",
+      token_count: 1,
+      live_access: 0,
+      live_refresh: 0,
+    });
+    const siblingRefresh = await SELF.fetch(
+      "http://localhost/api/auth/oauth2/token",
+      {
+        method: "POST",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          grant_type: "refresh_token",
+          client_id: client.clientId,
+          refresh_token: sibling.refreshToken!,
+          resource: service.audience,
+        }),
+      },
+    );
+    expect(siblingRefresh.status, await siblingRefresh.clone().text()).toBe(
+      200,
+    );
+  });
+
   it("withholds a mapped successor when replay wins before delivery", async () => {
     const suffix = crypto.randomUUID().slice(0, 8);
     const service = await registerService(testEnv.IDENTITY_DB, {
@@ -2285,6 +2870,406 @@ describe("T07 production OAuth refresh lineage", () => {
       refresh_revoked: null,
     });
   });
+
+  it("holds organization authority mutations across consume and publication", async () => {
+    const suffix = crypto.randomUUID().slice(0, 8);
+    const service = await registerService(testEnv.IDENTITY_DB, {
+      serviceId: `t07-late-authority-service-${suffix}`,
+      audience: `https://t07-late-authority-${suffix}.0000.test`,
+      capabilities: ["resource:read", "resource:write"],
+    });
+    const client = await provisionTrustedOAuthClient(
+      testEnv.IDENTITY_DB,
+      testEnv.BETTER_AUTH_SECRET,
+      {
+        serviceId: service.serviceId,
+        clientId: `t07-late-authority-client-${suffix}`,
+        redirectUri: `https://t07-late-authority-client-${suffix}.example.test/callback`,
+        capabilities: ["resource:read", "resource:write"],
+        authMethod: "none",
+        refreshEnabled: true,
+      },
+    );
+    type Context = {
+      userId: string;
+      organizationId: string;
+      installationId: string;
+      familyId: string;
+      tokenId: string;
+      membershipId: string;
+      membershipRole: string;
+      membershipCreatedAt: number;
+      consent: {
+        id: string;
+        clientId: string;
+        userId: string;
+        referenceId: string;
+        resources: string | null;
+        requestedUserInfoClaims: string | null;
+        scopes: string;
+        createdAt: number | null;
+        updatedAt: number | null;
+      };
+      refreshToken: string;
+      replacementMembershipId?: string;
+    };
+    type Mutation = {
+      name: string;
+      apply: (context: Context) => Promise<void>;
+      assert: (context: Context) => Promise<void>;
+      restore?: (context: Context) => Promise<void>;
+    };
+    const mutations: Mutation[] = [
+      {
+        name: "organization suspension",
+        apply: async (context) => {
+          const result = await testEnv.IDENTITY_DB.prepare(
+            "UPDATE organization SET suspendedAt = ? WHERE id = ?",
+          )
+            .bind(Date.now(), context.organizationId)
+            .run();
+          expect(result.meta.changes).toBe(1);
+        },
+        assert: async (context) => {
+          const row = await testEnv.IDENTITY_DB.prepare(
+            "SELECT suspendedAt FROM organization WHERE id = ?",
+          )
+            .bind(context.organizationId)
+            .first<{ suspendedAt: number | null }>();
+          expect(row?.suspendedAt).toEqual(expect.any(Number));
+        },
+        restore: async (context) => {
+          await testEnv.IDENTITY_DB.prepare(
+            "UPDATE organization SET suspendedAt = NULL WHERE id = ?",
+          )
+            .bind(context.organizationId)
+            .run();
+        },
+      },
+      {
+        name: "service catalog narrowing",
+        apply: async () => {
+          const result = await testEnv.IDENTITY_DB.prepare(
+            "UPDATE platform_service SET allowed_capabilities = '[]' WHERE service_id = ?",
+          )
+            .bind(service.serviceId)
+            .run();
+          expect(result.meta.changes).toBe(1);
+        },
+        assert: async () => {
+          const row = await testEnv.IDENTITY_DB.prepare(
+            "SELECT allowed_capabilities FROM platform_service WHERE service_id = ?",
+          )
+            .bind(service.serviceId)
+            .first<{ allowed_capabilities: string }>();
+          expect(row).toEqual({ allowed_capabilities: "[]" });
+        },
+        restore: async () => {
+          await testEnv.IDENTITY_DB.prepare(
+            "UPDATE platform_service SET allowed_capabilities = ? WHERE service_id = ?",
+          )
+            .bind(JSON.stringify(service.capabilities), service.serviceId)
+            .run();
+        },
+      },
+      {
+        name: "installation-scoped consent deletion",
+        apply: async (context) => {
+          const result = await testEnv.IDENTITY_DB.prepare(
+            "DELETE FROM oauthConsent WHERE referenceId = ?",
+          )
+            .bind(context.installationId)
+            .run();
+          expect(result.meta.changes).toBe(1);
+        },
+        assert: async (context) => {
+          const row = await testEnv.IDENTITY_DB.prepare(
+            "SELECT id FROM oauthConsent WHERE referenceId = ?",
+          )
+            .bind(context.installationId)
+            .first<{ id: string }>();
+          expect(row).toBeNull();
+        },
+        restore: async (context) => {
+          const consent = context.consent;
+          await testEnv.IDENTITY_DB.prepare(
+            `INSERT INTO oauthConsent
+               (id, clientId, userId, referenceId, resources,
+                requestedUserInfoClaims, scopes, createdAt, updatedAt)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          )
+            .bind(
+              consent.id,
+              consent.clientId,
+              consent.userId,
+              consent.referenceId,
+              consent.resources,
+              consent.requestedUserInfoClaims,
+              consent.scopes,
+              consent.createdAt,
+              consent.updatedAt,
+            )
+            .run();
+        },
+      },
+      {
+        name: "subject disablement",
+        apply: async (context) => {
+          const result = await testEnv.IDENTITY_DB.prepare(
+            'UPDATE "user" SET disabledAt = ? WHERE id = ?',
+          )
+            .bind(Date.now(), context.userId)
+            .run();
+          expect(result.meta.changes).toBe(1);
+        },
+        assert: async (context) => {
+          const row = await testEnv.IDENTITY_DB.prepare(
+            'SELECT disabledAt FROM "user" WHERE id = ?',
+          )
+            .bind(context.userId)
+            .first<{ disabledAt: number | null }>();
+          expect(row?.disabledAt).toEqual(expect.any(Number));
+        },
+        restore: async (context) => {
+          await testEnv.IDENTITY_DB.prepare(
+            'UPDATE "user" SET disabledAt = NULL WHERE id = ?',
+          )
+            .bind(context.userId)
+            .run();
+        },
+      },
+      {
+        name: "original membership removal and rejoin",
+        apply: async (context) => {
+          const deleted = await testEnv.IDENTITY_DB.prepare(
+            "DELETE FROM member WHERE id = ?",
+          )
+            .bind(context.membershipId)
+            .run();
+          expect(deleted.meta.changes).toBe(1);
+          context.replacementMembershipId = crypto.randomUUID();
+          const rejoined = await testEnv.IDENTITY_DB.prepare(
+            `INSERT INTO member (id, organizationId, userId, role, createdAt)
+             VALUES (?, ?, ?, ?, ?)`,
+          )
+            .bind(
+              context.replacementMembershipId,
+              context.organizationId,
+              context.userId,
+              context.membershipRole,
+              context.membershipCreatedAt,
+            )
+            .run();
+          expect(rejoined.meta.changes).toBe(1);
+        },
+        assert: async (context) => {
+          const rows = await testEnv.IDENTITY_DB.prepare(
+            "SELECT id FROM member WHERE id IN (?, ?)",
+          )
+            .bind(context.membershipId, context.replacementMembershipId)
+            .all<{ id: string }>();
+          expect(rows.results).toEqual([
+            { id: context.replacementMembershipId },
+          ]);
+        },
+        restore: async (context) => {
+          await testEnv.IDENTITY_DB.prepare("DELETE FROM member WHERE id = ?")
+            .bind(context.replacementMembershipId)
+            .run();
+          await testEnv.IDENTITY_DB.prepare(
+            `INSERT INTO member (id, organizationId, userId, role, createdAt)
+             VALUES (?, ?, ?, ?, ?)`,
+          )
+            .bind(
+              context.membershipId,
+              context.organizationId,
+              context.userId,
+              context.membershipRole,
+              context.membershipCreatedAt,
+            )
+            .run();
+        },
+      },
+    ];
+    const refreshRequest = (context: Context) =>
+      new Request("http://localhost/api/auth/oauth2/token", {
+        method: "POST",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          grant_type: "refresh_token",
+          client_id: client.clientId,
+          refresh_token: context.refreshToken,
+          resource: service.audience,
+        }),
+      });
+    const runPhase = async (
+      phase: "read" | "pending" | "provider" | "publication",
+    ) => {
+      for (const mutation of mutations) {
+        const user = await signIn();
+        const organization = await organizationId(user.cookies);
+        const positive = await issueHarnessFlow({
+          cookies: user.cookies,
+          userId: user.userId,
+          organizationId: organization,
+          client,
+          audience: service.audience,
+          offline: true,
+        });
+        const positiveRefresh = await SELF.fetch(
+          new Request("http://localhost/api/auth/oauth2/token", {
+            method: "POST",
+            headers: { "content-type": "application/x-www-form-urlencoded" },
+            body: new URLSearchParams({
+              grant_type: "refresh_token",
+              client_id: client.clientId,
+              refresh_token: positive.refreshToken!,
+              resource: service.audience,
+            }),
+          }),
+        );
+        expect(
+          positiveRefresh.status,
+          await positiveRefresh.clone().text(),
+        ).toBe(200);
+        const issued = await issueHarnessFlow({
+          cookies: user.cookies,
+          userId: user.userId,
+          organizationId: organization,
+          client,
+          audience: service.audience,
+          offline: true,
+        });
+        const root = await testEnv.IDENTITY_DB.prepare(
+          `SELECT f.id AS family_id, t.id AS token_id, f.membership_id,
+                  m.role, m.createdAt AS membership_created_at
+           FROM platform_oauth_refresh_family AS f
+           JOIN platform_oauth_refresh_token AS t
+             ON t.family_id = f.id AND t.sequence = 0
+           JOIN member AS m ON m.id = f.membership_id
+           WHERE f.installation_id = ?`,
+        )
+          .bind(issued.installationId)
+          .first<{
+            family_id: string;
+            token_id: string;
+            membership_id: string;
+            role: string;
+            membership_created_at: number;
+          }>();
+        expect(root).toBeTruthy();
+        const consent = await testEnv.IDENTITY_DB.prepare(
+          `SELECT id, clientId, userId, referenceId, resources,
+                  requestedUserInfoClaims, scopes, createdAt, updatedAt
+           FROM oauthConsent WHERE referenceId = ?`,
+        )
+          .bind(issued.installationId)
+          .first<Context["consent"]>();
+        expect(consent).toBeTruthy();
+        const context: Context = {
+          userId: user.userId,
+          organizationId: organization,
+          installationId: issued.installationId,
+          familyId: root!.family_id,
+          tokenId: root!.token_id,
+          membershipId: root!.membership_id,
+          membershipRole: root!.role,
+          membershipCreatedAt: root!.membership_created_at,
+          consent: consent!,
+          refreshToken: issued.refreshToken!,
+        };
+        const callback = async () => mutation.apply(context);
+        const phaseCallbacks: RefreshPhaseCallbacks =
+          phase === "read"
+            ? { onCurrentRead: callback }
+            : phase === "pending"
+              ? { onPendingFence: callback }
+              : phase === "provider"
+                ? { onProviderRowsRead: callback }
+                : { onPublicationRead: callback };
+        const response = await platformWorker.fetch(
+          refreshRequest(context),
+          workerRefreshPhaseEnv(phaseCallbacks),
+        );
+        expect(response.status, `${phase}: ${mutation.name}`).toBe(503);
+        const body = (await response.json()) as Record<string, unknown>;
+        expect(body).toMatchObject({
+          status: "authority_unavailable",
+          error: "temporarily_unavailable",
+        });
+        expect(body.access_token).toBeUndefined();
+        expect(body.refresh_token).toBeUndefined();
+        await mutation.assert(context);
+        if (phase === "read") {
+          const unchanged = await testEnv.IDENTITY_DB.prepare(
+            `SELECT f.state AS family_state, t.state AS token_state,
+                    access.revoked AS access_revoked,
+                    refresh.revoked AS refresh_revoked
+             FROM platform_oauth_refresh_family AS f
+             JOIN platform_oauth_refresh_token AS t ON t.id = ?
+             JOIN oauthAccessToken AS access ON access.id = t.provider_access_row_id
+             JOIN oauthRefreshToken AS refresh ON refresh.id = t.provider_refresh_row_id
+             WHERE f.id = ?`,
+          )
+            .bind(context.tokenId, context.familyId)
+            .first<{
+              family_state: string;
+              token_state: string;
+              access_revoked: number | null;
+              refresh_revoked: number | null;
+            }>();
+          expect(unchanged).toEqual({
+            family_state: "active",
+            token_state: "issued",
+            access_revoked: null,
+            refresh_revoked: null,
+          });
+        } else {
+          const terminal = await testEnv.IDENTITY_DB.prepare(
+            `SELECT f.state AS family_state, i.active,
+                    root.state AS root_state, successor.state AS successor_state
+             FROM platform_oauth_refresh_family AS f
+             JOIN platform_oauth_installation AS i ON i.id = f.installation_id
+             JOIN platform_oauth_refresh_token AS root
+               ON root.family_id = f.id AND root.sequence = 0
+             LEFT JOIN platform_oauth_refresh_token AS successor
+               ON successor.family_id = f.id AND successor.sequence = 1
+             WHERE f.id = ?`,
+          )
+            .bind(context.familyId)
+            .first<{
+              family_state: string;
+              active: number;
+              root_state: string;
+              successor_state: string | null;
+            }>();
+          expect(terminal, `${phase}: ${mutation.name}`).toBeTruthy();
+          if (!terminal) {
+            throw new Error(
+              `${phase}: ${mutation.name} terminal state missing`,
+            );
+          }
+          expect(terminal.family_state).toBe("quarantined");
+          expect(terminal.active).toBe(0);
+          if (terminal.successor_state === null) {
+            expect(terminal.root_state).toBe("quarantined");
+          } else {
+            expect(terminal.root_state, `${phase}: ${mutation.name}`).toBe(
+              "consumed",
+            );
+            expect(["quarantined", "revoked"]).toContain(
+              terminal.successor_state,
+            );
+          }
+        }
+        await mutation.restore?.(context);
+      }
+    };
+    await runPhase("read");
+    await runPhase("pending");
+    await runPhase("provider");
+    await runPhase("publication");
+  }, 30_000);
 
   it("denies refresh after each current-authority change without revoking the issued predecessor", async () => {
     const suffix = crypto.randomUUID().slice(0, 8);

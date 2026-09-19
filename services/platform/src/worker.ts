@@ -3648,7 +3648,8 @@ export default {
         if (
           pathname === "/api/auth/oauth2/token" &&
           request.method === "POST" &&
-          body === null &&
+          oauthState.platform &&
+          oauthState.refreshEnabled &&
           request.headers.get("content-type")?.toLowerCase().includes("json")
         ) {
           let jsonBody: unknown = null;
@@ -3673,6 +3674,21 @@ export default {
         // clients are fenced below before a refresh request reaches the
         // provider; a code-only Platform client is rejected explicitly.
         if (oauthState.platform) {
+          if (
+            pathname === "/api/auth/oauth2/token" &&
+            request.method === "POST" &&
+            typeof body?.grant_type === "string" &&
+            body.grant_type.trim() === "refresh_token" &&
+            body.grant_type !== "refresh_token"
+          ) {
+            return Response.json(
+              {
+                error: "invalid_request",
+                error_description: "grant_type must use canonical encoding.",
+              },
+              { status: 400, headers: { "cache-control": "no-store" } },
+            );
+          }
           if (
             pathname === "/api/auth/oauth2/token" &&
             request.method === "POST"

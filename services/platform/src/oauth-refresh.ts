@@ -515,10 +515,13 @@ async function parseReturnedTokens(
   }
 }
 
-function requestedScopes(body: Record<string, unknown>): string[] | null {
-  if (body.scope === undefined) return null;
-  if (typeof body.scope !== "string") return [];
+function requestedScopes(
+  body: Record<string, unknown>,
+): string[] | null | undefined {
+  if (body.scope === undefined) return undefined;
+  if (typeof body.scope !== "string") return null;
   const scopes = body.scope.split(" ").filter(Boolean);
+  if (scopes.length === 0) return null;
   return protocolScopes(scopes);
 }
 
@@ -590,7 +593,8 @@ export async function prepareOAuthRefresh(
   if (
     !storedCapabilities ||
     (requestedResource !== null && requestedResource !== row.audience) ||
-    (scope !== null &&
+    scope === null ||
+    (scope !== undefined &&
       !subset(
         scope.filter((entry) => entry !== "offline_access"),
         storedCapabilities,
@@ -635,7 +639,7 @@ export async function prepareOAuthRefresh(
   const current = await currentRefreshRow(database, row);
   if (
     !current ||
-    !authorityMatches(current, client, requestedResource, scope)
+    !authorityMatches(current, client, requestedResource, scope ?? null)
   ) {
     return {
       kind: "response",
@@ -713,7 +717,6 @@ export async function prepareOAuthRefresh(
              AND family.expires_at > ?
              AND installation.active = 1
              AND installation.revoked_at IS NULL
-             AND installation.expires_at > ?
              AND token.expires_at > ?
              AND NOT EXISTS (
                SELECT 1 FROM json_each(token.capabilities) AS requested
@@ -761,7 +764,6 @@ export async function prepareOAuthRefresh(
       tokenHash,
       fenceNow,
       row.family_id,
-      fenceNow,
       fenceNow,
       fenceNow,
     )

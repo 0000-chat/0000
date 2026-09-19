@@ -28,7 +28,15 @@ provider adoption, consumer integration, or full Platform MVP acceptance.
   exact returned provider rows to Platform lineage, detaches provider sessions
   only after durable mapping, revokes unbound provider rows after a mapping
   failure, and quarantines uncertain pending families without restoring
-  predecessors or storing response secrets.
+  predecessors or storing response secrets. Omitted scope is distinct from a
+  malformed or duplicate scope, so invalid presentations are rejected before
+  replay terminalization.
+- The refresh fence is independent of the original OAuth flow and installation
+  deadline. A live family remains refreshable after those initial records expire,
+  subject to the provider refresh, Platform family and current-authority
+  limits. Platform clients reject JSON refresh bodies and noncanonical padded
+  `grant_type` values before Better Auth can perform broad provider-family
+  cleanup.
 - Consumed ancestors remain recognizable after provider-row deletion. A replay
   terminalizes only its installation family and descendants; a duplicate of
   the exact pending token receives a 503 fence response. Access credentials and
@@ -41,7 +49,7 @@ provider adoption, consumer integration, or full Platform MVP acceptance.
 
 ## Focused Worker/D1 evidence
 
-`worker/test/oauth-refresh.test.ts` contains twelve actual Worker/D1 tests:
+`worker/test/oauth-refresh.test.ts` contains sixteen actual Worker/D1 tests:
 
 - A confidential `client_secret_post` client completes PKCE and explicit
   `offline_access` consent, publishes an exact root family and credential,
@@ -83,12 +91,26 @@ provider adoption, consumer integration, or full Platform MVP acceptance.
   the winning family is quarantined with one token and no released successor.
   The mapping case also revokes both exact returned provider rows, leaving no
   active provider descendant.
+- A malformed JSON refresh, padded form `grant_type`, duplicate scope and
+  invalid capability scope are each rejected without changing the consumed
+  family or sibling installation. A canonical replay still revokes only its
+  bound family, while the sibling remains usable. A refresh succeeds after the
+  original flow and installation deadlines are expired, and a family deadline
+  still denies the same request.
+- Fresh positive installations exercise organization suspension, service
+  catalog narrowing, consent deletion, subject disablement and membership
+  removal/rejoin at the joined-read, pending-fence, provider-row-to-mapping and
+  publication authority barriers. Each route returns a structured 503 without
+  token fields and leaves no usable descendant; positive controls and mutation
+  restoration keep the cases independent. A post-consume terminalization
+  barrier resumes the real provider route and confirms provider completion and
+  mapping cannot release a secret or a live provider row.
 - Browser account controls render installation metadata, omit refresh values and
   provider-row fields, reject machine bearer and untrusted-origin requests,
   revoke the family and installation durably, and remain idempotent on repeat.
 
-The focused run passed `1` file and `12` tests. The full Worker/D1 run passed
-`12` files and `44` tests. Provider HTTP in these tests is simulated only at
+The focused run passed `1` file and `16` tests. The full Worker/D1 run passed
+`12` files and `48` tests. Provider HTTP in these tests is simulated only at
 the GitHub social-login boundary; OAuth provider token rows and Platform
 verification are real local Better Auth/D1 rows. Existing non-Platform Better
 Auth provider lifecycle tests remain on their native provider path; Platform
@@ -96,14 +118,14 @@ clients are the refresh-fenced boundary.
 
 ## Verification
 
-- `sh scripts/format-check .` passed after formatting the six changed TypeScript
-  files.
+- `sh scripts/format-check .` passed.
 - `bun run typecheck` passed.
 - `bunx vitest run --config vitest.worker.config.ts worker/test/oauth-refresh.test.ts`
-  passed: 1 file, 12 tests, including the full-route concurrent fence,
+  passed: 1 file, 16 tests, including the full-route concurrent fence,
   initial zero-row/partial publication, pending ancestor replay, current-read
-  CAS and exact provider/Platform mapping abort triggers above.
-- `bunx vitest run --config vitest.worker.config.ts` passed: 12 files, 44
+  CAS, post-consume/provider completion barrier, late authority barriers and
+  exact provider/Platform mapping abort triggers above.
+- `bunx vitest run --config vitest.worker.config.ts` passed: 12 files, 48
   tests.
 - `bun run test:restart` passed the Miniflare D1 runtime restart persistence
   probe.
