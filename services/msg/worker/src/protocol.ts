@@ -28,7 +28,56 @@ export type RequestBody =
 
 export interface CreateRoomInput {
   readonly body: RequestBody;
+  readonly ownerGuestId?: string;
   readonly plan?: { readonly management: string; readonly room: string };
+}
+
+export type RoomAccessSource = "owner" | "public" | "management";
+export interface GuestRoomAccessContext {
+  readonly kind?: "guest";
+  readonly credential?: string;
+  readonly guestId: string;
+  readonly grantId?: string;
+  readonly source: RoomAccessSource;
+}
+
+export interface OrganizationRoomAccessContext {
+  readonly kind: "organization";
+  readonly credential: string;
+  readonly subjectId: string;
+  readonly organizationId: string;
+  readonly capabilities: readonly string[];
+  /** Retained only for diagnostic compatibility; organization auth never trusts it. */
+  readonly guestId?: string;
+  readonly source: "organization";
+}
+
+export interface ClaimRoomAccessContext {
+  readonly kind: "claim";
+  readonly credential: string;
+  readonly subjectId: string;
+  readonly organizationId: string;
+  readonly capabilities: readonly string[];
+  readonly guestId: string;
+  readonly source: "claim";
+}
+
+export type RoomAccessContext = GuestRoomAccessContext | OrganizationRoomAccessContext | ClaimRoomAccessContext;
+
+export interface ClaimRoomInput {
+  readonly room: string;
+  readonly idempotencyKey: string;
+  readonly requestDigest: string;
+  readonly revokeLinks: boolean;
+  readonly auth: ClaimRoomAccessContext;
+}
+
+export interface ClaimRoomResponse {
+  readonly protocol_version: typeof PROTOCOL_VERSION;
+  readonly room: string;
+  readonly organization_id: string;
+  readonly claimed_at: string;
+  readonly revoke_links: boolean;
 }
 
 export interface CreateRoomResponse {
@@ -107,6 +156,7 @@ function shellQuote(value: string): string {
 
 export interface RoomService {
   create(input: CreateRoomInput): Promise<CreateRoomResponse>;
+  claim?(input: ClaimRoomInput): Promise<ClaimRoomResponse>;
   read?(input: ReadRoomInput): Promise<ReadRoomResponse>;
   post?(input: PostMessageInput): Promise<PostMessageResponse>;
   manage?(input: ManageRoomInput): Promise<ManageRoomResponse>;
@@ -123,11 +173,16 @@ export interface RoomService {
   operatorDelete?(room: string): Promise<void>;
   live?(input: LiveRoomInput): Promise<Response>;
   exportRoom?(input: ExportRoomInput): Promise<Response>;
+  proveLink?(input: { readonly room: string; readonly source: RoomAccessSource; readonly token?: string }): Promise<{ readonly source: RoomAccessSource; readonly storedOwnerId?: string } | null>;
+  recordGrant?(input: { readonly room: string; readonly guestId: string; readonly source: RoomAccessSource; readonly capabilities: readonly string[]; readonly grantId?: string }): Promise<void>;
+  checkGrant?(input: { readonly room: string; readonly guestId: string; readonly source: RoomAccessSource; readonly action: "read" | "write" | "manage"; readonly grantId?: string }): Promise<boolean>;
+  findGrant?(input: { readonly room: string; readonly guestId: string; readonly source?: RoomAccessSource; readonly grantId?: string }): Promise<{ readonly source: RoomAccessSource; readonly grantId?: string; readonly capabilities: readonly string[]; readonly active: boolean } | null>;
 }
 
 export interface ReadRoomInput {
   readonly after: number;
   readonly room: string;
+  readonly auth?: RoomAccessContext;
 }
 
 export interface RoomMessage extends Message {
@@ -160,6 +215,7 @@ export interface PostMessageInput {
   readonly browserId?: string;
   readonly idempotencyKey?: string;
   readonly room: string;
+  readonly auth?: RoomAccessContext;
 }
 
 export interface PushSubscriptionInput {
@@ -169,6 +225,7 @@ export interface PushSubscriptionInput {
 }
 
 export interface PushEnrollmentInput {
+  readonly auth?: RoomAccessContext;
   readonly browserId: string;
   readonly room: string;
 }
@@ -198,6 +255,7 @@ export interface ManageRoomInput {
   readonly method: "DELETE" | "GET";
   readonly room: string;
   readonly token: string;
+  readonly auth?: RoomAccessContext;
 }
 
 export interface ManageRoomResponse {
@@ -207,20 +265,24 @@ export interface ManageRoomResponse {
 }
 
 export interface CreateWebhookInput {
+  readonly auth?: RoomAccessContext;
   readonly room: string;
   readonly url: string;
 }
 
 export interface ListWebhooksInput {
+  readonly auth?: RoomAccessContext;
   readonly room: string;
 }
 
 export interface RemoveWebhookInput {
+  readonly auth?: RoomAccessContext;
   readonly id: string;
   readonly room: string;
 }
 
 export interface ManageWebhookInput {
+  readonly auth?: RoomAccessContext;
   readonly id: string;
   readonly room: string;
 }
@@ -300,11 +362,13 @@ export interface RedeliverWebhookResponse {
 export interface LiveRoomInput {
   readonly after: number;
   readonly room: string;
+  readonly auth?: RoomAccessContext;
 }
 
 export interface ExportRoomInput {
   readonly format: "json" | "markdown";
   readonly room: string;
+  readonly auth?: RoomAccessContext;
 }
 
 /** Removes the legacy absolute-expiry field from replayed or rolling-deploy data. */

@@ -23,6 +23,7 @@ import {
 import { applySecurityHeaders } from "./security";
 import { DurableRoomService, type RoomNamespace } from "./room-service";
 import { emitMsgEvent } from "./observability";
+import type { MsgAuthenticator } from "./auth";
 import { normalizeWebhookUrl } from "./webhooks";
 import { PUSH_SERVICE_WORKER_PATH, pushServiceWorkerResponse } from "./push-service-worker";
 import { parsePushBrowserId, parsePushSubscription } from "./push-subscriptions";
@@ -50,6 +51,7 @@ export interface MsgWorkerOptions {
   readonly assets?: MsgStaticAssets;
   readonly createDisabled?: boolean;
   readonly operations?: Operations;
+  readonly auth?: MsgAuthenticator;
   readonly operatorToken?: string;
   readonly postDisabled?: boolean;
   readonly pushConfigured?: boolean;
@@ -58,14 +60,14 @@ export interface MsgWorkerOptions {
 }
 
 export type CreationClaim =
-  | { readonly kind: "claimed"; readonly leaseToken: string; readonly plan: { readonly management: string; readonly room: string } }
-  | { readonly kind: "complete"; readonly response: CreateRoomResponse }
+  | { readonly kind: "claimed"; readonly leaseToken: string; readonly plan: { readonly management: string; readonly room: string; readonly ownerGuestId?: string } }
+  | { readonly kind: "complete"; readonly response: CreateRoomResponse; readonly ownerGrantId?: string }
   | { readonly kind: "conflict" }
   | { readonly kind: "pending" };
 
 export interface CreationOperations {
-  claimCreation(key: string, fingerprint: string): Promise<CreationClaim>;
-  completeCreation(key: string, leaseToken: string, response: CreateRoomResponse): Promise<void>;
+  claimCreation(key: string, fingerprint: string, guestId?: string): Promise<CreationClaim>;
+  completeCreation(key: string, leaseToken: string, response: CreateRoomResponse, guestId?: string, ownerGrantId?: string): Promise<void>;
 }
 
 export interface Operations extends CreationOperations {
@@ -131,7 +133,10 @@ async function route(request: Request, service: RoomService, options: MsgWorkerO
   const url = new URL(request.url);
 
   if (url.pathname.startsWith("/operator/v1/")) {
-    if (!operatorAuthorized(request, options.operatorToken)) return operatorUnauthorized();
+    if (options.auth) {
+      const authorization = await options.auth.authorizeOperator(request);
+      if (authorization.status === "denied") return authorization.response;
+    } else if (!operatorAuthorized(request, options.operatorToken)) return operatorUnauthorized();
     if (request.method !== "GET" && request.method !== "HEAD" && !isSameOrigin(request, url)) {
       throw new ProtocolError(ERROR_CODES.forbidden, "Cross-origin state changes are not allowed.", 403);
     }
@@ -265,6 +270,7 @@ async function route(request: Request, service: RoomService, options: MsgWorkerO
     }
     await enforceRateLimit(request, options.rateLimits?.creation);
     const body = await parseRequestBody(request, { maxBytes: MAX_ROOM_REQUEST_BYTES });
+    const control = options.auth ? await options.auth.control(request) : undefined;
     const key = request.headers.has("idempotency-key")
       ? validateIdempotencyKey(request.headers.get("idempotency-key") ?? "")
       : undefined;
@@ -272,14 +278,15 @@ async function route(request: Request, service: RoomService, options: MsgWorkerO
       const fingerprint = await creationFingerprint(body);
       let claim: CreationClaim | undefined;
       try {
-        claim = await options.operations.claimCreation(key, fingerprint);
+        claim = await options.operations.claimCreation(key, fingerprint, control?.guestId);
       } catch {
         // D1 is intentionally outside the room creation availability path.
         emitMsgEvent("msg.d1.availability", "unavailable");
       }
       if (claim) emitMsgEvent("msg.creation.claimed", claim.kind);
       if (claim?.kind === "complete") {
-        return createResponse(claim.response, negotiateCreateRepresentation(request.headers.get("accept")));
+        const owner = control && options.auth ? await options.auth.authorizeOwner(request, { room: claim.response.room.id, storedOwnerId: control.guestId, ...(claim.ownerGrantId ? { grantId: claim.ownerGrantId } : {}) }, control) : undefined;
+        return createResponse(claim.response, negotiateCreateRepresentation(request.headers.get("accept")), [...(control?.setCookies ?? []), ...(owner?.setCookies ?? [])]);
       }
       if (claim?.kind === "conflict") {
         throw new ProtocolError(ERROR_CODES.conflict, "The Idempotency-Key is already used for another request.", 409);
@@ -287,61 +294,95 @@ async function route(request: Request, service: RoomService, options: MsgWorkerO
       if (claim?.kind === "pending") {
         throw new ProtocolError(ERROR_CODES.serviceUnavailable, "Room creation is still in progress. Retry with the same Idempotency-Key.", 503);
       }
-      const created = await service.create({ body, ...(claim?.kind === "claimed" ? { plan: claim.plan } : {}) });
+      const created = await service.create({ body, ...(control ? { ownerGuestId: control.guestId } : {}), ...(claim?.kind === "claimed" ? { plan: claim.plan } : {}) });
+      const owner = control && options.auth ? await options.auth.authorizeOwner(request, { room: created.room.id, storedOwnerId: control.guestId }, control) : undefined;
       try {
-        await options.operations.completeCreation(key, claim?.kind === "claimed" ? claim.leaseToken : "", created);
+        await options.operations.completeCreation(key, claim?.kind === "claimed" ? claim.leaseToken : "", created, control?.guestId, owner?.context.kind === "guest" ? owner.context.grantId : undefined);
       } catch {
         // The created room remains valid when the optional replay receipt cannot persist.
         emitMsgEvent("msg.d1.availability", "unavailable");
       }
-      return createResponse(created, negotiateCreateRepresentation(request.headers.get("accept")));
+      return createResponse(created, negotiateCreateRepresentation(request.headers.get("accept")), [...(control?.setCookies ?? []), ...(owner?.setCookies ?? [])]);
     }
-    const created = await service.create({ body });
+    const created = await service.create({ body, ...(control ? { ownerGuestId: control.guestId } : {}) });
+    const owner = control && options.auth ? await options.auth.authorizeOwner(request, { room: created.room.id, storedOwnerId: control.guestId }, control) : undefined;
     return createResponse(
       created,
       negotiateCreateRepresentation(request.headers.get("accept")),
+      [...(control?.setCookies ?? []), ...(owner?.setCookies ?? [])],
     );
+  }
+
+  const claimMatch = /^\/([^/]+)\/claim$/.exec(url.pathname);
+  if (claimMatch && request.method === "POST") {
+    if (!service.claim) return notFound();
+    if (!options.auth) throw new ProtocolError(ERROR_CODES.serviceUnavailable, "Ownership claims are temporarily unavailable.", 503);
+    const body = parseClaimBody(await parseRequestBody(request, { maxBytes: 2 * 1024 }));
+    const idempotencyKey = validateIdempotencyKey(request.headers.get("idempotency-key") ?? "");
+    const auth = await options.auth.authorizeClaim(request);
+    const result = await service.claim({
+      room: claimMatch[1]!,
+      idempotencyKey,
+      requestDigest: await claimFingerprint(body.revoke_links),
+      revokeLinks: body.revoke_links,
+      auth: auth.context,
+    });
+    return withSetCookies(jsonResponse(result), [...auth.setCookies]);
+  }
+
+  const organizationManageMatch = /^\/([^/]+)\/manage$/.exec(url.pathname);
+  if (organizationManageMatch && (request.method === "GET" || request.method === "DELETE")) {
+    if (!service.manage) return notFound();
+    if (!options.auth) throw new ProtocolError(ERROR_CODES.serviceUnavailable, "Organization management is temporarily unavailable.", 503);
+    const auth = await options.auth.authorizeOrganizationResource(request, { room: organizationManageMatch[1]!, action: "manage" });
+    const result = await service.manage({ method: request.method, room: organizationManageMatch[1]!, token: "", auth: auth.context });
+    return withSetCookies(manageResponse(result, request.method, negotiateRepresentation(request.headers.get("accept"))), [...auth.setCookies]);
   }
 
   const webhookCollectionMatch = /^\/([^/]+)\/webhooks$/u.exec(url.pathname);
   if (webhookCollectionMatch && request.method === "GET") {
     if (!service.listWebhooks) return notFound();
     await enforceRateLimit(request, options.rateLimits?.reads);
-    return jsonResponse(await service.listWebhooks({ room: webhookCollectionMatch[1]! }));
+    const auth = options.auth ? await options.auth.authorizeResource(request, { room: webhookCollectionMatch[1]!, source: "public", action: "read", recover: recoveryRequested(url) }) : undefined;
+    return withSetCookies(jsonResponse(await service.listWebhooks({ room: webhookCollectionMatch[1]!, ...(auth ? { auth: auth.context } : {}) })), [...(auth?.setCookies ?? [])]);
   }
   if (webhookCollectionMatch && request.method === "POST") {
     if (!service.createWebhook) return notFound();
     await enforceRateLimit(request, options.rateLimits?.posts);
+    const auth = options.auth ? await options.auth.authorizeResource(request, { room: webhookCollectionMatch[1]!, source: "public", action: "write", recover: recoveryRequested(url) }) : undefined;
     const destination = parseWebhookDestination(await parseRequestBody(request, { maxBytes: MAX_WEBHOOK_REQUEST_BYTES }));
-    return jsonResponse(await service.createWebhook({ room: webhookCollectionMatch[1]!, url: destination }), 201);
+    return withSetCookies(jsonResponse(await service.createWebhook({ room: webhookCollectionMatch[1]!, url: destination, ...(auth ? { auth: auth.context } : {}) }), 201), [...(auth?.setCookies ?? [])]);
   }
   const webhookItemMatch = /^\/([^/]+)\/webhooks\/([0-9a-f-]{36})$/iu.exec(url.pathname);
   if (webhookItemMatch && request.method === "DELETE") {
     if (!service.removeWebhook) return notFound();
     await enforceRateLimit(request, options.rateLimits?.posts);
-    return jsonResponse(await service.removeWebhook({ id: webhookItemMatch[2]!, room: webhookItemMatch[1]! }));
+    const auth = options.auth ? await options.auth.authorizeResource(request, { room: webhookItemMatch[1]!, source: "public", action: "write", recover: recoveryRequested(url) }) : undefined;
+    return withSetCookies(jsonResponse(await service.removeWebhook({ id: webhookItemMatch[2]!, room: webhookItemMatch[1]!, ...(auth ? { auth: auth.context } : {}) })), [...(auth?.setCookies ?? [])]);
   }
   const webhookActionMatch = /^\/([^/]+)\/webhooks\/([0-9a-f-]{36})\/(disable|enable|rotate-secret)$/iu.exec(url.pathname);
   if (webhookActionMatch && request.method === "POST") {
     await enforceRateLimit(request, options.rateLimits?.posts);
+    const auth = options.auth ? await options.auth.authorizeResource(request, { room: webhookActionMatch[1]!, source: "public", action: "write", recover: recoveryRequested(url) }) : undefined;
     const input = { id: webhookActionMatch[2]!, room: webhookActionMatch[1]! };
     if (webhookActionMatch[3] === "disable") {
       if (!service.disableWebhook) return notFound();
-      return jsonResponse(await service.disableWebhook(input));
+      return withSetCookies(jsonResponse(await service.disableWebhook({ ...input, ...(auth ? { auth: auth.context } : {}) })), [...(auth?.setCookies ?? [])]);
     }
     if (webhookActionMatch[3] === "enable") {
       if (!service.enableWebhook) return notFound();
-      return jsonResponse(await service.enableWebhook(input));
+      return withSetCookies(jsonResponse(await service.enableWebhook({ ...input, ...(auth ? { auth: auth.context } : {}) })), [...(auth?.setCookies ?? [])]);
     }
     if (!service.rotateWebhookSecret) return notFound();
-    return jsonResponse(await service.rotateWebhookSecret(input));
+    return withSetCookies(jsonResponse(await service.rotateWebhookSecret({ ...input, ...(auth ? { auth: auth.context } : {}) })), [...(auth?.setCookies ?? [])]);
   }
   const webhookRedeliveryMatch = /^\/([^/]+)\/webhooks\/([0-9a-f-]{36})\/deliveries\/([0-9a-f-]{36})\/redeliver$/iu.exec(url.pathname);
   if (webhookRedeliveryMatch && request.method === "POST") {
     if (!service.redeliverWebhook) return notFound();
     await enforceRateLimit(request, options.rateLimits?.posts);
-    const result = await service.redeliverWebhook({ eventId: webhookRedeliveryMatch[3]!, id: webhookRedeliveryMatch[2]!, room: webhookRedeliveryMatch[1]! });
-    return jsonResponse(result, result.result === "queued" ? 202 : 200);
+    const auth = options.auth ? await options.auth.authorizeResource(request, { room: webhookRedeliveryMatch[1]!, source: "public", action: "write", recover: recoveryRequested(url) }) : undefined;
+    const result = await service.redeliverWebhook({ eventId: webhookRedeliveryMatch[3]!, id: webhookRedeliveryMatch[2]!, room: webhookRedeliveryMatch[1]!, ...(auth ? { auth: auth.context } : {}) });
+    return withSetCookies(jsonResponse(result, result.result === "queued" ? 202 : 200), [...(auth?.setCookies ?? [])]);
   }
 
   const pushSubscriptionMatch = /^\/([^/]+)\/push-subscriptions$/u.exec(url.pathname);
@@ -352,12 +393,14 @@ async function route(request: Request, service: RoomService, options: MsgWorkerO
     if (request.method === "GET") {
       if (!service.readPushEnrollment) return notFound();
       await enforceRateLimit(request, options.rateLimits?.reads);
-      return jsonResponse(await service.readPushEnrollment({ browserId, room }));
+      const auth = options.auth ? await options.auth.authorizeResource(request, { room, source: "public", action: "read", recover: recoveryRequested(url) }) : undefined;
+      return withSetCookies(jsonResponse(await service.readPushEnrollment({ browserId, room, ...(auth ? { auth: auth.context } : {}) })), [...(auth?.setCookies ?? [])]);
     }
     await enforceRateLimit(request, options.rateLimits?.posts);
+    const auth = options.auth ? await options.auth.authorizeResource(request, { room, source: "public", action: "write", recover: recoveryRequested(url) }) : undefined;
     if (request.method === "DELETE") {
       if (!service.removePushEnrollment) return notFound();
-      return jsonResponse(await service.removePushEnrollment({ browserId, room }));
+      return withSetCookies(jsonResponse(await service.removePushEnrollment({ browserId, room, ...(auth ? { auth: auth.context } : {}) })), [...(auth?.setCookies ?? [])]);
     }
     if (!service.enrollPush) return notFound();
     if (!options.pushConfigured || !options.pushVapidPublicKey) {
@@ -366,28 +409,32 @@ async function route(request: Request, service: RoomService, options: MsgWorkerO
     const pushBody = await parseRequestBody(request, { maxBytes: MAX_PUSH_SUBSCRIPTION_REQUEST_BYTES });
     const subscription = pushBody.kind === "json" ? await parsePushSubscription(pushBody.value) : undefined;
     if (!subscription) throw new ProtocolError(ERROR_CODES.invalidBody, "The browser push subscription is invalid.", 400);
-    return jsonResponse(await service.enrollPush({ browserId, room, subscription }), 201);
+    return withSetCookies(jsonResponse(await service.enrollPush({ browserId, room, subscription, ...(auth ? { auth: auth.context } : {}) }), 201), [...(auth?.setCookies ?? [])]);
   }
 
   const exportMatch = /^\/([^/]+)\/export\.(md|json)$/.exec(url.pathname);
   if (exportMatch && request.method === "GET") {
     if (!service.exportRoom) return notFound();
     await enforceRateLimit(request, options.rateLimits?.reads);
-    return service.exportRoom({ format: exportMatch[2] === "json" ? "json" : "markdown", room: exportMatch[1] });
+    const auth = options.auth ? await options.auth.authorizeResource(request, { room: exportMatch[1], source: "public", action: "read", recover: recoveryRequested(url) }) : undefined;
+    const response = await service.exportRoom({ format: exportMatch[2] === "json" ? "json" : "markdown", room: exportMatch[1], ...(auth ? { auth: auth.context } : {}) });
+    return withSetCookies(response, [...(auth?.setCookies ?? [])]);
   }
 
   const agentMatch = /^\/([^/]+)\/agent$/.exec(url.pathname);
   if (agentMatch && request.method === "GET") {
     if (!service.read) return notFound();
     await enforceRateLimit(request, options.rateLimits?.reads);
+    const auth = options.auth ? await options.auth.authorizeResource(request, { room: agentMatch[1], source: "public", action: "read", recover: recoveryRequested(url) }) : undefined;
     const result = stripLegacyAbsoluteExpiry(await service.read({
       after: validateCursor(url.searchParams.get("after")),
       room: agentMatch[1],
+      ...(auth ? { auth: auth.context } : {}),
     })) as unknown as ReadRoomResponse;
     const document = buildAgentRepresentation(result);
-    return request.headers.get("accept")?.toLowerCase().includes("application/json")
+    return withSetCookies(request.headers.get("accept")?.toLowerCase().includes("application/json")
       ? jsonResponse(document)
-      : textResponse(renderAgentText(document));
+      : textResponse(renderAgentText(document)), [...(auth?.setCookies ?? [])]);
   }
 
   const roomMatch = /^\/([^/]+)$/.exec(url.pathname);
@@ -397,19 +444,20 @@ async function route(request: Request, service: RoomService, options: MsgWorkerO
       if (!service.read) return notFound();
       await enforceRateLimit(request, options.rateLimits?.reads);
       const after = validateCursor(url.searchParams.get("after"));
-      const result = stripLegacyAbsoluteExpiry(await service.read({ after, room })) as unknown as ReadRoomResponse;
+      const auth = options.auth ? await options.auth.authorizeResource(request, { room, source: "public", action: "read", recover: recoveryRequested(url) }) : undefined;
+      const result = stripLegacyAbsoluteExpiry(await service.read({ after, room, ...(auth ? { auth: auth.context } : {}) })) as unknown as ReadRoomResponse;
       if (negotiateRepresentation(request.headers.get("accept")) === "html") {
         if (selectBrowserView(url, request.headers.get("cookie")) === "agent") {
-          return htmlResponse(renderAgentRoomPage(result, url));
+        return withSetCookies(htmlResponse(renderAgentRoomPage(result, url)), [...(auth?.setCookies ?? [])]);
         }
         const page = renderBrowserDocument({ pushPublicKey: options.pushConfigured ? options.pushVapidPublicKey : undefined, room, title: "Temporary conversation", url });
-        return htmlResponse(page.html, 200, page.styleNonce);
+        return withSetCookies(htmlResponse(page.html, 200, page.styleNonce), [...(auth?.setCookies ?? [])]);
       }
       const etag = roomEtag(result.latest_message, after);
       if (request.headers.get("if-none-match") === etag) {
-        return new Response(null, { headers: { etag, "retry-after": "5" }, status: 304 });
+        return withSetCookies(new Response(null, { headers: { etag, "retry-after": "5" }, status: 304 }), [...(auth?.setCookies ?? [])]);
       }
-      return readResponse(result, negotiateRepresentation(request.headers.get("accept")), etag);
+      return withSetCookies(readResponse(result, negotiateRepresentation(request.headers.get("accept")), etag), [...(auth?.setCookies ?? [])]);
     }
     if (request.method === "POST") {
       if (!service.post) return notFound();
@@ -417,13 +465,15 @@ async function route(request: Request, service: RoomService, options: MsgWorkerO
         throw new ProtocolError(ERROR_CODES.serviceUnavailable, "New messages are temporarily unavailable.", 503);
       }
       await enforceRateLimit(request, options.rateLimits?.posts);
+      const auth = options.auth ? await options.auth.authorizeResource(request, { room, source: "public", action: "write", recover: recoveryRequested(url) }) : undefined;
       const result = stripLegacyAbsoluteExpiry(await service.post({
         body: await parseRequestBody(request, { maxBytes: MAX_ROOM_REQUEST_BYTES }),
         browserId: parseOptionalPushBrowserId(request.headers.get("x-msg-browser-id")),
         idempotencyKey: request.headers.has("idempotency-key") ? validateIdempotencyKey(request.headers.get("idempotency-key") ?? "") : undefined,
         room,
+        ...(auth ? { auth: auth.context } : {}),
       })) as unknown as import("./protocol").PostMessageResponse;
-      return postResponse(result, negotiateRepresentation(request.headers.get("accept")));
+      return withSetCookies(postResponse(result, negotiateRepresentation(request.headers.get("accept"))), [...(auth?.setCookies ?? [])]);
     }
   }
 
@@ -434,14 +484,17 @@ async function route(request: Request, service: RoomService, options: MsgWorkerO
       throw new ProtocolError(ERROR_CODES.invalidBody, "The live endpoint requires a WebSocket upgrade.", 400);
     }
     await enforceRateLimit(request, options.rateLimits?.live);
-    return service.live({ after: validateCursor(url.searchParams.get("after")), room: liveMatch[1] });
+    const auth = options.auth ? await options.auth.authorizeResource(request, { room: liveMatch[1], source: "public", action: "read", recover: recoveryRequested(url) }) : undefined;
+    const response = await service.live({ after: validateCursor(url.searchParams.get("after")), room: liveMatch[1], ...(auth ? { auth: auth.context } : {}) });
+    return withSetCookies(response, [...(auth?.setCookies ?? [])]);
   }
 
   const manageMatch = /^\/manage\/([^/]+)\/([^/]+)$/.exec(url.pathname);
   if (manageMatch && (request.method === "GET" || request.method === "DELETE")) {
     if (!service.manage) return notFound();
-    const result = await service.manage({ method: request.method, room: manageMatch[1], token: manageMatch[2] });
-    return manageResponse(result, request.method, negotiateRepresentation(request.headers.get("accept")));
+    const auth = options.auth ? await options.auth.authorizeResource(request, { room: manageMatch[1], source: "management", token: manageMatch[2], action: "manage", recover: recoveryRequested(url) }) : undefined;
+    const result = await service.manage({ method: request.method, room: manageMatch[1], token: manageMatch[2], ...(auth ? { auth: auth.context } : {}) });
+    return withSetCookies(manageResponse(result, request.method, negotiateRepresentation(request.headers.get("accept"))), [...(auth?.setCookies ?? [])]);
   }
 
   return errorResponse(
@@ -492,6 +545,28 @@ async function creationFingerprint(body: RequestBody): Promise<string> {
   let binary = "";
   for (const byte of digest) binary += String.fromCharCode(byte);
   return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/u, "");
+}
+
+async function claimFingerprint(revokeLinks: boolean): Promise<string> {
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(`msg-claim:v1:${revokeLinks ? "1" : "0"}`)));
+  let binary = "";
+  for (const byte of digest) binary += String.fromCharCode(byte);
+  return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/u, "");
+}
+
+function parseClaimBody(body: RequestBody): { readonly revoke_links: boolean } {
+  if (body.kind !== "json" || body.value === null || Array.isArray(body.value) || typeof body.value !== "object") {
+    throw new ProtocolError(ERROR_CODES.invalidBody, "The ownership claim body must be a JSON object.", 400);
+  }
+  const value = body.value as Record<string, import("./protocol").JsonValue>;
+  const keys = Object.keys(value);
+  if (keys.some((key) => key !== "revoke_links")) {
+    throw new ProtocolError(ERROR_CODES.invalidBody, "The ownership claim body contains unsupported fields.", 400);
+  }
+  if (value.revoke_links !== undefined && typeof value.revoke_links !== "boolean") {
+    throw new ProtocolError(ERROR_CODES.invalidBody, "revoke_links must be a boolean.", 400);
+  }
+  return { revoke_links: value.revoke_links === true };
 }
 
 function parseReport(body: RequestBody): { capability: string; description?: string } {
@@ -577,6 +652,10 @@ function notFound(): never {
   throw new ProtocolError(ERROR_CODES.notFound, "The requested resource was not found.", 404);
 }
 
+function recoveryRequested(url: URL): boolean {
+  return url.searchParams.get("recover") === "1";
+}
+
 function operatorAuthorized(request: Request, token: string | undefined): boolean {
   const value = request.headers.get("authorization");
   if (!token || !value?.startsWith("Bearer ")) return false;
@@ -590,6 +669,7 @@ function operatorUnauthorized(): Response {
 function createResponse(
   created: CreateRoomResponse,
   representation: "json" | "markdown",
+  cookies: readonly string[] = [],
 ): Response {
   const safeCreated = stripLegacyAbsoluteExpiry(created);
   const hydrated = {
@@ -604,6 +684,12 @@ function createResponse(
           201,
         );
   response.headers.set("location", hydrated.conversation_url);
+  for (const cookie of cookies) response.headers.append("set-cookie", cookie);
+  return response;
+}
+
+function withSetCookies(response: Response, cookies: readonly string[]): Response {
+  for (const cookie of cookies) response.headers.append("set-cookie", cookie);
   return response;
 }
 

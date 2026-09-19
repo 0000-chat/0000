@@ -8,7 +8,7 @@
     "check": "bun ../../scripts/check-workspace.mjs --workspace @0000/msg && bun run check:application",
     "check:application": "bun run check:worker && bun run check:tooling && bun run check:cli",
     "check:worker": "bun run assets:mermaid && bun run --cwd worker check:application",
-    "check:tooling": "bun test scripts",
+    "check:tooling": "bun test ./scripts",
     "check:cli": "bun run --cwd cli check:application",
     "browser:notifications": "dbus-run-session -- bun scripts/push-notification-browser-smoke.mjs",
     "wrangler:types": "bun scripts/wrangler-config.ts types worker/worker-configuration.d.ts --include-runtime=true",
@@ -17,6 +17,10 @@
     "operator": "bun worker/scripts/operator.ts",
     "synthetic": "bun worker/scripts/production-synthetic.ts",
     "deployment-allocation": "bun scripts/deployment-allocation.ts"
+  },
+  "dependencies": {
+    "@0000/contracts": "workspace:*",
+    "@0000/platform-client": "workspace:*"
   },
   "devDependencies": {
     "@types/ws": "8.18.1",

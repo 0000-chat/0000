@@ -1,0 +1,32 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "platform",
+  "main": "src/worker.ts",
+  "compatibility_date": "2026-09-18",
+  "compatibility_flags": ["nodejs_compat"],
+  "d1_databases": [
+    {
+      "binding": "IDENTITY_DB",
+      "database_name": "platform-identity",
+      "database_id": "00000000-0000-0000-0000-000000000001",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "vars": {
+    "PLATFORM_BASE_URL": "http://localhost:8787",
+    "PLATFORM_AUTHORITY_ID": "platform-t01-authority",
+    "PLATFORM_OPERATOR_USER_ID": "",
+    "PLATFORM_DEPLOYMENT_MODE": "self-hosted",
+    "PLATFORM_SIGNUP_POLICY": "open",
+    "PLATFORM_CREDENTIAL_MAX_LIFETIME_DAYS": "90",
+    "GOOGLE_CLIENT_ID": "platform-google-client",
+    "GITHUB_CLIENT_ID": "platform-t01-probe"
+  },
+  "secrets": {
+    "required": [
+      "GOOGLE_CLIENT_SECRET",
+      "GITHUB_CLIENT_SECRET",
+      "BETTER_AUTH_SECRET"
+    ]
+  }
+}

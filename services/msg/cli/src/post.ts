@@ -12,6 +12,7 @@ export interface PostCommand {
 
 export interface PostOptions extends PostCommand {
   readonly fetch: typeof globalThis.fetch;
+  readonly serviceOrigin?: string;
   readonly generatedClientMessageId: () => string;
   readonly signal?: AbortSignal;
   readonly sleep: (delayMs: number, signal?: AbortSignal) => Promise<void>;
@@ -34,9 +35,9 @@ export class PostSignalError extends Error {
   constructor() { super("The msg post was interrupted."); }
 }
 
-export function parsePostCommand(args: readonly string[]): PostCommand {
+export function parsePostCommand(args: readonly string[], serviceOrigin?: string): PostCommand {
   if (args[0] !== "post" || args.length < 4) throw new Error("Usage: msg post <conversation-url> --author <author> [--content <content>] [--client-message-id <id>]");
-  const conversationUrl = validateConversationUrl(args[1] ?? "");
+  const conversationUrl = validateConversationUrl(args[1] ?? "", serviceOrigin);
   const values: Partial<Record<"--author" | "--content" | "--client-message-id", string>> = {};
   for (let index = 2; index < args.length; index += 2) {
     const flag = args[index];
@@ -57,7 +58,7 @@ export function parsePostCommand(args: readonly string[]): PostCommand {
 }
 
 export async function postMessage(options: PostOptions): Promise<PostReceipt> {
-  const conversationUrl = validateConversationUrl(options.conversationUrl);
+  const conversationUrl = validateConversationUrl(options.conversationUrl, options.serviceOrigin);
   validateNonempty(options.author, "author");
   if (options.content === undefined) throw new Error("The msg post content is required.");
   validateNonempty(options.content, "content");

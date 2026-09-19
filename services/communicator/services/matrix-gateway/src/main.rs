@@ -19,9 +19,10 @@ use communicator_matrix_gateway::{
     admin::{self, AdminError},
     authority::AuthorityClaimClient,
     config::{GatewayConfig, MAX_CONFIG_JSON_BYTES},
+    credentials::{load_ingestion_service_credential, load_provisioning_credentials},
     crypto::Keyring,
     history::HistoryGatewayServer,
-    ingestion::{IngestionClient, OAuthTokenProvider, SecretString},
+    ingestion::IngestionClient,
     matrix::{
         MATRIX_SESSION_INVALID, MatrixProcessor, matrix_access_token, restore_matrix_client,
         restore_matrix_processor,
@@ -115,18 +116,6 @@ fn load_keyring(path: &Path) -> Result<Keyring, SafeError> {
     Keyring::new(material, 1).map_err(|_| SafeError::new("admin_key_invalid"))
 }
 
-fn load_text(path: &Path) -> Result<String, SafeError> {
-    let value = load_secret(
-        path,
-        SecretKind::Text {
-            max_bytes: MAX_TEXT_SECRET_BYTES,
-        },
-    )?;
-    std::str::from_utf8(value.as_bytes())
-        .map(str::to_owned)
-        .map_err(|_| SafeError::new("secret_invalid"))
-}
-
 fn parse_config_option(
     args: &[OsString],
     expected: &[&str],
@@ -195,18 +184,10 @@ async fn run_daemon(config_path: &Path) -> Result<(), SafeError> {
         Duration::from_secs(config.request_timeout_secs()),
         Duration::from_secs(config.sync_timeout_secs()),
     )?;
-    let oauth_secret = load_text(config.oauth_client_secret_file())?;
-    let token_provider = Arc::new(OAuthTokenProvider::new(
-        config.oauth_token_url(),
-        config.oauth_client_id(),
-        SecretString::new(oauth_secret),
-        config.oauth_client_auth_method(),
-        Duration::from_secs(config.request_timeout_secs()),
-        Duration::from_secs(30),
-    )?);
+    let ingestion_credential = load_ingestion_service_credential(&config)?;
     let sink = IngestionClient::new(
         config.ingestion_base_url(),
-        token_provider,
+        ingestion_credential,
         Duration::from_secs(config.request_timeout_secs()),
     )
     .map_err(|error| SafeError::new(error.code()))?;
@@ -230,8 +211,10 @@ async fn run_provisioning(config_path: &Path) -> Result<(), SafeError> {
     let provisioning = config
         .provisioning()
         .ok_or_else(|| SafeError::new("provisioning_config_missing"))?;
-    let bridge_secret = load_text(provisioning.bridge_shared_secret_file())?;
-    let gateway_secret = SecretString::new(load_text(provisioning.gateway_shared_secret_file())?);
+    let credentials = load_provisioning_credentials(provisioning)?;
+    let bridge_secret = credentials.bridge_shared().clone();
+    let gateway_transport_secret = credentials.gateway_transport().clone();
+    let authority_credential = credentials.authority_service().clone();
     let keyring = load_keyring(config.state_key_file())?;
     let store = Store::open(config.state_db_path(), keyring)
         .map_err(|error| SafeError::new(error.code()))?;
@@ -259,23 +242,27 @@ async fn run_provisioning(config_path: &Path) -> Result<(), SafeError> {
         Duration::from_secs(config.request_timeout_secs()),
         Duration::from_secs(config.sync_timeout_secs()),
     )?;
-    let history = HistoryGatewayServer::new(store, Arc::new(transport), gateway_secret.as_str())?;
+    let history = HistoryGatewayServer::new(
+        store,
+        Arc::new(transport),
+        gateway_transport_secret.as_str(),
+    )?;
     let authority = AuthorityClaimClient::new(
         provisioning.authority_base_url(),
-        gateway_secret.clone(),
+        authority_credential,
         Duration::from_secs(config.request_timeout_secs()),
     )
     .map_err(|error| SafeError::new(error.code()))?;
     let client = WhatsAppProvisioningClient::new(
         provisioning.bridge_url(),
-        SecretString::new(bridge_secret),
+        bridge_secret,
         provisioning.matrix_user_id(),
         Duration::from_secs(config.request_timeout_secs()),
     )
     .map_err(|error| SafeError::new(error.code()))?;
     let server = ProvisioningGatewayServer::new(
         client,
-        gateway_secret,
+        gateway_transport_secret,
         GatewayRouteMetadata {
             gateway_route_id: provisioning.gateway_route_id().to_owned(),
             bridge_instance_id: provisioning.bridge_instance_id().to_owned(),
@@ -333,7 +320,6 @@ fn runtime_exit_code(code: &str) -> u8 {
         || code.starts_with("secret_")
         || code == MATRIX_SESSION_INVALID
         || code == "matrix_transport_invalid"
-        || code.starts_with("oauth_")
         || code.starts_with("ingestion_")
         || code.starts_with("provisioning_")
     {

@@ -13,6 +13,7 @@ export interface CliDependencies {
   readonly generatedClientMessageId?: () => string;
   readonly readStdin?: (signal?: AbortSignal) => Promise<string>;
   readonly signal?: AbortSignal;
+  readonly serviceOrigin?: string;
   readonly sleep?: (delayMs: number, signal?: AbortSignal) => Promise<void>;
   readonly stderr: (text: string) => void;
   readonly stdinIsTTY?: boolean;
@@ -31,16 +32,17 @@ export async function runCli(args: readonly string[], dependencies: CliDependenc
   }
   try {
     if (args[0] === "join") {
-      const command = parseJoinCommand(args);
+      const command = parseJoinCommand(args, dependencies.serviceOrigin);
       dependencies.stdout(await joinConversation({
         ...command,
         fetch: dependencies.fetch,
         signal: dependencies.signal,
+        serviceOrigin: dependencies.serviceOrigin,
       }));
       return 0;
     }
     if (args[0] === "post") {
-      const command = parsePostCommand(args);
+      const command = parsePostCommand(args, dependencies.serviceOrigin);
       const postDependencies = postRuntimeDependencies(dependencies);
       if (dependencies.signal?.aborted) throw new PostSignalError();
       let content: string;
@@ -59,6 +61,7 @@ export async function runCli(args: readonly string[], dependencies: CliDependenc
         content,
         fetch: dependencies.fetch,
         signal: dependencies.signal,
+        serviceOrigin: dependencies.serviceOrigin,
         ...postDependencies,
         status: (text: string) => dependencies.stderr(`${text}\n`),
       });
@@ -66,15 +69,16 @@ export async function runCli(args: readonly string[], dependencies: CliDependenc
       return 0;
     }
     if (args[0] === "webhooks") {
-      const command = parseWebhooksCommand(args);
-      const response = await manageWebhooks({ ...command, fetch: dependencies.fetch, signal: dependencies.signal });
+      const command = parseWebhooksCommand(args, dependencies.serviceOrigin);
+      const response = await manageWebhooks({ ...command, fetch: dependencies.fetch, serviceOrigin: dependencies.serviceOrigin, signal: dependencies.signal });
       dependencies.stdout(`${JSON.stringify(response)}\n`);
       return 0;
     }
-    const command = parseWaitCommand(args);
+    const command = parseWaitCommand(args, dependencies.serviceOrigin);
     const result = await waitForMessages({
       ...command,
       ...dependencies,
+      serviceOrigin: dependencies.serviceOrigin,
       status: (text: string) => dependencies.stderr(`${text}\n`),
     } as WaitOptions);
     dependencies.stdout(`${JSON.stringify({

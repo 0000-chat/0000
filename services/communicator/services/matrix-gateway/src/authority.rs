@@ -196,10 +196,14 @@ pub trait OutboundAuthority: Send + Sync {
 }
 
 /// Bounded HTTP client for the private Worker claim endpoint.
+///
+/// The bearer is a dedicated Platform-issued outbound claim service
+/// credential. It is separate from the gateway shared secret used to
+/// authenticate Worker-to-gateway transport.
 pub struct AuthorityClaimClient {
     client: Client,
     endpoint: Url,
-    shared_secret: SecretString,
+    service_credential: SecretString,
 }
 
 impl fmt::Debug for AuthorityClaimClient {
@@ -211,28 +215,28 @@ impl fmt::Debug for AuthorityClaimClient {
 impl AuthorityClaimClient {
     pub fn new(
         base_url: impl AsRef<str>,
-        shared_secret: SecretString,
+        service_credential: SecretString,
         timeout: Duration,
     ) -> Result<Self, AuthorityClaimFailure> {
-        Self::build(base_url.as_ref(), shared_secret, timeout, false)
+        Self::build(base_url.as_ref(), service_credential, timeout, false)
     }
 
     #[cfg(test)]
     pub fn new_for_test(
         base_url: impl AsRef<str>,
-        shared_secret: SecretString,
+        service_credential: SecretString,
         timeout: Duration,
     ) -> Result<Self, AuthorityClaimFailure> {
-        Self::build(base_url.as_ref(), shared_secret, timeout, true)
+        Self::build(base_url.as_ref(), service_credential, timeout, true)
     }
 
     fn build(
         base_url: &str,
-        shared_secret: SecretString,
+        service_credential: SecretString,
         timeout: Duration,
         allow_loopback_http: bool,
     ) -> Result<Self, AuthorityClaimFailure> {
-        if shared_secret.as_str().len() < 16 || timeout.is_zero() {
+        if service_credential.as_str().len() < 16 || timeout.is_zero() {
             return Err(AuthorityClaimFailure::InvalidRequest);
         }
         let base = Url::parse(base_url).map_err(|_| AuthorityClaimFailure::InvalidRequest)?;
@@ -268,7 +272,7 @@ impl AuthorityClaimClient {
         Ok(Self {
             client,
             endpoint,
-            shared_secret,
+            service_credential,
         })
     }
 
@@ -333,7 +337,7 @@ impl OutboundAuthority for AuthorityClaimClient {
         let response = self
             .client
             .request(Method::POST, self.endpoint.clone())
-            .bearer_auth(self.shared_secret.as_str())
+            .bearer_auth(self.service_credential.as_str())
             .header("content-type", "application/json")
             .header("accept", "application/json")
             .header("cache-control", "no-store")
@@ -595,7 +599,10 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(matchers::method("POST"))
             .and(matchers::path(CLAIM_PATH))
-            .and(matchers::header("authorization", "Bearer authority-secret"))
+            .and(matchers::header(
+                "authorization",
+                "Bearer authority-claim-service-credential",
+            ))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "status": "claimed",
                 "replayed": false,
@@ -606,7 +613,7 @@ mod tests {
             .await;
         let client = AuthorityClaimClient::new_for_test(
             format!("{}/", server.uri()),
-            SecretString::new("authority-secret"),
+            SecretString::new("authority-claim-service-credential"),
             Duration::from_secs(2),
         )
         .expect("authority test client");
@@ -634,7 +641,7 @@ mod tests {
             .await;
         let client = AuthorityClaimClient::new_for_test(
             format!("{}/", server.uri()),
-            SecretString::new("authority-secret"),
+            SecretString::new("authority-claim-service-credential"),
             Duration::from_secs(2),
         )
         .expect("authority test client");

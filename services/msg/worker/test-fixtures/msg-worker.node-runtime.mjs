@@ -52,6 +52,35 @@ async function readBody(request) {
   return Buffer.concat(chunks);
 }
 
+async function fetchLocalOutbound(request) {
+  const url = new URL(request.url);
+  const body = Buffer.from(await request.arrayBuffer());
+  const headers = Object.fromEntries(request.headers.entries());
+  return new Promise((resolve, reject) => {
+    const outgoing = sendWorkerRequest({
+      hostname: url.hostname,
+      port: url.port || (url.protocol === "https:" ? 443 : 80),
+      path: `${url.pathname}${url.search}`,
+      method: request.method,
+      headers,
+    }, (incoming) => {
+      const chunks = [];
+      incoming.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+      incoming.on("error", reject);
+      incoming.on("end", () => {
+        const responseHeaders = new Headers();
+        for (const [name, value] of Object.entries(incoming.headers)) {
+          if (value !== undefined) responseHeaders.set(name, Array.isArray(value) ? value.join(", ") : value);
+        }
+        resolve(new Response(Buffer.concat(chunks), { status: incoming.statusCode ?? 502, headers: responseHeaders }));
+      });
+    });
+    outgoing.on("error", reject);
+    if (body.byteLength > 0) outgoing.end(body);
+    else outgoing.end();
+  });
+}
+
 function sendJson(response, value, status = 200) {
   const body = Buffer.from(JSON.stringify(value));
   response.writeHead(status, { "content-type": "application/json; charset=utf-8", "content-length": body.byteLength });
@@ -297,10 +326,18 @@ async function start(configurationPath) {
       bindings: configuration.bindings,
       compatibilityDate: configuration.compatibilityDate,
       durableObjects: configuration.durableObjects,
+      ...(configuration.d1Databases ? { d1Databases: configuration.d1Databases } : {}),
+      ...(configuration.d1Persist ? { d1Persist: configuration.d1Persist } : {}),
       durableObjectsPersist: configuration.persistenceDirectory,
       host: "127.0.0.1",
       modules: true,
+      ratelimits: configuration.ratelimits,
       outboundService: async (request) => {
+        // Platform integration fixtures expose the authority through a local
+        // HTTP bridge. Preserve that real boundary while the notification
+        // tests use this hook as their deterministic push provider.
+        const outboundUrl = new URL(request.url);
+        if (outboundUrl.hostname === "127.0.0.1" || outboundUrl.hostname === "localhost") return fetchLocalOutbound(request);
         const bodyBytes = Buffer.from(await request.arrayBuffer());
         const responseConfig = outboundResponse;
         const captured = {
@@ -333,6 +370,19 @@ async function start(configurationPath) {
       },
       script: configuration.script,
     });
+    if (configuration.d1MigrationPaths?.length) {
+      const database = await miniflare.getD1Database("MSG_DB");
+      for (const path of configuration.d1MigrationPaths) {
+        const source = await readFile(path, "utf8");
+        for (const statement of source.split(";").map((value) => value.trim()).filter(Boolean)) {
+          try {
+            await database.prepare(statement).run();
+          } catch (error) {
+            if (!(error instanceof Error) || !/duplicate column name|already exists/iu.test(error.message)) throw error;
+          }
+        }
+      }
+    }
     dispatchServer = createServer((request, response) => {
       void dispatch(request, response);
     });

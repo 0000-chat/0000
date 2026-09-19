@@ -63,6 +63,7 @@ async function resetSchema(): Promise<void> {
     "audit_events",
     "control_event_outbox",
     "directory_mutations",
+    "platform_bindings",
     "oauth_authorization_codes",
     "oauth_upstream_login_transactions",
     "oauth_authorization_transactions",

@@ -9,5 +9,9 @@
     "test": "bun test src scripts",
     "check:application": "bun run lint && bun run typecheck && bun run test",
     "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@0000/contracts": "workspace:*",
+    "@0000/platform-client": "workspace:*"
   }
 }

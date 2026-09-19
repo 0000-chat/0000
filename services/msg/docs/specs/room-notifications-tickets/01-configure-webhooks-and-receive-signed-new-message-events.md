@@ -30,4 +30,3 @@ None (can start immediately).
 ## Parent
 
 [Room Notifications spec](https://github.com/0000-chat/0000-full/issues/24)
-

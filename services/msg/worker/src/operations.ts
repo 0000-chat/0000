@@ -17,7 +17,12 @@ export interface AbuseReportInput {
   readonly capability: string;
   readonly description?: string;
 }
-export interface CreationPlan { readonly management: string; readonly room: string; }
+export interface CreationPlan { readonly management: string; readonly room: string; readonly ownerGuestId?: string; }
+
+interface CreationReceipt {
+  readonly response: CreateRoomResponse;
+  readonly ownerGrantId?: string;
+}
 
 export type AbuseReportStatus = "closed" | "open" | "reviewed";
 
@@ -59,24 +64,18 @@ export class D1OperationStore implements CreationOperations {
     private readonly now: () => number = () => Date.now(),
   ) {}
 
-  async claimCreation(key: string, fingerprint: string): Promise<CreationClaim> {
+  async claimCreation(key: string, fingerprint: string, guestId = "legacy-unscoped-test"): Promise<CreationClaim> {
     const now = this.now();
-    const legacy = await this.d1.prepare("SELECT request_fingerprint, state, response_envelope, expires_at FROM creation_idempotency WHERE idempotency_key = ?").bind(key).first<Pick<CreationRow, "request_fingerprint" | "state" | "response_envelope" | "expires_at">>();
-    if (legacy) {
-      if (legacy.expires_at <= now) await this.d1.prepare("DELETE FROM creation_idempotency WHERE idempotency_key = ? AND expires_at <= ?").bind(key, now).run();
-      else if (legacy.request_fingerprint !== fingerprint) return { kind: "conflict" };
-      else if (legacy.state === "pending") return { kind: "pending" };
-      else if (legacy.response_envelope) return { kind: "complete", response: await decryptOperationRecord<CreateRoomResponse>(this.encryptionKey, "creation_idempotency", key, legacy.response_envelope) };
-    }
     await this.purge(now);
-    const storageId = await opaque(this.encryptionKey, "creation-id", key);
-    const comparisonFingerprint = await opaque(this.encryptionKey, "creation-fingerprint", fingerprint);
-    return this.claim(storageId, comparisonFingerprint, now, 0);
+    const storageId = await this.storageId(guestId, key);
+    const comparisonFingerprint = await opaque(this.encryptionKey, "creation-fingerprint", `${guestId}/${fingerprint}`);
+    return this.claim(storageId, comparisonFingerprint, now, 0, guestId);
   }
 
-  async completeCreation(key: string, leaseToken: string, response: CreateRoomResponse): Promise<void> {
-    const storageId = await opaque(this.encryptionKey, "creation-id", key);
-    const envelope = await encryptOperationRecord(this.encryptionKey, "creation_idempotency", storageId, response);
+  async completeCreation(key: string, leaseToken: string, response: CreateRoomResponse, guestId = "legacy-unscoped-test", ownerGrantId?: string): Promise<void> {
+    const storageId = await this.storageId(guestId, key);
+    const receipt: CreationReceipt = { response, ...(ownerGrantId ? { ownerGrantId } : {}) };
+    const envelope = await encryptOperationRecord(this.encryptionKey, "creation_idempotency", storageId, receipt);
     const now = this.now();
     const result = await this.d1.prepare("UPDATE creation_idempotency SET state = 'complete', response_envelope = ?, updated_at = ?, lease_token = '' WHERE idempotency_key = ? AND state = 'pending' AND lease_token = ?").bind(envelope, now, storageId, leaseToken).run();
     if (result.meta?.changes !== 1) throw new Error("The creation lease is no longer valid.");
@@ -134,9 +133,9 @@ export class D1OperationStore implements CreationOperations {
     return this.purge(now);
   }
 
-  private async claim(storageId: string, fingerprint: string, now: number, attempt: number): Promise<CreationClaim> {
+  private async claim(storageId: string, fingerprint: string, now: number, attempt: number, guestId: string): Promise<CreationClaim> {
     const leaseToken = crypto.randomUUID();
-    const plan: CreationPlan = { management: randomCapability(), room: randomCapability() };
+    const plan: CreationPlan = { management: randomCapability(), room: randomCapability(), ownerGuestId: guestId === "legacy-unscoped-test" ? undefined : guestId };
     const planEnvelope = await encryptOperationRecord(this.encryptionKey, "creation_plan", storageId, plan);
     try {
       const inserted = await this.d1.prepare("INSERT OR IGNORE INTO creation_idempotency (idempotency_key, request_fingerprint, state, response_envelope, plan_envelope, lease_token, created_at, updated_at, expires_at) VALUES (?, ?, 'pending', NULL, ?, ?, ?, ?, ?)").bind(storageId, fingerprint, planEnvelope, leaseToken, now, now, now + IDP_TTL_MS).run();
@@ -148,16 +147,22 @@ export class D1OperationStore implements CreationOperations {
     if (!row || row.expires_at <= now) {
       if (attempt >= 2) return { kind: "pending" };
       if (row) await this.d1.prepare("DELETE FROM creation_idempotency WHERE idempotency_key = ? AND expires_at <= ?").bind(storageId, now).run();
-      return this.claim(storageId, fingerprint, now, attempt + 1);
+      return this.claim(storageId, fingerprint, now, attempt + 1, guestId);
     }
     if (row.request_fingerprint !== fingerprint) return { kind: "conflict" };
     if (row.state === "complete" && row.response_envelope) {
-      return { kind: "complete", response: await decryptOperationRecord<CreateRoomResponse>(this.encryptionKey, "creation_idempotency", storageId, row.response_envelope) };
+      const stored = await decryptOperationRecord<CreationReceipt | CreateRoomResponse>(this.encryptionKey, "creation_idempotency", storageId, row.response_envelope);
+      if (isCreationReceipt(stored)) return { kind: "complete", response: stored.response, ...(stored.ownerGrantId ? { ownerGrantId: stored.ownerGrantId } : {}) };
+      return { kind: "complete", response: stored };
     }
     if (now - row.updated_at < STALE_PENDING_MS) return { kind: "pending" };
     const reclaimed = await this.d1.prepare("UPDATE creation_idempotency SET lease_token = ?, updated_at = ? WHERE idempotency_key = ? AND state = 'pending' AND lease_token = ? AND updated_at = ? AND expires_at > ?").bind(leaseToken, now, storageId, row.lease_token, row.updated_at, now).run();
     if (reclaimed.meta?.changes === 1) return { kind: "claimed", leaseToken, plan: await decryptOperationRecord<CreationPlan>(this.encryptionKey, "creation_plan", storageId, row.plan_envelope) };
-    return attempt >= 2 ? { kind: "pending" } : this.claim(storageId, fingerprint, now, attempt + 1);
+    return attempt >= 2 ? { kind: "pending" } : this.claim(storageId, fingerprint, now, attempt + 1, guestId);
+  }
+
+  private storageId(guestId: string, key: string): Promise<string> {
+    return opaque(this.encryptionKey, "creation-id", `${guestId}\u0000${key}`);
   }
 
   private async purge(now: number): Promise<number> {
@@ -166,6 +171,10 @@ export class D1OperationStore implements CreationOperations {
     const c = await this.d1.prepare("DELETE FROM operator_audit WHERE rowid IN (SELECT rowid FROM operator_audit WHERE expires_at <= ? LIMIT ?)").bind(now, PURGE_LIMIT).run();
     return (a.meta?.changes ?? 0) + (b.meta?.changes ?? 0) + (c.meta?.changes ?? 0);
   }
+}
+
+function isCreationReceipt(value: CreationReceipt | CreateRoomResponse): value is CreationReceipt {
+  return typeof value === "object" && value !== null && "response" in value && typeof value.response === "object" && value.response !== null;
 }
 
 const reportStatuses = new Set<AbuseReportStatus>(["closed", "open", "reviewed"]);

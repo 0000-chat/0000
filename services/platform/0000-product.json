@@ -2,11 +2,11 @@
   "schema_version": 1,
   "name": "0000-platform",
   "visibility": "public",
-  "status": "scaffold-only",
-  "purpose": "Boundary for shared platform concerns and future authentication adapters.",
+  "status": "active-development",
+  "purpose": "Shared identity and credential authority with an experimental Worker/D1 T01 authentication probe.",
   "dependencies": [],
   "standalone_authentication": "not-required",
   "hosting_class": "cloudflare-public-ingress",
-  "application_code": false,
+  "application_code": true,
   "license_selected": false
 }

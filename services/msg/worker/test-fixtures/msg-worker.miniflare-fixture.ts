@@ -1,16 +1,25 @@
-import { spawn } from "node:child_process";
+import { execFile as execFileCallback, spawn } from "node:child_process";
 import { Buffer } from "node:buffer";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createInterface } from "node:readline";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 
 import { acquireMiniflareTestLock } from "./miniflare-test-lock";
+import {
+  buildMsgMiniflareRateLimits,
+  type MsgMiniflareRateLimitBinding,
+  type MsgRateLimitPolicy,
+} from "../../scripts/msg-rate-limit-policy";
 
 const appDirectory = fileURLToPath(new URL("../", import.meta.url));
 const temporaryDirectory = join(appDirectory, ".miniflare-tests");
 const workerEntry = fileURLToPath(new URL("../src/worker-entry.ts", import.meta.url));
 const nodeRuntimeEntry = fileURLToPath(new URL("./msg-worker.node-runtime.mjs", import.meta.url));
+const bunWorkerBundleTimeoutMs = 20_000;
+const bunWorkerBundleOutputLimit = 16 * 1024;
+const execFile = promisify(execFileCallback);
 let workerScriptPromise: Promise<string> | undefined;
 
 export const TEST_ROOM_LIMITS = {
@@ -27,6 +36,14 @@ export const SHORT_LIVED_TEST_ROOM_LIMITS = {
   ...TEST_ROOM_LIMITS,
   inactivityTtlMs: 100,
   tombstoneTtlMs: 100,
+};
+
+/** Generous local bindings keep auth/integration fixtures focused on their own behavior. */
+export const TEST_MSG_RATE_LIMIT_POLICY: MsgRateLimitPolicy = {
+  creation: { limit: 100, namespace_id: "913001" },
+  reads: { limit: 1_000, namespace_id: "913002" },
+  posts: { limit: 100, namespace_id: "913003" },
+  live: { limit: 100, namespace_id: "913004" },
 };
 
 export interface MsgMiniflareRuntime {
@@ -69,17 +86,14 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 interface NodeRuntimeConfiguration {
-  bindings: {
-    MSG_TEST_MODE?: string;
-    MSG_TEST_NOW_MS?: string;
-    MSG_TEST_ROOM_LIMITS?: string;
-    MSG_VAPID_PRIVATE_KEY: string;
-    MSG_VAPID_PUBLIC_KEY: string;
-    MSG_VAPID_SUBJECT: string;
-  };
+  bindings: Record<string, string>;
   compatibilityDate: string;
+  d1Databases?: Record<string, string>;
+  d1MigrationPaths?: string[];
+  d1Persist?: string;
   durableObjects: { ConversationRoom: { className: string; useSQLite: boolean } };
   persistenceDirectory: string;
+  ratelimits: Readonly<Record<string, MsgMiniflareRateLimitBinding>>;
   script: string;
 }
 
@@ -103,6 +117,37 @@ interface NodeRuntimeProcess {
 export async function createMsgMiniflareTempDirectory(label: string): Promise<string> {
   await mkdir(temporaryDirectory, { recursive: true });
   return mkdtemp(join(temporaryDirectory, `${label}-`));
+}
+
+/** Builds a Worker bundle in a separate pinned Bun process and returns its script. */
+export async function buildWorkerBundleInChild(entrypoint: string): Promise<string> {
+  const buildDirectory = await createMsgMiniflareTempDirectory("bun-worker-build");
+  const outputPath = join(buildDirectory, "worker.js");
+  try {
+    await execFile(process.execPath, [
+      "build",
+      entrypoint,
+      "--external",
+      "cloudflare:workers",
+      "--format",
+      "esm",
+      "--target",
+      "browser",
+      "--outfile",
+      outputPath,
+    ], {
+      cwd: appDirectory,
+      killSignal: "SIGKILL",
+      maxBuffer: bunWorkerBundleOutputLimit,
+      timeout: bunWorkerBundleTimeoutMs,
+    });
+    return await readFile(outputPath, "utf8");
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new Error(`Bun Worker bundle failed: ${detail}`, { cause: error });
+  } finally {
+    await rm(buildDirectory, { force: true, recursive: true });
+  }
 }
 
 function workerScript(): Promise<string> {
@@ -344,9 +389,14 @@ async function startNodeRuntimeWithConfiguration(configuration: NodeRuntimeConfi
 export async function startMsgMiniflare(
   persistenceDirectory: string,
   limits = TEST_ROOM_LIMITS,
-  options: { readonly nowMs?: number; readonly testMode?: boolean } = {},
+  extraBindingsOrOptions: Record<string, string> | { readonly nowMs?: number; readonly testMode?: boolean } = {},
+  useTestLimits = true,
+  useOperations = false,
+  rateLimitPolicy: MsgRateLimitPolicy = TEST_MSG_RATE_LIMIT_POLICY,
 ): Promise<MsgMiniflareFixture> {
-  const testMode = options.testMode !== false;
+  const options = isStartOptions(extraBindingsOrOptions) ? extraBindingsOrOptions : {};
+  const extraBindings = isStartOptions(extraBindingsOrOptions) ? {} : extraBindingsOrOptions;
+  const testMode = isStartOptions(extraBindingsOrOptions) ? options.testMode !== false : useTestLimits;
   if (!testMode && options.nowMs !== undefined) throw new Error("The test clock requires explicit test mode.");
   const releaseRuntime = await acquireMiniflareTestLock();
   let runtime: NodeRuntimeProcess | undefined;
@@ -361,12 +411,23 @@ export async function startMsgMiniflare(
         MSG_VAPID_PRIVATE_KEY: TEST_VAPID_PRIVATE_KEY,
         MSG_VAPID_PUBLIC_KEY: TEST_VAPID_PUBLIC_KEY,
         MSG_VAPID_SUBJECT: TEST_VAPID_SUBJECT,
+        ...extraBindings,
       },
       compatibilityDate: "2026-05-15",
+      ...(useOperations ? {
+        d1Databases: { MSG_DB: "msg-operations" },
+        d1MigrationPaths: [
+          fileURLToPath(new URL("../migrations/0001_operations.sql", import.meta.url)),
+          fileURLToPath(new URL("../migrations/0002_operations_retention.sql", import.meta.url)),
+          fileURLToPath(new URL("../migrations/0003_creation_plan.sql", import.meta.url)),
+        ],
+        d1Persist: `${persistenceDirectory}-d1`,
+      } : {}),
       durableObjects: {
         ConversationRoom: { className: "ConversationRoom", useSQLite: true },
       },
       persistenceDirectory,
+      ratelimits: buildMsgMiniflareRateLimits(rateLimitPolicy),
       script,
     });
   } catch (error) {
@@ -424,4 +485,8 @@ export async function startMsgMiniflare(
       if (disposeFailed) throw disposeFailure;
     },
   };
+}
+
+function isStartOptions(value: Record<string, string> | { readonly nowMs?: number; readonly testMode?: boolean }): value is { readonly nowMs?: number; readonly testMode?: boolean } {
+  return Object.hasOwn(value, "nowMs") || Object.hasOwn(value, "testMode");
 }
