@@ -45,8 +45,17 @@ with simulated Google provider HTTP:
 - grant revocation retires its credentials and reauthorization creates a new
   grant ID; current service-catalog narrowing denies without broadening stored
   credential capabilities;
+- concurrent grant narrowing uses a stored-capability compare-and-set, so a
+  stale request cannot reintroduce a capability under the same grant ID;
 - invalid lifetime configuration blocks issue and rotation while allowing
   metadata listing and revocation;
+- shared-client requests through the real protected-resource fixture prove
+  separate audience access, wrong audience, missing capability and foreign
+  organization-owner denials; both current grants remain usable after creator
+  departure;
+- an injected replacement INSERT failure in the real D1 rotation batch rolls
+  back predecessor revocation and leaves the old bearer usable with no
+  replacement row;
 - an admin can manage an agent after its creator leaves, while member,
   foreign-tenant, machine-bearer and untrusted-origin administration fails.
 
@@ -65,6 +74,8 @@ Checks run on this branch:
   passed: 1 file, 2 tests;
 - full `bun run check` passed: 6 Worker/D1 files, 9 tests, followed by the
   persistent Miniflare D1 restart probe;
+- repository-root `bun run check` passed the 11 workspace manifest scaffold
+  checks;
 - standalone `sh scripts/lint` was attempted but cannot run in this frozen
   install because the optional `oxlint` executable is absent; `bun run check`
   does not invoke that script.

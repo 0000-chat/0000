@@ -1,8 +1,13 @@
 import { createPlatformClient } from "@0000/platform-client";
 import { SELF, env } from "cloudflare:test";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  createOrNarrowAgentGrant,
+  rotateAgentCredential,
+} from "../../src/agent-state";
 import { opaqueSecret } from "../../src/platform-state";
 import { updateServiceMetadata } from "../../src/service-registration";
+import { handleResourceRequest } from "./fixtures/resource-service";
 import { registerTestService, type TestService } from "./fixtures/provision";
 
 const testEnv = env as Cloudflare.Env;
@@ -99,6 +104,133 @@ function client(service: TestService) {
     serviceVerifier: service.verifier,
     fetch: (input, init) => SELF.fetch(input, init),
   });
+}
+
+function agentService(service: TestService) {
+  return {
+    serviceId: service.serviceId,
+    audience: service.audience,
+    verifierHash: "test-agent-verifier-hash",
+    allowedCapabilities: service.allowedCapabilities,
+  };
+}
+
+async function fixtureRead(
+  service: TestService,
+  credential: string,
+  resourceId: string,
+): Promise<Response> {
+  return handleResourceRequest(
+    new Request(`http://fixture.test/resources/${resourceId}`, {
+      headers: { authorization: `Bearer ${credential}` },
+    }),
+    {
+      database: testEnv.IDENTITY_DB,
+      platformBaseUrl: testEnv.PLATFORM_BASE_URL,
+      authority: testEnv.PLATFORM_AUTHORITY_ID,
+      audience: service.audience,
+      serviceVerifier: service.verifier,
+      guestGrantIssuer: service.guestGrantIssuer,
+      fetch: (input, init) => SELF.fetch(input, init),
+    },
+  );
+}
+
+type NarrowingRace = {
+  currentReads: number;
+  releaseReads: () => void;
+  readsReady: Promise<void>;
+  firstUpdateDone: Promise<void>;
+  markFirstUpdate: () => void;
+};
+
+function createNarrowingRace(): NarrowingRace {
+  let releaseReads!: () => void;
+  let markFirstUpdate!: () => void;
+  return {
+    currentReads: 0,
+    releaseReads: () => releaseReads(),
+    readsReady: new Promise<void>((resolve) => {
+      releaseReads = resolve;
+    }),
+    firstUpdateDone: new Promise<void>((resolve) => {
+      markFirstUpdate = resolve;
+    }),
+    markFirstUpdate: () => markFirstUpdate(),
+  };
+}
+
+function interleavedNarrowingDatabase(
+  database: D1Database,
+  role: "first" | "second",
+  race: NarrowingRace,
+): D1DatabaseSession {
+  const wrapStatement = (
+    statement: D1PreparedStatement,
+    query: string,
+  ): D1PreparedStatement => {
+    const isCurrentGrantSelect =
+      query.includes("SELECT id, agent_id") &&
+      query.includes("FROM platform_agent_grant") &&
+      query.includes("platform_agent.organization_id");
+    const isGrantUpdate =
+      query.includes("UPDATE platform_agent_grant") &&
+      query.includes("SET capabilities =");
+    return {
+      bind: (...values: unknown[]) =>
+        wrapStatement(statement.bind(...values), query),
+      first: async <T = Record<string, unknown>>(columnName?: string) => {
+        const result =
+          columnName === undefined
+            ? await statement.first<T>()
+            : await statement.first<T>(columnName);
+        if (isCurrentGrantSelect) {
+          race.currentReads += 1;
+          if (race.currentReads === 2) race.releaseReads();
+          await race.readsReady;
+        }
+        return result;
+      },
+      run: async <T = Record<string, unknown>>() => {
+        if (isGrantUpdate && role === "second") {
+          await race.firstUpdateDone;
+        }
+        const result = await statement.run<T>();
+        if (isGrantUpdate && role === "first") race.markFirstUpdate();
+        return result;
+      },
+      all: <T = Record<string, unknown>>() => statement.all<T>(),
+      raw: <T = unknown[]>(options?: { columnNames?: boolean }) =>
+        statement.raw<T>(options as never),
+    } as unknown as D1PreparedStatement;
+  };
+  return new Proxy(database, {
+    get(target, property, receiver) {
+      if (property === "prepare") {
+        return (query: string) => wrapStatement(target.prepare(query), query);
+      }
+      return Reflect.get(target, property, receiver);
+    },
+  }) as unknown as D1DatabaseSession;
+}
+
+function failingBatchDatabase(database: D1Database): D1Database {
+  return new Proxy(database, {
+    get(target, property, receiver) {
+      if (property === "batch") {
+        return (statements: D1PreparedStatement[]) =>
+          target.batch([
+            ...statements,
+            target
+              .prepare(
+                "INSERT INTO platform_agent_rotation_failure (id) VALUES (?)",
+              )
+              .bind("injected-rotation-failure"),
+          ]);
+      }
+      return Reflect.get(target, property, receiver);
+    },
+  }) as unknown as D1Database;
 }
 
 async function inviteAndAccept(
@@ -234,6 +366,27 @@ describe("T05 organization-owned agents", () => {
     expect(grantTwo.status, await grantTwo.clone().text()).toBe(201);
     const firstGrant = (await grantOne.json()) as { id: string };
     const secondGrant = (await grantTwo.json()) as { id: string };
+    const firstResourceId = "t05-agent-resource-one";
+    const secondResourceId = "t05-agent-resource-two";
+    const foreignResourceId = "t05-agent-resource-foreign";
+    await testEnv.IDENTITY_DB.prepare(
+      "INSERT INTO fixture_resource (id, owner_kind, owner_id, created_at, audience) VALUES (?, 'organization', ?, ?, ?), (?, 'organization', ?, ?, ?), (?, 'organization', ?, ?, ?)",
+    )
+      .bind(
+        firstResourceId,
+        owner.organizationId,
+        Date.now(),
+        first.audience,
+        secondResourceId,
+        owner.organizationId,
+        Date.now(),
+        second.audience,
+        foreignResourceId,
+        "org-foreign-owner",
+        Date.now(),
+        first.audience,
+      )
+      .run();
     const excessiveGrant = await post(
       "/api/account/agents/grants",
       owner.cookie,
@@ -322,16 +475,125 @@ describe("T05 organization-owned agents", () => {
       (await client(second).authenticate(firstCredential.credential)).status,
     ).toBe("invalid_credential");
 
-    const narrowed = await post("/api/account/agents/grants", owner.cookie, {
-      organizationId: owner.organizationId,
-      agentId: agent.id,
-      serviceId: first.serviceId,
-      capabilities: ["resource:read"],
-    });
-    expect(narrowed.status, await narrowed.clone().text()).toBe(200);
+    const writeOnlyIssued = await post(
+      "/api/account/agents/credentials",
+      owner.cookie,
+      {
+        organizationId: owner.organizationId,
+        agentId: agent.id,
+        grantId: firstGrant.id,
+        serviceId: first.serviceId,
+        capabilities: ["resource:write"],
+        name: "Agent write only",
+      },
+    );
+    expect(writeOnlyIssued.status, await writeOnlyIssued.clone().text()).toBe(
+      201,
+    );
+    const writeOnlyCredential = (await writeOnlyIssued.json()) as {
+      credential: string;
+    };
+    expect(
+      (
+        await fixtureRead(
+          first,
+          writeOnlyCredential.credential,
+          firstResourceId,
+        )
+      ).status,
+    ).toBe(403);
+
+    const narrowingRace = createNarrowingRace();
+    const firstNarrowing = createOrNarrowAgentGrant(
+      interleavedNarrowingDatabase(testEnv.IDENTITY_DB, "first", narrowingRace),
+      {
+        actorUserId: owner.id,
+        organizationId: owner.organizationId,
+        agentId: agent.id,
+        service: agentService(first),
+        capabilities: ["resource:read"],
+      },
+    );
+    const secondNarrowing = createOrNarrowAgentGrant(
+      interleavedNarrowingDatabase(
+        testEnv.IDENTITY_DB,
+        "second",
+        narrowingRace,
+      ),
+      {
+        actorUserId: owner.id,
+        organizationId: owner.organizationId,
+        agentId: agent.id,
+        service: agentService(first),
+        capabilities: ["resource:write"],
+      },
+    );
+    const [firstNarrowingResult, secondNarrowingResult] = await Promise.all([
+      firstNarrowing,
+      secondNarrowing,
+    ]);
+    expect(firstNarrowingResult.status).toBe("narrowed");
+    expect(secondNarrowingResult.status).toBe("conflict");
+    expect(
+      (await client(first).authenticate(writeOnlyCredential.credential)).status,
+    ).toBe("invalid_credential");
+
+    const firstReadIssued = await post(
+      "/api/account/agents/credentials",
+      owner.cookie,
+      {
+        organizationId: owner.organizationId,
+        agentId: agent.id,
+        grantId: firstGrant.id,
+        serviceId: first.serviceId,
+        capabilities: ["resource:read"],
+        name: "Agent first read",
+      },
+    );
+    expect(firstReadIssued.status, await firstReadIssued.clone().text()).toBe(
+      201,
+    );
+    const firstReadCredential = (await firstReadIssued.json()) as {
+      credential: string;
+      credentialId: string;
+    };
+    expect(
+      (await client(first).authenticate(firstReadCredential.credential)).status,
+    ).toBe("authenticated");
     expect(
       (await client(first).authenticate(firstCredential.credential)).status,
     ).toBe("invalid_credential");
+    expect(
+      (
+        await fixtureRead(
+          first,
+          firstReadCredential.credential,
+          firstResourceId,
+        )
+      ).status,
+    ).toBe(200);
+    expect(
+      (await fixtureRead(second, secondCredential.credential, secondResourceId))
+        .status,
+    ).toBe(200);
+    expect(
+      (
+        await fixtureRead(
+          second,
+          firstReadCredential.credential,
+          secondResourceId,
+        )
+      ).status,
+    ).toBe(401);
+    expect(
+      (
+        await fixtureRead(
+          first,
+          firstReadCredential.credential,
+          foreignResourceId,
+        )
+      ).status,
+    ).toBe(404);
     const widened = await post("/api/account/agents/grants", owner.cookie, {
       organizationId: owner.organizationId,
       agentId: agent.id,
@@ -525,6 +787,40 @@ describe("T05 organization-owned agents", () => {
       credential: string;
     };
 
+    let rotationFailureObserved = false;
+    try {
+      await rotateAgentCredential(failingBatchDatabase(testEnv.IDENTITY_DB), {
+        actorUserId: owner.id,
+        service: agentService(first),
+        organizationId: owner.organizationId,
+        agentId: agent.id,
+        grantId: firstGrant.id,
+        credentialId: firstReadCredential.credentialId,
+        expiresAt: Date.now() + 90 * 24 * 60 * 60 * 1000,
+      });
+    } catch {
+      rotationFailureObserved = true;
+    }
+    expect(rotationFailureObserved).toBe(true);
+    const rolledBackPredecessor = await testEnv.IDENTITY_DB.prepare(
+      "SELECT revoked_at, replaced_by_id FROM platform_credential WHERE id = ?",
+    )
+      .bind(firstReadCredential.credentialId)
+      .first<{ revoked_at: number | null; replaced_by_id: string | null }>();
+    expect(rolledBackPredecessor).toEqual({
+      revoked_at: null,
+      replaced_by_id: null,
+    });
+    const replacementRows = await testEnv.IDENTITY_DB.prepare(
+      "SELECT COUNT(*) AS count FROM platform_credential WHERE predecessor_id = ?",
+    )
+      .bind(firstReadCredential.credentialId)
+      .first<{ count: number }>();
+    expect(replacementRows?.count).toBe(0);
+    expect(
+      (await client(first).authenticate(firstReadCredential.credential)).status,
+    ).toBe("authenticated");
+
     await updateServiceMetadata(testEnv.IDENTITY_DB, {
       serviceId: second.serviceId,
       capabilities: ["resource:write"],
@@ -563,6 +859,24 @@ describe("T05 organization-owned agents", () => {
       organizationId: owner.organizationId,
     });
     expect(left.status).toBe(200);
+    expect(
+      (
+        await fixtureRead(
+          first,
+          firstReadCredential.credential,
+          firstResourceId,
+        )
+      ).status,
+    ).toBe(200);
+    expect(
+      (
+        await fixtureRead(
+          second,
+          catalogCredential.credential,
+          secondResourceId,
+        )
+      ).status,
+    ).toBe(200);
     const ownerAgentList = await SELF.fetch(
       `http://localhost/api/account/agents?organizationId=${encodeURIComponent(owner.organizationId)}`,
       { headers: { cookie: owner.cookie } },

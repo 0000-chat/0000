@@ -378,11 +378,12 @@ export async function createOrNarrowAgentGrant(
          SET capabilities = ?
          WHERE id = ? AND organization_id = ? AND agent_id = ?
            AND revoked_at IS NULL
-           AND EXISTS (
-             SELECT 1 FROM platform_agent
-             WHERE platform_agent.id = platform_agent_grant.agent_id
-               AND platform_agent.organization_id = ?
-           )
+         AND EXISTS (
+           SELECT 1 FROM platform_agent
+           WHERE platform_agent.id = platform_agent_grant.agent_id
+             AND platform_agent.organization_id = ?
+         )
+         AND capabilities = ?
            AND ${managerPredicate()}`,
       )
       .bind(
@@ -391,6 +392,7 @@ export async function createOrNarrowAgentGrant(
         input.organizationId,
         input.agentId,
         input.organizationId,
+        currentRow.capabilities,
         input.organizationId,
         input.actorUserId,
       )
