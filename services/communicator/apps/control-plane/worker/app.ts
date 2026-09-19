@@ -138,7 +138,6 @@ import {
   getOAuthRuntimeConfig,
   type OAuthRuntimeConfig,
 } from "./oauth/tokens";
-import type { OAuthAccessTokenClaims } from "./oauth/tokens";
 import { resolveAuthorization } from "./control-directory/authorization";
 import { handleMcpGet, handleMcpRequest } from "./mcp";
 import {
@@ -232,11 +231,6 @@ export type AppServices = {
   ) => Promise<OAuthHumanSession | null>;
   oauthClock?: () => Date;
   oauthConfig?: (env: Cloudflare.Env) => OAuthRuntimeConfig;
-  signOAuthAccessToken?: (
-    env: Cloudflare.Env,
-    config: OAuthRuntimeConfig,
-    claims: OAuthAccessTokenClaims,
-  ) => Promise<string>;
   /** Controlled fetch for the configured upstream token/JWKS exchange. */
   fetchOAuthUpstream?: typeof fetch;
   createConnectionGateway?: LinkingServices["createConnectionGateway"];
@@ -465,11 +459,9 @@ export function createApp(services: AppServices = {}) {
       };
     };
   }
-  if (services.signOAuthAccessToken)
-    oauthServices.signAccessToken = services.signOAuthAccessToken;
   // The browser UI delegates login to Platform's first-party OAuth endpoints.
-  // The historical local issuer routes remain available only to isolated
-  // compatibility fixtures; deployed requests use the Platform routes above.
+  // The historical local issuer routes are retained only as explicit
+  // unavailable responses for clients that have not migrated yet.
   registerPlatformBrowserRoutes(app);
   registerOAuthRoutes(app, oauthServices);
   const outboundAcceptanceServices: OutboundAcceptanceServices = {

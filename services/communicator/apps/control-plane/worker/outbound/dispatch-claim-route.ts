@@ -254,6 +254,7 @@ const claimOperation = async (
 export const dispatchClaimHandlerAt = async (
   context: Context<any>,
   clock: () => Date = () => new Date(),
+  options: { allowLegacyGatewaySecret?: boolean } = {},
 ): Promise<Response> => {
   const runtime = context.env as RuntimeEnvironment;
   const secret = runtime.CONNECTION_GATEWAY_TOKEN ?? "";
@@ -265,7 +266,7 @@ export const dispatchClaimHandlerAt = async (
   } catch {
     return unauthorized(context);
   }
-  if (platformMode) {
+  if (platformMode || options.allowLegacyGatewaySecret !== true) {
     if (getPlatformRuntimeConfig(context.env) === null) {
       return jsonResponse(context, { error: "service_unavailable" }, 503);
     }
@@ -359,4 +360,9 @@ export const dispatchClaimHandlerAt = async (
 };
 
 export const dispatchClaimHandler = (context: Context): Promise<Response> =>
-  dispatchClaimHandlerAt(context);
+  dispatchClaimHandlerAt(context, undefined, {
+    // The deployed route never accepts CONNECTION_GATEWAY_TOKEN as an
+    // inbound authority. The optional branch remains only for isolated
+    // component tests that call dispatchClaimHandlerAt directly.
+    allowLegacyGatewaySecret: false,
+  });

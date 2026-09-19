@@ -993,6 +993,76 @@ describe("Platform to Communicator adoption boundary", () => {
     });
   });
 
+  it("keeps the retired local issuer unavailable when Platform configuration is missing", async () => {
+    const { app } = createPlatformFixture();
+    const environment = {
+      CONTROL_DB: env.CONTROL_DB,
+    } as Cloudflare.Env;
+    const metadata = await app.request(
+      "https://communicator.test/.well-known/oauth-authorization-server",
+      {},
+      environment,
+    );
+    expect(metadata.status).toBe(503);
+    expect(await metadata.json()).toMatchObject({
+      error: "temporarily_unavailable",
+    });
+  });
+
+  it("rejects cross-origin and missing-origin cookie mutations before route work", async () => {
+    const { app } = createPlatformFixture();
+    const mutation = {
+      method: "POST",
+      headers: {
+        Cookie: "__Host-0000-access=platform-human",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({}),
+    };
+    const crossOrigin = await app.request(
+      "https://communicator.test/api/v1/grants",
+      { ...mutation, headers: { ...mutation.headers, Origin: "https://evil.test" } },
+      platformEnvironment(),
+    );
+    expect(crossOrigin.status).toBe(401);
+
+    const missingOrigin = await app.request(
+      "https://communicator.test/api/v1/grants",
+      mutation,
+      platformEnvironment(),
+    );
+    expect(missingOrigin.status).toBe(401);
+
+    const sameOrigin = await app.request(
+      "https://communicator.test/api/v1/grants",
+      {
+        ...mutation,
+        headers: {
+          ...mutation.headers,
+          Cookie: "__Host-0000-access=platform-admin",
+          Origin: "https://communicator.test",
+        },
+      },
+      platformEnvironment(),
+    );
+    expect(sameOrigin.status).toBe(400);
+
+    const explicitBearer = await app.request(
+      "https://communicator.test/api/v1/grants",
+      {
+        ...mutation,
+        headers: {
+          "Content-Type": "application/json",
+          Cookie: "__Host-0000-access=stale-cookie",
+          Authorization: "Bearer platform-human",
+          Origin: "https://evil.test",
+        },
+      },
+      platformEnvironment(),
+    );
+    expect(explicitBearer.status).toBe(403);
+  });
+
   it("lets an explicit Authorization credential override a stale browser cookie", async () => {
     const { app } = createPlatformFixture();
     const response = await app.request(

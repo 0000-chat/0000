@@ -1,5 +1,8 @@
 import type { AuthenticatedPrincipal } from "@0000/contracts";
-import { selectBrowserCredential } from "@0000/platform-client";
+import {
+  isSameOriginUnsafeBrowserRequest,
+  selectBrowserCredential,
+} from "@0000/platform-client";
 import type { SessionResponse } from "@communicator/contracts";
 import { decodeJwt } from "jose";
 import type { MiddlewareHandler } from "hono";
@@ -121,6 +124,15 @@ export function createAuthorizationMiddleware(
       if (!legacyFixtures) {
         const selection = selectBrowserCredential(context.req.raw);
         if (selection.status === "invalid" || selection.credential === null) {
+          return respond(401, "unauthenticated", "Authentication required");
+        }
+        if (
+          selection.source === "cookie" &&
+          !isSameOriginUnsafeBrowserRequest(
+            context.req.raw,
+            new URL(context.req.url).origin,
+          )
+        ) {
           return respond(401, "unauthenticated", "Authentication required");
         }
         const authenticator = options.getPlatformAuthenticator?.(context.env);
