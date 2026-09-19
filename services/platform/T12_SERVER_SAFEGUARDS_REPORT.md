@@ -96,23 +96,26 @@ suppression and a committed event before a failing follow-up read.
 The delayed guest proxy starts the D1 batch before waiting and dispatches the
 original batch after the timeout; it is not a deployed Worker post-response
 lifetime proof. The native boundary measures body and D1 work, not provider
-HTTP execution separately. The parent still must reconcile this Platform
-checkpoint with accepted msg aggregate `9bad4c9`, wire the real Communicator
-consumer fixture through this binding/deadline contract, and run the actual
-Platform-to-msg boundary before full T12 acceptance.
+HTTP execution separately. The accepted msg checkpoint is now reconciled with
+this branch's isolated fixture proof and full msg check. The real Communicator
+consumer fixture still needs to use this binding/deadline contract, and the
+actual Platform-to-msg boundary remains pending before full T12 acceptance.
 
 The three actual msg Platform integration scenarios now run in separately
 owned Bun test children. This isolates the pre-existing same-process
 Bun/workerd startup failure while preserving each scenario's production
-Platform Worker/D1, msg Worker/DO, restart and concurrency paths. The forced
-worker-cwd order (`bun test src/t13-quota.integration.test.ts
+Platform Worker/D1, msg Worker/DO, restart and concurrency paths. The worker-
+cwd command with an explicit file list (`bun test
+src/t13-quota.integration.test.ts
 src/t09-platform.integration.test.ts src/t10-claim.integration.test.ts`) passed
 3 parent tests; the children passed their 3 real tests with 183 assertions
 (13 + 84 + 86), recorded in
 `/tmp/platform-t12-msg-isolated-forced-order-final.log`. Each wrapper emits a
 bounded structured child summary with its scenario, test count and assertion
-count. The normal three-file worker-cwd invocation also passed 3 parent tests
-in `/tmp/platform-t12-msg-isolated-combined-worker-final.log`. The required
+count. Bun's explicit CLI file list selects the files but does not guarantee
+their execution order; these runs observed T13 -> T09 -> T10, as shown in the
+log. The normal three-file worker-cwd invocation also passed 3 parent tests in
+`/tmp/platform-t12-msg-isolated-combined-worker-final.log`. The required
 `bun run check` passed 270 Worker tests with 1,901 parent-level assertions, 13
 tooling tests with 34 assertions, 67 CLI tests with 254 assertions, and 3
 packaging tests with 18 assertions; its complete output is in
@@ -129,8 +132,13 @@ mode-600 ignored artifact under
 proof log is `/tmp/platform-t12-msg-isolation-descendant-failure.log`. The
 existing browser smoke evidence remains valid because the browser fixture
 source was unchanged (`/tmp/platform-t12-msg-browser-smoke.log`, exit 0). The
-prior same-process
-T13 -> T09 -> T10 failure, including pristine accepted-baseline reproduction,
-remains a local runtime-order caveat; the adapted normal test commands use
-fresh process ownership for each scenario. Full Communicator adoption and
+prior same-process T13 -> T09 -> T10 failure remains a local runtime-order
+caveat. The parent baseline proof used a separate dynamic-import importer to
+intentionally import T13, then T09, then T10 on pristine accepted baseline
+`0509fc4`; that run reproduced the failure before this repair. The adapted
+normal test commands use fresh process ownership for each scenario. On the
+aggregate e9 source, the parent's dynamic-import importer then passed the same
+intentional T13 -> T09 -> T10 sequence: 3 parent tests and 183 child
+assertions in 22.55 seconds, exit 0 (`/tmp/platform-parent-final-msg-order.test.ts`,
+`/tmp/platform-parent-final-msg-order.log`). Full Communicator adoption and
 final combined T12 acceptance remain pending.
