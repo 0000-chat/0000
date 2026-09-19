@@ -15,6 +15,10 @@ const validPrincipal = {
   membershipId: "member-1",
 };
 
+function wait(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
 function client(fetch: typeof globalThis.fetch) {
   return createPlatformClient({
     baseUrl: "https://platform.test",
@@ -42,6 +46,8 @@ describe("Platform verification client", () => {
     expect(new Headers(call?.init.headers).get("authorization")).toBe(
       "Bearer service-verifier-only",
     );
+    expect(call?.init.redirect).toBe("manual");
+    expect(call?.init.signal).toBeInstanceOf(AbortSignal);
     expect(JSON.parse(String(call?.init.body))).toEqual({
       credential: "end-user-credential",
     });
@@ -117,6 +123,137 @@ describe("Platform verification client", () => {
     }).authenticate("end-user-credential");
     expect(outage.status).toBe("authority_unavailable");
   });
+
+  it("expires a delayed fetch and aborts it without accepting its late success", async () => {
+    let resolveFetch!: (response: Response) => void;
+    let signal: AbortSignal | undefined;
+    const fetch = mock((_input: RequestInfo | URL, init?: RequestInit) => {
+      signal = init?.signal;
+      return new Promise<Response>((resolve) => {
+        resolveFetch = resolve;
+      });
+    }) as unknown as typeof globalThis.fetch;
+
+    const resultPromise = createPlatformClient({
+      baseUrl: "https://platform.test",
+      authority: "platform-deployment",
+      audience: "https://service.0000.test",
+      serviceVerifier: "service-verifier-only",
+      fetch,
+      timeoutMs: 10,
+    }).authenticate("end-user-credential");
+    const result = await resultPromise;
+
+    expect(result).toEqual({ status: "authority_unavailable" });
+    expect(signal?.aborted).toBe(true);
+
+    resolveFetch(
+      Response.json({ status: "authenticated", principal: validPrincipal }),
+    );
+    await wait(20);
+    expect(result).toEqual({ status: "authority_unavailable" });
+  });
+
+  it("expires a delayed response body under the same fetch deadline", async () => {
+    let resolveBody!: (value: unknown) => void;
+    const body = new Promise<unknown>((resolve) => {
+      resolveBody = resolve;
+    });
+    const response = {
+      status: 200,
+      ok: true,
+      redirected: false,
+      url: "",
+      json: () => body,
+    } as unknown as Response;
+
+    const result = await createPlatformClient({
+      baseUrl: "https://platform.test",
+      authority: "platform-deployment",
+      audience: "https://service.0000.test",
+      serviceVerifier: "service-verifier-only",
+      fetch: async () => response,
+      timeoutMs: 10,
+    }).authenticate("end-user-credential");
+
+    expect(result).toEqual({ status: "authority_unavailable" });
+    resolveBody({ status: "authenticated", principal: validPrincipal });
+    await wait(20);
+    expect(result).toEqual({ status: "authority_unavailable" });
+  });
+
+  it("observes a late rejected fetch after timeout without changing the result", async () => {
+    let rejectFetch!: (reason: unknown) => void;
+    const fetch = mock(
+      () =>
+        new Promise<Response>((_resolve, reject) => {
+          rejectFetch = reject;
+        }),
+    ) as unknown as typeof globalThis.fetch;
+
+    const result = await createPlatformClient({
+      baseUrl: "https://platform.test",
+      authority: "platform-deployment",
+      audience: "https://service.0000.test",
+      serviceVerifier: "service-verifier-only",
+      fetch,
+      timeoutMs: 10,
+    }).authenticate("end-user-credential");
+    expect(result).toEqual({ status: "authority_unavailable" });
+
+    rejectFetch(new Error("late transport failure"));
+    await wait(20);
+    expect(result).toEqual({ status: "authority_unavailable" });
+  });
+
+  it("rejects invalid timeout configuration at client construction", () => {
+    for (const timeoutMs of [
+      0,
+      -1,
+      Number.NaN,
+      Number.POSITIVE_INFINITY,
+      1.5,
+      60_001,
+    ]) {
+      expect(() =>
+        createPlatformClient({
+          baseUrl: "https://platform.test",
+          authority: "platform-deployment",
+          audience: "https://service.0000.test",
+          serviceVerifier: "service-verifier-only",
+          timeoutMs,
+        }),
+      ).toThrow(RangeError);
+      expect(() =>
+        createPlatformGuestClient({
+          baseUrl: "https://platform.test",
+          authority: "platform-deployment",
+          audience: "https://service.0000.test",
+          guestGrantIssuer: "guest-issuer-only",
+          timeoutMs,
+        }),
+      ).toThrow(RangeError);
+    }
+
+    expect(
+      createPlatformClient({
+        baseUrl: "https://platform.test",
+        authority: "platform-deployment",
+        audience: "https://service.0000.test",
+        serviceVerifier: "service-verifier-only",
+        timeoutMs: 1,
+      }),
+    ).toBeDefined();
+    expect(
+      createPlatformGuestClient({
+        baseUrl: "https://platform.test",
+        authority: "platform-deployment",
+        audience: "https://service.0000.test",
+        guestGrantIssuer: "guest-issuer-only",
+        timeoutMs: 60_000,
+      }),
+    ).toBeDefined();
+  });
 });
 
 describe("Platform guest control client", () => {
@@ -190,6 +327,58 @@ describe("Platform guest control client", () => {
     ]);
   });
 
+  it("retains resolve, renew and revoke guest operations", async () => {
+    const calls: string[] = [];
+    const fetch = mock(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input));
+      calls.push(url.pathname);
+      if (url.pathname === "/internal/v1/guests/resolve") {
+        return Response.json({
+          status: "success",
+          guestId: "guest-1",
+          authority: guestOptions.authority,
+          audience: guestOptions.audience,
+          purpose: "guest_control",
+        });
+      }
+      if (url.pathname.endsWith("/renew")) {
+        return Response.json({
+          status: "success",
+          credential: "renewed-grant-secret",
+          credentialId: "credential-1",
+          grantId: "grant-1",
+          principal: guestPrincipal,
+        });
+      }
+      return Response.json({ status: "success", revoked: true });
+    }) as unknown as typeof globalThis.fetch;
+    const client = createPlatformGuestClient({ ...guestOptions, fetch });
+
+    expect((await client.resolveGuestControl("bootstrap-1")).status).toBe(
+      "success",
+    );
+    expect(
+      (
+        await client.renewGuestGrant({
+          grantId: "grant-1",
+          bootstrapCredential: "bootstrap-1",
+          resourceId: "resource-1",
+          capabilities: ["resource:read"],
+          assertion: { kind: "owner", storedOwnerId: "guest-1" },
+        })
+      ).status,
+    ).toBe("success");
+    expect(await client.revokeGuestGrant("grant-1")).toEqual({
+      status: "success",
+      revoked: true,
+    });
+    expect(calls).toEqual([
+      "/internal/v1/guests/resolve",
+      "/internal/v1/guest-grants/grant-1/renew",
+      "/internal/v1/guest-grants/grant-1/revoke",
+    ]);
+  });
+
   it("preserves denial categories and fails closed on malformed or mismatched responses", async () => {
     const result = async (response: Response) =>
       createPlatformGuestClient({
@@ -230,5 +419,43 @@ describe("Platform guest control client", () => {
     expect(
       (await result(new Response("not-json", { status: 200 }))).status,
     ).toBe("authority_unavailable");
+  });
+
+  it("fails closed on actual redirects without sending guest control to the target", async () => {
+    let targetRequests = 0;
+    let targetAuthorization: string | null = null;
+    const server = Bun.serve({
+      port: 0,
+      fetch(request: Request) {
+        const url = new URL(request.url);
+        if (url.pathname === "/capture") {
+          targetRequests += 1;
+          targetAuthorization = request.headers.get("authorization");
+          return new Response("captured");
+        }
+        return Response.redirect(`${url.origin}/capture`, 302);
+      },
+    });
+
+    try {
+      const baseUrl = `http://127.0.0.1:${server.port}`;
+      const authenticated = await createPlatformClient({
+        baseUrl,
+        authority: "platform-deployment",
+        audience: "https://service.0000.test",
+        serviceVerifier: "service-verifier-only",
+      }).authenticate("end-user-credential");
+      const guest = await createPlatformGuestClient({
+        ...guestOptions,
+        baseUrl,
+      }).createGuest();
+
+      expect(authenticated).toEqual({ status: "authority_unavailable" });
+      expect(guest).toEqual({ status: "authority_unavailable" });
+      expect(targetRequests).toBe(0);
+      expect(targetAuthorization).toBeNull();
+    } finally {
+      server.stop(true);
+    }
   });
 });

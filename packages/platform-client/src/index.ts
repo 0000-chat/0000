@@ -18,6 +18,8 @@ export interface PlatformClientOptions {
   audience: string;
   serviceVerifier: string;
   fetch?: typeof fetch;
+  /** Request deadline in milliseconds. Accepted range: 1..60000. */
+  timeoutMs?: number;
 }
 
 export interface PlatformClient {
@@ -30,6 +32,8 @@ export interface PlatformGuestClientOptions {
   audience: string;
   guestGrantIssuer: string;
   fetch?: typeof fetch;
+  /** Request deadline in milliseconds. Accepted range: 1..60000. */
+  timeoutMs?: number;
 }
 
 export interface GuestGrantInput {
@@ -57,41 +61,146 @@ export interface PlatformGuestClient {
   >;
 }
 
+const DEFAULT_TIMEOUT_MS = 10_000;
+const MAX_TIMEOUT_MS = 60_000;
+
+type JsonTransportResult =
+  | { response: Response; value: unknown }
+  | { response: null; value: null };
+
+function validateTimeout(timeoutMs: number | undefined): number {
+  const value = timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  if (
+    !Number.isFinite(value) ||
+    !Number.isInteger(value) ||
+    value < 1 ||
+    value > MAX_TIMEOUT_MS
+  ) {
+    throw new RangeError(
+      `timeoutMs must be an integer from 1 through ${MAX_TIMEOUT_MS} milliseconds`,
+    );
+  }
+  return value;
+}
+
+function unexpectedRedirect(response: Response, endpoint: URL): boolean {
+  if (response.type === "opaqueredirect") return true;
+  if (response.status >= 300 && response.status < 400) return true;
+  if (response.redirected) return true;
+  if (!response.url) return false;
+  try {
+    return new URL(response.url).origin !== endpoint.origin;
+  } catch {
+    return true;
+  }
+}
+
+function createJsonTransport(
+  request: typeof fetch,
+  timeoutMs: number,
+): (url: URL, init: RequestInit) => Promise<JsonTransportResult> {
+  return (url, init) => {
+    const controller =
+      typeof AbortController === "undefined" ? null : new AbortController();
+    const deadline = Date.now() + timeoutMs;
+    let timedOut = false;
+    let settled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+
+    return new Promise<JsonTransportResult>((resolve) => {
+      const complete = (result: JsonTransportResult): void => {
+        if (settled) return;
+        settled = true;
+        if (timer !== undefined) clearTimeout(timer);
+        resolve(result);
+      };
+
+      const expire = (): void => {
+        if (settled) return;
+        timedOut = true;
+        try {
+          controller?.abort();
+        } catch {
+          // Some injected transports expose an AbortController-like object
+          // that can throw while aborting. The deadline still applies.
+        }
+        complete({ response: null, value: null });
+      };
+
+      const expired = (): boolean => timedOut || Date.now() >= deadline;
+
+      timer = setTimeout(expire, timeoutMs);
+
+      const run = async (): Promise<void> => {
+        try {
+          const response = await request(url, {
+            ...init,
+            // Cloudflare's edge fetch does not implement redirect:error.
+            // Manual mode still prevents forwarding the request, and every
+            // redirect response is rejected before its body is trusted.
+            redirect: "manual",
+            ...(controller ? { signal: controller.signal } : {}),
+          });
+          if (expired()) {
+            expire();
+            return;
+          }
+          if (unexpectedRedirect(response, url)) {
+            complete({ response: null, value: null });
+            return;
+          }
+          const value = await response.json();
+          if (expired()) {
+            expire();
+            return;
+          }
+          complete({ response, value });
+        } catch {
+          if (expired()) expire();
+          else complete({ response: null, value: null });
+        }
+      };
+
+      // Keep the operation observed after a timeout. A transport or body
+      // parser may ignore abort and reject after the caller has completed.
+      void run().catch(() => {
+        if (expired()) expire();
+        else complete({ response: null, value: null });
+      });
+    });
+  };
+}
+
 export function createPlatformClient(
   options: PlatformClientOptions,
 ): PlatformClient {
+  const timeoutMs = validateTimeout(options.timeoutMs);
   const request = options.fetch ?? fetch;
+  const transport = createJsonTransport(request, timeoutMs);
   const authenticate = async (
     presentedCredential: string,
   ): Promise<AuthenticationResult> => {
     if (!presentedCredential) return { status: "invalid_credential" };
 
-    let response: Response;
-    try {
-      response = await request(
-        new URL("/internal/v1/authenticate", options.baseUrl),
-        {
-          method: "POST",
-          headers: {
-            authorization: `Bearer ${options.serviceVerifier}`,
-            "content-type": "application/json",
-            accept: "application/json",
-          },
-          body: JSON.stringify({ credential: presentedCredential }),
+    const result = await transport(
+      new URL("/internal/v1/authenticate", options.baseUrl),
+      {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${options.serviceVerifier}`,
+          "content-type": "application/json",
+          accept: "application/json",
         },
-      );
-    } catch {
-      return { status: "authority_unavailable" };
-    }
+        body: JSON.stringify({ credential: presentedCredential }),
+      },
+    );
+    if (!result.response) return { status: "authority_unavailable" };
 
+    const response = result.response;
     if (response.status >= 500) return { status: "authority_unavailable" };
 
-    let parsed: AuthenticationWireResult | null;
-    try {
-      parsed = parseAuthenticationResult(await response.json());
-    } catch {
-      return { status: "authority_unavailable" };
-    }
+    const parsed: AuthenticationWireResult | null =
+      parseAuthenticationResult(result.value);
     if (!parsed) return { status: "authority_unavailable" };
     if (response.status === 401) {
       return parsed.status === "invalid_credential"
@@ -122,34 +231,23 @@ function unavailable<T>(): T {
 export function createPlatformGuestClient(
   options: PlatformGuestClientOptions,
 ): PlatformGuestClient {
+  const timeoutMs = validateTimeout(options.timeoutMs);
   const request = options.fetch ?? fetch;
+  const transport = createJsonTransport(request, timeoutMs);
 
   async function post(
     path: string,
     body?: unknown,
-  ): Promise<
-    { response: Response; value: unknown } | { response: null; value: null }
-  > {
-    try {
-      const response = await request(new URL(path, options.baseUrl), {
-        method: "POST",
-        headers: {
-          authorization: `Bearer ${options.guestGrantIssuer}`,
-          "content-type": "application/json",
-          accept: "application/json",
-        },
-        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-      });
-      let value: unknown;
-      try {
-        value = await response.json();
-      } catch {
-        return { response: null, value: null };
-      }
-      return { response, value };
-    } catch {
-      return { response: null, value: null };
-    }
+  ): Promise<JsonTransportResult> {
+    return transport(new URL(path, options.baseUrl), {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${options.guestGrantIssuer}`,
+        "content-type": "application/json",
+        accept: "application/json",
+      },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    });
   }
 
   function statusFailure(
