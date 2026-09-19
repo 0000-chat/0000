@@ -18,7 +18,12 @@ The focused Worker test `worker/test/guest-lifecycle.test.ts` exercises:
   predecessor CAS interleaving with one conflict and one winner, and a targeted
   replacement INSERT trigger whose exact D1 error is asserted while the
   predecessor remains usable; issuer-scoped revocation held across a retired
-  issuer lookup, and rotation-disable CAS with no successor left active;
+  issuer lookup returning `authority_unavailable`, and rotation-disable CAS
+  with no successor left active;
+- same-guest sibling-resource and sibling-service grants created before the
+  affected grant is revoked, both authenticated and read after revocation; a
+  held renewal versus real HTTP revoke interleaving returns `409` and leaves no
+  live successor credential;
 - permanent grant revocation, guest disable, service disable, issuer rotation
   and disable, retired issuer control returning `authority_unavailable`, and
   verifier/authority outage mapping;
@@ -35,9 +40,9 @@ Validation run on this branch:
   including guest transport/error parsing;
 - local Wrangler D1 migration application (schema already current) plus
   `bun run provision:service -- --local` register, register-guest-issuer,
-  rotate-guest-issuer, and disable-guest-issuer: all successful with one-time
-  secrets emitted only for successful register/rotate; the final active issuer
-  count was zero;
+  rotate-guest-issuer, and disable-guest-issuer using the shared guarded
+  rotation builder: all successful with one-time secrets emitted only for
+  successful register/rotate; the final active issuer count was zero;
 - `git diff --check`: passed.
 
 The concurrent renewal route test can serialize two complete HTTP requests as

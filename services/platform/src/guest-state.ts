@@ -607,5 +607,17 @@ export async function revokeGuestGrant(
         input.issuer.issuerHash,
       ),
   ]);
-  return results[0]?.meta.changes === 1;
+  if (results[0]?.meta.changes === 1) return true;
+  const authority = await database
+    .prepare(`SELECT ${issuerAuthorityPredicate("'[]'")} AS authority_valid`)
+    .bind(
+      input.issuer.service.serviceId,
+      input.issuer.service.audience,
+      input.issuer.issuerHash,
+    )
+    .first<{ authority_valid: number }>();
+  if (authority?.authority_valid !== 1) {
+    throw new GuestAuthorityUnavailable();
+  }
+  return false;
 }

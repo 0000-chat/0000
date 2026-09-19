@@ -307,6 +307,50 @@ function validateHash(verifierHash: string, label: string): void {
   }
 }
 
+interface GuestIssuerRotationStatements {
+  retireSql: string;
+  retireBindings: [string, string];
+  successorSql: string;
+  successorBindings: [string, string];
+}
+
+function guestIssuerRotationStatements(
+  serviceId: string,
+  issuerHash: string,
+  priorIssuerHash: string,
+): GuestIssuerRotationStatements {
+  if (!validServiceId(serviceId)) {
+    throw new ServiceRegistrationError(
+      "invalid_service_id",
+      "service ID is invalid.",
+    );
+  }
+  validateHash(issuerHash, "Guest grant issuer");
+  validateHash(priorIssuerHash, "Previous guest grant issuer");
+  return {
+    retireSql:
+      "UPDATE platform_service_grant_issuer SET disabled = 1 WHERE service_id = ? AND credential_hash = ? AND disabled = 0",
+    retireBindings: [serviceId, priorIssuerHash],
+    successorSql: `INSERT INTO platform_service_grant_issuer
+      (credential_hash, service_id, capabilities, disabled)
+      SELECT ?, service_id, '["guest:grant"]', 0
+      FROM platform_service
+      WHERE service_id = ? AND disabled = 0 AND changes() = 1`,
+    successorBindings: [issuerHash, serviceId],
+  };
+}
+
+function inlineSql(sql: string, values: string[]): string {
+  let index = 0;
+  const rendered = sql.replaceAll("?", () => {
+    const value = values[index++];
+    if (value === undefined) throw new Error("SQL binding count mismatch.");
+    return sqlString(value);
+  });
+  if (index !== values.length) throw new Error("SQL binding count mismatch.");
+  return rendered;
+}
+
 export function guestIssuerRegistrationSql(
   serviceId: string,
   issuerHash: string,
@@ -337,27 +381,14 @@ export function guestIssuerRotationSql(
   createdAt: number,
   priorIssuerHash: string,
 ): string {
-  if (!validServiceId(serviceId)) {
-    throw new ServiceRegistrationError(
-      "invalid_service_id",
-      "service ID is invalid.",
-    );
-  }
-  validateHash(issuerHash, "Guest grant issuer");
-  validateHash(priorIssuerHash, "Previous guest grant issuer");
+  const statements = guestIssuerRotationStatements(
+    serviceId,
+    issuerHash,
+    priorIssuerHash,
+  );
   sqlInteger(createdAt);
-  return `UPDATE platform_service_grant_issuer
-    SET disabled = 1
-    WHERE service_id = ${sqlString(serviceId)}
-      AND credential_hash = ${sqlString(priorIssuerHash)}
-      AND disabled = 0;
-  INSERT INTO platform_service_grant_issuer
-    (credential_hash, service_id, capabilities, disabled)
-    SELECT ${sqlString(issuerHash)}, service_id, '["guest:grant"]', 0
-    FROM platform_service
-    WHERE service_id = ${sqlString(serviceId)}
-      AND disabled = 0
-      AND changes() = 1;`;
+  return `${inlineSql(statements.retireSql, statements.retireBindings)};
+${inlineSql(statements.successorSql, statements.successorBindings)};`;
 }
 
 export function guestIssuerDisableSql(
@@ -475,21 +506,16 @@ export async function rotateGuestIssuer(
   }
   const guestGrantIssuer = opaqueSecret("service_guest_grant_");
   const issuerHash = await hashOpaque(guestGrantIssuer);
+  const statements = guestIssuerRotationStatements(
+    serviceId,
+    issuerHash,
+    active.credential_hash,
+  );
   const results = await database.batch([
+    database.prepare(statements.retireSql).bind(...statements.retireBindings),
     database
-      .prepare(
-        "UPDATE platform_service_grant_issuer SET disabled = 1 WHERE service_id = ? AND credential_hash = ? AND disabled = 0",
-      )
-      .bind(serviceId, active.credential_hash),
-    database
-      .prepare(
-        `INSERT INTO platform_service_grant_issuer
-         (credential_hash, service_id, capabilities, disabled)
-         SELECT ?, service_id, '["guest:grant"]', 0
-         FROM platform_service
-         WHERE service_id = ? AND disabled = 0 AND changes() = 1`,
-      )
-      .bind(issuerHash, serviceId),
+      .prepare(statements.successorSql)
+      .bind(...statements.successorBindings),
   ]);
   if (results[0]?.meta.changes !== 1 || results[1]?.meta.changes !== 1) {
     throw new ServiceRegistrationError(

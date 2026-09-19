@@ -2488,13 +2488,20 @@ async function revokeGuestGrantRoute(
   if (!validCredentialId(grantId)) {
     return json(400, { error: "invalid_request" });
   }
-  const revoked = await revokeGuestGrant(env.IDENTITY_DB, {
-    issuer,
-    grantId,
-  });
-  return revoked
-    ? json(200, { status: "success", revoked: true })
-    : json(403, { status: "grant_denied" });
+  try {
+    const revoked = await revokeGuestGrant(env.IDENTITY_DB, {
+      issuer,
+      grantId,
+    });
+    return revoked
+      ? json(200, { status: "success", revoked: true })
+      : json(403, { status: "grant_denied" });
+  } catch (error) {
+    if (error instanceof GuestAuthorityUnavailable) {
+      return json(503, { status: "authority_unavailable" });
+    }
+    throw error;
+  }
 }
 
 async function platformRoute(

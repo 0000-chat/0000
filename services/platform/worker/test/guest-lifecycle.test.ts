@@ -11,6 +11,7 @@ import {
   rotateGuestIssuer,
 } from "../../src/service-registration";
 import {
+  GuestAuthorityUnavailable,
   GuestGrantConflict,
   renewGuestGrant,
   revokeGuestGrant,
@@ -143,7 +144,8 @@ describe("T08 persistent guest control and resource grants", () => {
     await testEnv.IDENTITY_DB.prepare(
       `INSERT INTO fixture_resource
        (id, owner_kind, owner_id, created_at, audience)
-       VALUES (?, 'guest', ?, ?, ?), (?, 'guest', ?, ?, ?), (?, 'guest', ?, ?, ?)`,
+       VALUES (?, 'guest', ?, ?, ?), (?, 'guest', ?, ?, ?), (?, 'guest', ?, ?, ?),
+              (?, 'guest', ?, ?, ?)`,
     )
       .bind(
         "t08-owned",
@@ -158,6 +160,10 @@ describe("T08 persistent guest control and resource grants", () => {
         guest.guestId,
         Date.now(),
         second.audience,
+        "t08-owned-sibling",
+        guest.guestId,
+        Date.now(),
+        first.audience,
       )
       .run();
     await testEnv.IDENTITY_DB.prepare(
@@ -181,6 +187,22 @@ describe("T08 persistent guest control and resource grants", () => {
       capabilities: ["resource:read"],
     });
     expect(ownerGrant).toBeTruthy();
+    const sameGuestSiblingGrant = await attestGuestResource(
+      resourceConfig(first),
+      {
+        bootstrapCredential: guest.bootstrapCredential,
+        resourceId: "t08-owned-sibling",
+        capabilities: ["resource:read"],
+      },
+    );
+    expect(sameGuestSiblingGrant).toBeTruthy();
+    const sibling = await secondClient.attestGuestGrant({
+      bootstrapCredential: guest.bootstrapCredential,
+      resourceId: "t08-second-service",
+      capabilities: ["resource:read"],
+      assertion: { kind: "owner", storedOwnerId: guest.guestId },
+    });
+    expect(sibling.status).toBe("success");
     expect(
       await attestGuestResource(resourceConfig(first), {
         bootstrapCredential: guest.bootstrapCredential,
@@ -233,6 +255,9 @@ describe("T08 persistent guest control and resource grants", () => {
     const transferredParticipant = await firstClient.createGuest();
     expect(transferredParticipant.status).toBe("success");
     if (
+      !ownerGrant ||
+      !sameGuestSiblingGrant ||
+      sibling.status !== "success" ||
       !participantGrant ||
       !ownerParticipantResourceGrant ||
       transferredParticipant.status !== "success"
@@ -529,18 +554,139 @@ describe("T08 persistent guest control and resource grants", () => {
       first.serviceId,
     );
     releaseRevokeLookup();
-    expect(await staleRevoke).toBe(false);
+    await expect(staleRevoke).rejects.toBeInstanceOf(GuestAuthorityUnavailable);
     expect((await platform.authenticate(current.value.credential)).status).toBe(
       "authenticated",
     );
     first.guestGrantIssuer = rotatedIssuer.guestGrantIssuer;
+    expect(
+      await firstClient.revokeGuestGrant(current.value.grantId),
+    ).toMatchObject({ status: "authority_unavailable" });
     const currentIssuerClient = guestClient(first);
+    const secondPlatform = createPlatformClient({
+      baseUrl: testEnv.PLATFORM_BASE_URL,
+      authority: testEnv.PLATFORM_AUTHORITY_ID,
+      audience: second.audience,
+      serviceVerifier: second.verifier,
+      fetch: (input, init) => SELF.fetch(input, init),
+    });
+
+    let releaseRenewLookup!: () => void;
+    const renewLookupReleased = new Promise<void>((resolve) => {
+      releaseRenewLookup = resolve;
+    });
+    let renewLookupStarted!: () => void;
+    const renewLookupObserved = new Promise<void>((resolve) => {
+      renewLookupStarted = resolve;
+    });
+    const delayedRenewDatabase = new Proxy(testEnv.IDENTITY_DB, {
+      get(target, property, receiver) {
+        if (property !== "prepare")
+          return Reflect.get(target, property, receiver);
+        return (query: string) => {
+          const statement = target.prepare(query);
+          if (
+            !query.includes(
+              "SELECT guest_grant.guest_id, guest_grant.service_id",
+            )
+          )
+            return statement;
+          return new Proxy(statement, {
+            get(statementTarget, statementProperty, statementReceiver) {
+              if (statementProperty !== "bind") {
+                return Reflect.get(
+                  statementTarget,
+                  statementProperty,
+                  statementReceiver,
+                );
+              }
+              return (...values: unknown[]) => {
+                const bound = statementTarget.bind(...values);
+                return new Proxy(bound, {
+                  get(boundTarget, boundProperty, boundReceiver) {
+                    if (boundProperty !== "first") {
+                      return Reflect.get(
+                        boundTarget,
+                        boundProperty,
+                        boundReceiver,
+                      );
+                    }
+                    return async (...args: unknown[]) => {
+                      const value = await (
+                        boundTarget.first as (...values: unknown[]) => unknown
+                      )(...args);
+                      renewLookupStarted();
+                      await renewLookupReleased;
+                      return value;
+                    };
+                  },
+                });
+              };
+            },
+          });
+        };
+      },
+    }) as unknown as D1Database;
+    const currentIssuer = {
+      ...issuer,
+      issuerHash: await hashOpaque(first.guestGrantIssuer),
+    };
+    const pendingRenew = (async () => {
+      try {
+        return await renewGuestGrant(delayedRenewDatabase, {
+          issuer: currentIssuer,
+          authority: testEnv.PLATFORM_AUTHORITY_ID,
+          grantId: current.value.grantId,
+          bootstrapCredential: guest.bootstrapCredential,
+          resourceId: "t08-owned",
+          capabilities: ["resource:read"],
+          assertion: { kind: "owner", storedOwnerId: guest.guestId },
+        });
+      } catch (error) {
+        if (error instanceof GuestGrantConflict)
+          return { status: "conflict" as const };
+        throw error;
+      }
+    })();
+    await renewLookupObserved;
     expect(
       await currentIssuerClient.revokeGuestGrant(current.value.grantId),
     ).toMatchObject({ status: "success", revoked: true });
+    releaseRenewLookup();
+    expect(await pendingRenew).toMatchObject({ status: "conflict" });
+    const liveSuccessor = await testEnv.IDENTITY_DB.prepare(
+      "SELECT COUNT(*) AS count FROM platform_credential WHERE grant_id = ? AND kind = 'guest' AND revoked_at IS NULL AND replaced_by_id IS NULL",
+    )
+      .bind(current.value.grantId)
+      .first<{ count: number }>();
+    expect(liveSuccessor?.count).toBe(0);
     expect((await platform.authenticate(current.value.credential)).status).toBe(
       "invalid_credential",
     );
+    expect(
+      (await platform.authenticate(sameGuestSiblingGrant.credential)).status,
+    ).toBe("authenticated");
+    expect(
+      (
+        await readResource(
+          first,
+          "t08-owned-sibling",
+          sameGuestSiblingGrant.credential,
+        )
+      ).status,
+    ).toBe(200);
+    expect(
+      (await secondPlatform.authenticate(sibling.value.credential)).status,
+    ).toBe("authenticated");
+    expect(
+      (
+        await readResource(
+          second,
+          "t08-second-service",
+          sibling.value.credential,
+        )
+      ).status,
+    ).toBe(200);
 
     const rotationRaceService = service(
       "rotation-race",
@@ -625,23 +771,6 @@ describe("T08 persistent guest control and resource grants", () => {
       .first<{ count: number }>();
     expect(activeRotationIssuer?.count).toBe(0);
 
-    const sibling = await secondClient.attestGuestGrant({
-      bootstrapCredential: guest.bootstrapCredential,
-      resourceId: "t08-second-service",
-      capabilities: ["resource:read"],
-      assertion: { kind: "owner", storedOwnerId: guest.guestId },
-    });
-    expect(sibling.status).toBe("success");
-    expect(
-      await firstClient.revokeGuestGrant(current.value.grantId),
-    ).toMatchObject({ status: "authority_unavailable" });
-    const revoke = await currentIssuerClient.revokeGuestGrant(
-      current.value.grantId,
-    );
-    expect(revoke.status).toBe("success");
-    expect((await platform.authenticate(current.value.credential)).status).toBe(
-      "invalid_credential",
-    );
     expect(
       (
         await currentIssuerClient.renewGuestGrant({
@@ -653,7 +782,6 @@ describe("T08 persistent guest control and resource grants", () => {
         })
       ).status,
     ).toBe("grant_denied");
-    expect(sibling.status).toBe("success");
 
     const cookieConfig = resourceConfig(second);
     const firstCookie = await handleGuestBootstrapRequest(
@@ -711,14 +839,6 @@ describe("T08 persistent guest control and resource grants", () => {
       },
     );
     expect(outageCookie.status).toBe(503);
-    const secondPlatform = createPlatformClient({
-      baseUrl: testEnv.PLATFORM_BASE_URL,
-      authority: testEnv.PLATFORM_AUTHORITY_ID,
-      audience: second.audience,
-      serviceVerifier: second.verifier,
-      fetch: (input, init) => SELF.fetch(input, init),
-    });
-    if (sibling.status !== "success") return;
     await testEnv.IDENTITY_DB.prepare(
       "UPDATE platform_guest SET disabled_at = ? WHERE id = ?",
     )
