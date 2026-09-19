@@ -1139,6 +1139,7 @@ export async function completeOAuthRefresh(
   response: Response,
   preparation: Extract<OAuthRefreshPreparation, { kind: "refresh" }>,
   clientId: string,
+  onCommitted?: (installationId: string) => void,
 ): Promise<Response> {
   if (response.status !== 200) {
     await quarantineAfterFailure(
@@ -1407,6 +1408,7 @@ export async function completeOAuthRefresh(
     );
     return jsonAuthorityUnavailable("refresh mapping was not durable");
   }
+  onCommitted?.(predecessor.installation_id);
   if (
     !(await currentFamilyAuthority(database, preparation.familyId, successorId))
   ) {
@@ -1429,6 +1431,7 @@ export async function completeOAuthRefresh(
 export async function completeInitialOAuthRefresh(
   database: OAuthDatabase,
   response: Response,
+  onCommitted?: (installationId: string) => void,
 ): Promise<Response | undefined> {
   if (response.status !== 200) return;
   const returned = await parseReturnedTokens(response);
@@ -1808,6 +1811,7 @@ export async function completeInitialOAuthRefresh(
       "OAuth refresh installation was not durable",
     );
   }
+  onCommitted?.(context.id);
   if (!(await currentFamilyAuthority(database, familyId, rootId))) {
     await quarantineAfterFailure(
       database,
@@ -1970,6 +1974,7 @@ export async function revokeOAuthInstallation(
   database: OAuthDatabase,
   installationId: string,
   reason: string,
+  onCommitted?: (installationId: string) => void,
 ): Promise<boolean> {
   const family = await database
     .prepare(
@@ -2018,6 +2023,9 @@ export async function revokeOAuthInstallation(
       .prepare(`DELETE FROM oauthConsent WHERE referenceId = ?`)
       .bind(installationId),
   ]);
+  if (result.some((entry) => entry.meta.changes > 0)) {
+    onCommitted?.(installationId);
+  }
   return result.some((entry) => entry.meta.changes > 0);
 }
 

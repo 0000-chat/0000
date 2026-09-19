@@ -8,6 +8,7 @@ import {
   validateTrustedOAuthClientInput,
 } from "../../src/oauth-installation";
 import { createAuth } from "../../src/auth";
+import platformWorker from "../../src/worker";
 import { registerService } from "../../src/service-registration";
 import { opaqueSecret } from "../../src/platform-state";
 import { createPlatformClient } from "@0000/platform-client";
@@ -2293,6 +2294,121 @@ describe("T06 production OAuth installation", () => {
 
     await expectAuthenticated();
     await expectIntrospection(true);
+    const introspectionSentinel = "t12-introspection-d1-message-sentinel";
+    const introspectionStackSentinel =
+      "t12-introspection-d1-stack-only-sentinel";
+    let providerClientLookupHits = 0;
+    let providerAccessTokenPrepareHits = 0;
+    let providerAccessTokenBoundHits = 0;
+    let providerAccessTokenOperationHits = 0;
+    const providerAccessTokenQuery = (query: string): boolean =>
+      /oauth(?:_|)access(?:_|)token/i.test(query);
+    const providerClientQuery = (query: string): boolean =>
+      /oauth(?:_|)client/i.test(query);
+    const throwProviderLookupFailure = (): never => {
+      const error = new Error(introspectionSentinel);
+      error.stack = `${error.name}: ${error.message}\n    at provider ${introspectionStackSentinel}`;
+      throw error;
+    };
+    const failingDatabase = new Proxy(testEnv.IDENTITY_DB, {
+      get(target, property, receiver) {
+        if (property !== "prepare") {
+          return Reflect.get(target, property, receiver);
+        }
+        return (query: string) => {
+          if (providerClientQuery(query)) providerClientLookupHits += 1;
+          const statement = target.prepare(query);
+          if (!providerAccessTokenQuery(query)) return statement;
+          providerAccessTokenPrepareHits += 1;
+          return new Proxy(statement, {
+            get(statementTarget, statementProperty, statementReceiver) {
+              if (statementProperty !== "bind") {
+                return Reflect.get(
+                  statementTarget,
+                  statementProperty,
+                  statementReceiver,
+                );
+              }
+              return (...values: unknown[]) => {
+                providerAccessTokenBoundHits += 1;
+                const bound = statementTarget.bind(...values);
+                return new Proxy(bound, {
+                  get(boundTarget, boundProperty, boundReceiver) {
+                    if (
+                      boundProperty === "first" ||
+                      boundProperty === "all" ||
+                      boundProperty === "raw" ||
+                      boundProperty === "run"
+                    ) {
+                      return (..._args: unknown[]) => {
+                        providerAccessTokenOperationHits += 1;
+                        return throwProviderLookupFailure();
+                      };
+                    }
+                    return Reflect.get(
+                      boundTarget,
+                      boundProperty,
+                      boundReceiver,
+                    );
+                  },
+                });
+              };
+            },
+          });
+        };
+      },
+    });
+    const failingEnv = new Proxy(testEnv, {
+      get(target, property, receiver) {
+        if (property === "IDENTITY_DB") return failingDatabase;
+        return Reflect.get(target, property, receiver);
+      },
+    }) as Cloudflare.Env;
+    const capturedConsole: unknown[] = [];
+    const consoleSpies = (
+      ["error", "warn", "log", "info", "debug"] as const
+    ).map((method) =>
+      vi.spyOn(console, method).mockImplementation((...args: unknown[]) => {
+        capturedConsole.push(...args);
+      }),
+    );
+    let failedIntrospection: Response;
+    try {
+      failedIntrospection = await platformWorker.fetch(
+        new Request("http://localhost/api/auth/oauth2/introspect", {
+          method: "POST",
+          headers: { "content-type": "application/x-www-form-urlencoded" },
+          body: new URLSearchParams({
+            token: issued.accessToken,
+            client_id: introspectionClient.clientId,
+            client_secret: introspectionClient.clientSecret!,
+          }),
+        }),
+        failingEnv,
+      );
+    } finally {
+      for (const spy of consoleSpies) spy.mockRestore();
+    }
+    expect(failedIntrospection!.status).toBe(503);
+    expect(providerClientLookupHits).toBeGreaterThan(0);
+    expect(providerAccessTokenPrepareHits).toBeGreaterThan(0);
+    expect(providerAccessTokenBoundHits).toBeGreaterThan(0);
+    expect(providerAccessTokenOperationHits).toBeGreaterThan(0);
+    const capturedConsoleText = capturedConsole
+      .map((value) => {
+        if (value instanceof Error) {
+          return `${value.name}:${value.message}:${value.stack ?? ""}`;
+        }
+        if (typeof value === "string") return value;
+        try {
+          return JSON.stringify(value);
+        } catch {
+          return String(value);
+        }
+      })
+      .join(" ");
+    expect(capturedConsoleText).not.toContain(introspectionSentinel);
+    expect(capturedConsoleText).not.toContain(introspectionStackSentinel);
     await testEnv.IDENTITY_DB.prepare(
       "UPDATE platform_oauth_client SET active = 0 WHERE client_id = ?",
     )
@@ -2397,6 +2513,133 @@ describe("T06 production OAuth installation", () => {
       .run();
     await expectAuthenticated();
     await expectIntrospection(true);
+  });
+
+  it("maps generic provider database failures without exposing provider errors", async () => {
+    currentProfile = {
+      id: 816346,
+      login: "t06-provider-failure",
+      email: "provider-failure-t06@example.test",
+    };
+    const start = await SELF.fetch("http://localhost/api/auth/sign-in/social", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        origin: testEnv.PLATFORM_BASE_URL,
+      },
+      body: JSON.stringify({
+        provider: "github",
+        callbackURL: "http://localhost/account",
+        disableRedirect: true,
+      }),
+    });
+    expect(start.status).toBe(200);
+    const state = new URL(
+      ((await start.json()) as { url: string }).url,
+    ).searchParams.get("state");
+    expect(state).toBeTruthy();
+
+    const providerMessageSentinel = "t12-provider-callback-message-sentinel";
+    const providerStackSentinel = "t12-provider-callback-stack-sentinel";
+    let providerPrepareHits = 0;
+    let providerBoundHits = 0;
+    let providerOperationHits = 0;
+    const failingDatabase = new Proxy(testEnv.IDENTITY_DB, {
+      get(target, property, receiver) {
+        if (property !== "prepare") {
+          return Reflect.get(target, property, receiver);
+        }
+        return (query: string) => {
+          const statement = target.prepare(query);
+          if (!/from\s+["`]?(account|user)["`]?/iu.test(query)) {
+            return statement;
+          }
+          providerPrepareHits += 1;
+          return new Proxy(statement, {
+            get(statementTarget, statementProperty, statementReceiver) {
+              if (statementProperty !== "bind") {
+                return Reflect.get(
+                  statementTarget,
+                  statementProperty,
+                  statementReceiver,
+                );
+              }
+              return (...values: unknown[]) => {
+                providerBoundHits += 1;
+                const bound = statementTarget.bind(...values);
+                return new Proxy(bound, {
+                  get(boundTarget, boundProperty, boundReceiver) {
+                    if (
+                      boundProperty === "first" ||
+                      boundProperty === "all" ||
+                      boundProperty === "raw" ||
+                      boundProperty === "run"
+                    ) {
+                      return (..._args: unknown[]) => {
+                        providerOperationHits += 1;
+                        const error = new Error(providerMessageSentinel);
+                        error.stack = `${error.name}: ${error.message}\n    at provider ${providerStackSentinel}`;
+                        throw error;
+                      };
+                    }
+                    return Reflect.get(
+                      boundTarget,
+                      boundProperty,
+                      boundReceiver,
+                    );
+                  },
+                });
+              };
+            },
+          });
+        };
+      },
+    });
+    const failingEnv = new Proxy(testEnv, {
+      get(target, property, receiver) {
+        if (property === "IDENTITY_DB") return failingDatabase;
+        return Reflect.get(target, property, receiver);
+      },
+    }) as Cloudflare.Env;
+    const capturedConsole: unknown[] = [];
+    const consoleSpies = (
+      ["error", "warn", "log", "info", "debug"] as const
+    ).map((method) =>
+      vi.spyOn(console, method).mockImplementation((...args: unknown[]) => {
+        capturedConsole.push(...args);
+      }),
+    );
+    let failedCallback: Response;
+    try {
+      failedCallback = await platformWorker.fetch(
+        new Request(
+          `http://localhost/api/auth/callback/github?code=provider-code&state=${encodeURIComponent(state!)}`,
+          { headers: { cookie: cookiesFrom(start) } },
+        ),
+        failingEnv,
+      );
+    } finally {
+      for (const spy of consoleSpies) spy.mockRestore();
+    }
+    expect(failedCallback!.status).toBe(503);
+    expect(providerPrepareHits).toBeGreaterThan(0);
+    expect(providerBoundHits).toBeGreaterThan(0);
+    expect(providerOperationHits).toBeGreaterThan(0);
+    const capturedConsoleText = capturedConsole
+      .map((value) => {
+        if (value instanceof Error) {
+          return `${value.name}:${value.message}:${value.stack ?? ""}`;
+        }
+        if (typeof value === "string") return value;
+        try {
+          return JSON.stringify(value);
+        } catch {
+          return String(value);
+        }
+      })
+      .join(" ");
+    expect(capturedConsoleText).not.toContain(providerMessageSentinel);
+    expect(capturedConsoleText).not.toContain(providerStackSentinel);
   });
 
   it("fails closed at first-party final publication when organization authority changes", async () => {

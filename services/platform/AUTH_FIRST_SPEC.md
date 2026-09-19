@@ -75,8 +75,11 @@ configuration publication and Communicator adoption remain separate gates.
 The shared-client transport portion of T12 is integrated at `82e6181` with
 independently verified deadlines, late-result suppression and redirect refusal.
 Twelve client tests and twenty-seven Worker/D1 tests plus restart pass; native
-and bounded adversarial reviews accepted this slice. Distributed endpoint
-limits, audit and the rest of T12 remain required.
+and bounded adversarial reviews accepted this slice. The [T12 server safeguards
+report](T12_SERVER_SAFEGUARDS_REPORT.md) records the native endpoint policy,
+finite protected-request deadline and allowlisted diagnostics implemented in
+Platform. The actual Communicator consumer boundary and full T12 acceptance
+remain required.
 
 ## MVP outcome and deployment
 

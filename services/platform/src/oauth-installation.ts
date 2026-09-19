@@ -1206,6 +1206,7 @@ function providerResponseAccessToken(response: Response): Promise<{
 export async function completeInitialOAuthAccess(
   database: OAuthDatabase,
   response: Response,
+  onCommitted?: (installationId: string) => void,
 ): Promise<Response | undefined> {
   if (response.status !== 200) return;
   const returned = await providerResponseAccessToken(response);
@@ -1580,6 +1581,7 @@ export async function completeInitialOAuthAccess(
       400,
     );
   }
+  onCommitted?.(installation.id);
   const durable = await database
     .prepare(
       `SELECT c.id AS credential_id, i.active, f.status, a.sessionId

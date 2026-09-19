@@ -14,6 +14,7 @@ import {
 } from "../src/oauth-installation.ts";
 import { opaqueSecret } from "../src/platform-state.ts";
 import { registerTestService } from "../worker/test/fixtures/provision.ts";
+import { PLATFORM_TEST_MINIFLARE_RATE_LIMITS } from "./test-rate-limits.ts";
 
 const playwrightModule = process.env.T07_PLAYWRIGHT_MODULE;
 if (!playwrightModule) {
@@ -140,12 +141,15 @@ function createRuntime(script, persistenceDirectory, baseUrl) {
       PLATFORM_AUTHORITY_ID: authority,
       PLATFORM_BASE_URL: baseUrl,
       PLATFORM_CREDENTIAL_MAX_LIFETIME_DAYS: "90",
+      PLATFORM_SERVER_DEADLINE_MS: "8000",
+      PLATFORM_RATE_LIMIT_POLICY: "",
       PLATFORM_DEPLOYMENT_MODE: "self-hosted",
       PLATFORM_SIGNUP_POLICY: "open",
     },
     compatibilityDate,
     compatibilityFlags: ["nodejs_compat"],
     d1Databases: { IDENTITY_DB: "platform-t07-browser-identity" },
+    ratelimits: PLATFORM_TEST_MINIFLARE_RATE_LIMITS,
     host: "127.0.0.1",
     modules: true,
     name: "platform-t07-browser-runtime",
