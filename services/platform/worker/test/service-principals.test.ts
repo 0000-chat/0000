@@ -151,6 +151,15 @@ async function serviceCredential(
   });
 }
 
+async function expectRouteStatus(
+  responsePromise: Promise<Response>,
+  status: number,
+): Promise<Response> {
+  const response = await responsePromise;
+  expect(response.status, await response.clone().text()).toBe(status);
+  return response;
+}
+
 describe("T11 organization-owned service principals", () => {
   beforeEach(() => {
     mutableEnv.PLATFORM_CREDENTIAL_MAX_LIFETIME_DAYS = "90";
@@ -666,5 +675,684 @@ describe("T11 organization-owned service principals", () => {
     expect(
       rotations.filter((result) => result.status === "rejected"),
     ).toHaveLength(1);
+  });
+
+  it("proves registered rotation lineage, route isolation, and current authority", async () => {
+    const owner = await loginAs({
+      subject: "t11-service-route-owner",
+      name: "T11 Route Owner",
+      email: "t11-service-route-owner@example.test",
+    });
+    const foreignOwner = await loginAs({
+      subject: "t11-service-route-foreign-owner",
+      name: "T11 Foreign Owner",
+      email: "t11-service-route-foreign-owner@example.test",
+    });
+    const service: TestService = {
+      serviceId: "t11-service-route-boundary",
+      audience: "https://t11-service-route-boundary.0000.test",
+      verifier: opaqueSecret("service_verify_"),
+      guestGrantIssuer: opaqueSecret("service_guest_grant_"),
+      allowedCapabilities: ["resource:read", "resource:write"],
+    };
+    await registerTestService(testEnv.IDENTITY_DB, service);
+
+    const created = await expectRouteStatus(
+      post("/api/account/service-principals", owner.cookie, {
+        organizationId: owner.organizationId,
+        name: "Route boundary service",
+      }),
+      201,
+    );
+    const principal = (await created.json()) as { subjectId: string };
+    const grantResponse = await expectRouteStatus(
+      post("/api/account/service-principals/grants", owner.cookie, {
+        organizationId: owner.organizationId,
+        subjectId: principal.subjectId,
+        serviceId: service.serviceId,
+        capabilities: ["resource:read", "resource:write"],
+      }),
+      201,
+    );
+    const grant = (await grantResponse.json()) as { id: string };
+    const issueResponse = await expectRouteStatus(
+      post("/api/account/service-principals/credentials", owner.cookie, {
+        organizationId: owner.organizationId,
+        subjectId: principal.subjectId,
+        grantId: grant.id,
+        serviceId: service.serviceId,
+        capabilities: ["resource:read", "resource:write"],
+      }),
+      201,
+    );
+    const issued = (await issueResponse.json()) as {
+      credential: string;
+      credentialId: string;
+    };
+
+    expect((await serviceCredential(service, service.verifier)).status).toBe(
+      401,
+    );
+    expect(
+      (await serviceCredential(service, service.guestGrantIssuer)).status,
+    ).toBe(401);
+    const sessionAsCredential = await SELF.fetch(
+      "http://localhost/api/auth/get-session",
+      {
+        headers: {
+          cookie: `better-auth.session_token=${issued.credential}`,
+        },
+      },
+    );
+    expect(sessionAsCredential.status).toBe(200);
+    expect(await sessionAsCredential.json()).toBeNull();
+    expect(
+      (
+        await SELF.fetch(
+          `http://localhost/api/account/service-principals?organizationId=${encodeURIComponent(owner.organizationId)}`,
+          { headers: { authorization: `Bearer ${issued.credential}` } },
+        )
+      ).status,
+    ).toBe(401);
+
+    const agentResponse = await expectRouteStatus(
+      post("/api/account/agents", owner.cookie, {
+        organizationId: owner.organizationId,
+        name: "Route boundary agent",
+      }),
+      201,
+    );
+    const agent = (await agentResponse.json()) as { id: string; kind: string };
+    expect(agent.kind).toBe("agent");
+    const agentGrantResponse = await expectRouteStatus(
+      post("/api/account/agents/grants", owner.cookie, {
+        organizationId: owner.organizationId,
+        agentId: agent.id,
+        serviceId: service.serviceId,
+        capabilities: ["resource:read"],
+      }),
+      201,
+    );
+    const agentGrant = (await agentGrantResponse.json()) as { id: string };
+    const agentCredentialResponse = await expectRouteStatus(
+      post("/api/account/agents/credentials", owner.cookie, {
+        organizationId: owner.organizationId,
+        agentId: agent.id,
+        grantId: agentGrant.id,
+        serviceId: service.serviceId,
+        capabilities: ["resource:read"],
+      }),
+      201,
+    );
+    const agentCredential = (await agentCredentialResponse.json()) as {
+      credentialId: string;
+    };
+
+    const ownerMembership = await testEnv.IDENTITY_DB.prepare(
+      "SELECT id FROM member WHERE organizationId = ? AND userId = ?",
+    )
+      .bind(owner.organizationId, owner.id)
+      .first<{ id: string }>();
+    if (!ownerMembership) throw new Error("route owner membership missing");
+    const oauthClientId = `t11-route-oauth-client-${crypto.randomUUID()}`;
+    const oauthSubjectId = `t11-route-oauth-subject-${crypto.randomUUID()}`;
+    await testEnv.IDENTITY_DB.prepare(
+      'INSERT INTO "oauthClient" ("id", "clientId", "redirectUris") VALUES (?, ?, ?)',
+    )
+      .bind(crypto.randomUUID(), oauthClientId, "https://oauth.example.test/cb")
+      .run();
+    await testEnv.IDENTITY_DB.prepare(
+      `INSERT INTO platform_oauth_installation
+       (id, client_id, user_id, membership_id, organization_id, service_id,
+        audience, capabilities, subject_id, grant_id, active, revoked_at,
+        created_at, expires_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, NULL, ?, ?)`,
+    )
+      .bind(
+        crypto.randomUUID(),
+        oauthClientId,
+        owner.id,
+        ownerMembership.id,
+        owner.organizationId,
+        service.serviceId,
+        service.audience,
+        JSON.stringify(["resource:read"]),
+        oauthSubjectId,
+        `t11-route-oauth-grant-${crypto.randomUUID()}`,
+        Date.now(),
+        Date.now() + 86_400_000,
+      )
+      .run();
+
+    const wrongOrgList = await SELF.fetch(
+      `http://localhost/api/account/service-principals?organizationId=${encodeURIComponent(foreignOwner.organizationId)}`,
+      { headers: { cookie: owner.cookie } },
+    );
+    expect(wrongOrgList.status).toBe(404);
+    await expectRouteStatus(
+      post("/api/account/service-principals/update", owner.cookie, {
+        organizationId: foreignOwner.organizationId,
+        subjectId: principal.subjectId,
+        name: "wrong organization",
+      }),
+      404,
+    );
+    await expectRouteStatus(
+      post("/api/account/service-principals/credentials/rotate", owner.cookie, {
+        organizationId: foreignOwner.organizationId,
+        subjectId: principal.subjectId,
+        credentialId: issued.credentialId,
+      }),
+      404,
+    );
+
+    const serviceQuery = (suffix: string) =>
+      SELF.fetch(`http://localhost/api/account/service-principals/${suffix}`, {
+        headers: { cookie: owner.cookie },
+      });
+    await expectRouteStatus(
+      serviceQuery(
+        `grants?organizationId=${encodeURIComponent(owner.organizationId)}&subjectId=${encodeURIComponent(agent.id)}`,
+      ),
+      404,
+    );
+    await expectRouteStatus(
+      serviceQuery(
+        `credentials?organizationId=${encodeURIComponent(owner.organizationId)}&subjectId=${encodeURIComponent(agent.id)}`,
+      ),
+      404,
+    );
+    await expectRouteStatus(
+      post("/api/account/service-principals/update", owner.cookie, {
+        organizationId: owner.organizationId,
+        subjectId: agent.id,
+        name: "must stay agent",
+      }),
+      404,
+    );
+    await expectRouteStatus(
+      post("/api/account/service-principals/lifecycle", owner.cookie, {
+        organizationId: owner.organizationId,
+        subjectId: agent.id,
+        action: "disable",
+      }),
+      404,
+    );
+    await expectRouteStatus(
+      post("/api/account/service-principals/grants", owner.cookie, {
+        organizationId: owner.organizationId,
+        subjectId: agent.id,
+        serviceId: service.serviceId,
+        capabilities: ["resource:read"],
+      }),
+      404,
+    );
+    await expectRouteStatus(
+      post("/api/account/service-principals/grants/revoke", owner.cookie, {
+        organizationId: owner.organizationId,
+        subjectId: agent.id,
+        grantId: agentGrant.id,
+      }),
+      404,
+    );
+    await expectRouteStatus(
+      post("/api/account/service-principals/credentials", owner.cookie, {
+        organizationId: owner.organizationId,
+        subjectId: agent.id,
+        grantId: agentGrant.id,
+        serviceId: service.serviceId,
+        capabilities: ["resource:read"],
+      }),
+      404,
+    );
+    await expectRouteStatus(
+      post("/api/account/service-principals/credentials/rotate", owner.cookie, {
+        organizationId: owner.organizationId,
+        subjectId: agent.id,
+        credentialId: agentCredential.credentialId,
+      }),
+      404,
+    );
+    await expectRouteStatus(
+      post("/api/account/service-principals/credentials/revoke", owner.cookie, {
+        organizationId: owner.organizationId,
+        subjectId: agent.id,
+        credentialId: agentCredential.credentialId,
+      }),
+      404,
+    );
+
+    const agentQuery = (suffix: string) =>
+      SELF.fetch(`http://localhost/api/account/agents/${suffix}`, {
+        headers: { cookie: owner.cookie },
+      });
+    await expectRouteStatus(
+      agentQuery(
+        `grants?organizationId=${encodeURIComponent(owner.organizationId)}&agentId=${encodeURIComponent(principal.subjectId)}`,
+      ),
+      404,
+    );
+    await expectRouteStatus(
+      agentQuery(
+        `credentials?organizationId=${encodeURIComponent(owner.organizationId)}&agentId=${encodeURIComponent(principal.subjectId)}`,
+      ),
+      404,
+    );
+    await expectRouteStatus(
+      post("/api/account/agents/update", owner.cookie, {
+        organizationId: owner.organizationId,
+        agentId: principal.subjectId,
+        name: "must stay service",
+      }),
+      404,
+    );
+    await expectRouteStatus(
+      post("/api/account/agents/lifecycle", owner.cookie, {
+        organizationId: owner.organizationId,
+        agentId: principal.subjectId,
+        action: "disable",
+      }),
+      404,
+    );
+    await expectRouteStatus(
+      post("/api/account/agents/grants", owner.cookie, {
+        organizationId: owner.organizationId,
+        agentId: principal.subjectId,
+        serviceId: service.serviceId,
+        capabilities: ["resource:read"],
+      }),
+      404,
+    );
+    await expectRouteStatus(
+      post("/api/account/agents/grants/revoke", owner.cookie, {
+        organizationId: owner.organizationId,
+        agentId: principal.subjectId,
+        grantId: grant.id,
+      }),
+      404,
+    );
+    await expectRouteStatus(
+      post("/api/account/agents/credentials", owner.cookie, {
+        organizationId: owner.organizationId,
+        agentId: principal.subjectId,
+        grantId: grant.id,
+        serviceId: service.serviceId,
+        capabilities: ["resource:read"],
+      }),
+      404,
+    );
+    await expectRouteStatus(
+      post("/api/account/agents/credentials/rotate", owner.cookie, {
+        organizationId: owner.organizationId,
+        agentId: principal.subjectId,
+        credentialId: issued.credentialId,
+      }),
+      404,
+    );
+    await expectRouteStatus(
+      post("/api/account/agents/credentials/revoke", owner.cookie, {
+        organizationId: owner.organizationId,
+        agentId: principal.subjectId,
+        credentialId: issued.credentialId,
+      }),
+      404,
+    );
+
+    const oauthServiceQuery = (suffix: string) =>
+      SELF.fetch(`http://localhost/api/account/service-principals/${suffix}`, {
+        headers: { cookie: owner.cookie },
+      });
+    await expectRouteStatus(
+      oauthServiceQuery(
+        `grants?organizationId=${encodeURIComponent(owner.organizationId)}&subjectId=${encodeURIComponent(oauthSubjectId)}`,
+      ),
+      404,
+    );
+    await expectRouteStatus(
+      oauthServiceQuery(
+        `credentials?organizationId=${encodeURIComponent(owner.organizationId)}&subjectId=${encodeURIComponent(oauthSubjectId)}`,
+      ),
+      404,
+    );
+    await expectRouteStatus(
+      post("/api/account/service-principals/update", owner.cookie, {
+        organizationId: owner.organizationId,
+        subjectId: oauthSubjectId,
+        name: "must stay OAuth subject",
+      }),
+      404,
+    );
+    await expectRouteStatus(
+      post("/api/account/service-principals/lifecycle", owner.cookie, {
+        organizationId: owner.organizationId,
+        subjectId: oauthSubjectId,
+        action: "disable",
+      }),
+      404,
+    );
+    await expectRouteStatus(
+      post("/api/account/service-principals/grants", owner.cookie, {
+        organizationId: owner.organizationId,
+        subjectId: oauthSubjectId,
+        serviceId: service.serviceId,
+        capabilities: ["resource:read"],
+      }),
+      404,
+    );
+    await expectRouteStatus(
+      post("/api/account/service-principals/grants/revoke", owner.cookie, {
+        organizationId: owner.organizationId,
+        subjectId: oauthSubjectId,
+        grantId: grant.id,
+      }),
+      404,
+    );
+    await expectRouteStatus(
+      post("/api/account/service-principals/credentials", owner.cookie, {
+        organizationId: owner.organizationId,
+        subjectId: oauthSubjectId,
+        grantId: grant.id,
+        serviceId: service.serviceId,
+        capabilities: ["resource:read"],
+      }),
+      404,
+    );
+    await expectRouteStatus(
+      post("/api/account/service-principals/credentials/rotate", owner.cookie, {
+        organizationId: owner.organizationId,
+        subjectId: oauthSubjectId,
+        credentialId: issued.credentialId,
+      }),
+      404,
+    );
+    await expectRouteStatus(
+      post("/api/account/service-principals/credentials/revoke", owner.cookie, {
+        organizationId: owner.organizationId,
+        subjectId: oauthSubjectId,
+        credentialId: issued.credentialId,
+      }),
+      404,
+    );
+
+    const rotations = await Promise.all([
+      post("/api/account/service-principals/credentials/rotate", owner.cookie, {
+        organizationId: owner.organizationId,
+        subjectId: principal.subjectId,
+        credentialId: issued.credentialId,
+      }),
+      post("/api/account/service-principals/credentials/rotate", owner.cookie, {
+        organizationId: owner.organizationId,
+        subjectId: principal.subjectId,
+        credentialId: issued.credentialId,
+      }),
+    ]);
+    expect(rotations.map((response) => response.status).sort()).toEqual([
+      201, 409,
+    ]);
+    const winnerResponse = rotations.find(
+      (response) => response.status === 201,
+    );
+    const loserResponse = rotations.find((response) => response.status === 409);
+    if (!winnerResponse || !loserResponse)
+      throw new Error("service route rotation winner missing");
+    const winner = (await winnerResponse.json()) as {
+      credential: string;
+      credentialId: string;
+    };
+    const loserBody = (await loserResponse.json()) as Record<string, unknown>;
+    expect(loserBody).not.toHaveProperty("credential");
+    expect((await client(service).authenticate(issued.credential)).status).toBe(
+      "invalid_credential",
+    );
+    expect((await client(service).authenticate(winner.credential)).status).toBe(
+      "authenticated",
+    );
+    const lineage = await testEnv.IDENTITY_DB.prepare(
+      `SELECT id, revoked_at, replaced_by_id, predecessor_id
+       FROM platform_credential
+       WHERE id IN (?, ?)`,
+    )
+      .bind(issued.credentialId, winner.credentialId)
+      .all<{
+        id: string;
+        revoked_at: number | null;
+        replaced_by_id: string | null;
+        predecessor_id: string | null;
+      }>();
+    expect(lineage.results).toHaveLength(2);
+    const predecessor = lineage.results.find(
+      (row) => row.id === issued.credentialId,
+    );
+    const successor = lineage.results.find(
+      (row) => row.id === winner.credentialId,
+    );
+    expect(predecessor).toMatchObject({
+      revoked_at: expect.any(Number),
+      replaced_by_id: winner.credentialId,
+      predecessor_id: null,
+    });
+    expect(successor).toMatchObject({
+      revoked_at: null,
+      replaced_by_id: null,
+      predecessor_id: issued.credentialId,
+    });
+    const activeCount = await testEnv.IDENTITY_DB.prepare(
+      "SELECT COUNT(*) AS count FROM platform_credential WHERE kind = 'service' AND subject_id = ? AND revoked_at IS NULL",
+    )
+      .bind(principal.subjectId)
+      .first<{ count: number }>();
+    expect(activeCount?.count).toBe(1);
+
+    await testEnv.IDENTITY_DB.prepare(
+      `CREATE TRIGGER t11_fail_service_replacement
+       BEFORE INSERT ON platform_credential
+       WHEN NEW.kind = 'service' AND NEW.predecessor_id IS NOT NULL
+       BEGIN SELECT RAISE(ABORT, 't11 service replacement insert failure'); END`,
+    ).run();
+    let failedRotation: Response | undefined;
+    try {
+      failedRotation = await post(
+        "/api/account/service-principals/credentials/rotate",
+        owner.cookie,
+        {
+          organizationId: owner.organizationId,
+          subjectId: principal.subjectId,
+          credentialId: winner.credentialId,
+        },
+      );
+    } finally {
+      await testEnv.IDENTITY_DB.prepare(
+        "DROP TRIGGER t11_fail_service_replacement",
+      ).run();
+    }
+    if (!failedRotation) throw new Error("service fault rotation missing");
+    expect(failedRotation.status).not.toBe(201);
+    expect(await failedRotation.text()).not.toContain("0000_service_");
+    const winnerAfterFault = await testEnv.IDENTITY_DB.prepare(
+      "SELECT revoked_at, replaced_by_id FROM platform_credential WHERE id = ?",
+    )
+      .bind(winner.credentialId)
+      .first<{ revoked_at: number | null; replaced_by_id: string | null }>();
+    expect(winnerAfterFault).toEqual({
+      revoked_at: null,
+      replaced_by_id: null,
+    });
+    const faultSuccessorCount = await testEnv.IDENTITY_DB.prepare(
+      "SELECT COUNT(*) AS count FROM platform_credential WHERE predecessor_id = ?",
+    )
+      .bind(winner.credentialId)
+      .first<{ count: number }>();
+    expect(faultSuccessorCount?.count).toBe(0);
+    expect((await client(service).authenticate(winner.credential)).status).toBe(
+      "authenticated",
+    );
+
+    const beforeNarrow = await expectRouteStatus(
+      post("/api/account/service-principals/credentials", owner.cookie, {
+        organizationId: owner.organizationId,
+        subjectId: principal.subjectId,
+        grantId: grant.id,
+        serviceId: service.serviceId,
+        capabilities: ["resource:read", "resource:write"],
+      }),
+      201,
+    );
+    const beforeNarrowBody = (await beforeNarrow.json()) as {
+      credential: string;
+      credentialId: string;
+    };
+    await testEnv.IDENTITY_DB.prepare(
+      "UPDATE organization SET suspendedAt = ? WHERE id = ?",
+    )
+      .bind(Date.now(), owner.organizationId)
+      .run();
+    expect(
+      (await client(service).authenticate(beforeNarrowBody.credential)).status,
+    ).toBe("invalid_credential");
+    await testEnv.IDENTITY_DB.prepare(
+      "UPDATE organization SET suspendedAt = NULL WHERE id = ?",
+    )
+      .bind(owner.organizationId)
+      .run();
+    expect(
+      (await client(service).authenticate(beforeNarrowBody.credential)).status,
+    ).toBe("authenticated");
+
+    await updateServiceMetadata(testEnv.IDENTITY_DB, {
+      serviceId: service.serviceId,
+      capabilities: ["resource:write"],
+      displayName: "Route catalog narrowed",
+    });
+    expect(
+      (await client(service).authenticate(beforeNarrowBody.credential)).status,
+    ).toBe("invalid_credential");
+    await updateServiceMetadata(testEnv.IDENTITY_DB, {
+      serviceId: service.serviceId,
+      capabilities: ["resource:read", "resource:write"],
+      displayName: "Route catalog restored",
+    });
+    const narrowGrant = await expectRouteStatus(
+      post("/api/account/service-principals/grants", owner.cookie, {
+        organizationId: owner.organizationId,
+        subjectId: principal.subjectId,
+        serviceId: service.serviceId,
+        capabilities: ["resource:read"],
+      }),
+      200,
+    );
+    expect(((await narrowGrant.json()) as { status: string }).status).toBe(
+      "narrowed",
+    );
+    expect(
+      (await client(service).authenticate(beforeNarrowBody.credential)).status,
+    ).toBe("invalid_credential");
+    const readCredentialResponse = await expectRouteStatus(
+      post("/api/account/service-principals/credentials", owner.cookie, {
+        organizationId: owner.organizationId,
+        subjectId: principal.subjectId,
+        grantId: grant.id,
+        serviceId: service.serviceId,
+        capabilities: ["resource:read"],
+      }),
+      201,
+    );
+    const readCredential = (await readCredentialResponse.json()) as {
+      credential: string;
+      credentialId: string;
+    };
+    expect(
+      (await client(service).authenticate(readCredential.credential)).status,
+    ).toBe("authenticated");
+    await expectRouteStatus(
+      post("/api/account/service-principals/credentials/revoke", owner.cookie, {
+        organizationId: owner.organizationId,
+        subjectId: principal.subjectId,
+        credentialId: readCredential.credentialId,
+      }),
+      200,
+    );
+    expect(
+      (await client(service).authenticate(readCredential.credential)).status,
+    ).toBe("invalid_credential");
+    const managerRuntimeCredentialResponse = await expectRouteStatus(
+      post("/api/account/service-principals/credentials", owner.cookie, {
+        organizationId: owner.organizationId,
+        subjectId: principal.subjectId,
+        grantId: grant.id,
+        serviceId: service.serviceId,
+        capabilities: ["resource:read"],
+      }),
+      201,
+    );
+    const managerRuntimeCredential =
+      (await managerRuntimeCredentialResponse.json()) as {
+        credential: string;
+      };
+
+    const admin = await loginAs({
+      subject: "t11-service-route-admin",
+      name: "T11 Route Admin",
+      email: "t11-service-route-admin@example.test",
+    });
+    await inviteAndAccept(owner, admin, "admin");
+    const adminMembership = await testEnv.IDENTITY_DB.prepare(
+      "SELECT id FROM member WHERE organizationId = ? AND userId = ?",
+    )
+      .bind(owner.organizationId, admin.id)
+      .first<{ id: string }>();
+    if (!adminMembership) throw new Error("route admin membership missing");
+    await expectRouteStatus(
+      post("/api/account/members/role", owner.cookie, {
+        organizationId: owner.organizationId,
+        membershipId: adminMembership.id,
+        role: "owner",
+      }),
+      200,
+    );
+    await expectRouteStatus(
+      post("/api/account/members/leave", owner.cookie, {
+        organizationId: owner.organizationId,
+      }),
+      200,
+    );
+    const formerOwnerList = await SELF.fetch(
+      `http://localhost/api/account/service-principals?organizationId=${encodeURIComponent(owner.organizationId)}`,
+      { headers: { cookie: owner.cookie } },
+    );
+    expect([401, 403, 404]).toContain(formerOwnerList.status);
+    const formerOwnerUpdate = await post(
+      "/api/account/service-principals/update",
+      owner.cookie,
+      {
+        organizationId: owner.organizationId,
+        subjectId: principal.subjectId,
+        name: "former owner denied",
+      },
+    );
+    expect([401, 403, 404]).toContain(formerOwnerUpdate.status);
+    await expectRouteStatus(
+      post("/api/account/service-principals/update", admin.cookie, {
+        organizationId: owner.organizationId,
+        subjectId: principal.subjectId,
+        name: "current manager service",
+      }),
+      200,
+    );
+    expect(
+      (await client(service).authenticate(managerRuntimeCredential.credential))
+        .status,
+    ).toBe("authenticated");
+    await expectRouteStatus(
+      post("/api/account/service-principals/grants/revoke", admin.cookie, {
+        organizationId: owner.organizationId,
+        subjectId: principal.subjectId,
+        grantId: grant.id,
+      }),
+      200,
+    );
+    expect(
+      (await client(service).authenticate(managerRuntimeCredential.credential))
+        .status,
+    ).toBe("invalid_credential");
   });
 });

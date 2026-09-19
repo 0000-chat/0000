@@ -49,13 +49,18 @@ routes and D1 state for:
   agent/service route isolation, issuer separation, disabled and restored
   subjects, expiry, catalog narrowing, immutable kind and credential-kind
   binding;
-- shared-client audience denial and single-winner concurrent rotation.
+- shared-client audience denial and single-winner concurrent rotation;
+- registered rotation-route races with predecessor/successor lineage checks,
+  replacement-insert rollback, no returned secret on failure, reverse
+  agent/OAuth subject route isolation, wrong-organization and wrong-grant
+  denial, suspended-organization verification, grant narrowing and credential
+  revocation, and current-manager/runtime continuity after creator departure.
 
 The focused command passes:
 
 ```text
 bunx vitest run --config vitest.worker.config.ts worker/test/service-principals.test.ts
-2 tests passed
+3 tests passed
 ```
 
 The existing agent regression passes:
@@ -65,13 +70,15 @@ bunx vitest run --config vitest.worker.config.ts worker/test/agents.test.ts
 2 tests passed
 ```
 
-`bun run typecheck` and the focused Biome format check pass. The full Platform
-Worker suite reaches 50 passing tests and one pre-existing account fixture
-failure in `worker/test/account.test.ts`: after the account test's concurrent
-provider unlink flow, the expected membership-recovery page is replaced by the
-sign-in page. That fixture is outside this change and is owned by the parent
-account correction work.
+`bun run typecheck` and the full Platform format check pass. The full Worker
+suite reaches 50 passing tests in 13 files and one pre-existing account fixture
+failure in `worker/test/account.test.ts`. After the concurrent provider unlink
+flow can leave GitHub as the surviving account, the fixture still starts a
+hard-coded Google login and expects `user_disabled`; the callback returns
+`account_not_linked`. The parent-owned fixture correction is isolated in
+`de7af31`; the remaining assertion is outside this change. The same run with
+that account file excluded passes all 12 other files and 50 tests.
 
-The OAuth refresh restart probe and the full repository check remain required
-at the parent verification gate. No external provider HTTP or consumer
-deployment is claimed here.
+`bun run test:restart` passes the D1 persistence probe, and
+`bun scripts/test-oauth-refresh-restart.mjs` passes the actual refresh restart
+probe. No external provider HTTP or consumer deployment is claimed here.
