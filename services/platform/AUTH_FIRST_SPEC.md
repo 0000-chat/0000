@@ -41,7 +41,12 @@ Atomic ownership claims are reviewed and integrated at `c54d884`;
 assertions, deterministic expiry and claim/renewal race evidence, and the
 explicitly local Database-style contract fixture. Parent full msg checks pass;
 native and bounded adversarial reviews found no remaining confirmed defect.
-Managed quotas and Communicator adoption remain separate gates.
+Msg quota configuration and enforcement are reviewed and integrated at `4242217`;
+[the quota report](../msg/T13_QUOTA_REPORT.md) records actual managed/self-host
+binding thresholds and fresh Platform guest non-reset evidence. Parent combined
+checks pass 198 Worker tests, 20 tooling tests, 66 CLI tests and build/pack,
+including executed missing/failed production binding checks. Private Cloud
+configuration publication and Communicator adoption remain separate gates.
 
 The shared-client transport portion of T12 is integrated at `82e6181` with
 independently verified deadlines, late-result suppression and redirect refusal.

@@ -50,8 +50,15 @@ revocation, reviewed and integrated at `c54d884`. Parent checks pass the full
 msg package and 83 actual Platform/D1-to-msg/DO claim assertions; deterministic
 DO expiry coverage also passes. Native reviews and the bounded adversarial
 review found no remaining confirmed defect. The Database-style fixture remains
-a local contract fixture. Managed quotas remain T13; Communicator integration
-remains T11.
+a local contract fixture.
+[Msg's quota report](../msg/T13_QUOTA_REPORT.md) records service-owned managed
+and self-host policy configuration, integrated at `4242217`. Parent combined
+checks pass 198 Worker tests, 20 tooling tests, 66 CLI tests and build/pack.
+Actual Platform guest replacement preserves the same actor's exhausted quota;
+executed production-entry checks deny all missing or failed action bindings
+before resource calls. Native and bounded adversarial reviews found no remaining
+confirmed defect. Limits remain per-location and permissive; private Cloud
+configuration publication remains T15. Communicator integration remains T11.
 The full MVP is not implemented or accepted, and these reports do not establish
 production readiness.
 

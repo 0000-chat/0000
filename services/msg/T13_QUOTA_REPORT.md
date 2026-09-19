@@ -30,6 +30,15 @@ Validation from branch `codex/platform-t13`:
 - `bun test worker/src/t13-quota.integration.test.ts worker/src/t13-config.integration.test.ts` — passed: 2 tests / 15 assertions.
 - `git diff --check` — passed.
 
+Parent aggregate verification at `4242217` passes 198 Worker tests / 1,221
+assertions, 20 tooling tests / 71 assertions, 66 CLI tests / 242 assertions,
+and build/pack. The executable production-entry probe covers missing and
+throwing bindings for all four actions: each returns metadata-only 429 with
+Retry-After 60 before any resource-service call. Independent native reviews
+and the bounded external adversarial review found no remaining confirmed
+defect. The Cloudflare test mock preserves Durable Object context consistently
+with the existing room tests.
+
 Cloudflare Rate Limit bindings are location-local and permissive/eventually
 consistent. Namespace IDs share counters across Workers in one account, so
 these checks do not establish exact global accounting, exact per-person
