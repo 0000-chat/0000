@@ -875,6 +875,34 @@ describe("human recovery evidence experiments", () => {
       },
       "human-probe-mixed-linker-signin",
     );
+    let ownerGuardError: unknown;
+    try {
+      await testEnv.IDENTITY_DB.prepare(
+        `INSERT INTO account
+           (id, accountId, providerId, userId, createdAt, updatedAt)
+         VALUES (?, ?, 'github', ?, ?, ?)`,
+      )
+        .bind(
+          crypto.randomUUID(),
+          "814922",
+          linkUser.userId,
+          Date.now(),
+          Date.now(),
+        )
+        .run();
+    } catch (error) {
+      ownerGuardError = error;
+    }
+    expect(String(ownerGuardError)).toContain(
+      "provider account belongs to a pending user",
+    );
+    expect(await accountRows("814922")).toHaveLength(0);
+    expect((await pendingRows(pendingIdentity.email))[0]).toMatchObject({
+      id: pendingUser?.id,
+      pendingSocialProviderId: "github",
+      pendingSocialSubject: "814922",
+    });
+
     const linkStart = await startLink(linkUser.cookie);
     const retryStart = await startSocialLogin();
     expect(linkStart.status).toBe(200);

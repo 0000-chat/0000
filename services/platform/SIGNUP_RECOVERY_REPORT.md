@@ -52,10 +52,13 @@ HTTP boundary. It passed ten tests:
   re-enabling the user, the same verified subject recovers and clears the
   marker.
 - A pending orphan combined with a revoked explicit-link callback returns
-  `link_session_required`; the callback leaves both the pending marker and
-  provider account absent. A concurrent fresh retry and explicit-link claim
-  with overlapping provider lookups leaves exactly one account owned by the
-  pending user, proving the cross-table pending-owner guard.
+  `link_session_required`; the callback leaves the pending marker intact and
+  the provider account absent. A direct D1 insert for the same provider subject
+  under a different user raises the pending-owner trigger error, leaves the
+  marker intact, and creates no competing account. A bounded concurrent fresh
+  retry and explicit-link claim then leaves exactly one account owned by the
+  pending user; its provider lookups overlap, but the fixture does not claim
+  to force database ordering.
 - Two simultaneous fresh retries against the same pending marker both return
   the account page and create sessions for the same user. The conditional
   account insert leaves one account, one default organization, and one owner
