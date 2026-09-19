@@ -33,6 +33,12 @@ Native reviews and a bounded Grok adversarial review found no confirmed defect.
 Actual msg adoption, management access and grant-to-local-permission binding
 remain acceptance gates; these results do not establish consumer readiness.
 
+The shared-client transport portion of T12 is integrated at `82e6181` with
+independently verified deadlines, late-result suppression and redirect refusal.
+Twelve client tests and twenty-seven Worker/D1 tests plus restart pass; native
+and bounded adversarial reviews accepted this slice. Distributed endpoint
+limits, audit and the rest of T12 remain required.
+
 ## MVP outcome and deployment
 
 Use the same open-source Platform for self-hosted deployments and managed 0000

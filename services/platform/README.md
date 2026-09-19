@@ -22,6 +22,12 @@ Worker/D1 files, twenty-seven tests, format/typecheck and restart persistence.
 Distinct owner and participant permissions can coexist on one resource without
 widening or revoking each other; pre-migration grants retain their default
 permission. Msg must still bind each grant to its local permission source.
+The [shared client](../../packages/platform-client/README.md) transport follow-up
+is integrated at `82e6181`: verification and guest operations have a configurable
+deadline covering fetch and body parsing, reject redirects, and preserve
+failure categories. Twelve client tests and the twenty-seven-test Platform
+suite plus restart pass independently; native and adversarial reviews found no
+confirmed defect. T12's server-side rate limits and audit remain outstanding.
 T03 aggregate checks passed at `c51d285`; T04 checks passed at `dc30cd4`.
 [T14_RECONNECT_REPORT.md](T14_RECONNECT_REPORT.md) records the independently
 reviewed reconnect fixture, integrated and verified at `166e54d`.
