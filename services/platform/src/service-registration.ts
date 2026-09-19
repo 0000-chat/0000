@@ -17,6 +17,11 @@ export interface ProvisionedService extends ServiceRegistrationInput {
   verifier: string;
 }
 
+export interface ProvisionedGuestIssuer {
+  serviceId: string;
+  guestGrantIssuer: string;
+}
+
 export interface ServiceMetadataUpdateInput {
   serviceId: string;
   capabilities: string[];
@@ -31,7 +36,10 @@ export class ServiceRegistrationError extends Error {
     | "invalid_display_name"
     | "service_conflict"
     | "service_not_found"
-    | "service_disabled";
+    | "service_disabled"
+    | "guest_issuer_conflict"
+    | "guest_issuer_not_found"
+    | "guest_issuer_disabled";
 
   constructor(code: ServiceRegistrationError["code"], message: string) {
     super(message);
@@ -291,4 +299,229 @@ export async function disableService(
     );
   }
   return false;
+}
+
+function validateHash(verifierHash: string, label: string): void {
+  if (!/^[a-f0-9]{64}$/.test(verifierHash)) {
+    throw new Error(`${label} hash must be a SHA-256 hex digest.`);
+  }
+}
+
+export function guestIssuerRegistrationSql(
+  serviceId: string,
+  issuerHash: string,
+  createdAt: number,
+): string {
+  if (!validServiceId(serviceId)) {
+    throw new ServiceRegistrationError(
+      "invalid_service_id",
+      "service ID is invalid.",
+    );
+  }
+  validateHash(issuerHash, "Guest grant issuer");
+  sqlInteger(createdAt);
+  return `INSERT INTO platform_service_grant_issuer
+    (credential_hash, service_id, capabilities, disabled)
+    SELECT ${sqlString(issuerHash)}, service_id, '["guest:grant"]', 0
+    FROM platform_service
+    WHERE service_id = ${sqlString(serviceId)} AND disabled = 0
+      AND NOT EXISTS (
+        SELECT 1 FROM platform_service_grant_issuer
+        WHERE service_id = ${sqlString(serviceId)} AND disabled = 0
+      );`;
+}
+
+export function guestIssuerRotationSql(
+  serviceId: string,
+  issuerHash: string,
+  createdAt: number,
+  priorIssuerHash: string,
+): string {
+  if (!validServiceId(serviceId)) {
+    throw new ServiceRegistrationError(
+      "invalid_service_id",
+      "service ID is invalid.",
+    );
+  }
+  validateHash(issuerHash, "Guest grant issuer");
+  validateHash(priorIssuerHash, "Previous guest grant issuer");
+  sqlInteger(createdAt);
+  return `UPDATE platform_service_grant_issuer
+    SET disabled = 1
+    WHERE service_id = ${sqlString(serviceId)}
+      AND credential_hash = ${sqlString(priorIssuerHash)}
+      AND disabled = 0;
+  INSERT INTO platform_service_grant_issuer
+    (credential_hash, service_id, capabilities, disabled)
+    SELECT ${sqlString(issuerHash)}, service_id, '["guest:grant"]', 0
+    FROM platform_service
+    WHERE service_id = ${sqlString(serviceId)}
+      AND disabled = 0
+      AND changes() = 1;`;
+}
+
+export function guestIssuerDisableSql(
+  serviceId: string,
+  updatedAt: number,
+): string {
+  if (!validServiceId(serviceId)) {
+    throw new ServiceRegistrationError(
+      "invalid_service_id",
+      "service ID is invalid.",
+    );
+  }
+  sqlInteger(updatedAt);
+  return `UPDATE platform_service_grant_issuer
+    SET disabled = 1
+    WHERE service_id = ${sqlString(serviceId)} AND disabled = 0;`;
+}
+
+export async function registerGuestIssuer(
+  database: D1Database,
+  serviceId: string,
+  issuerOverride?: string,
+): Promise<ProvisionedGuestIssuer> {
+  if (!validServiceId(serviceId)) {
+    throw new ServiceRegistrationError(
+      "invalid_service_id",
+      "service ID is invalid.",
+    );
+  }
+  const service = await database
+    .prepare("SELECT disabled FROM platform_service WHERE service_id = ?")
+    .bind(serviceId)
+    .first<{ disabled: number }>();
+  if (!service) {
+    throw new ServiceRegistrationError(
+      "service_not_found",
+      "service registration was not found.",
+    );
+  }
+  if (service.disabled === 1) {
+    throw new ServiceRegistrationError(
+      "service_disabled",
+      "disabled service registrations cannot receive a guest issuer.",
+    );
+  }
+  const active = await database
+    .prepare(
+      "SELECT credential_hash FROM platform_service_grant_issuer WHERE service_id = ? AND disabled = 0",
+    )
+    .bind(serviceId)
+    .first<{ credential_hash: string }>();
+  if (active) {
+    throw new ServiceRegistrationError(
+      "guest_issuer_conflict",
+      "the service already has an active guest grant issuer.",
+    );
+  }
+  const guestGrantIssuer =
+    issuerOverride ?? opaqueSecret("service_guest_grant_");
+  const inserted = await database
+    .prepare(
+      guestIssuerRegistrationSql(
+        serviceId,
+        await hashOpaque(guestGrantIssuer),
+        Date.now(),
+      ),
+    )
+    .run();
+  if (inserted.meta.changes !== 1) {
+    throw new ServiceRegistrationError(
+      "guest_issuer_disabled",
+      "the service is disabled or its guest issuer changed.",
+    );
+  }
+  return { serviceId, guestGrantIssuer };
+}
+
+export async function rotateGuestIssuer(
+  database: D1Database,
+  serviceId: string,
+): Promise<ProvisionedGuestIssuer> {
+  if (!validServiceId(serviceId)) {
+    throw new ServiceRegistrationError(
+      "invalid_service_id",
+      "service ID is invalid.",
+    );
+  }
+  const service = await database
+    .prepare("SELECT disabled FROM platform_service WHERE service_id = ?")
+    .bind(serviceId)
+    .first<{ disabled: number }>();
+  if (!service) {
+    throw new ServiceRegistrationError(
+      "service_not_found",
+      "service registration was not found.",
+    );
+  }
+  if (service.disabled === 1) {
+    throw new ServiceRegistrationError(
+      "service_disabled",
+      "disabled service registrations cannot rotate a guest issuer.",
+    );
+  }
+  const active = await database
+    .prepare(
+      "SELECT credential_hash FROM platform_service_grant_issuer WHERE service_id = ? AND disabled = 0",
+    )
+    .bind(serviceId)
+    .first<{ credential_hash: string }>();
+  if (!active) {
+    throw new ServiceRegistrationError(
+      "guest_issuer_not_found",
+      "the service has no active guest grant issuer.",
+    );
+  }
+  const guestGrantIssuer = opaqueSecret("service_guest_grant_");
+  const issuerHash = await hashOpaque(guestGrantIssuer);
+  const results = await database.batch([
+    database
+      .prepare(
+        "UPDATE platform_service_grant_issuer SET disabled = 1 WHERE service_id = ? AND credential_hash = ? AND disabled = 0",
+      )
+      .bind(serviceId, active.credential_hash),
+    database
+      .prepare(
+        `INSERT INTO platform_service_grant_issuer
+         (credential_hash, service_id, capabilities, disabled)
+         SELECT ?, service_id, '["guest:grant"]', 0
+         FROM platform_service
+         WHERE service_id = ? AND disabled = 0 AND changes() = 1`,
+      )
+      .bind(issuerHash, serviceId),
+  ]);
+  if (results[0]?.meta.changes !== 1 || results[1]?.meta.changes !== 1) {
+    throw new ServiceRegistrationError(
+      "guest_issuer_disabled",
+      "the service is disabled or its guest issuer changed.",
+    );
+  }
+  return { serviceId, guestGrantIssuer };
+}
+
+export async function disableGuestIssuer(
+  database: D1Database,
+  serviceId: string,
+): Promise<boolean> {
+  if (!validServiceId(serviceId)) {
+    throw new ServiceRegistrationError(
+      "invalid_service_id",
+      "service ID is invalid.",
+    );
+  }
+  const service = await database
+    .prepare("SELECT service_id FROM platform_service WHERE service_id = ?")
+    .bind(serviceId)
+    .first<{ service_id: string }>();
+  if (!service) {
+    throw new ServiceRegistrationError(
+      "service_not_found",
+      "service registration was not found.",
+    );
+  }
+  const result = await database
+    .prepare(guestIssuerDisableSql(serviceId, Date.now()))
+    .run();
+  return result.meta.changes === 1;
 }

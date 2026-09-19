@@ -1,4 +1,7 @@
-import { createPlatformClient } from "@0000/platform-client";
+import {
+  createPlatformClient,
+  createPlatformGuestClient,
+} from "@0000/platform-client";
 import { SELF, env } from "cloudflare:test";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { opaqueSecret } from "../../src/platform-state";
@@ -388,27 +391,18 @@ describe("Platform shared-auth T01 runtime trace", () => {
       (await rejectedAuthentication.authenticate(issued.credential)).status,
     ).toBe("authority_unavailable");
 
-    const bootstrap = await SELF.fetch("http://localhost/api/guest/bootstrap", {
-      method: "POST",
-      headers: { origin: testEnv.PLATFORM_BASE_URL },
+    const guestClient = createPlatformGuestClient({
+      baseUrl: testEnv.PLATFORM_BASE_URL,
+      authority: testEnv.PLATFORM_AUTHORITY_ID,
+      audience: service.audience,
+      guestGrantIssuer: service.guestGrantIssuer,
+      fetch: requestFetch,
     });
-    expect(bootstrap.status).toBe(201);
-    const guest = (await bootstrap.json()) as {
-      guestId: string;
-      credential: string;
-    };
-    const otherBootstrap = await SELF.fetch(
-      "http://localhost/api/guest/bootstrap",
-      {
-        method: "POST",
-        headers: { origin: testEnv.PLATFORM_BASE_URL },
-      },
-    );
-    expect(otherBootstrap.status).toBe(201);
-    const otherGuest = (await otherBootstrap.json()) as {
-      guestId: string;
-      credential: string;
-    };
+    const guest = await guestClient.createGuest();
+    const otherGuest = await guestClient.createGuest();
+    expect(guest.status).toBe("success");
+    expect(otherGuest.status).toBe("success");
+    if (guest.status !== "success" || otherGuest.status !== "success") return;
     await testEnv.IDENTITY_DB.prepare(
       "INSERT INTO fixture_resource (id, owner_kind, owner_id, created_at) VALUES (?, 'guest', ?, ?), (?, 'guest', ?, ?)",
     )
@@ -427,7 +421,7 @@ describe("Platform shared-auth T01 runtime trace", () => {
           service,
           testEnv.IDENTITY_DB,
           "guest-resource",
-          guest.credential,
+          guest.bootstrapCredential,
         )
       ).status,
     ).toBe(401);
@@ -445,7 +439,7 @@ describe("Platform shared-auth T01 runtime trace", () => {
       await attestGuestResource(
         { ...guestGrantConfig, guestGrantIssuer: service.verifier },
         {
-          guestCredential: guest.credential,
+          bootstrapCredential: guest.bootstrapCredential,
           resourceId: "guest-resource",
           capabilities: ["resource:read"],
         },
@@ -453,13 +447,13 @@ describe("Platform shared-auth T01 runtime trace", () => {
     ).toBeNull();
     expect(
       await attestGuestResource(guestGrantConfig, {
-        guestCredential: guest.credential,
+        bootstrapCredential: guest.bootstrapCredential,
         resourceId: "guest-resource",
         capabilities: ["resource:admin"],
       }),
     ).toBeNull();
     const guestGrant = await attestGuestResource(guestGrantConfig, {
-      guestCredential: guest.credential,
+      bootstrapCredential: guest.bootstrapCredential,
       resourceId: "guest-resource",
       capabilities: ["resource:read"],
     });
@@ -486,7 +480,7 @@ describe("Platform shared-auth T01 runtime trace", () => {
     ).toBe(404);
     expect(
       await attestGuestResource(guestGrantConfig, {
-        guestCredential: guest.credential,
+        bootstrapCredential: guest.bootstrapCredential,
         resourceId: "guest-other-resource",
         capabilities: ["resource:read"],
       }),
@@ -509,7 +503,7 @@ describe("Platform shared-auth T01 runtime trace", () => {
     ).toBe(401);
     expect(
       await attestGuestResource(guestGrantConfig, {
-        guestCredential: guest.credential,
+        bootstrapCredential: guest.bootstrapCredential,
         resourceId: "guest-resource",
         capabilities: ["resource:read"],
       }),

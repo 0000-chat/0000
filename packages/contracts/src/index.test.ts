@@ -49,8 +49,16 @@ describe("versioned principal validation", () => {
 
   it("keeps a successful wire principal unknown until kind-specific validation", () => {
     const rawPrincipal = { kind: "guest", organizationId: "attacker-value" };
-    const parsed = parseAuthenticationResult({ status: "authenticated", principal: rawPrincipal });
-    expect(parsed).toEqual({ status: "authenticated", principal: rawPrincipal });
-    expect(parsed?.status === "authenticated" && parsed.principal).toBe(rawPrincipal);
+    const parsed = parseAuthenticationResult({
+      status: "authenticated",
+      principal: rawPrincipal,
+    });
+    expect(parsed).toEqual({
+      status: "authenticated",
+      principal: rawPrincipal,
+    });
+    expect(parsed?.status === "authenticated" && parsed.principal).toBe(
+      rawPrincipal,
+    );
   });
 });

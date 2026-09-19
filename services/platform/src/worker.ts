@@ -69,6 +69,17 @@ import {
   isOrganizationRole,
   type OrganizationRole,
 } from "./organization-state";
+import {
+  createGuestIdentity,
+  issueGuestGrant,
+  parseGuestAssertion,
+  renewGuestGrant,
+  resolveGuestControl,
+  revokeGuestGrant,
+  GuestAuthorityUnavailable,
+  GuestGrantConflict,
+  type GuestIssuer,
+} from "./guest-state";
 
 function json(status: number, body: unknown): Response {
   return Response.json(body, { status });
@@ -1890,13 +1901,14 @@ async function findServiceByVerifier(
   return row ? serviceFromRow(row) : null;
 }
 
-async function findServiceByGrantIssuer(
+async function findGuestIssuer(
   database: D1DatabaseSession,
   request: Request,
-): Promise<ServiceRegistration | null> {
+): Promise<GuestIssuer | null> {
   const authorization = request.headers.get("authorization") ?? "";
   const match = /^Bearer ([^\s]+)$/.exec(authorization);
   if (!match) return null;
+  const issuerHash = await hashOpaque(match[1]!);
   const row = await database
     .prepare(
       `SELECT s.service_id, s.audience, s.verifier_hash, s.allowed_capabilities, s.display_name, i.capabilities AS issuer_capabilities
@@ -1904,7 +1916,7 @@ async function findServiceByGrantIssuer(
        JOIN platform_service s ON s.service_id = i.service_id
        WHERE i.credential_hash = ? AND i.disabled = 0 AND s.disabled = 0`,
     )
-    .bind(await hashOpaque(match[1]!))
+    .bind(issuerHash)
     .first<{
       service_id: string;
       audience: string;
@@ -1916,7 +1928,8 @@ async function findServiceByGrantIssuer(
   if (!row) return null;
   const issuerCapabilities = parseStringArray(row.issuer_capabilities);
   if (!issuerCapabilities?.includes("guest:grant")) return null;
-  return serviceFromRow(row);
+  const service = serviceFromRow(row);
+  return service ? { service, issuerHash } : null;
 }
 
 export async function authenticateCredential(
@@ -2204,11 +2217,19 @@ export async function authenticateCredential(
         `SELECT credential.id, credential.subject_id, credential.grant_id,
                 credential.audience, credential.capabilities,
                 credential.resource_ids, credential.expires_at,
-                live_service.allowed_capabilities AS service_capabilities
+                live_service.allowed_capabilities AS service_capabilities,
+                guest_grant.resource_id AS grant_resource_id,
+                guest_grant.capabilities AS grant_capabilities
          FROM platform_credential AS credential
          JOIN platform_guest AS guest
            ON guest.id = credential.subject_id
           AND guest.disabled_at IS NULL
+         JOIN platform_guest_grant AS guest_grant
+           ON guest_grant.id = credential.grant_id
+          AND guest_grant.guest_id = guest.id
+          AND guest_grant.service_id = ?
+          AND guest_grant.audience = ?
+          AND guest_grant.revoked_at IS NULL
          JOIN platform_service AS live_service
            ON live_service.service_id = ?
           AND live_service.audience = ?
@@ -2226,6 +2247,8 @@ export async function authenticateCredential(
       .bind(
         service.serviceId,
         service.audience,
+        service.serviceId,
+        service.audience,
         service.verifierHash,
         credentialHash,
       )
@@ -2238,6 +2261,8 @@ export async function authenticateCredential(
         resource_ids: string;
         expires_at: number | null;
         service_capabilities: string;
+        grant_resource_id: string;
+        grant_capabilities: string;
       }>();
     if (!currentGuest) return json(401, { status: "invalid_credential" });
     const currentCapabilities = parseStringArray(currentGuest.capabilities);
@@ -2245,19 +2270,29 @@ export async function authenticateCredential(
     const serviceCapabilities = parseStringArray(
       currentGuest.service_capabilities,
     );
-    if (!currentCapabilities || !currentResourceIds || !serviceCapabilities) {
+    const grantCapabilities = parseStringArray(currentGuest.grant_capabilities);
+    if (
+      !currentCapabilities ||
+      !currentResourceIds ||
+      !serviceCapabilities ||
+      !grantCapabilities
+    ) {
       return json(503, { status: "authority_unavailable" });
     }
     if (
       !validCapabilities(currentCapabilities) ||
       !validCapabilities(serviceCapabilities) ||
-      currentResourceIds.length === 0
+      !validCapabilities(grantCapabilities) ||
+      currentResourceIds.length !== 1 ||
+      currentResourceIds[0] !== currentGuest.grant_resource_id
     ) {
       return json(503, { status: "authority_unavailable" });
     }
     if (
       currentCapabilities.some(
-        (capability) => !serviceCapabilities.includes(capability),
+        (capability) =>
+          !grantCapabilities.includes(capability) ||
+          !serviceCapabilities.includes(capability),
       )
     ) {
       return json(401, { status: "invalid_credential" });
@@ -2282,109 +2317,184 @@ export async function authenticateCredential(
   return json(503, { status: "authority_unavailable" });
 }
 
-async function createGuestBootstrap(
-  request: Request,
-  env: Cloudflare.Env,
-): Promise<Response> {
-  if (!hasTrustedOrigin(request, env))
-    return json(403, { error: "untrusted_origin" });
-  const guestId = crypto.randomUUID();
-  const bootstrapId = crypto.randomUUID();
-  const credential = opaqueSecret("guest_");
-  const credentialHash = await hashOpaque(credential);
-  const createdAt = Date.now();
-  await env.IDENTITY_DB.batch([
-    env.IDENTITY_DB.prepare(
-      "INSERT INTO platform_guest (id, created_at) VALUES (?, ?)",
-    ).bind(guestId, createdAt),
-    env.IDENTITY_DB.prepare(
-      "INSERT INTO platform_guest_bootstrap (id, credential_hash, guest_id, created_at, revoked_at) VALUES (?, ?, ?, ?, NULL)",
-    ).bind(bootstrapId, credentialHash, guestId, createdAt),
-  ]);
-  return json(201, { guestId, credential });
+function guestMutationResponse(
+  result: Awaited<ReturnType<typeof issueGuestGrant>>,
+  successStatus: number,
+): Response {
+  if (result.status === "success") {
+    return json(successStatus, {
+      status: "success",
+      ...result.value,
+    });
+  }
+  if (result.status === "invalid_guest_control") {
+    return json(401, { status: "invalid_guest_control" });
+  }
+  if (result.status === "grant_denied") {
+    return json(403, { status: "grant_denied" });
+  }
+  return json(409, { status: "conflict" });
 }
 
-async function attestGuestGrant(
+async function createGuestRoute(
   request: Request,
   env: Cloudflare.Env,
 ): Promise<Response> {
-  const database = env.IDENTITY_DB.withSession("first-primary");
-  const service = await findServiceByGrantIssuer(database, request);
-  if (!service) return json(503, { status: "authority_unavailable" });
-  let body: unknown;
-  try {
-    body = await request.json();
-  } catch {
+  const issuer = await findGuestIssuer(
+    env.IDENTITY_DB.withSession("first-primary"),
+    request,
+  );
+  if (!issuer) return json(503, { status: "authority_unavailable" });
+  const created = await createGuestIdentity(env.IDENTITY_DB, issuer);
+  if (!created) return json(503, { status: "authority_unavailable" });
+  return json(201, {
+    status: "success",
+    guestId: created.guestId,
+    bootstrapCredential: created.bootstrapCredential,
+    authority: env.PLATFORM_AUTHORITY_ID,
+    audience: issuer.service.audience,
+    purpose: "guest_control",
+  });
+}
+
+async function resolveGuestControlRoute(
+  request: Request,
+  env: Cloudflare.Env,
+): Promise<Response> {
+  const issuer = await findGuestIssuer(
+    env.IDENTITY_DB.withSession("first-primary"),
+    request,
+  );
+  if (!issuer) return json(503, { status: "authority_unavailable" });
+  const body = await requestBody(request);
+  if (!body || typeof body.bootstrapCredential !== "string") {
     return json(400, { error: "invalid_request" });
   }
+  try {
+    const control = await resolveGuestControl(
+      env.IDENTITY_DB.withSession("first-primary"),
+      body.bootstrapCredential,
+      issuer,
+    );
+    return control
+      ? json(200, {
+          status: "success",
+          guestId: control.guestId,
+          authority: env.PLATFORM_AUTHORITY_ID,
+          audience: issuer.service.audience,
+          purpose: "guest_control",
+        })
+      : json(401, { status: "invalid_guest_control" });
+  } catch (error) {
+    if (error instanceof GuestAuthorityUnavailable) {
+      return json(503, { status: "authority_unavailable" });
+    }
+    throw error;
+  }
+}
+
+async function attestGuestGrantRoute(
+  request: Request,
+  env: Cloudflare.Env,
+): Promise<Response> {
+  const issuer = await findGuestIssuer(
+    env.IDENTITY_DB.withSession("first-primary"),
+    request,
+  );
+  if (!issuer) return json(503, { status: "authority_unavailable" });
+  const body = await requestBody(request);
+  const assertion = body && parseGuestAssertion(body.assertion);
   if (
     !body ||
-    typeof body !== "object" ||
-    !("guestCredential" in body) ||
-    typeof body.guestCredential !== "string" ||
-    !("resourceId" in body) ||
+    typeof body.bootstrapCredential !== "string" ||
     typeof body.resourceId !== "string" ||
-    !body.resourceId ||
-    !("resourceOwnerId" in body) ||
-    typeof body.resourceOwnerId !== "string" ||
-    !body.resourceOwnerId ||
-    !("capabilities" in body) ||
     !Array.isArray(body.capabilities) ||
-    !body.capabilities.every(
-      (item) => typeof item === "string" && item.length > 0,
-    )
+    !assertion
   ) {
     return json(400, { error: "invalid_request" });
   }
-  const capabilities = body.capabilities as string[];
-  if (
-    capabilities.length === 0 ||
-    capabilities.some(
-      (capability) => !service.allowedCapabilities.includes(capability),
-    )
-  ) {
-    return json(403, { error: "grant_exceeds_service_permissions" });
+  try {
+    const result = await issueGuestGrant(env.IDENTITY_DB, {
+      issuer,
+      authority: env.PLATFORM_AUTHORITY_ID,
+      bootstrapCredential: body.bootstrapCredential,
+      resourceId: body.resourceId,
+      capabilities: body.capabilities as string[],
+      assertion,
+    });
+    return guestMutationResponse(result, 201);
+  } catch (error) {
+    if (error instanceof GuestAuthorityUnavailable) {
+      return json(503, { status: "authority_unavailable" });
+    }
+    throw error;
   }
-  const guestBootstrap = await database
-    .prepare(
-      `SELECT bootstrap.guest_id
-       FROM platform_guest_bootstrap AS bootstrap
-       JOIN platform_guest AS guest ON guest.id = bootstrap.guest_id
-       WHERE bootstrap.credential_hash = ?
-         AND bootstrap.revoked_at IS NULL
-         AND guest.disabled_at IS NULL`,
-    )
-    .bind(await hashOpaque(body.guestCredential))
-    .first<{ guest_id: string }>();
-  if (!guestBootstrap || guestBootstrap.guest_id !== body.resourceOwnerId) {
-    return json(401, { status: "invalid_credential" });
-  }
+}
 
-  const credential = opaqueSecret("guest_grant_");
-  const credentialId = crypto.randomUUID();
-  const grantId = crypto.randomUUID();
-  await database
-    .prepare(
-      `INSERT INTO platform_credential
-       (id, credential_hash, kind, subject_id, organization_id, membership_id, grant_id, audience, capabilities, resource_ids, expires_at, revoked_at)
-       VALUES (?, ?, 'guest', ?, NULL, NULL, ?, ?, ?, ?, NULL, NULL)`,
-    )
-    .bind(
-      credentialId,
-      await hashOpaque(credential),
-      guestBootstrap.guest_id,
+async function renewGuestGrantRoute(
+  request: Request,
+  env: Cloudflare.Env,
+  grantId: string,
+): Promise<Response> {
+  const issuer = await findGuestIssuer(
+    env.IDENTITY_DB.withSession("first-primary"),
+    request,
+  );
+  if (!issuer) return json(503, { status: "authority_unavailable" });
+  const body = await requestBody(request);
+  const assertion = body && parseGuestAssertion(body.assertion);
+  if (
+    !body ||
+    !validCredentialId(grantId) ||
+    typeof body.bootstrapCredential !== "string" ||
+    typeof body.resourceId !== "string" ||
+    !Array.isArray(body.capabilities) ||
+    !assertion
+  ) {
+    return json(400, { error: "invalid_request" });
+  }
+  try {
+    const result = await renewGuestGrant(env.IDENTITY_DB, {
+      issuer,
+      authority: env.PLATFORM_AUTHORITY_ID,
       grantId,
-      service.audience,
-      JSON.stringify(capabilities),
-      JSON.stringify([body.resourceId]),
-    )
-    .run();
-  return json(201, {
-    credential,
-    credentialId,
+      bootstrapCredential: body.bootstrapCredential,
+      resourceId: body.resourceId,
+      capabilities: body.capabilities as string[],
+      assertion,
+    });
+    return guestMutationResponse(result, 201);
+  } catch (error) {
+    if (error instanceof GuestGrantConflict) {
+      return json(409, { status: "conflict" });
+    }
+    if (error instanceof GuestAuthorityUnavailable) {
+      return json(503, { status: "authority_unavailable" });
+    }
+    throw error;
+  }
+}
+
+async function revokeGuestGrantRoute(
+  request: Request,
+  env: Cloudflare.Env,
+  grantId: string,
+): Promise<Response> {
+  const issuer = await findGuestIssuer(
+    env.IDENTITY_DB.withSession("first-primary"),
+    request,
+  );
+  if (!issuer) return json(503, { status: "authority_unavailable" });
+  if (!validCredentialId(grantId)) {
+    return json(400, { error: "invalid_request" });
+  }
+  const revoked = await revokeGuestGrant(env.IDENTITY_DB, {
+    issuer,
     grantId,
-    resourceId: body.resourceId,
   });
+  return revoked
+    ? json(200, { status: "success", revoked: true })
+    : json(403, { status: "grant_denied" });
 }
 
 async function platformRoute(
@@ -2650,14 +2760,40 @@ async function platformRoute(
   ) {
     return authenticateCredential(request, env);
   }
-  if (url.pathname === "/api/guest/bootstrap" && request.method === "POST") {
-    return createGuestBootstrap(request, env);
+  if (url.pathname === "/internal/v1/guests" && request.method === "POST") {
+    return createGuestRoute(request, env);
+  }
+  if (
+    url.pathname === "/internal/v1/guests/resolve" &&
+    request.method === "POST"
+  ) {
+    return resolveGuestControlRoute(request, env);
   }
   if (
     url.pathname === "/internal/v1/guest-grants" &&
     request.method === "POST"
   ) {
-    return attestGuestGrant(request, env);
+    return attestGuestGrantRoute(request, env);
+  }
+  const renewMatch = /^\/internal\/v1\/guest-grants\/([^/]+)\/renew$/.exec(
+    url.pathname,
+  );
+  if (renewMatch && request.method === "POST") {
+    return renewGuestGrantRoute(
+      request,
+      env,
+      decodeURIComponent(renewMatch[1]!),
+    );
+  }
+  const revokeMatch = /^\/internal\/v1\/guest-grants\/([^/]+)\/revoke$/.exec(
+    url.pathname,
+  );
+  if (revokeMatch && request.method === "POST") {
+    return revokeGuestGrantRoute(
+      request,
+      env,
+      decodeURIComponent(revokeMatch[1]!),
+    );
   }
   return null;
 }

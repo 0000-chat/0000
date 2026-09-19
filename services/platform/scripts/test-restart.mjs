@@ -3,7 +3,10 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { createPlatformClient } from "@0000/platform-client";
+import {
+  createPlatformClient,
+  createPlatformGuestClient,
+} from "@0000/platform-client";
 import { readD1Migrations } from "@cloudflare/vitest-plugin";
 import { convertV4MiniflareOptions, Miniflare } from "miniflare";
 import { opaqueSecret } from "../src/platform-state.ts";
@@ -98,44 +101,34 @@ try {
   };
   await registerTestService(database, service);
 
-  const bootstrap = await firstFetch(`${platformBaseUrl}/api/guest/bootstrap`, {
-    method: "POST",
-    headers: { origin: platformBaseUrl },
+  const guestClient = createPlatformGuestClient({
+    baseUrl: platformBaseUrl,
+    authority,
+    audience,
+    guestGrantIssuer: service.guestGrantIssuer,
+    fetch: firstFetch,
   });
-  await expectStatus(bootstrap, 201, "guest bootstrap");
-  const guest = await bootstrap.json();
-  assert.ok(
-    typeof guest.guestId === "string" && typeof guest.credential === "string",
-    "bootstrap credentials returned",
-  );
+  const guest = await guestClient.createGuest();
+  assert.equal(guest.status, "success", "guest control created");
+  if (guest.status !== "success") throw new Error("guest control failed");
 
   await database
     .prepare(
-      "INSERT INTO fixture_resource (id, owner_kind, owner_id, created_at) VALUES (?, 'guest', ?, ?)",
+      "INSERT INTO fixture_resource (id, owner_kind, owner_id, created_at, audience) VALUES (?, 'guest', ?, ?, ?)",
     )
-    .bind("restart-resource", guest.guestId, Date.now())
+    .bind("restart-resource", guest.guestId, Date.now(), audience)
     .run();
-  const grantResponse = await firstFetch(
-    `${platformBaseUrl}/internal/v1/guest-grants`,
-    {
-      method: "POST",
-      headers: {
-        authorization: `Bearer ${service.guestGrantIssuer}`,
-        "content-type": "application/json",
-      },
-      body: JSON.stringify({
-        guestCredential: guest.credential,
-        resourceId: "restart-resource",
-        resourceOwnerId: guest.guestId,
-        capabilities: ["resource:read"],
-      }),
-    },
-  );
-  await expectStatus(grantResponse, 201, "bounded guest grant");
-  const grant = await grantResponse.json();
+  const grant = await guestClient.attestGuestGrant({
+    bootstrapCredential: guest.bootstrapCredential,
+    resourceId: "restart-resource",
+    capabilities: ["resource:read"],
+    assertion: { kind: "owner", storedOwnerId: guest.guestId },
+  });
+  assert.equal(grant.status, "success", "bounded guest grant");
+  if (grant.status !== "success") throw new Error("guest grant failed");
   assert.ok(
-    typeof grant.credential === "string" &&
-      typeof grant.credentialId === "string",
+    typeof grant.value.credential === "string" &&
+      typeof grant.value.credentialId === "string",
     "resource grant returned",
   );
 
@@ -146,7 +139,7 @@ try {
     serviceVerifier: service.verifier,
     fetch: firstFetch,
   });
-  const beforeResult = await beforeRestart.authenticate(grant.credential);
+  const beforeResult = await beforeRestart.authenticate(grant.value.credential);
   assert.equal(
     beforeResult.status,
     "authenticated",
@@ -167,7 +160,7 @@ try {
     serviceVerifier: service.verifier,
     fetch: secondFetch,
   });
-  const afterResult = await afterRestart.authenticate(grant.credential);
+  const afterResult = await afterRestart.authenticate(grant.value.credential);
   assert.equal(
     afterResult.status,
     "authenticated",
@@ -195,7 +188,7 @@ try {
 
   const resourceResponse = await handleResourceRequest(
     new Request("https://fixture.test/resources/restart-resource", {
-      headers: { authorization: `Bearer ${grant.credential}` },
+      headers: { authorization: `Bearer ${grant.value.credential}` },
     }),
     {
       database: persistedDatabase,
@@ -204,6 +197,7 @@ try {
       audience,
       serviceVerifier: service.verifier,
       guestGrantIssuer: service.guestGrantIssuer,
+      serviceId: service.serviceId,
       fetch: secondFetch,
     },
   );

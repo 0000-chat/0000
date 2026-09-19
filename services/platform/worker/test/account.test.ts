@@ -1,3 +1,4 @@
+import { createPlatformGuestClient } from "@0000/platform-client";
 import { SELF, env } from "cloudflare:test";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createAuth, PLATFORM_SESSION_FRESH_AGE_SECONDS } from "../../src/auth";
@@ -1055,19 +1056,6 @@ describe("Platform human account providers", () => {
       new URL(existingUserCallback.headers.get("location")!).pathname,
     ).toBe("/account");
 
-    const guestBootstrap = await SELF.fetch(
-      "http://localhost/api/guest/bootstrap",
-      {
-        method: "POST",
-        headers: { origin: testEnv.PLATFORM_BASE_URL },
-      },
-    );
-    expect(guestBootstrap.status).toBe(201);
-    const guestIdentity = (await guestBootstrap.json()) as {
-      guestId: string;
-      credential: string;
-    };
-
     const profileName = '<img src=x onerror="alert(1)">';
     const invalidAvatar = await SELF.fetch(
       "http://localhost/api/account/profile",
@@ -1226,26 +1214,34 @@ describe("Platform human account providers", () => {
       allowedCapabilities: ["resource:read"],
     };
     await registerTestService(testEnv.IDENTITY_DB, service);
-    const guestGrantResponse = await SELF.fetch(
-      "http://localhost/internal/v1/guest-grants",
-      {
-        method: "POST",
-        headers: {
-          authorization: `Bearer ${service.guestGrantIssuer}`,
-          "content-type": "application/json",
-        },
-        body: JSON.stringify({
-          guestCredential: guestIdentity.credential,
-          resourceId: "t02-guest-resource",
-          resourceOwnerId: guestIdentity.guestId,
-          capabilities: ["resource:read"],
-        }),
-      },
-    );
-    expect(guestGrantResponse.status).toBe(201);
-    const guestGrant = (await guestGrantResponse.json()) as {
-      credential: string;
-    };
+    const guestClient = createPlatformGuestClient({
+      baseUrl: testEnv.PLATFORM_BASE_URL,
+      authority: testEnv.PLATFORM_AUTHORITY_ID,
+      audience: service.audience,
+      guestGrantIssuer: service.guestGrantIssuer,
+      fetch: (input, init) => SELF.fetch(input, init),
+    });
+    const guestIdentity = await guestClient.createGuest();
+    expect(guestIdentity.status).toBe("success");
+    if (guestIdentity.status !== "success") return;
+    await testEnv.IDENTITY_DB.prepare(
+      "INSERT INTO fixture_resource (id, owner_kind, owner_id, created_at, audience) VALUES (?, 'guest', ?, ?, ?)",
+    )
+      .bind(
+        "t02-guest-resource",
+        guestIdentity.guestId,
+        Date.now(),
+        service.audience,
+      )
+      .run();
+    const guestGrant = await guestClient.attestGuestGrant({
+      bootstrapCredential: guestIdentity.bootstrapCredential,
+      resourceId: "t02-guest-resource",
+      capabilities: ["resource:read"],
+      assertion: { kind: "owner", storedOwnerId: guestIdentity.guestId },
+    });
+    expect(guestGrant.status).toBe("success");
+    if (guestGrant.status !== "success") return;
     const issueCredential = async (): Promise<{
       credential: string;
       credentialId: string;
@@ -1286,7 +1282,7 @@ describe("Platform human account providers", () => {
           authorization: `Bearer ${service.verifier}`,
           "content-type": "application/json",
         },
-        body: JSON.stringify({ credential: guestGrant.credential }),
+        body: JSON.stringify({ credential: guestGrant.value.credential }),
       });
 
     await testEnv.IDENTITY_DB.prepare(

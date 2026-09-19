@@ -1,6 +1,9 @@
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import {
+  guestIssuerDisableSql,
+  guestIssuerRegistrationSql,
+  guestIssuerRotationSql,
   serviceDisableSql,
   serviceMetadataUpdateSql,
   serviceRegistrationSql,
@@ -19,14 +22,21 @@ const platformRoot = fileURLToPath(new URL("../", import.meta.url));
 const databaseName = "platform-identity";
 
 type Arguments = {
-  operation: "register" | "update" | "rotate-verifier" | "disable";
+  operation:
+    | "register"
+    | "update"
+    | "rotate-verifier"
+    | "disable"
+    | "register-guest-issuer"
+    | "rotate-guest-issuer"
+    | "disable-guest-issuer";
   values: Map<string, string[]>;
   remote: boolean;
 };
 
 function usage(): never {
   throw new Error(
-    "Usage: bun scripts/provision-service.ts [--local|--remote] <register|update|rotate-verifier|disable> --service-id ID [options]",
+    "Usage: bun scripts/provision-service.ts [--local|--remote] <register|update|rotate-verifier|disable|register-guest-issuer|rotate-guest-issuer|disable-guest-issuer> --service-id ID [options]",
   );
 }
 
@@ -50,7 +60,10 @@ function parseArguments(argv: string[]): Arguments {
       arg === "register" ||
       arg === "update" ||
       arg === "rotate-verifier" ||
-      arg === "disable"
+      arg === "disable" ||
+      arg === "register-guest-issuer" ||
+      arg === "rotate-guest-issuer" ||
+      arg === "disable-guest-issuer"
     ) {
       if (operation) usage();
       operation = arg;
@@ -225,6 +238,81 @@ async function main(): Promise<void> {
     );
     assertChanged(output, "rotate-verifier");
     process.stdout.write(`rotated ${serviceId}\nverifier=${verifier}\n`);
+    return;
+  }
+
+  if (args.operation === "register-guest-issuer") {
+    const issuer = opaqueSecret("service_guest_grant_");
+    const output = await runWrangler(
+      `${guestIssuerRegistrationSql(
+        serviceId,
+        await hashOpaque(issuer),
+        Date.now(),
+      )} SELECT changes() AS changed;`,
+      args.remote,
+    );
+    assertChanged(output, "register-guest-issuer");
+    process.stdout.write(
+      `registered-guest-issuer ${serviceId}\nissuer=${issuer}\n`,
+    );
+    return;
+  }
+
+  if (args.operation === "rotate-guest-issuer") {
+    const current = parseWranglerResults(
+      await runWrangler(
+        `SELECT service_id FROM platform_service WHERE service_id = ${sqlString(serviceId)} AND disabled = 0; SELECT credential_hash FROM platform_service_grant_issuer WHERE service_id = ${sqlString(serviceId)} AND disabled = 0;`,
+        args.remote,
+      ),
+    );
+    if ((current.at(-2)?.results?.length ?? 0) === 0) {
+      throw new Error(
+        "rotate-guest-issuer: service registration was not found or is disabled.",
+      );
+    }
+    if ((current.at(-1)?.results?.length ?? 0) === 0) {
+      throw new Error(
+        "rotate-guest-issuer: the service has no active guest issuer.",
+      );
+    }
+    const priorIssuerHash = current.at(-1)?.results?.[0]?.credential_hash;
+    if (typeof priorIssuerHash !== "string") {
+      throw new Error(
+        "rotate-guest-issuer: the active guest issuer hash was not returned.",
+      );
+    }
+    const issuer = opaqueSecret("service_guest_grant_");
+    const output = await runWrangler(
+      `${guestIssuerRotationSql(
+        serviceId,
+        await hashOpaque(issuer),
+        Date.now(),
+        priorIssuerHash,
+      )} SELECT changes() AS changed;`,
+      args.remote,
+    );
+    assertChanged(output, "rotate-guest-issuer");
+    process.stdout.write(
+      `rotated-guest-issuer ${serviceId}\nissuer=${issuer}\n`,
+    );
+    return;
+  }
+
+  if (args.operation === "disable-guest-issuer") {
+    const output = await runWrangler(
+      `${guestIssuerDisableSql(serviceId, Date.now())} SELECT changes() AS changed; SELECT service_id FROM platform_service WHERE service_id = ${sqlString(serviceId)};`,
+      args.remote,
+    );
+    const results = parseWranglerResults(output);
+    if ((results.at(-1)?.results?.length ?? 0) === 0) {
+      throw new Error(
+        "disable-guest-issuer: service registration was not found.",
+      );
+    }
+    const changed = results.at(-2)?.results?.[0]?.changed === 1;
+    process.stdout.write(
+      `${changed ? "disabled-guest-issuer" : "already-disabled-guest-issuer"} ${serviceId}\n`,
+    );
     return;
   }
 
