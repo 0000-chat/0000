@@ -331,6 +331,46 @@ describe("T04 human credentials and registered resource audiences", () => {
     testEnv.PLATFORM_CREDENTIAL_MAX_LIFETIME_DAYS = "NaN";
     const invalidConfiguration = await issue(user, first);
     expect(invalidConfiguration.status).toBe(503);
+    const invalidConfigurationAccount = await SELF.fetch(
+      `http://localhost/account?organizationId=${encodeURIComponent(user.organizationId)}`,
+      { headers: { cookie: user.cookie } },
+    );
+    const invalidConfigurationHtml = await invalidConfigurationAccount.text();
+    expect(invalidConfigurationAccount.status).toBe(200);
+    expect(invalidConfigurationHtml).toContain("Read and write");
+    expect(invalidConfigurationHtml).toContain(
+      "Credential issuance and rotation are unavailable",
+    );
+    expect(invalidConfigurationHtml).toContain(
+      `data-revoke-credential="${issued.credentialId}"`,
+    );
+    const invalidConfigurationListing = await SELF.fetch(
+      `http://localhost/api/credentials?organizationId=${encodeURIComponent(user.organizationId)}`,
+      { headers: { cookie: user.cookie } },
+    );
+    expect(invalidConfigurationListing.status).toBe(200);
+    expect(await invalidConfigurationListing.text()).toContain(
+      issued.credentialId,
+    );
+    const invalidConfigurationRevoke = await SELF.fetch(
+      "http://localhost/api/credentials/revoke",
+      {
+        method: "POST",
+        headers: {
+          cookie: user.cookie,
+          origin: testEnv.PLATFORM_BASE_URL,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          organizationId: user.organizationId,
+          credentialId: issued.credentialId,
+        }),
+      },
+    );
+    expect(invalidConfigurationRevoke.status).toBe(200);
+    expect((await firstClient.authenticate(issued.credential)).status).toBe(
+      "invalid_credential",
+    );
     testEnv.PLATFORM_CREDENTIAL_MAX_LIFETIME_DAYS = "90";
   });
 

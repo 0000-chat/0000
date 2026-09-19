@@ -17,6 +17,12 @@ export interface ProvisionedService extends ServiceRegistrationInput {
   verifier: string;
 }
 
+export interface ServiceMetadataUpdateInput {
+  serviceId: string;
+  capabilities: string[];
+  displayName?: string;
+}
+
 export class ServiceRegistrationError extends Error {
   readonly code:
     | "invalid_service_id"
@@ -72,17 +78,101 @@ function sqlString(value: string): string {
   return `'${value.replaceAll("'", "''")}'`;
 }
 
+function sqlInteger(value: number): string {
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new RangeError("SQL timestamps must be non-negative safe integers.");
+  }
+  return String(value);
+}
+
+function validateMetadataInput(input: ServiceMetadataUpdateInput): void {
+  if (!validServiceId(input.serviceId)) {
+    throw new ServiceRegistrationError(
+      "invalid_service_id",
+      "service IDs must be 1-64 characters using letters, numbers, '.', '_' or '-'.",
+    );
+  }
+  if (!validCapabilities(input.capabilities)) {
+    throw new ServiceRegistrationError(
+      "invalid_capabilities",
+      "capabilities must be a unique nonempty list of bounded names.",
+    );
+  }
+  if (
+    input.displayName !== undefined &&
+    (input.displayName.trim().length === 0 ||
+      input.displayName.trim().length > DISPLAY_NAME_LIMIT ||
+      /[\u0000-\u001f\u007f]/.test(input.displayName))
+  ) {
+    throw new ServiceRegistrationError(
+      "invalid_display_name",
+      "display name must be 1-120 characters without control characters.",
+    );
+  }
+}
+
+export function serviceMetadataUpdateSql(
+  input: ServiceMetadataUpdateInput,
+  updatedAt: number,
+): string {
+  validateMetadataInput(input);
+  const displayName =
+    input.displayName === undefined
+      ? "display_name"
+      : sqlString(input.displayName.trim());
+  return `UPDATE platform_service
+    SET allowed_capabilities = ${sqlString(JSON.stringify(input.capabilities))},
+        display_name = ${displayName}, updated_at = ${sqlInteger(updatedAt)}
+    WHERE service_id = ${sqlString(input.serviceId)} AND disabled = 0;`;
+}
+
+export function serviceVerifierRotationSql(
+  serviceId: string,
+  verifierHash: string,
+  updatedAt: number,
+): string {
+  if (!validServiceId(serviceId)) {
+    throw new ServiceRegistrationError(
+      "invalid_service_id",
+      "service ID is invalid.",
+    );
+  }
+  if (!/^[a-f0-9]{64}$/.test(verifierHash)) {
+    throw new Error("Service verifier hash must be a SHA-256 hex digest.");
+  }
+  return `UPDATE platform_service
+    SET verifier_hash = ${sqlString(verifierHash)}, updated_at = ${sqlInteger(updatedAt)}
+    WHERE service_id = ${sqlString(serviceId)} AND disabled = 0;`;
+}
+
+export function serviceDisableSql(
+  serviceId: string,
+  updatedAt: number,
+): string {
+  if (!validServiceId(serviceId)) {
+    throw new ServiceRegistrationError(
+      "invalid_service_id",
+      "service ID is invalid.",
+    );
+  }
+  return `UPDATE platform_service SET disabled = 1, updated_at = ${sqlInteger(updatedAt)}
+    WHERE service_id = ${sqlString(serviceId)} AND disabled = 0;`;
+}
+
 export function serviceRegistrationSql(
   input: ServiceRegistrationInput,
   verifierHash: string,
   createdAt: number,
 ): string {
   validateInput(input);
+  if (!/^[a-f0-9]{64}$/.test(verifierHash)) {
+    throw new Error("Service verifier hash must be a SHA-256 hex digest.");
+  }
   return `INSERT INTO platform_service
     (service_id, audience, verifier_hash, allowed_capabilities, disabled, display_name, created_at, updated_at)
-    VALUES (${sqlString(input.serviceId)}, ${sqlString(input.audience)}, ${sqlString(verifierHash)},
+      VALUES (${sqlString(input.serviceId)}, ${sqlString(input.audience)}, ${sqlString(verifierHash)},
       ${sqlString(JSON.stringify(input.capabilities))}, 0,
-      ${sqlString(input.displayName?.trim() ?? "")}, ${createdAt}, ${createdAt});`;
+      ${sqlString(input.displayName?.trim() ?? "")}, ${sqlInteger(createdAt)}, ${sqlInteger(createdAt)});`;
 }
 
 export async function registerService(
@@ -95,20 +185,7 @@ export async function registerService(
   const now = Date.now();
   try {
     await database
-      .prepare(
-        `INSERT INTO platform_service
-         (service_id, audience, verifier_hash, allowed_capabilities, disabled, display_name, created_at, updated_at)
-         VALUES (?, ?, ?, ?, 0, ?, ?, ?)`,
-      )
-      .bind(
-        input.serviceId,
-        input.audience,
-        await hashOpaque(verifier),
-        JSON.stringify(input.capabilities),
-        input.displayName?.trim() ?? "",
-        now,
-        now,
-      )
+      .prepare(serviceRegistrationSql(input, await hashOpaque(verifier), now))
       .run();
   } catch (error) {
     const message = error instanceof Error ? error.message : "";
@@ -125,11 +202,7 @@ export async function registerService(
 
 export async function updateServiceMetadata(
   database: D1Database,
-  input: {
-    serviceId: string;
-    capabilities: string[];
-    displayName?: string;
-  },
+  input: ServiceMetadataUpdateInput,
 ): Promise<void> {
   const current = await database
     .prepare("SELECT audience FROM platform_service WHERE service_id = ?")
@@ -148,17 +221,7 @@ export async function updateServiceMetadata(
     displayName: input.displayName,
   });
   const updated = await database
-    .prepare(
-      `UPDATE platform_service
-       SET allowed_capabilities = ?, display_name = ?, updated_at = ?
-       WHERE service_id = ? AND disabled = 0`,
-    )
-    .bind(
-      JSON.stringify(input.capabilities),
-      input.displayName?.trim() ?? "",
-      Date.now(),
-      input.serviceId,
-    )
+    .prepare(serviceMetadataUpdateSql(input, Date.now()))
     .run();
   if (updated.meta.changes !== 1) {
     throw new ServiceRegistrationError(
@@ -181,10 +244,12 @@ export async function rotateServiceVerifier(
   const verifier = opaqueSecret("service_verify_");
   const updated = await database
     .prepare(
-      `UPDATE platform_service SET verifier_hash = ?, updated_at = ?
-       WHERE service_id = ? AND disabled = 0`,
+      serviceVerifierRotationSql(
+        serviceId,
+        await hashOpaque(verifier),
+        Date.now(),
+      ),
     )
-    .bind(await hashOpaque(verifier), Date.now(), serviceId)
     .run();
   if (updated.meta.changes !== 1) {
     const existing = await database
@@ -212,10 +277,7 @@ export async function disableService(
     );
   }
   const result = await database
-    .prepare(
-      "UPDATE platform_service SET disabled = 1, updated_at = ? WHERE service_id = ? AND disabled = 0",
-    )
-    .bind(Date.now(), serviceId)
+    .prepare(serviceDisableSql(serviceId, Date.now()))
     .run();
   if (result.meta.changes === 1) return true;
   const existing = await database

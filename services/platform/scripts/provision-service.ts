@@ -1,7 +1,10 @@
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import {
+  serviceDisableSql,
+  serviceMetadataUpdateSql,
   serviceRegistrationSql,
+  serviceVerifierRotationSql,
   ServiceRegistrationError,
   type ServiceRegistrationInput,
 } from "../src/service-registration";
@@ -197,16 +200,12 @@ async function main(): Promise<void> {
 
   if (args.operation === "update") {
     const nextCapabilities = capabilities(args);
-    const name = one(args, "name") ?? "";
-    if (
-      name.trim().length === 0 ||
-      name.trim().length > 120 ||
-      /[\u0000-\u001f\u007f]/.test(name)
-    ) {
-      throw new Error("Invalid --name.");
-    }
+    const name = one(args, "name");
     const output = await runWrangler(
-      `UPDATE platform_service SET allowed_capabilities = ${sqlString(JSON.stringify(nextCapabilities))}, display_name = ${sqlString(name.trim())}, updated_at = ${Date.now()} WHERE service_id = ${sqlString(serviceId)} AND disabled = 0; SELECT changes() AS changed;`,
+      `${serviceMetadataUpdateSql(
+        { serviceId, capabilities: nextCapabilities, displayName: name },
+        Date.now(),
+      )} SELECT changes() AS changed;`,
       args.remote,
     );
     assertChanged(output, "update");
@@ -217,7 +216,11 @@ async function main(): Promise<void> {
   if (args.operation === "rotate-verifier") {
     const verifier = opaqueSecret("service_verify_");
     const output = await runWrangler(
-      `UPDATE platform_service SET verifier_hash = ${sqlString(await hashOpaque(verifier))}, updated_at = ${Date.now()} WHERE service_id = ${sqlString(serviceId)} AND disabled = 0; SELECT changes() AS changed;`,
+      `${serviceVerifierRotationSql(
+        serviceId,
+        await hashOpaque(verifier),
+        Date.now(),
+      )} SELECT changes() AS changed;`,
       args.remote,
     );
     assertChanged(output, "rotate-verifier");
@@ -226,7 +229,7 @@ async function main(): Promise<void> {
   }
 
   const output = await runWrangler(
-    `UPDATE platform_service SET disabled = 1, updated_at = ${Date.now()} WHERE service_id = ${sqlString(serviceId)} AND disabled = 0; SELECT changes() AS changed; SELECT service_id, disabled FROM platform_service WHERE service_id = ${sqlString(serviceId)};`,
+    `${serviceDisableSql(serviceId, Date.now())} SELECT changes() AS changed; SELECT service_id, disabled FROM platform_service WHERE service_id = ${sqlString(serviceId)};`,
     args.remote,
   );
   const results = parseWranglerResults(output);

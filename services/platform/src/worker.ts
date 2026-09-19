@@ -1089,7 +1089,7 @@ async function accountRoute(
     let credentialOrganizationId: string | null = null;
     let credentialServices: AccountCredentialService[] = [];
     let credentials: AccountCredential[] = [];
-    if (selectedOrganization && configuredCredentialLifetimeDays !== null) {
+    if (selectedOrganization) {
       const currentAuthority = await getCurrentOrganizationAuthority(
         database,
         current.user.id,

@@ -30,7 +30,10 @@ idempotent current-owner mutation and takes effect on the next verification.
 Removed memberships, disabled users, suspended organizations, expired or
 revoked keys and disabled or rotated service verifiers fail closed. A service
 verifier is accepted only at the internal authentication transport and cannot
-authorize a browser lifecycle route.
+authorize a browser lifecycle route. Issue and rotation browser completions
+capture the organization and view generation; a response from an old
+organization cannot restore a secret, status or enabled control after a
+selection change.
 
 Trusted service registration is provided by `scripts/provision-service.ts` and
 the `provision:service` package script. It supports register, metadata update,
@@ -69,6 +72,13 @@ service verifier's inability to issue a human key. A D1 trigger injected before
 the replacement insert proves that a failed rotation leaves the predecessor
 active and unlinked. A concurrent rotation/revoke probe confirms that the
 operation leaves no unexpected second active predecessor.
+
+The follow-up regression sets the lifetime configuration invalid after issuing
+a valid key. The account page and `/api/credentials` still return that key's
+metadata, the UI exposes revoke while hiding issue/rotate, revoke succeeds, and
+the shared client rejects the key on its next check. This keeps existing key
+recovery/revocation available while disabling only operations that would create
+a new expiry.
 
 The compatibility suites were run together:
 
@@ -117,6 +127,11 @@ The migration command reported no pending migrations after applying `0004`.
 The provisioning commands reported `registered`, `updated`, `rotated`,
 `disabled` and `already-disabled` respectively. The generated verifier values
 were captured only for the local operation and are omitted from this report.
+The follow-up sequence used the shared SQL builders with an omitted `--name`
+on update; the D1 row retained its original display name while capabilities
+changed. The D1 helpers and CLI now call the same validated metadata-update,
+verifier-rotation and disable SQL definitions, and registration uses the same
+validated registration SQL as the local fixture and CLI.
 Argument and conflict checks also passed:
 
 ```text
@@ -149,6 +164,12 @@ bun run check                         -> workspace scaffold check passed (11 wor
 
 The root command remains a workspace manifest scaffold check, not
 authentication evidence.
+
+The follow-up focused command after the review fixes passed 1 file and 3 tests:
+
+```text
+bun x vitest run --config vitest.worker.config.ts worker/test/credentials.test.ts
+```
 
 ## Limits
 
