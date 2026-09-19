@@ -14,6 +14,13 @@ persistence/refresh restart and the actual Platform-to-msg boundary. Communicato
 adoption, first-party human browser transport, deployment provisioning and full
 T11 consumer acceptance remain open.
 
+The Matrix gateway caller prerequisite now uses protected finite ingestion and
+claim credentials with separate transport secrets. A 401 stops automatic
+delivery and preserves the pending batch for explicit credential replacement
+and restart. [T11_MATRIX_CALLER_REPORT.md](T11_MATRIX_CALLER_REPORT.md) records
+the reviewed coordinator/store/protected-file evidence and its limits; actual
+Rust-to-Platform-to-Communicator acceptance is still required.
+
 [README.md](README.md) defines Platform's ownership. This specification records
 the agreed product and security decisions for the implementation.
 Implementation details marked for validation must be proven against the selected

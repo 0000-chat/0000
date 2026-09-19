@@ -83,6 +83,13 @@ reviews and a bounded Grok runtime-kind review are clear. Communicator adoption,
 first-party human browser transport, deployment provisioning and full T11
 consumer acceptance remain open.
 
+[T11_MATRIX_CALLER_REPORT.md](T11_MATRIX_CALLER_REPORT.md) records the bounded
+Matrix gateway caller prerequisite: protected finite ingestion and claim
+credentials, separate transport secrets, and explicit recovery after a 401
+without automatic daemon or supervisor replay. Actual coordinator, protected-file
+replacement and persisted-batch tests pass. The real Platform-to-Communicator
+boundary remains a separate T11 gate.
+
 ## Purpose and deployment
 
 0000 Platform is the shared open-source identity and credential authority for
