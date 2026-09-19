@@ -14,7 +14,7 @@ import { registerGuestIssuer, registerService } from "../../../platform/src/serv
 import { createAgent, createOrNarrowAgentGrant, issueAgentCredential } from "../../../platform/src/agent-state";
 import { ensureDefaultOrganization, hashOpaque, issueHumanCredential, opaqueSecret, type ServiceRegistration } from "../../../platform/src/platform-state";
 import { MSG_OPERATOR, MSG_READ } from "./auth";
-import { createMsgMiniflareTempDirectory, startMsgMiniflare, TEST_ROOM_LIMITS } from "../test-fixtures/msg-worker.miniflare-fixture";
+import { buildWorkerBundleInChild, createMsgMiniflareTempDirectory, startMsgMiniflare, TEST_ROOM_LIMITS } from "../test-fixtures/msg-worker.miniflare-fixture";
 import { PersistentCookieJar } from "../../cli/src/cookie-jar";
 import { joinConversation } from "../../cli/src/join";
 
@@ -29,19 +29,13 @@ interface RuntimeBridge {
 }
 
 async function buildPlatformWorker(): Promise<string> {
-  const result = await Bun.build({
-    entrypoints: [platformWorkerEntry],
+  return buildWorkerBundleInChild({
+    entrypoint: platformWorkerEntry,
     external: ["cloudflare:workers"],
     format: "esm",
     naming: "worker.js",
     target: "browser",
   });
-  if (!result.success) {
-    throw new Error(result.logs.map((log) => log.message).join("\n"));
-  }
-  const entry = result.outputs.find((output) => output.kind === "entry-point");
-  if (!entry) throw new Error("The Platform Worker bundle was not emitted.");
-  return entry.text();
 }
 
 async function applyPlatformMigrations(database: D1Database): Promise<void> {
