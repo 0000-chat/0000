@@ -121,18 +121,18 @@ fixture and its refresh-token probe is not part of this code-only boundary.
 - `git diff --check` passed;
 - local CLI evidence passed for public and confidential registration. Invalid
   query-bearing redirects and `offline_access` were rejected before writes.
-  For the rollback check, `t06-cli-rollback-proof` was registered with the
-  catalog `["resource:read","resource:write"]`, then a valid seed client
-  established this resource row before the failing call:
-  `name='T06 rollback seed', allowedScopes='["resource:read","resource:write"]', disabled=0`.
-  `bun scripts/provision-oauth-client.ts --service-id
-  t06-cli-rollback-proof --redirect-uri
-  https://t06-cli-invalid.example.test/callback --capability resource:write
-  --public --owner-user-id t06-no-such-owner` exited 1 with a foreign-key
-  error. The same post-failure query returned the identical resource row and
-  zero `oauthClient` and `platform_oauth_client` rows for the failed redirect,
-  proving that the preceding resource upsert was rolled back with the failed
-  `--file` batch;
+  The discriminating rollback run is recorded in
+  `/tmp/platform-t06-parent-cli-rollback-proof.md`: a fresh local D1 database
+  registered `parent-cli-rollback` with catalog
+  `["resource:read","resource:write"]`, then seeded its resource with
+  `allowedScopes='["sentinel:before"]', disabled=1, updatedAt=222` and a
+  stable resource ID. The actual `provision-oauth-client` CLI, using
+  `resource:read`, an exact HTTPS redirect and an absent owner, exited 1 with
+  the Wrangler `--file` path's foreign-key error. Before and after snapshots
+  retained all three sentinel columns and the resource ID, while the failed
+  client count remained zero. Since the preceding upsert would have changed
+  every sentinel if it escaped the failed transaction, this proves rollback of
+  the resource write as well as the client writes;
 - a real Chromium/Miniflare navigation rendered the selection and consent
   pages, sent native form POSTs with `Origin: http://localhost:18792`, and
   completed both approve and deny cases against a separate local callback
