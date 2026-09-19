@@ -26,7 +26,11 @@ interface RoomState {
   readonly inactivity_expires_at: number;
   readonly last_message_at: number;
   readonly management_hash: string | null;
+  readonly creation_guest_id: string | null;
   readonly owner_guest_id: string | null;
+  readonly owner_organization_id: string | null;
+  readonly owner_subject_id: string | null;
+  readonly links_revoked: number;
   readonly message_count: number;
   readonly next_sequence: number;
   readonly status: "active" | "deleted";
@@ -42,19 +46,39 @@ interface StoredMessage extends MessageInput {
   readonly sequence: number;
 }
 
+interface ClaimReceipt {
+  readonly idempotency_key: string;
+  readonly request_digest: string;
+  readonly original_guest_id: string;
+  readonly claimant_subject_id: string;
+  readonly organization_id: string;
+  readonly revoke_links: number;
+  readonly claimed_at: number;
+}
+
 type HibernatingSocket = WebSocket & {
   deserializeAttachment(): unknown;
   serializeAttachment(value: unknown): void;
 };
 
-type CredentialVerification = "valid" | "invalid" | "unavailable";
+type CredentialVerification = "valid" | "invalid" | "forbidden" | "unavailable";
+interface ClaimCredentialVerification { readonly status: CredentialVerification; readonly subjectId?: string; readonly organizationId?: string; }
 
 interface SocketContext {
-  readonly guestId: string;
+  readonly kind: "guest" | "organization";
+  readonly credential?: string;
+  readonly guestId?: string;
+  readonly subjectId?: string;
+  readonly organizationId?: string;
   readonly resource: string;
-  readonly source: "owner" | "public" | "management";
+  readonly source: "owner" | "public" | "management" | "organization";
   readonly after: number;
 }
+
+type RequestAuth =
+  | { readonly kind: "guest"; readonly credential?: string; readonly guestId: string; readonly source: "owner" | "public" | "management" }
+  | { readonly kind: "organization"; readonly credential: string; readonly subjectId?: string; readonly organizationId?: string; readonly source: "organization" }
+  | { readonly kind: "claim"; readonly credential: string; readonly guestId: string; readonly subjectId?: string; readonly organizationId?: string; readonly source: "claim" };
 
 const socketTag = "conversation-live";
 
@@ -81,6 +105,7 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
       if (request.method === "POST" && url.pathname === "/access/record") return await this.accessRecord(request);
       if (request.method === "POST" && url.pathname === "/access/check") return await this.accessCheck(request);
       if (request.method === "POST" && url.pathname === "/access/grant") return await this.accessGrant(request);
+      if (request.method === "POST" && url.pathname === "/claim") return await this.claim(request);
       if (request.method === "GET" && url.pathname === "/read") return await this.read(request);
       if (request.method === "POST" && url.pathname === "/messages") return await this.post(request);
       if (request.method === "GET" && url.pathname === "/manage") return await this.manage(request, false);
@@ -138,8 +163,8 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
       const bytes = messageStorageBytes(input.initial, undefined, id);
       const inactivity = now + this.limits.inactivityTtlMs;
       this.ctx.storage.sql.exec(
-        "INSERT INTO room_state (singleton, schema_version, protocol_version, created_at, last_message_at, inactivity_expires_at, absolute_expires_at, next_sequence, message_count, total_bytes, status, tombstone_expires_at, management_hash, owner_guest_id) VALUES (1, ?, ?, ?, ?, ?, ?, 2, 1, ?, 'active', NULL, ?, ?)",
-        CURRENT_ROOM_SCHEMA_VERSION, PROTOCOL_VERSION, now, now, inactivity, inactivity, bytes, input.management_hash, input.owner_guest_id ?? null,
+        "INSERT INTO room_state (singleton, schema_version, protocol_version, created_at, last_message_at, inactivity_expires_at, absolute_expires_at, next_sequence, message_count, total_bytes, status, tombstone_expires_at, management_hash, creation_guest_id, owner_guest_id, owner_organization_id, owner_subject_id, links_revoked) VALUES (1, ?, ?, ?, ?, ?, ?, 2, 1, ?, 'active', NULL, ?, ?, ?, NULL, NULL, 0)",
+        CURRENT_ROOM_SCHEMA_VERSION, PROTOCOL_VERSION, now, now, inactivity, inactivity, bytes, input.management_hash, input.owner_guest_id ?? null, input.owner_guest_id ?? null,
       );
       if (input.owner_guest_id) {
         this.insertAcl(input.owner_guest_id, "owner", ["msg:read", "msg:write"], now);
@@ -200,11 +225,58 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
     return this.json({ protocol_version: PROTOCOL_VERSION, message: this.toMessage(result.message), expires_at: iso(result.state.inactivity_expires_at), replayed: result.replayed });
   }
 
+  private async claim(request: Request): Promise<Response> {
+    const input = await request.json() as { idempotency_key?: unknown; request_digest?: unknown; revoke_links?: unknown };
+    if (typeof input.idempotency_key !== "string" || !input.idempotency_key || typeof input.request_digest !== "string" || !input.request_digest || typeof input.revoke_links !== "boolean") {
+      throw new ProtocolError(ERROR_CODES.invalidBody, "The ownership claim is invalid.", 400);
+    }
+    const auth = this.parseAuth(request);
+    if (auth.kind !== "claim" || !auth.credential || !auth.guestId) throw new ProtocolError(ERROR_CODES.forbidden, "The ownership claim authorization is missing.", 403);
+    const verification = await this.verifyClaimCredential(auth, auth.credential);
+    if (verification.status === "unavailable") throw new ProtocolError(ERROR_CODES.serviceUnavailable, "The identity authority is temporarily unavailable.", 503);
+    if (verification.status === "invalid") throw new ProtocolError(ERROR_CODES.invalidBody, "The ownership claim credential is invalid.", 401);
+    if (verification.status !== "valid" || !verification.subjectId || !verification.organizationId) throw new ProtocolError(ERROR_CODES.forbidden, "The ownership claim is not authorized.", 403);
+    const claimantSubjectId = verification.subjectId;
+    const organizationId = verification.organizationId;
+    const now = this.now();
+    const result = this.ctx.storage.transactionSync(() => {
+      const state = this.requireState();
+      if (state.status !== "active") throw new ProtocolError(ERROR_CODES.gone, "The conversation has expired.", 410);
+      const receipt = rows<ClaimReceipt>(this.ctx.storage.sql.exec("SELECT * FROM claim_receipts WHERE idempotency_key = ?", input.idempotency_key))[0];
+      if (receipt) {
+        if (receipt.request_digest !== input.request_digest || receipt.original_guest_id !== auth.guestId || receipt.claimant_subject_id !== claimantSubjectId || receipt.organization_id !== organizationId || receipt.revoke_links !== (input.revoke_links ? 1 : 0)) {
+          throw new ProtocolError(ERROR_CODES.conflict, "The ownership claim key is already used for another claim.", 409);
+        }
+        return { claimedAt: receipt.claimed_at, organizationId: receipt.organization_id, revokeLinks: receipt.revoke_links === 1 };
+      }
+      if (state.owner_guest_id !== auth.guestId || state.owner_organization_id !== null) {
+        throw new ProtocolError(ERROR_CODES.forbidden, "The room is not owned by the controlled guest.", 403);
+      }
+      const owner = rows<{ active: number; capabilities: string }>(this.ctx.storage.sql.exec("SELECT active, capabilities FROM room_acl WHERE guest_id = ? AND source = 'owner'", auth.guestId))[0];
+      if (!owner || owner.active !== 1 || !parseCapabilities(owner.capabilities).includes("msg:read") || !parseCapabilities(owner.capabilities).includes("msg:write")) {
+        throw new ProtocolError(ERROR_CODES.forbidden, "The room owner permission is no longer valid.", 403);
+      }
+      this.ctx.storage.sql.exec(
+        "UPDATE room_state SET owner_guest_id = NULL, owner_organization_id = ?, owner_subject_id = ?, management_hash = NULL, links_revoked = ? WHERE singleton = 1 AND owner_guest_id = ? AND owner_organization_id IS NULL",
+        organizationId, claimantSubjectId, input.revoke_links ? 1 : 0, auth.guestId,
+      );
+      this.ctx.storage.sql.exec("UPDATE room_acl SET active = 0 WHERE guest_id = ? AND source IN ('owner', 'management')", auth.guestId);
+      if (input.revoke_links) this.ctx.storage.sql.exec("UPDATE room_acl SET active = 0 WHERE source = 'public'");
+      this.ctx.storage.sql.exec(
+        "INSERT INTO claim_receipts (idempotency_key, request_digest, original_guest_id, claimant_subject_id, organization_id, revoke_links, claimed_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        input.idempotency_key, input.request_digest, auth.guestId, claimantSubjectId, organizationId, input.revoke_links ? 1 : 0, now,
+      );
+      return { claimedAt: now, organizationId, revokeLinks: input.revoke_links };
+    });
+    return this.json({ protocol_version: PROTOCOL_VERSION, room: new URL(request.url).searchParams.get("resource") ?? "", organization_id: result.organizationId, claimed_at: iso(result.claimedAt), revoke_links: result.revokeLinks });
+  }
+
   private async manage(request: Request, deleteRoom: boolean): Promise<Response> {
-    await this.requireAccessFromRequest(request, "manage");
+    const auth = this.parseAuth(request);
+    await this.requireAccess(auth, "manage", new URL(request.url).searchParams.get("resource") ?? "");
     const token = new URL(request.url).searchParams.get("token") ?? "";
     const state = this.state();
-    if (!state || !state.management_hash || !compareCapabilities(await hashToken(token), state.management_hash)) {
+    if (auth.kind !== "organization" && (!state || !state.management_hash || !compareCapabilities(await hashToken(token), state.management_hash))) {
       throw new ProtocolError(ERROR_CODES.notFound, "The requested resource was not found.", 404);
     }
     if (deleteRoom) {
@@ -213,6 +285,7 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
       await this.schedule(deleted);
       return this.json({ protocol_version: PROTOCOL_VERSION, deleted: true, expires_at: iso(deleted.tombstone_expires_at!) });
     }
+    if (!state) throw new ProtocolError(ERROR_CODES.notFound, "The requested resource was not found.", 404);
     return this.json({ protocol_version: PROTOCOL_VERSION, expires_at: iso(state.inactivity_expires_at) });
   }
 
@@ -227,6 +300,7 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
   private async live(request: Request): Promise<Response> {
     const url = new URL(request.url);
     const auth = this.parseAuth(request);
+    if (auth.kind === "claim") throw new ProtocolError(ERROR_CODES.forbidden, "Ownership claim credentials cannot open a live room socket.", 403);
     await this.requireAccess(auth, "read", url.searchParams.get("resource") ?? "");
     const state = await this.requireActive(this.now());
     const sockets = this.liveSockets();
@@ -236,7 +310,9 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
     const after = Number(url.searchParams.get("after") ?? 0);
     this.socketCredentials.set(server, auth.credential ?? "");
     const resource = url.searchParams.get("resource") ?? "";
-    this.socketContexts.set(server, { after, guestId: auth.guestId, resource, source: auth.source });
+    this.socketContexts.set(server, auth.kind === "organization"
+      ? { after, kind: "organization", credential: auth.credential, subjectId: auth.subjectId, organizationId: auth.organizationId, resource, source: "organization" }
+      : { after, kind: "guest", guestId: auth.guestId, resource, source: auth.source });
     if (this.config.MSG_AUTH_REQUIRED === "1") {
       // Authenticated sockets use the standard WebSocket API so their current
       // credential remains in memory while this DO instance is alive. Raw
@@ -247,7 +323,7 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
       server.addEventListener("error", () => { void this.webSocketClose(server); });
     } else {
       this.ctx.acceptWebSocket(server, [socketTag]);
-      server.serializeAttachment({ after, guestId: auth.guestId, resource, source: auth.source });
+      if (auth.kind === "guest") server.serializeAttachment({ after, guestId: auth.guestId, resource, source: auth.source });
     }
     server.send(JSON.stringify({ protocol_version: PROTOCOL_VERSION, type: "ready", latest_message: state.next_sequence - 1, expires_at: iso(state.inactivity_expires_at) }));
     return new Response(null, { status: 101, webSocket: client } as ResponseInit & { webSocket: WebSocket });
@@ -265,7 +341,7 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
     const input = await request.json() as { source?: string; token?: string };
     const state = await this.requireActive(this.now());
     const source = input.source;
-    if (source === "public") return this.json({ source: "public" });
+    if (source === "public" && state.links_revoked !== 1) return this.json({ source: "public" });
     if (source === "management" && input.token !== undefined && state.management_hash && compareCapabilities(await hashToken(input.token), state.management_hash)) return this.json({ source: "management" });
     if (source === "owner" && state.owner_guest_id) return this.json({ source: "owner", stored_owner_id: state.owner_guest_id });
     throw new ProtocolError(ERROR_CODES.notFound, "The requested resource was not found.", 404);
@@ -277,6 +353,8 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
     if (input.grant_id !== undefined && !input.grant_id) throw new ProtocolError(ERROR_CODES.invalidBody, "The room access grant is invalid.", 400);
     const state = this.requireState();
     if (state.status !== "active") throw new ProtocolError(ERROR_CODES.gone, "The conversation has expired.", 410);
+    if (state.links_revoked === 1 && (input.source === "public" || input.source === "management")) throw new ProtocolError(ERROR_CODES.forbidden, "Room links are no longer admitted.", 403);
+    if (input.source === "management" && !state.management_hash) throw new ProtocolError(ERROR_CODES.forbidden, "The management link is no longer admitted.", 403);
     if (input.source === "owner" && state.owner_guest_id !== input.guest_id) throw new ProtocolError(ERROR_CODES.forbidden, "The room owner is invalid.", 403);
     this.ctx.storage.transactionSync(() => this.insertAcl(input.guest_id!, input.source as SocketContext["source"], input.capabilities as string[], this.now(), input.grant_id));
     return this.json({ recorded: true });
@@ -303,17 +381,27 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
     return this.json({ source: row.source, ...(row.grant_id ? { grant_id: row.grant_id } : {}), capabilities: parseCapabilities(row.capabilities), active: row.active === 1 });
   }
 
-  private parseAuth(request: Request): { readonly credential?: string; readonly guestId: string; readonly source: SocketContext["source"] } {
+  private parseAuth(request: Request): RequestAuth {
+    const kind = request.headers.get("x-msg-auth-kind");
+    const authorization = request.headers.get("authorization");
+    const credential = authorization?.startsWith("Bearer ") ? authorization.slice("Bearer ".length) : undefined;
+    if (kind === "organization") {
+      if (!credential) throw new ProtocolError(ERROR_CODES.forbidden, "The organization authorization is missing.", 403);
+      return { kind: "organization", credential, subjectId: request.headers.get("x-msg-subject-id") ?? undefined, organizationId: request.headers.get("x-msg-organization-id") ?? undefined, source: "organization" };
+    }
+    if (kind === "claim") {
+      const guestId = request.headers.get("x-msg-guest-id") ?? "";
+      if (!credential || !guestId) throw new ProtocolError(ERROR_CODES.forbidden, "The ownership claim authorization is missing.", 403);
+      return { kind: "claim", credential, guestId, subjectId: request.headers.get("x-msg-subject-id") ?? undefined, organizationId: request.headers.get("x-msg-organization-id") ?? undefined, source: "claim" };
+    }
     const guestId = request.headers.get("x-msg-guest-id") ?? "";
     const source = request.headers.get("x-msg-source");
     if (!guestId || (source !== "owner" && source !== "public" && source !== "management")) {
       if (this.config.MSG_AUTH_REQUIRED === "1") throw new ProtocolError(ERROR_CODES.forbidden, "The room authorization is missing.", 403);
-      return { guestId: "legacy", source: "public" };
+      return { kind: "guest", guestId: "legacy", source: "public" };
     }
-    const authorization = request.headers.get("authorization");
-    const credential = authorization?.startsWith("Bearer ") ? authorization.slice("Bearer ".length) : undefined;
     if (this.config.MSG_AUTH_REQUIRED === "1" && !credential) throw new ProtocolError(ERROR_CODES.forbidden, "The room authorization is missing.", 403);
-    return { ...(credential ? { credential } : {}), guestId, source };
+    return { kind: "guest", ...(credential ? { credential } : {}), guestId, source };
   }
 
   private async requireAccessFromRequest(request: Request, action: "read" | "write" | "manage"): Promise<void> {
@@ -322,16 +410,17 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
     await this.requireAccess(auth, action, new URL(request.url).searchParams.get("resource") ?? "");
   }
 
-  private async requireAccess(auth: { readonly credential?: string; readonly guestId: string; readonly source: SocketContext["source"] }, action: "read" | "write" | "manage", resource: string): Promise<void> {
+  private async requireAccess(auth: RequestAuth | SocketContext, action: "read" | "write" | "manage", resource: string): Promise<void> {
     if (this.config.MSG_AUTH_REQUIRED !== "1") return;
     if (!auth.credential || !resource) throw new ProtocolError(ERROR_CODES.forbidden, "The room authorization is missing.", 403);
     await this.requireActive(this.now());
     const verification = await this.verifyCredential(auth, auth.credential, resource, action);
     if (verification === "unavailable") throw new ProtocolError(ERROR_CODES.serviceUnavailable, "The identity authority is temporarily unavailable.", 503);
+    if (verification === "forbidden") throw new ProtocolError(ERROR_CODES.forbidden, "The room authorization is no longer valid.", 403);
     if (verification !== "valid") throw new ProtocolError(ERROR_CODES.invalidBody, "The room authorization is no longer valid.", 401);
   }
 
-  private async verifyCredential(auth: { readonly credential?: string; readonly guestId: string; readonly source: SocketContext["source"] }, credential: string, resource: string, action: "read" | "write" | "manage"): Promise<CredentialVerification> {
+  private async verifyCredential(auth: RequestAuth | SocketContext, credential: string, resource: string, action: "read" | "write" | "manage"): Promise<CredentialVerification> {
     const baseUrl = this.config.MSG_PLATFORM_BASE_URL;
     const authority = this.config.MSG_PLATFORM_AUTHORITY;
     const audience = this.config.MSG_PLATFORM_AUDIENCE;
@@ -339,10 +428,35 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
     if (!baseUrl || !authority || !audience || !verifier) return "unavailable";
     const authentication = await createPlatformClient({ baseUrl, authority, audience, serviceVerifier: verifier }).authenticate(credential);
     if (authentication.status === "authority_unavailable") return "unavailable";
-    if (authentication.status !== "authenticated" || authentication.principal.kind !== "guest") return "invalid";
-    const principal = authentication.principal;
     const capability = action === "read" ? "msg:read" : action === "write" ? "msg:write" : "msg:manage";
+    if (authentication.status !== "authenticated") return "invalid";
+    const principal = authentication.principal;
+    if (auth.kind === "organization") {
+      const state = this.state();
+      if (principal.kind === "guest") return "forbidden";
+      if (state?.owner_organization_id !== principal.organizationId) return "forbidden";
+      return principal.capabilities.includes(capability) ? "valid" : "forbidden";
+    }
+    if (auth.kind === "claim") {
+      if (principal.kind !== "human") return "forbidden";
+      return principal.subjectId === auth.subjectId && principal.organizationId === auth.organizationId && principal.capabilities.includes("msg:claim") ? "valid" : "forbidden";
+    }
+    if (principal.kind !== "guest") return "invalid";
     return principal.subjectId === auth.guestId && principal.resourceIds.includes(resource) && principal.capabilities.includes(capability) && this.hasGrant(auth.guestId, auth.source, action, principal.grantId) ? "valid" : "invalid";
+  }
+
+  private async verifyClaimCredential(auth: RequestAuth, credential: string): Promise<ClaimCredentialVerification> {
+    const baseUrl = this.config.MSG_PLATFORM_BASE_URL;
+    const authority = this.config.MSG_PLATFORM_AUTHORITY;
+    const audience = this.config.MSG_PLATFORM_AUDIENCE;
+    const verifier = this.config.MSG_PLATFORM_SERVICE_VERIFIER;
+    if (!baseUrl || !authority || !audience || !verifier) return { status: "unavailable" };
+    const authentication = await createPlatformClient({ baseUrl, authority, audience, serviceVerifier: verifier }).authenticate(credential);
+    if (authentication.status === "authority_unavailable") return { status: "unavailable" };
+    if (authentication.status !== "authenticated") return { status: "invalid" };
+    if (auth.kind !== "claim" || authentication.principal.kind !== "human") return { status: "forbidden" };
+    if (!authentication.principal.capabilities.includes("msg:claim")) return { status: "forbidden" };
+    return { status: "valid", subjectId: authentication.principal.subjectId, organizationId: authentication.principal.organizationId };
   }
 
   private attachmentContext(socket: HibernatingSocket): SocketContext | undefined {
@@ -350,7 +464,7 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
     if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
     const candidate = value as Record<string, unknown>;
     if (typeof candidate.guestId !== "string" || typeof candidate.resource !== "string" || (candidate.source !== "owner" && candidate.source !== "public" && candidate.source !== "management") || typeof candidate.after !== "number") return undefined;
-    return { guestId: candidate.guestId, resource: candidate.resource, source: candidate.source, after: candidate.after };
+    return { kind: "guest", guestId: candidate.guestId, resource: candidate.resource, source: candidate.source, after: candidate.after };
   }
 
   private async verifySocket(context: SocketContext, credential: string): Promise<boolean> {
@@ -367,6 +481,8 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
   }
 
   private hasGrant(guestId: string, source: SocketContext["source"], action: "read" | "write" | "manage", grantId?: string): boolean {
+    const state = this.state();
+    if (state?.links_revoked === 1 && (source === "public" || source === "management")) return false;
     const required = action === "read" ? "msg:read" : action === "write" ? "msg:write" : "msg:manage";
     const sources = source === "public" ? ["public", "owner"] : [source];
     return sources.some((candidate) => {
@@ -381,6 +497,7 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
       if (state.status === "deleted") return false;
       this.ctx.storage.sql.exec("DELETE FROM messages");
       this.ctx.storage.sql.exec("DELETE FROM room_acl");
+      this.ctx.storage.sql.exec("DELETE FROM claim_receipts");
       this.ctx.storage.sql.exec("UPDATE room_state SET status = 'deleted', tombstone_expires_at = ?, management_hash = NULL, message_count = 0, total_bytes = 0 WHERE singleton = 1", now + this.limits.tombstoneTtlMs);
       return true;
     });

@@ -1,6 +1,6 @@
 import { ROOM_LIMITS } from "./room-domain";
 
-export const CURRENT_ROOM_SCHEMA_VERSION = 5;
+export const CURRENT_ROOM_SCHEMA_VERSION = 6;
 
 interface SqlStorage {
   exec(query: string, ...values: unknown[]): Iterable<unknown>;
@@ -91,6 +91,26 @@ function applyMigration(sql: SqlStorage, version: number, inactivityTtlMs: numbe
   if (version === 5) {
     const columns = rows<{ name: string }>(sql.exec("PRAGMA table_info(room_acl)"));
     if (!columns.some((column) => column.name === "grant_id")) sql.exec("ALTER TABLE room_acl ADD COLUMN grant_id TEXT");
+    return;
+  }
+  if (version === 6) {
+    const columns = rows<{ name: string }>(sql.exec("PRAGMA table_info(room_state)"));
+    if (!columns.some((column) => column.name === "creation_guest_id")) sql.exec("ALTER TABLE room_state ADD COLUMN creation_guest_id TEXT");
+    if (!columns.some((column) => column.name === "owner_organization_id")) sql.exec("ALTER TABLE room_state ADD COLUMN owner_organization_id TEXT");
+    if (!columns.some((column) => column.name === "owner_subject_id")) sql.exec("ALTER TABLE room_state ADD COLUMN owner_subject_id TEXT");
+    if (!columns.some((column) => column.name === "links_revoked")) sql.exec("ALTER TABLE room_state ADD COLUMN links_revoked INTEGER NOT NULL DEFAULT 0 CHECK (links_revoked IN (0, 1))");
+    sql.exec("UPDATE room_state SET creation_guest_id = owner_guest_id WHERE creation_guest_id IS NULL AND owner_guest_id IS NOT NULL");
+    sql.exec(`
+      CREATE TABLE IF NOT EXISTS claim_receipts (
+        idempotency_key TEXT PRIMARY KEY,
+        request_digest TEXT NOT NULL,
+        original_guest_id TEXT NOT NULL,
+        claimant_subject_id TEXT NOT NULL,
+        organization_id TEXT NOT NULL,
+        revoke_links INTEGER NOT NULL CHECK (revoke_links IN (0, 1)),
+        claimed_at INTEGER NOT NULL
+      );
+    `);
     return;
   }
   throw new Error("The room schema migration is not defined.");

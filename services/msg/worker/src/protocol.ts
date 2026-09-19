@@ -33,11 +33,51 @@ export interface CreateRoomInput {
 }
 
 export type RoomAccessSource = "owner" | "public" | "management";
-export interface RoomAccessContext {
+export interface GuestRoomAccessContext {
+  readonly kind?: "guest";
   readonly credential?: string;
   readonly guestId: string;
   readonly grantId?: string;
   readonly source: RoomAccessSource;
+}
+
+export interface OrganizationRoomAccessContext {
+  readonly kind: "organization";
+  readonly credential: string;
+  readonly subjectId: string;
+  readonly organizationId: string;
+  readonly capabilities: readonly string[];
+  /** Retained only for diagnostic compatibility; organization auth never trusts it. */
+  readonly guestId?: string;
+  readonly source: "organization";
+}
+
+export interface ClaimRoomAccessContext {
+  readonly kind: "claim";
+  readonly credential: string;
+  readonly subjectId: string;
+  readonly organizationId: string;
+  readonly capabilities: readonly string[];
+  readonly guestId: string;
+  readonly source: "claim";
+}
+
+export type RoomAccessContext = GuestRoomAccessContext | OrganizationRoomAccessContext | ClaimRoomAccessContext;
+
+export interface ClaimRoomInput {
+  readonly room: string;
+  readonly idempotencyKey: string;
+  readonly requestDigest: string;
+  readonly revokeLinks: boolean;
+  readonly auth: ClaimRoomAccessContext;
+}
+
+export interface ClaimRoomResponse {
+  readonly protocol_version: typeof PROTOCOL_VERSION;
+  readonly room: string;
+  readonly organization_id: string;
+  readonly claimed_at: string;
+  readonly revoke_links: boolean;
 }
 
 export interface CreateRoomResponse {
@@ -116,6 +156,7 @@ function shellQuote(value: string): string {
 
 export interface RoomService {
   create(input: CreateRoomInput): Promise<CreateRoomResponse>;
+  claim?(input: ClaimRoomInput): Promise<ClaimRoomResponse>;
   read?(input: ReadRoomInput): Promise<ReadRoomResponse>;
   post?(input: PostMessageInput): Promise<PostMessageResponse>;
   manage?(input: ManageRoomInput): Promise<ManageRoomResponse>;

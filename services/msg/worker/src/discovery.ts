@@ -170,6 +170,8 @@ const DISCOVERY_DOCUMENT = {
     live: "GET /{room}/live",
     export: "GET /{room}/export.md and /{room}/export.json",
     manage: "GET, DELETE /manage/{room}/{token}",
+    claim: "POST /{room}/claim (human msg:claim + guest control cookie)",
+    organization_manage: "GET, DELETE /{room}/manage (verified organization owner)",
     discovery: "GET /",
     health: "GET /healthz",
   },
@@ -237,6 +239,15 @@ export const OPENAPI_DOCUMENT = {
         responses: { "201": { description: "Message created or idempotently replayed.", content: { "application/json": { schema: POST_RESPONSE_SCHEMA, example: POST_RESPONSE_EXAMPLE } } }, "400": { description: "Invalid message." }, "409": { description: "Idempotency key conflict." }, "410": { description: "Room has expired." }, "413": { description: "Message is too large." }, "429": { description: "Room quota is reached." } },
       },
     },
+    "/{room}/claim": {
+      post: {
+        summary: "Atomically transfer a guest-owned room to the claimant's verified organization",
+        description: "Requires an explicit human Bearer credential with msg:claim, the existing msg_guest_control cookie, and Idempotency-Key. The exact retry is receipt-bound; revoke_links permanently closes public and management link admission.",
+        parameters: [{ name: "room", in: "path", required: true, schema: { type: "string" } }, { name: "Idempotency-Key", in: "header", required: true, schema: { type: "string" } }],
+        requestBody: { required: true, content: { "application/json": { schema: { type: "object", properties: { revoke_links: { type: "boolean", default: false } }, additionalProperties: false } } } },
+        responses: { "200": { description: "Claim transferred and receipt recorded." }, "400": { description: "Invalid claim body or idempotency key." }, "401": { description: "Invalid human credential or guest control." }, "403": { description: "Missing owner/control proof or insufficient capability." }, "409": { description: "Claim receipt conflict." }, "503": { description: "Identity authority unavailable; no transfer was applied." } },
+      },
+    },
     "/{room}/agent": {
       get: {
         summary: "Read a temporary conversation for a browser-free agent handoff",
@@ -281,6 +292,18 @@ export const OPENAPI_DOCUMENT = {
         summary: "Delete a temporary conversation",
         parameters: [{ name: "room", in: "path", required: true, schema: { type: "string" } }, { name: "token", in: "path", required: true, schema: { type: "string" } }],
         responses: { "200": { description: "Conversation deleted." }, "404": { description: "Invalid management capability." } },
+      },
+    },
+    "/{room}/manage": {
+      get: {
+        summary: "Show management confirmation for a verified organization owner",
+        parameters: [{ name: "room", in: "path", required: true, schema: { type: "string" } }],
+        responses: { "200": { description: "Management confirmation." }, "401": { description: "Invalid explicit organization credential." }, "403": { description: "Organization is not the current owner or lacks msg:manage." }, "503": { description: "Identity authority unavailable." } },
+      },
+      delete: {
+        summary: "Delete a room as a verified organization owner",
+        parameters: [{ name: "room", in: "path", required: true, schema: { type: "string" } }],
+        responses: { "200": { description: "Conversation deleted." }, "401": { description: "Invalid explicit organization credential." }, "403": { description: "Organization is not the current owner or lacks msg:manage." }, "503": { description: "Identity authority unavailable." } },
       },
     },
   },

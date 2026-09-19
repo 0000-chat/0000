@@ -5,7 +5,7 @@ service has a Cloudflare Worker and the public npm package @0000chat/msg.
 
 The Worker stores each conversation in a ConversationRoom Durable Object.
 It uses D1 for operations metadata and the shared Platform authority for guest
-control and resource grants. The service exposes the existing msg.0000.chat
+control, resource grants, and audience-scoped human credentials. The service exposes the existing msg.0000.chat
 address. This migration does not deploy the Worker or change production
 routing.
 
@@ -15,8 +15,8 @@ credentials to `/manage/{room}`. The browser uses ordinary same-origin cookie
 storage; the CLI uses a private persistent jar at
 `$MSG_COOKIE_JAR` or `~/.config/0000/msg/cookies.json`. Set
 `MSG_SERVICE_ORIGIN` for an explicit self-hosted origin. Credentials are
-issued and verified by Platform; msg stores only the guest owner and
-source-separated public or management ACL rows in the room Durable Object.
+issued and verified by Platform; msg stores the guest provenance, current
+owner, and source-separated ACL rows in the room Durable Object.
 If a resource cookie is stale, append `?recover=1` to the checked room or
 management link to explicitly replace it after the link is verified again.
 The CLI exposes this as `msg join <url> --recover`; failed authentication does
@@ -27,8 +27,17 @@ incurs active duration charges; normal eviction still requires reconnect.
 [T09_PLATFORM_AUTH_REPORT.md](T09_PLATFORM_AUTH_REPORT.md) records the reviewed
 integration at `be5b001`. Combined checks pass the full msg package and 59
 assertions across actual Platform Worker/D1 and msg Worker/DO routes. Browser
-flows pass independently. Atomic organization claims and managed anonymous
-quotas remain separate work; this change is not a deployment.
+flows pass independently. An authenticated human with `msg:claim` can transfer
+a guest-owned room with `POST /{room}/claim`, using the existing guest-control
+cookie and an `Idempotency-Key`. The Durable Object stores an action-bound
+receipt and keeps immutable creation guest provenance separate from the current
+organization owner. `revoke_links: true` permanently closes public and
+management link admission for that room. After transfer, matching
+organization credentials with `msg:read`, `msg:write`, or `msg:manage` use
+ordinary room routes or `GET, DELETE /{room}/manage`; explicit bearer failures
+never fall back to guest cookies. The actual Platform Worker/D1 and msg
+Worker/DO proof is in [T10_CLAIM_REPORT.md](T10_CLAIM_REPORT.md). This change
+does not modify Platform production code or claim a Database integration.
 
 Operator routes require an issued Platform bearer with `msg:operator` and a
 matching `MSG_OPERATOR_ALLOWLIST` entry for the human or agent subject and

@@ -1,6 +1,6 @@
 import { ERROR_CODES, ProtocolError } from "./errors";
 import { hashCapability, parseMessageInput, randomCapability, validateIdempotencyKey } from "./room-domain";
-import { buildShareMessage, foregroundWait, PROTOCOL_VERSION, stripLegacyAbsoluteExpiry, type CreateRoomInput, type CreateRoomResponse, type ExportRoomInput, type LiveRoomInput, type ManageRoomInput, type ManageRoomResponse, type PostMessageInput, type PostMessageResponse, type ReadRoomInput, type ReadRoomResponse, type RoomAccessContext, type RoomAccessSource, type RoomService } from "./protocol";
+import { buildShareMessage, foregroundWait, PROTOCOL_VERSION, stripLegacyAbsoluteExpiry, type ClaimRoomInput, type ClaimRoomResponse, type CreateRoomInput, type CreateRoomResponse, type ExportRoomInput, type LiveRoomInput, type ManageRoomInput, type ManageRoomResponse, type PostMessageInput, type PostMessageResponse, type ReadRoomInput, type ReadRoomResponse, type RoomAccessContext, type RoomAccessSource, type RoomService } from "./protocol";
 
 export interface RoomStub { fetch(request: Request): Promise<Response>; }
 export interface RoomNamespace { getByName(name: string): RoomStub; }
@@ -39,6 +39,15 @@ export class DurableRoomService implements RoomService {
       expires_at: value.expires_at as string,
       wait: foregroundWait(this.origin, room, 1),
     };
+  }
+
+  async claim(input: ClaimRoomInput): Promise<ClaimRoomResponse> {
+    const value = await responseJson(await this.room(input.room).fetch(jsonRequest(`/claim?resource=${encodeURIComponent(input.room)}`, {
+      idempotency_key: validateIdempotencyKey(input.idempotencyKey),
+      request_digest: input.requestDigest,
+      revoke_links: input.revokeLinks,
+    }, input.auth)));
+    return value as unknown as ClaimRoomResponse;
   }
 
   async read(input: ReadRoomInput): Promise<ReadRoomResponse> {
@@ -112,8 +121,15 @@ function jsonRequest(path: string, value: unknown, auth?: RoomAccessContext): Re
 
 function authHeaders(auth?: RoomAccessContext): Record<string, string> {
   if (!auth) return {};
+  if (auth.kind === "organization") {
+    return { authorization: `Bearer ${auth.credential}`, "x-msg-auth-kind": "organization" };
+  }
+  if (auth.kind === "claim") {
+    return { authorization: `Bearer ${auth.credential}`, "x-msg-auth-kind": "claim", "x-msg-guest-id": auth.guestId };
+  }
   return {
     ...(auth.credential ? { authorization: `Bearer ${auth.credential}` } : {}),
+    "x-msg-auth-kind": "guest",
     "x-msg-guest-id": auth.guestId,
     "x-msg-source": auth.source,
   };

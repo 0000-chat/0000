@@ -284,7 +284,7 @@ async function route(request: Request, service: RoomService, options: MsgWorkerO
       const created = await service.create({ body, ...(control ? { ownerGuestId: control.guestId } : {}), ...(claim?.kind === "claimed" ? { plan: claim.plan } : {}) });
       const owner = control && options.auth ? await options.auth.authorizeOwner(request, { room: created.room.id, storedOwnerId: control.guestId }, control) : undefined;
       try {
-        await options.operations.completeCreation(key, claim?.kind === "claimed" ? claim.leaseToken : "", created, control?.guestId, owner?.context.grantId);
+        await options.operations.completeCreation(key, claim?.kind === "claimed" ? claim.leaseToken : "", created, control?.guestId, owner?.context.kind === "guest" ? owner.context.grantId : undefined);
       } catch {
         // The created room remains valid when the optional replay receipt cannot persist.
         emitMsgEvent("msg.d1.availability", "unavailable");
@@ -298,6 +298,32 @@ async function route(request: Request, service: RoomService, options: MsgWorkerO
       negotiateCreateRepresentation(request.headers.get("accept")),
       [...(control?.setCookies ?? []), ...(owner?.setCookies ?? [])],
     );
+  }
+
+  const claimMatch = /^\/([^/]+)\/claim$/.exec(url.pathname);
+  if (claimMatch && request.method === "POST") {
+    if (!service.claim) return notFound();
+    if (!options.auth) throw new ProtocolError(ERROR_CODES.serviceUnavailable, "Ownership claims are temporarily unavailable.", 503);
+    const body = parseClaimBody(await parseRequestBody(request, { maxBytes: 2 * 1024 }));
+    const idempotencyKey = validateIdempotencyKey(request.headers.get("idempotency-key") ?? "");
+    const auth = await options.auth.authorizeClaim(request);
+    const result = await service.claim({
+      room: claimMatch[1]!,
+      idempotencyKey,
+      requestDigest: await claimFingerprint(body.revoke_links),
+      revokeLinks: body.revoke_links,
+      auth: auth.context,
+    });
+    return withSetCookies(jsonResponse(result), [...auth.setCookies]);
+  }
+
+  const organizationManageMatch = /^\/([^/]+)\/manage$/.exec(url.pathname);
+  if (organizationManageMatch && (request.method === "GET" || request.method === "DELETE")) {
+    if (!service.manage) return notFound();
+    if (!options.auth) throw new ProtocolError(ERROR_CODES.serviceUnavailable, "Organization management is temporarily unavailable.", 503);
+    const auth = await options.auth.authorizeOrganizationResource(request, { room: organizationManageMatch[1]!, action: "manage" });
+    const result = await service.manage({ method: request.method, room: organizationManageMatch[1]!, token: "", auth: auth.context });
+    return withSetCookies(manageResponse(result, request.method, negotiateRepresentation(request.headers.get("accept"))), [...auth.setCookies]);
   }
 
   const exportMatch = /^\/([^/]+)\/export\.(md|json)$/.exec(url.pathname);
@@ -432,6 +458,28 @@ async function creationFingerprint(body: RequestBody): Promise<string> {
   let binary = "";
   for (const byte of digest) binary += String.fromCharCode(byte);
   return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/u, "");
+}
+
+async function claimFingerprint(revokeLinks: boolean): Promise<string> {
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(`msg-claim:v1:${revokeLinks ? "1" : "0"}`)));
+  let binary = "";
+  for (const byte of digest) binary += String.fromCharCode(byte);
+  return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/u, "");
+}
+
+function parseClaimBody(body: RequestBody): { readonly revoke_links: boolean } {
+  if (body.kind !== "json" || body.value === null || Array.isArray(body.value) || typeof body.value !== "object") {
+    throw new ProtocolError(ERROR_CODES.invalidBody, "The ownership claim body must be a JSON object.", 400);
+  }
+  const value = body.value as Record<string, import("./protocol").JsonValue>;
+  const keys = Object.keys(value);
+  if (keys.some((key) => key !== "revoke_links")) {
+    throw new ProtocolError(ERROR_CODES.invalidBody, "The ownership claim body contains unsupported fields.", 400);
+  }
+  if (value.revoke_links !== undefined && typeof value.revoke_links !== "boolean") {
+    throw new ProtocolError(ERROR_CODES.invalidBody, "revoke_links must be a boolean.", 400);
+  }
+  return { revoke_links: value.revoke_links === true };
 }
 
 function parseReport(body: RequestBody): { capability: string; description?: string } {

@@ -9,6 +9,7 @@ import { ERROR_CODES, ProtocolError } from "./errors";
 export const MSG_READ = "msg:read";
 export const MSG_WRITE = "msg:write";
 export const MSG_MANAGE = "msg:manage";
+export const MSG_CLAIM = "msg:claim";
 export const MSG_OPERATOR = "msg:operator";
 export const MSG_PERMISSION_IDS = {
   owner: "msg-owner",
@@ -78,11 +79,38 @@ export interface ResourceAuthorization {
   readonly setCookies: readonly string[];
 }
 
-export interface MsgAuthContext {
+export interface GuestAuthContext {
+  readonly kind: "guest";
   readonly credential: string;
   readonly guestId: string;
   readonly grantId?: string;
   readonly source: AccessSource;
+}
+
+export interface OrganizationAuthContext {
+  readonly kind: "organization";
+  readonly credential: string;
+  readonly subjectId: string;
+  readonly organizationId: string;
+  readonly capabilities: readonly string[];
+  readonly guestId?: string;
+  readonly source: "organization";
+}
+
+export interface ClaimAuthContext {
+  readonly kind: "claim";
+  readonly credential: string;
+  readonly subjectId: string;
+  readonly organizationId: string;
+  readonly capabilities: readonly string[];
+  readonly guestId: string;
+  readonly source: "claim";
+}
+
+export type MsgAuthContext = GuestAuthContext | OrganizationAuthContext | ClaimAuthContext;
+
+export interface ClaimAuthorization extends ResourceAuthorization {
+  readonly context: ClaimAuthContext;
 }
 
 export type OperatorAuthorization =
@@ -92,6 +120,8 @@ export type OperatorAuthorization =
 export interface MsgAuthenticator {
   control(request: Request): Promise<GuestControl>;
   authorizeOwner(request: Request, input: { room: string; storedOwnerId: string; grantId?: string }, control?: GuestControl): Promise<ResourceAuthorization>;
+  authorizeClaim(request: Request): Promise<ClaimAuthorization>;
+  authorizeOrganizationResource(request: Request, input: { room: string; action: "read" | "write" | "manage" }): Promise<ResourceAuthorization>;
   authorizeResource(request: Request, input: {
     room: string;
     source: AccessSource;
@@ -150,6 +180,10 @@ export function createMsgAuthenticator(
       if (control.guestId !== input.storedOwnerId) throw authError("The creator control is not the stored room owner.", 403);
       const local = await rooms.findGrant({ room: input.room, guestId: control.guestId, source: "owner", ...(input.grantId ? { grantId: input.grantId } : {}) });
       if (local && !local.active) throw authError("The creator permission is no longer valid.", 403);
+      if (!local) {
+        const proof = await rooms.proveLink({ room: input.room, source: "owner" });
+        if (!proof || proof.storedOwnerId !== undefined && proof.storedOwnerId !== input.storedOwnerId) throw authError("The creator permission is no longer valid.", 403);
+      }
       if (input.grantId && (!local || local.grantId !== input.grantId || !local.capabilities.includes(MSG_READ) || !local.capabilities.includes(MSG_WRITE))) {
         throw authError("The creator permission is no longer valid.", 403);
       }
@@ -171,7 +205,7 @@ export function createMsgAuthenticator(
       if (grant.status !== "success") throw authError("The creator grant could not be issued.", 403);
       await rooms.recordGrant({ room: input.room, guestId: control.guestId, source: "owner", capabilities: [MSG_READ, MSG_WRITE], grantId: grant.value.grantId });
       return {
-        context: { credential: grant.value.credential, guestId: control.guestId, grantId: grant.value.grantId, source: "owner" },
+        context: { kind: "guest", credential: grant.value.credential, guestId: control.guestId, grantId: grant.value.grantId, source: "owner" },
         setCookies: [
           ...(existingControl ? [] : control.setCookies),
           serializeCookie(RESOURCE_COOKIE, grant.value.credential, `/${input.room}`),
@@ -179,7 +213,55 @@ export function createMsgAuthenticator(
       };
     },
 
+    async authorizeClaim(request) {
+      const credential = requireBearer(request);
+      const authentication = await platformClient.authenticate(credential);
+      if (authentication.status === "invalid_credential") throw authError("The claim credential is invalid.", 401);
+      if (authentication.status === "authority_unavailable") throw authorityError();
+      const principal = authentication.principal;
+      if (principal.kind !== "human" || !principal.capabilities.includes(MSG_CLAIM)) {
+        throw authError("The claimant is not authorized for msg ownership claims.", 403);
+      }
+      const control = await existingControl(request, guestClient);
+      return {
+        context: {
+          kind: "claim",
+          credential,
+          subjectId: principal.subjectId,
+          organizationId: principal.organizationId,
+          capabilities: principal.capabilities,
+          guestId: control.guestId,
+          source: "claim",
+        },
+        setCookies: control.setCookies,
+      };
+    },
+
+    async authorizeOrganizationResource(request, input) {
+      const credential = requireBearer(request);
+      const authentication = await platformClient.authenticate(credential);
+      if (authentication.status === "invalid_credential") throw authError("The organization credential is invalid.", 401);
+      if (authentication.status === "authority_unavailable") throw authorityError();
+      const principal = authentication.principal;
+      const capability = input.action === "read" ? MSG_READ : input.action === "write" ? MSG_WRITE : MSG_MANAGE;
+      if (principal.kind === "guest" || !principal.capabilities.includes(capability)) {
+        throw authError("The organization credential is not authorized for this request.", 403);
+      }
+      return {
+        context: {
+          kind: "organization",
+          credential,
+          subjectId: principal.subjectId,
+          organizationId: principal.organizationId,
+          capabilities: principal.capabilities,
+          source: "organization",
+        },
+        setCookies: [],
+      };
+    },
+
     async authorizeResource(request, input) {
+      if (request.headers.has("authorization")) return this.authorizeOrganizationResource(request, input);
       const control = await this.control(request);
       const cookies = parseCookies(request.headers.get("cookie"));
       const resourceCookie = cookies.get(input.source === "management" ? MANAGEMENT_COOKIE : RESOURCE_COOKIE);
@@ -206,7 +288,7 @@ export function createMsgAuthenticator(
           throw authError("The resource permission is no longer valid.", 403);
         }
         return {
-          context: { credential: resourceCookie, guestId: control.guestId, grantId: principal.grantId, source: effectiveSource },
+          context: { kind: "guest", credential: resourceCookie, guestId: control.guestId, grantId: principal.grantId, source: effectiveSource },
           setCookies: control.setCookies,
         };
       }
@@ -236,7 +318,7 @@ export function createMsgAuthenticator(
       const resourceCookiePath = input.source === "management" ? `/manage/${input.room}` : `/${input.room}`;
       const resourceCookieName = input.source === "management" ? MANAGEMENT_COOKIE : RESOURCE_COOKIE;
       return {
-        context: { credential: grant.value.credential, guestId: control.guestId, grantId: grant.value.grantId, source: input.source },
+        context: { kind: "guest", credential: grant.value.credential, guestId: control.guestId, grantId: grant.value.grantId, source: input.source },
         setCookies: [...control.setCookies, serializeCookie(resourceCookieName, grant.value.credential, resourceCookiePath)],
       };
     },
@@ -266,6 +348,8 @@ export function unavailableMsgAuthenticator(): MsgAuthenticator {
   return {
     control: unavailable,
     authorizeOwner: unavailable,
+    authorizeClaim: unavailable,
+    authorizeOrganizationResource: unavailable,
     authorizeResource: unavailable,
     async authorizeOperator() { return { status: "denied", response: operatorResponse(503, "The identity authority is temporarily unavailable.") }; },
   };
@@ -309,6 +393,23 @@ function authError(message: string, status: number): ProtocolError {
 
 function authorityError(): ProtocolError {
   return new ProtocolError(ERROR_CODES.serviceUnavailable, "The identity authority is temporarily unavailable.", 503);
+}
+
+function requireBearer(request: Request): string {
+  const value = request.headers.get("authorization");
+  const match = /^Bearer ([^\s]+)$/u.exec(value ?? "");
+  if (!match) throw authError("An explicit Bearer credential is required.", 401);
+  return match[1]!;
+}
+
+async function existingControl(request: Request, guestClient: ReturnType<typeof createPlatformGuestClient>): Promise<GuestControl> {
+  const cookies = parseCookies(request.headers.get("cookie"));
+  const presented = cookies.get(CONTROL_COOKIE);
+  if (presented === undefined) throw authError("The guest control cookie is required.", 403);
+  const resolved = await guestClient.resolveGuestControl(presented);
+  if (resolved.status === "invalid_guest_control") throw authError("The guest control cookie is invalid.", 401);
+  if (resolved.status !== "success") throw authorityError();
+  return { bootstrapCredential: presented, guestId: resolved.guestId, setCookies: [] };
 }
 
 function operatorResponse(status: number, message: string): Response {
