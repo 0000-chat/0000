@@ -440,7 +440,50 @@ async function familyState(database, installation) {
       .bind(row.family_id)
       .all(),
   );
-  return { ...row, lineage: lineage.results };
+  const [providerAccess, providerRefresh] = await Promise.all([
+    within(
+      "provider access inventory",
+      database
+        .prepare(
+          `SELECT id, clientId AS client_id, sessionId AS session_id,
+                  userId AS user_id, referenceId AS reference_id,
+                  authorizationCodeId AS authorization_code_id,
+                  resources, requestedUserInfoClaims AS requested_user_info_claims,
+                  refreshId AS refresh_id, expiresAt AS expires_at,
+                  createdAt AS created_at, revoked, confirmation, scopes
+           FROM oauthAccessToken
+           WHERE referenceId = ?
+           ORDER BY id ASC`,
+        )
+        .bind(installation)
+        .all(),
+    ),
+    within(
+      "provider refresh inventory",
+      database
+        .prepare(
+          `SELECT id, clientId AS client_id, sessionId AS session_id,
+                  userId AS user_id, referenceId AS reference_id,
+                  authorizationCodeId AS authorization_code_id,
+                  resources, requestedUserInfoClaims AS requested_user_info_claims,
+                  expiresAt AS expires_at, createdAt AS created_at, revoked,
+                  rotatedAt AS rotated_at,
+                  rotationReplayExpiresAt AS rotation_replay_expires_at,
+                  authTime AS auth_time, confirmation, scopes
+           FROM oauthRefreshToken
+           WHERE referenceId = ?
+           ORDER BY id ASC`,
+        )
+        .bind(installation)
+        .all(),
+    ),
+  ]);
+  return {
+    ...row,
+    lineage: lineage.results,
+    providerAccessRows: providerAccess.results,
+    providerRefreshRows: providerRefresh.results,
+  };
 }
 
 function pendingLineageSnapshot(row) {
@@ -478,7 +521,86 @@ function pendingLineageSnapshot(row) {
       provider_refresh_rotated_at: token.provider_refresh_rotated_at,
       provider_access_revoked: token.provider_access_revoked,
     })),
+    provider_access_rows: row.providerAccessRows.map((provider) => ({
+      id: provider.id,
+      client_id: provider.client_id,
+      session_id: provider.session_id,
+      user_id: provider.user_id,
+      reference_id: provider.reference_id,
+      authorization_code_id: provider.authorization_code_id,
+      resources: provider.resources,
+      requested_user_info_claims: provider.requested_user_info_claims,
+      refresh_id: provider.refresh_id,
+      expires_at: provider.expires_at,
+      created_at: provider.created_at,
+      revoked: provider.revoked,
+      confirmation: provider.confirmation,
+      scopes: provider.scopes,
+    })),
+    provider_refresh_rows: row.providerRefreshRows.map((provider) => ({
+      id: provider.id,
+      client_id: provider.client_id,
+      session_id: provider.session_id,
+      user_id: provider.user_id,
+      reference_id: provider.reference_id,
+      authorization_code_id: provider.authorization_code_id,
+      resources: provider.resources,
+      requested_user_info_claims: provider.requested_user_info_claims,
+      expires_at: provider.expires_at,
+      created_at: provider.created_at,
+      revoked: provider.revoked,
+      rotated_at: provider.rotated_at,
+      rotation_replay_expires_at: provider.rotation_replay_expires_at,
+      auth_time: provider.auth_time,
+      confirmation: provider.confirmation,
+      scopes: provider.scopes,
+    })),
   };
+}
+
+function assertProviderInventory(row, installation) {
+  assert.ok(
+    row.providerAccessRows.length > 0,
+    `provider access rows exist for ${installation}`,
+  );
+  assert.ok(
+    row.providerRefreshRows.length > 0,
+    `provider refresh rows exist for ${installation}`,
+  );
+  assert.equal(
+    row.providerAccessRows.every(
+      (provider) => provider.reference_id === installation,
+    ),
+    true,
+    `provider access rows are scoped to ${installation}`,
+  );
+  assert.equal(
+    row.providerRefreshRows.every(
+      (provider) => provider.reference_id === installation,
+    ),
+    true,
+    `provider refresh rows are scoped to ${installation}`,
+  );
+  const accessIds = new Set(
+    row.providerAccessRows.map((provider) => provider.id),
+  );
+  const refreshIds = new Set(
+    row.providerRefreshRows.map((provider) => provider.id),
+  );
+  for (const token of row.lineage) {
+    if (token.provider_access_row_id !== null) {
+      assert.equal(
+        accessIds.has(token.provider_access_row_id),
+        true,
+        `lineage access row is in the ${installation} inventory`,
+      );
+    }
+    assert.equal(
+      refreshIds.has(token.provider_refresh_row_id),
+      true,
+      `lineage refresh row is in the ${installation} inventory`,
+    );
+  }
 }
 
 async function addFailureTriggers(database, installation, familyId) {
@@ -708,6 +830,7 @@ try {
     firstDatabase,
     targetInstallation,
   );
+  assertProviderInventory(pendingBeforeRestart, targetInstallation);
   assert.equal(pendingBeforeRestart.family_state, "pending");
   assert.equal(pendingBeforeRestart.first_token_state, "pending");
   assert.equal(pendingBeforeRestart.pending_token_id !== null, true);

@@ -34,7 +34,8 @@ The emitted result recorded these assertions:
   family and state after runtime recreation. The temporary failure triggers
   are dropped before the trigger-free pending retry and runtime recreation;
   both retries compare the exact family ID, pending token ID, consumption
-  nonce, provider-row bindings/statuses, and refresh lineage.
+  nonce, full installation-scoped provider access/refresh row inventories
+  (including row IDs, `revoked`, and access `refreshId`), and refresh lineage.
 - Target access authentication is denied and target refresh remains denied
   before and after recreation.
 - The independent sibling remains authenticated after the target failure and
