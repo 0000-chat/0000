@@ -134,7 +134,7 @@ T01 through T05 are reviewed and verified on the aggregate, including T02's reco
 
 ### T08. Create and renew per-client guest access through the verifier
 
-**Readiness:** Contract resolved and dispatched on `codex/platform-t08` from verified aggregate `10d31c8`. The self-contained brief covers shared guest client, separate control purpose, owner/participant service attestation, nonexpiring grants, atomic renewal/revocation, trusted issuer provisioning and caller migration. Parent baseline passes seven Worker/D1 files/ten tests plus restart and root checks. This slice uses a real resource fixture; msg adoption follows in T09.
+**Readiness:** Reviewed and integrated as `556827d`, `06359cb` and `1d221bb`. Parent aggregate checks pass nine Worker/D1 files/twenty-two tests, format/typecheck and guest/resource restart. Independent Standards and Spec reviews accepted the final correction; an Astra high adversarial fallback found no additional authority defect. Grok was unauthenticated, so external model diversity was unavailable. The shared guest boundary is ready for msg adoption in T09; this fixture does not establish that adoption.
 
 **Blocked by (contract):** T01 guest principal, bootstrap purpose/audience and resource-grant exchange; T04 shared verifier.
 

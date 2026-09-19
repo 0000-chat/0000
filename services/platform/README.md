@@ -12,6 +12,10 @@ checks passed at `10d31c8` (seven Worker/D1 files, ten tests and restart).
 [SIGNUP_RECOVERY_REPORT.md](SIGNUP_RECOVERY_REPORT.md) records the reviewed
 recovery follow-up; combined checks at `54fc212` pass eight Worker/D1 files,
 twenty tests and separate guest/resource and human runtime restart probes.
+[T08_GUEST_REPORT.md](T08_GUEST_REPORT.md) records the reviewed guest lifecycle.
+Combined checks at `1d221bb` pass nine Worker/D1 files, twenty-two tests,
+format/typecheck and guest/resource runtime restart. This establishes the shared
+guest boundary for msg integration; msg adoption remains outstanding.
 T03 aggregate checks passed at `c51d285`; T04 checks passed at `dc30cd4`.
 [T14_RECONNECT_REPORT.md](T14_RECONNECT_REPORT.md) records the independently
 reviewed reconnect fixture, integrated and verified at `166e54d`.
