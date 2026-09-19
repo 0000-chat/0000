@@ -1,11 +1,17 @@
 import { spawn } from "node:child_process";
-import { symmetricEncrypt } from "better-auth/crypto";
-import { opaqueSecret } from "../src/platform-state";
+import { unlink } from "node:fs/promises";
+import {
+  prepareTrustedOAuthClientRegistration,
+  trustedOAuthClientStatements,
+  type TrustedOAuthClientInput,
+} from "../src/oauth-installation";
 
 const databaseName = "platform-identity";
 
-function sql(value: string | null): string {
-  return value === null ? "NULL" : `'${value.replaceAll("'", "''")}'`;
+function sql(value: string | number | null): string {
+  if (value === null) return "NULL";
+  if (typeof value === "number") return String(value);
+  return `'${value.replaceAll("'", "''")}'`;
 }
 
 function required(values: Map<string, string>, name: string): string {
@@ -54,6 +60,8 @@ function parse(argv: string[]): {
 }
 
 async function wrangler(sqlText: string, remote: boolean): Promise<string> {
+  const file = `/tmp/0000-platform-oauth-${crypto.randomUUID()}.sql`;
+  await Bun.write(file, sqlText);
   const child = spawn(
     "bun",
     [
@@ -63,8 +71,8 @@ async function wrangler(sqlText: string, remote: boolean): Promise<string> {
       "execute",
       databaseName,
       remote ? "--remote" : "--local",
-      "--command",
-      sqlText,
+      "--file",
+      file,
       "--json",
     ],
     { cwd: new URL("../", import.meta.url), stdio: ["ignore", "pipe", "pipe"] },
@@ -73,12 +81,22 @@ async function wrangler(sqlText: string, remote: boolean): Promise<string> {
   let stderr = "";
   child.stdout.on("data", (chunk) => (stdout += String(chunk)));
   child.stderr.on("data", (chunk) => (stderr += String(chunk)));
-  const status = await new Promise<number>((resolve, reject) => {
-    child.once("error", reject);
-    child.once("close", (code) => resolve(code ?? 1));
-  });
-  if (status !== 0)
-    throw new Error(stderr.trim() || "OAuth client provisioning failed.");
+  let status: number;
+  try {
+    status = await new Promise<number>((resolve, reject) => {
+      child.once("error", reject);
+      child.once("close", (code) => resolve(code ?? 1));
+    });
+  } finally {
+    await unlink(file).catch(() => undefined);
+  }
+  if (status !== 0) {
+    throw new Error(
+      [stderr.trim(), stdout.trim(), "OAuth client provisioning failed."]
+        .filter(Boolean)
+        .join("\n"),
+    );
+  }
   return stdout;
 }
 
@@ -87,6 +105,7 @@ const serviceId = required(values, "service-id");
 const redirectUri = required(values, "redirect-uri");
 const capabilities = (values.get("capabilities") ?? "")
   .split(",")
+  .map((capability) => capability.trim())
   .filter(Boolean);
 if (capabilities.length === 0)
   throw new Error("Provide at least one --capability.");
@@ -99,36 +118,82 @@ if (!secretKey)
   throw new Error(
     "BETTER_AUTH_SECRET must be supplied in the protected environment.",
   );
-const clientId = `platform-oauth-${crypto.randomUUID()}`;
-const clientSecret =
-  authMethod === "client_secret_post" ? opaqueSecret("oauth_secret_") : null;
-const encryptedSecret = clientSecret
-  ? await symmetricEncrypt({ key: secretKey, data: clientSecret })
-  : null;
-const now = Date.now();
-const capabilityJson = JSON.stringify(capabilities);
-const redirectJson = JSON.stringify([redirectUri]);
-const grantJson = JSON.stringify(["authorization_code"]);
-const responseJson = JSON.stringify(["code"]);
+
+type WranglerResult = {
+  results?: Array<Record<string, unknown>>;
+};
+
+function parseWranglerResults(output: string): WranglerResult[] {
+  const start = output.indexOf("[");
+  if (start < 0) throw new Error("D1 returned no machine-readable result.");
+  try {
+    return JSON.parse(output.slice(start)) as WranglerResult[];
+  } catch {
+    throw new Error("D1 returned an invalid machine-readable result.");
+  }
+}
+
+const serviceOutput = await wrangler(
+  `SELECT service_id, audience, allowed_capabilities
+   FROM platform_service
+   WHERE service_id = ${sql(serviceId)} AND disabled = 0;`,
+  remote,
+);
+const serviceRow = parseWranglerResults(serviceOutput)
+  .flatMap((result) => result.results ?? [])
+  .at(-1);
+if (
+  !serviceRow ||
+  typeof serviceRow.service_id !== "string" ||
+  typeof serviceRow.audience !== "string" ||
+  typeof serviceRow.allowed_capabilities !== "string"
+) {
+  throw new Error("service_not_found");
+}
+let catalog: unknown;
+try {
+  catalog = JSON.parse(serviceRow.allowed_capabilities);
+} catch {
+  throw new Error("service_catalog_malformed");
+}
+if (
+  !Array.isArray(catalog) ||
+  !catalog.every((value) => typeof value === "string")
+) {
+  throw new Error("service_catalog_malformed");
+}
+const input: TrustedOAuthClientInput = {
+  serviceId,
+  redirectUri,
+  capabilities,
+  authMethod,
+  ownerUserId: values.get("owner-user-id") ?? null,
+  name: values.get("name"),
+};
+const registration = await prepareTrustedOAuthClientRegistration(
+  input,
+  { serviceId: serviceRow.service_id, audience: serviceRow.audience, catalog },
+  secretKey,
+);
+const renderedStatements = trustedOAuthClientStatements(registration).map(
+  (statement) => {
+    let index = 0;
+    const rendered = statement.sql.replaceAll("?", () => {
+      const value = statement.values[index++];
+      if (index > statement.values.length)
+        throw new Error("unbound SQL placeholder");
+      return sql(value ?? null);
+    });
+    if (index !== statement.values.length) throw new Error("unused SQL value");
+    return `${rendered};`;
+  },
+);
 const result = await wrangler(
-  `BEGIN;
-INSERT INTO oauthResource (id, identifier, name, accessTokenTtl, refreshTokenTtl, allowedScopes, disabled, createdAt, updatedAt)
-SELECT lower(hex(randomblob(16))), audience, service_id, 3600, NULL, ${sql(capabilityJson)}, 0, ${now}, ${now}
-FROM platform_service WHERE service_id = ${sql(serviceId)} AND disabled = 0
-ON CONFLICT(identifier) DO UPDATE SET allowedScopes = excluded.allowedScopes, disabled = 0, updatedAt = excluded.updatedAt;
-INSERT INTO oauthClient (id, clientId, clientSecret, disabled, skipConsent, scopes, clientCredentialsScopes, userId, createdAt, updatedAt, name, redirectUris, grantTypes, responseTypes, tokenEndpointAuthMethod, applicationType, requirePKCE, dpopBoundAccessTokens)
-SELECT lower(hex(randomblob(16))), ${sql(clientId)}, ${sql(encryptedSecret)}, 0, 0, ${sql(capabilityJson)}, '[]', ${sql(values.get("owner-user-id") ?? null)}, ${now}, ${now}, ${sql(values.get("name") ?? `0000 ${serviceId}`)}, ${sql(redirectJson)}, ${sql(grantJson)}, ${sql(responseJson)}, ${sql(authMethod)}, 'web', 1, 0
-WHERE EXISTS (SELECT 1 FROM platform_service WHERE service_id = ${sql(serviceId)} AND disabled = 0);
-INSERT INTO oauthClientResource (id, clientId, resourceId, createdAt)
-SELECT lower(hex(randomblob(16))), ${sql(clientId)}, audience, ${now} FROM platform_service WHERE service_id = ${sql(serviceId)} AND disabled = 0;
-INSERT INTO platform_oauth_client (client_id, service_id, owner_user_id, redirect_uri, capabilities, active, created_at, updated_at)
-SELECT ${sql(clientId)}, service_id, ${sql(values.get("owner-user-id") ?? null)}, ${sql(redirectUri)}, ${sql(capabilityJson)}, 1, ${now}, ${now}
-FROM platform_service WHERE service_id = ${sql(serviceId)} AND disabled = 0;
-SELECT changes() AS changed;
-COMMIT;`,
+  `${renderedStatements.join("\n")}\nSELECT changes() AS changed;\n`,
   remote,
 );
 if (!/"changed"\s*:\s*1/.test(result))
   throw new Error("OAuth client registration did not complete.");
-process.stdout.write(`registered ${clientId}\n`);
-if (clientSecret) process.stdout.write(`client_secret=${clientSecret}\n`);
+process.stdout.write(`registered ${registration.clientId}\n`);
+if (registration.clientSecret)
+  process.stdout.write(`client_secret=${registration.clientSecret}\n`);

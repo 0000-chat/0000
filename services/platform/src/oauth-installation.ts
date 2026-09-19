@@ -186,7 +186,7 @@ export async function oauthProviderTokenHash(token: string): Promise<string> {
     .replaceAll("=", "");
 }
 
-function validRedirectUri(value: string): boolean {
+export function validOAuthClientRedirectUri(value: string): boolean {
   if (value.length > 2048) return false;
   try {
     const url = new URL(value);
@@ -214,20 +214,7 @@ export async function provisionTrustedOAuthClient(
   secretKey: string,
   input: TrustedOAuthClientInput,
 ): Promise<TrustedOAuthClient> {
-  if (!validServiceId(input.serviceId)) throw new Error("invalid_service_id");
-  if (
-    input.authMethod !== "none" &&
-    input.authMethod !== "client_secret_post"
-  ) {
-    throw new Error("invalid_client_auth_method");
-  }
-  if (!secretKey) throw new Error("missing_better_auth_secret");
-  if (!validRedirectUri(input.redirectUri)) {
-    throw new Error("invalid_redirect_uri");
-  }
-  if (!validOAuthCapabilities(input.capabilities)) {
-    throw new Error("invalid_capabilities");
-  }
+  validateTrustedOAuthClientInput(input, secretKey);
   const service = await database
     .prepare(
       `SELECT service_id, audience, allowed_capabilities
@@ -243,15 +230,100 @@ export async function provisionTrustedOAuthClient(
     throw new Error("service_not_found");
   }
   const catalog = parseStringArray(service.allowed_capabilities);
+  if (!catalog) throw new Error("service_catalog_malformed");
+  const registration = await prepareTrustedOAuthClientRegistration(
+    input,
+    { serviceId: service.service_id, audience: service.audience, catalog },
+    secretKey,
+  );
+  await database.batch(
+    trustedOAuthClientStatements(registration).map((statement) =>
+      database.prepare(statement.sql).bind(...statement.values),
+    ),
+  );
+  return {
+    clientId: registration.clientId,
+    clientSecret: registration.clientSecret,
+    serviceId: input.serviceId,
+    audience: service.audience,
+    redirectUri: input.redirectUri,
+    capabilities: [...input.capabilities],
+    authMethod: input.authMethod,
+  };
+}
+
+export function validateTrustedOAuthClientInput(
+  input: TrustedOAuthClientInput,
+  secretKey: string,
+): void {
+  if (!validServiceId(input.serviceId)) throw new Error("invalid_service_id");
   if (
-    !catalog ||
-    input.capabilities.some((capability) => !catalog.includes(capability))
+    input.authMethod !== "none" &&
+    input.authMethod !== "client_secret_post"
+  ) {
+    throw new Error("invalid_client_auth_method");
+  }
+  if (!secretKey) throw new Error("missing_better_auth_secret");
+  if (!validOAuthClientRedirectUri(input.redirectUri)) {
+    throw new Error("invalid_redirect_uri");
+  }
+  if (!validOAuthCapabilities(input.capabilities)) {
+    throw new Error("invalid_capabilities");
+  }
+  if (input.clientId && !validClientId(input.clientId)) {
+    throw new Error("invalid_client_id");
+  }
+  const clientName = input.name?.trim() || `0000 ${input.serviceId}`;
+  if (clientName.length > 120 || /[\u0000-\u001f\u007f]/.test(clientName)) {
+    throw new Error("invalid_client_name");
+  }
+}
+
+export interface TrustedOAuthClientService {
+  serviceId: string;
+  audience: string;
+  catalog: string[];
+}
+
+export interface TrustedOAuthClientRegistration {
+  clientId: string;
+  clientSecret: string | null;
+  storedSecret: string | null;
+  serviceId: string;
+  audience: string;
+  redirectUri: string;
+  capabilities: string[];
+  authMethod: OAuthClientAuthMethod;
+  ownerUserId: string | null;
+  clientName: string;
+  now: number;
+  resourceId: string;
+  catalog: string[];
+}
+
+export async function prepareTrustedOAuthClientRegistration(
+  input: TrustedOAuthClientInput,
+  service: TrustedOAuthClientService,
+  secretKey: string,
+  now = Date.now(),
+): Promise<TrustedOAuthClientRegistration> {
+  validateTrustedOAuthClientInput(input, secretKey);
+  if (
+    input.serviceId !== service.serviceId ||
+    !validServiceAudience(service.audience) ||
+    !validCapabilities(service.catalog)
+  ) {
+    throw new Error("service_catalog_malformed");
+  }
+  if (
+    input.capabilities.some(
+      (capability) => !service.catalog.includes(capability),
+    )
   ) {
     throw new Error("capability_not_registered");
   }
   const clientId = input.clientId ?? `platform-oauth-${crypto.randomUUID()}`;
   if (!validClientId(clientId)) throw new Error("invalid_client_id");
-  const now = Date.now();
   const clientSecret =
     input.authMethod === "client_secret_post"
       ? opaqueSecret("oauth_secret_")
@@ -259,88 +331,101 @@ export async function provisionTrustedOAuthClient(
   const storedSecret = clientSecret
     ? await symmetricEncrypt({ key: secretKey, data: clientSecret })
     : null;
-  const capabilities = JSON.stringify(input.capabilities);
-  const resourceId = service.audience;
-  const clientName = input.name?.trim() || `0000 ${input.serviceId}`;
-  if (clientName.length > 120 || /[\u0000-\u001f\u007f]/.test(clientName)) {
-    throw new Error("invalid_client_name");
-  }
-  await database.batch([
-    database
-      .prepare(
-        `INSERT INTO oauthResource
-         (id, identifier, name, accessTokenTtl, refreshTokenTtl,
-          allowedScopes, disabled, createdAt, updatedAt)
-         VALUES (?, ?, ?, ?, NULL, ?, 0, ?, ?) 
-         ON CONFLICT(identifier) DO UPDATE SET
-           allowedScopes = excluded.allowedScopes,
-           disabled = 0,
-           updatedAt = excluded.updatedAt`,
-      )
-      .bind(
-        crypto.randomUUID(),
-        resourceId,
-        clientName,
-        3600,
-        capabilities,
-        now,
-        now,
-      ),
-    database
-      .prepare(
-        `INSERT INTO oauthClient
-         (id, clientId, clientSecret, disabled, skipConsent, scopes,
-          clientCredentialsScopes, userId, createdAt, updatedAt, name,
-          redirectUris, grantTypes, responseTypes, tokenEndpointAuthMethod,
-          applicationType, requirePKCE, dpopBoundAccessTokens)
-         VALUES (?, ?, ?, 0, 0, ?, '[]', ?, ?, ?, ?, ?, ?, ?, ?, 'web', 1, 0)`,
-      )
-      .bind(
-        crypto.randomUUID(),
-        clientId,
-        storedSecret,
-        capabilities,
-        input.ownerUserId ?? null,
-        now,
-        now,
-        clientName,
-        JSON.stringify([input.redirectUri]),
-        JSON.stringify(["authorization_code"]),
-        JSON.stringify(["code"]),
-        input.authMethod,
-      ),
-    database
-      .prepare(
-        `INSERT INTO oauthClientResource (id, clientId, resourceId, createdAt)
-         VALUES (?, ?, ?, ?)`,
-      )
-      .bind(crypto.randomUUID(), clientId, resourceId, now),
-    database
-      .prepare(
-        `INSERT INTO platform_oauth_client
-         (client_id, service_id, owner_user_id, redirect_uri, capabilities,
-          active, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, 1, ?, ?)`,
-      )
-      .bind(
-        clientId,
-        input.serviceId,
-        input.ownerUserId ?? null,
-        input.redirectUri,
-        capabilities,
-        now,
-        now,
-      ),
-  ]);
   return {
     clientId,
     clientSecret,
-    serviceId: input.serviceId,
+    storedSecret,
+    serviceId: service.serviceId,
     audience: service.audience,
     redirectUri: input.redirectUri,
     capabilities: [...input.capabilities],
     authMethod: input.authMethod,
+    ownerUserId: input.ownerUserId ?? null,
+    clientName: input.name?.trim() || `0000 ${input.serviceId}`,
+    now,
+    resourceId: service.audience,
+    catalog: [...service.catalog],
   };
+}
+
+export interface OAuthClientProvisionStatement {
+  sql: string;
+  values: Array<string | number | null>;
+}
+
+export function trustedOAuthClientStatements(
+  registration: TrustedOAuthClientRegistration,
+): OAuthClientProvisionStatement[] {
+  const capabilities = JSON.stringify(registration.capabilities);
+  const catalog = JSON.stringify(registration.catalog);
+  return [
+    {
+      sql: `INSERT INTO oauthResource
+       (id, identifier, name, accessTokenTtl, refreshTokenTtl,
+        allowedScopes, disabled, createdAt, updatedAt)
+       VALUES (?, ?, ?, ?, NULL, ?, 0, ?, ?)
+       ON CONFLICT(identifier) DO UPDATE SET
+         allowedScopes = excluded.allowedScopes,
+         disabled = 0,
+         updatedAt = excluded.updatedAt`,
+      values: [
+        crypto.randomUUID(),
+        registration.resourceId,
+        registration.clientName,
+        3600,
+        catalog,
+        registration.now,
+        registration.now,
+      ],
+    },
+    {
+      sql: `INSERT INTO oauthClient
+       (id, clientId, clientSecret, disabled, skipConsent, scopes,
+        clientCredentialsScopes, userId, createdAt, updatedAt, name,
+        redirectUris, grantTypes, responseTypes, tokenEndpointAuthMethod,
+        applicationType, requirePKCE, dpopBoundAccessTokens)
+       VALUES (?, ?, ?, 0, 0, ?, '[]', ?, ?, ?, ?, ?, ?, ?, ?, 'web', 1, 0)`,
+      values: [
+        crypto.randomUUID(),
+        registration.clientId,
+        registration.storedSecret,
+        capabilities,
+        registration.ownerUserId,
+        registration.now,
+        registration.now,
+        registration.clientName,
+        JSON.stringify([registration.redirectUri]),
+        JSON.stringify(["authorization_code"]),
+        JSON.stringify(["code"]),
+        registration.authMethod,
+      ],
+    },
+    {
+      sql: `INSERT INTO oauthClientResource (id, clientId, resourceId, createdAt)
+       VALUES (?, ?, ?, ?)`,
+      values: [
+        crypto.randomUUID(),
+        registration.clientId,
+        registration.resourceId,
+        registration.now,
+      ],
+    },
+    {
+      sql: `INSERT INTO platform_oauth_client
+       (client_id, service_id, owner_user_id, redirect_uri, capabilities,
+        active, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, 1, ?, ?)`,
+      values: [
+        registration.clientId,
+        registration.serviceId,
+        registration.ownerUserId,
+        registration.redirectUri,
+        capabilities,
+        registration.now,
+        registration.now,
+      ],
+    },
+  ];
 }
 
 export async function findOAuthClient(
@@ -405,6 +490,29 @@ export async function findOAuthClient(
     ownerUserId: row.owner_user_id,
     scopes,
   };
+}
+
+/**
+ * Keep canonical Platform OAuth routes classified after a client or its
+ * service has been disabled.  An active lookup is intentionally insufficient:
+ * otherwise the request would fall through to the fixture/default provider
+ * and bypass Platform's authority decision.
+ */
+export async function hasPlatformOAuthClient(
+  database: OAuthDatabase,
+  clientId: string,
+): Promise<boolean> {
+  const row = await database
+    .prepare(
+      `SELECT p.client_id
+       FROM platform_oauth_client AS p
+       JOIN oauthClient AS o ON o.clientId = p.client_id
+       WHERE p.client_id = ?
+       LIMIT 1`,
+    )
+    .bind(clientId)
+    .first<{ client_id: string }>();
+  return row !== null;
 }
 
 export function validateOAuthQuery(
@@ -636,7 +744,11 @@ export async function selectOAuthFlow(
        SET organization_id = ?, membership_id = ?, installation_id = ?,
            status = 'selected'
        WHERE id = ? AND status = 'pending' AND user_id = ? AND session_id = ?
-         AND expires_at > ?`,
+         AND expires_at > ?
+         AND EXISTS (
+           SELECT 1 FROM platform_oauth_installation
+           WHERE id = ? AND active = 0
+         )`,
     )
     .bind(
       input.organizationId,
@@ -646,6 +758,7 @@ export async function selectOAuthFlow(
       input.userId,
       input.sessionId,
       now,
+      installationId,
     );
   const results = await database.batch([installation, updated]);
   if (results[0]?.meta.changes !== 1 || results[1]?.meta.changes !== 1) {
@@ -828,6 +941,45 @@ async function revokeProviderAccess(
     .prepare("UPDATE oauthAccessToken SET revoked = 1 WHERE token = ?")
     .bind(accessHash)
     .run();
+}
+
+async function invalidateOAuthBinding(
+  database: OAuthDatabase,
+  input: {
+    accessHash: string;
+    installationId: string;
+    flowId: string;
+    credentialId?: string;
+    reason: string;
+  },
+): Promise<void> {
+  const now = Date.now();
+  await database.batch([
+    database
+      .prepare("UPDATE oauthAccessToken SET revoked = 1 WHERE token = ?")
+      .bind(input.accessHash),
+    database
+      .prepare(
+        `UPDATE platform_oauth_installation
+         SET active = 0, revoked_at = COALESCE(revoked_at, ?)
+         WHERE id = ? AND active = 1`,
+      )
+      .bind(now, input.installationId),
+    database
+      .prepare(
+        `UPDATE platform_credential
+         SET revoked_at = COALESCE(revoked_at, ?), revoked_reason = ?
+         WHERE id = ? AND oauth_installation_id = ?`,
+      )
+      .bind(now, input.reason, input.credentialId ?? "", input.installationId),
+    database
+      .prepare(
+        `UPDATE platform_oauth_flow
+         SET status = 'rejected', consumed_at = COALESCE(consumed_at, ?)
+         WHERE id = ? AND status IN ('consumed', 'activated')`,
+      )
+      .bind(now, input.flowId),
+  ]);
 }
 
 function providerResponseAccessToken(response: Response): Promise<{
@@ -1077,6 +1229,14 @@ export async function completeInitialOAuthAccess(
        JOIN platform_service AS service
          ON service.service_id = i.service_id AND service.audience = i.audience
         AND service.disabled = 0
+       JOIN "user" AS current_user
+         ON current_user.id = i.user_id AND current_user.disabledAt IS NULL
+       JOIN organization AS current_org
+         ON current_org.id = i.organization_id AND current_org.suspendedAt IS NULL
+       JOIN member AS current_member
+         ON current_member.id = i.membership_id
+        AND current_member.userId = i.user_id
+        AND current_member.organizationId = i.organization_id
        JOIN oauthConsent AS consent
          ON consent.clientId = i.client_id AND consent.userId = i.user_id
         AND consent.referenceId = i.id
@@ -1086,17 +1246,34 @@ export async function completeInitialOAuthAccess(
          AND a.refreshId IS NULL
          AND a.expiresAt > ?
          AND i.expires_at > ?
+         AND pc.redirect_uri = ?
          AND EXISTS (SELECT 1 FROM member WHERE id = i.membership_id
            AND userId = i.user_id AND organizationId = i.organization_id)
          AND EXISTS (
            SELECT 1 FROM platform_oauth_flow
            WHERE id = ? AND installation_id = i.id AND status = 'consumed'
+             AND user_id = i.user_id AND organization_id = i.organization_id
+             AND membership_id = i.membership_id AND expires_at > ?
          )
          AND NOT EXISTS (
            SELECT 1 FROM json_each(i.capabilities) AS requested
            WHERE NOT EXISTS (
              SELECT 1 FROM json_each(service.allowed_capabilities) AS catalog
              WHERE catalog.value = requested.value
+           )
+         )
+         AND NOT EXISTS (
+           SELECT 1 FROM json_each(i.capabilities) AS requested
+           WHERE NOT EXISTS (
+             SELECT 1 FROM json_each(pc.capabilities) AS ceiling
+             WHERE ceiling.value = requested.value
+           )
+         )
+         AND NOT EXISTS (
+           SELECT 1 FROM json_each(i.capabilities) AS requested
+           WHERE NOT EXISTS (
+             SELECT 1 FROM json_each(json_extract(oc.scopes, '$')) AS ceiling
+             WHERE ceiling.value = requested.value
            )
          )
          AND NOT EXISTS (
@@ -1134,31 +1311,53 @@ export async function completeInitialOAuthAccess(
       installation.id,
       now,
       now,
+      binding.redirectUri,
       flow.id,
+      now,
     );
   const results = await database.batch([
     insert,
     database
       .prepare(
         `UPDATE oauthAccessToken SET sessionId = NULL
-         WHERE id = ? AND token = ? AND referenceId = ?`,
+         WHERE id = ? AND token = ? AND referenceId = ?
+           AND EXISTS (
+             SELECT 1 FROM platform_credential
+             WHERE id = ? AND oauth_provider_row_id = ?
+           )`,
       )
-      .bind(access.id, accessHash, installation.id),
+      .bind(access.id, accessHash, installation.id, credentialId, access.id),
     database
       .prepare(
         `UPDATE platform_oauth_installation SET active = 1
-         WHERE id = ? AND active = 0 AND revoked_at IS NULL`,
+         WHERE id = ? AND active = 0 AND revoked_at IS NULL
+           AND EXISTS (
+             SELECT 1 FROM platform_credential
+             WHERE id = ? AND oauth_installation_id = ?
+               AND oauth_provider_row_id = ?
+           )`,
       )
-      .bind(installation.id),
+      .bind(installation.id, credentialId, installation.id, access.id),
     database
       .prepare(
         `UPDATE platform_oauth_flow SET status = 'activated'
-         WHERE id = ? AND status = 'consumed'`,
+         WHERE id = ? AND status = 'consumed'
+           AND EXISTS (
+             SELECT 1 FROM platform_credential
+             WHERE id = ? AND oauth_installation_id = ?
+               AND oauth_provider_row_id = ?
+           )`,
       )
-      .bind(flow.id),
+      .bind(flow.id, credentialId, installation.id, access.id),
   ]);
   if (results[0]?.meta.changes !== 1) {
-    await revokeProviderAccess(database, accessHash);
+    await invalidateOAuthBinding(database, {
+      accessHash,
+      installationId: installation.id,
+      flowId: flow.id,
+      credentialId,
+      reason: "oauth_binding_not_durable",
+    });
     return noStoreError(
       "invalid_grant",
       "OAuth access binding was not durable",
@@ -1170,7 +1369,8 @@ export async function completeInitialOAuthAccess(
       `SELECT c.id AS credential_id, i.active, f.status, a.sessionId
        FROM platform_credential AS c
        JOIN platform_oauth_installation AS i ON i.id = c.oauth_installation_id
-       JOIN platform_oauth_flow AS f ON f.id = ?
+       JOIN platform_oauth_flow AS f
+         ON f.id = ? AND f.installation_id = i.id AND f.status = 'activated'
        JOIN oauthAccessToken AS a ON a.id = c.oauth_provider_row_id
        WHERE c.id = ? AND c.oauth_provider_token_hash = ?`,
     )
@@ -1182,8 +1382,24 @@ export async function completeInitialOAuthAccess(
       sessionId: string | null;
     }>();
   if (!durable || durable.active !== 1 || durable.status !== "activated") {
-    await revokeProviderAccess(database, accessHash);
+    await invalidateOAuthBinding(database, {
+      accessHash,
+      installationId: installation.id,
+      flowId: flow.id,
+      credentialId,
+      reason: "oauth_authority_not_durable",
+    });
     return noStoreError("server_error", "OAuth authority was not durable", 500);
+  }
+  if (!(await oauthTokenIsCurrentlyAuthorized(database, credential))) {
+    await invalidateOAuthBinding(database, {
+      accessHash,
+      installationId: installation.id,
+      flowId: flow.id,
+      credentialId,
+      reason: "oauth_authority_changed_during_activation",
+    });
+    return noStoreError("server_error", "OAuth authority changed", 500);
   }
   return;
 }
@@ -1195,8 +1411,10 @@ export async function oauthTokenIsCurrentlyAuthorized(
   const hash = await oauthProviderTokenHash(token);
   const row = await database
     .prepare(
-      `SELECT c.id, i.audience AS audience,
+      `SELECT c.id, i.client_id AS client_id, i.audience AS audience,
               i.capabilities AS installation_capabilities,
+              pc.redirect_uri AS client_redirect_uri,
+              f.oauth_query AS oauth_query,
               a.resources AS provider_resources, a.scopes AS provider_scopes,
               consent.resources AS consent_resources, consent.scopes AS consent_scopes,
               pc.capabilities AS client_capabilities, oc.scopes AS registered_scopes,
@@ -1209,6 +1427,8 @@ export async function oauthTokenIsCurrentlyAuthorized(
         AND a.refreshId IS NULL
        JOIN platform_oauth_client AS pc
          ON pc.client_id = i.client_id AND pc.active = 1
+       JOIN platform_oauth_flow AS f
+         ON f.installation_id = i.id AND f.status = 'activated'
        JOIN oauthClient AS oc ON oc.clientId = i.client_id AND oc.disabled = 0
        JOIN member AS m ON m.id = i.membership_id
          AND m.userId = i.user_id AND m.organizationId = i.organization_id
@@ -1234,8 +1454,11 @@ export async function oauthTokenIsCurrentlyAuthorized(
     .bind(await hashOpaque(token), hash, Date.now(), Date.now())
     .first<{
       id: string;
+      client_id: string;
       audience: string;
       installation_capabilities: string;
+      client_redirect_uri: string;
+      oauth_query: string;
       provider_resources: string | null;
       provider_scopes: string;
       consent_resources: string | null;
@@ -1253,6 +1476,7 @@ export async function oauthTokenIsCurrentlyAuthorized(
   const clientCapabilities = jsonArray(row.client_capabilities);
   const registeredScopes = jsonArray(row.registered_scopes);
   const serviceCapabilities = jsonArray(row.service_capabilities);
+  const binding = parseOAuthQuery(row.oauth_query);
   if (
     !installationCapabilities ||
     !providerResources ||
@@ -1262,6 +1486,7 @@ export async function oauthTokenIsCurrentlyAuthorized(
     !clientCapabilities ||
     !registeredScopes ||
     !serviceCapabilities ||
+    !binding ||
     !validOAuthCapabilities(installationCapabilities) ||
     !validOAuthCapabilities(providerScopes) ||
     !validOAuthCapabilities(consentScopes) ||
@@ -1272,8 +1497,17 @@ export async function oauthTokenIsCurrentlyAuthorized(
     return false;
   }
   return (
+    binding.clientId === row.client_id &&
+    binding.redirectUri === row.client_redirect_uri &&
+    binding.resource === row.audience &&
     providerResources.includes(row.audience) &&
     consentResources.includes(row.audience) &&
+    providerResources.length === 1 &&
+    consentResources.length === 1 &&
+    providerScopes.length === installationCapabilities.length &&
+    consentScopes.length === installationCapabilities.length &&
+    binding.scopes.length === installationCapabilities.length &&
+    binding.scopes.every((scope) => installationCapabilities.includes(scope)) &&
     installationCapabilities.every(
       (capability) =>
         serviceCapabilities.includes(capability) &&

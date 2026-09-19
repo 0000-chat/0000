@@ -1,5 +1,9 @@
 import { escapeHtml, htmlResponse } from "./account-ui";
-import type { OAuthClientRecord, OAuthFlow } from "./oauth-installation";
+import {
+  parseOAuthQuery,
+  type OAuthClientRecord,
+  type OAuthFlow,
+} from "./oauth-installation";
 
 export interface OAuthOrganizationChoice {
   organizationId: string;
@@ -20,7 +24,9 @@ export function oauthSelectionPage(
         `<option value="${escapeHtml(organization.organizationId)}">${escapeHtml(organization.organizationName)} · ${escapeHtml(organization.role)}</option>`,
     )
     .join("");
-  const capabilities = client.capabilities
+  const capabilities = (
+    parseOAuthQuery(flow.oauth_query)?.scopes ?? client.capabilities
+  )
     .map((capability) => `<li>${escapeHtml(capability)}</li>`)
     .join("");
   return htmlResponse(`<!doctype html>
@@ -40,7 +46,7 @@ export function oauthConsentPage(
   client: OAuthClientRecord,
   flow: OAuthFlow | null,
 ): Response {
-  const capabilities = client.capabilities
+  const capabilities = (parseOAuthQuery(query)?.scopes ?? client.capabilities)
     .map((capability) => `<li>${escapeHtml(capability)}</li>`)
     .join("");
   const flowId = flow?.id ?? "";

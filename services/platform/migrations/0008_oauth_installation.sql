@@ -19,7 +19,9 @@ CREATE TABLE IF NOT EXISTS platform_oauth_flow (
   oauth_query TEXT NOT NULL,
   state TEXT NOT NULL,
   user_id TEXT NOT NULL REFERENCES "user"(id),
-  session_id TEXT NOT NULL REFERENCES session(id) ON DELETE CASCADE,
+  -- The consumed/activated flow is durable authority; browser sign-out must
+  -- not cascade-delete an installation's provider binding.
+  session_id TEXT NOT NULL,
   organization_id TEXT REFERENCES organization(id),
   membership_id TEXT,
   installation_id TEXT,
@@ -36,7 +38,7 @@ CREATE TABLE IF NOT EXISTS platform_oauth_installation (
   id TEXT PRIMARY KEY NOT NULL,
   client_id TEXT NOT NULL REFERENCES oauthClient(clientId),
   user_id TEXT NOT NULL REFERENCES "user"(id),
-  membership_id TEXT NOT NULL REFERENCES member(id),
+  membership_id TEXT NOT NULL,
   organization_id TEXT NOT NULL REFERENCES organization(id),
   service_id TEXT NOT NULL REFERENCES platform_service(service_id),
   audience TEXT NOT NULL,

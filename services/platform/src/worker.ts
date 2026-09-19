@@ -75,6 +75,7 @@ import {
   completeOAuthConsent,
   findOAuthClient,
   findOAuthFlowForQuery,
+  hasPlatformOAuthClient,
   loadOAuthFlow,
   oauthIntrospectionResponse,
   oauthMetadata,
@@ -139,15 +140,12 @@ function isDisabledBetterAuthPath(pathname: string): boolean {
     pathname.startsWith("/api/auth/delete-user/") ||
     pathname === "/api/auth/oauth2/revoke" ||
     pathname === "/api/auth/oauth2/register" ||
-    pathname === "/api/auth/oauth2/create-client" ||
     pathname === "/api/auth/oauth2/delete-client" ||
     pathname === "/api/auth/oauth2/update-client" ||
     pathname === "/api/auth/oauth2/client/rotate-secret" ||
     pathname === "/api/auth/oauth2/public-client" ||
     pathname === "/api/auth/oauth2/public-client-prelogin" ||
-    pathname === "/api/auth/oauth2/userinfo" ||
-    pathname === "/api/auth/admin/oauth2/create-client" ||
-    pathname === "/api/auth/admin/oauth2/update-client"
+    pathname === "/api/auth/oauth2/userinfo"
   );
 }
 
@@ -251,8 +249,10 @@ async function oauthRequestState(
   const database = env.IDENTITY_DB.withSession("first-primary");
   if (pathname === "/api/auth/oauth2/authorize" && request.method === "GET") {
     const clientId = new URL(request.url).searchParams.get("client_id");
-    const client = clientId ? await findOAuthClient(database, clientId) : null;
-    return { platform: client !== null, flowId: null, rawQuery: null };
+    const platform = clientId
+      ? await hasPlatformOAuthClient(database, clientId)
+      : false;
+    return { platform, flowId: null, rawQuery: null };
   }
   if (
     (pathname === "/api/auth/oauth2/continue" ||
@@ -287,11 +287,11 @@ async function oauthRequestState(
           )
         : null;
     const binding = rawQuery ? parseOAuthQuery(rawQuery) : null;
-    const client = binding
-      ? await findOAuthClient(database, binding.clientId)
-      : null;
+    const platform = binding
+      ? await hasPlatformOAuthClient(database, binding.clientId)
+      : false;
     return {
-      platform: client !== null,
+      platform,
       flowId: flow?.id ?? null,
       rawQuery,
     };
@@ -314,8 +314,10 @@ async function oauthRequestState(
     }
     const clientId =
       body && typeof body.client_id === "string" ? body.client_id : null;
-    const client = clientId ? await findOAuthClient(database, clientId) : null;
-    return { platform: client !== null, flowId: null, rawQuery: null };
+    const platform = clientId
+      ? await hasPlatformOAuthClient(database, clientId)
+      : false;
+    return { platform, flowId: null, rawQuery: null };
   }
   if (pathname === "/api/auth/oauth2/introspect" && request.method === "POST") {
     let body: Record<string, unknown> | null = null;
@@ -330,8 +332,10 @@ async function oauthRequestState(
     }
     const clientId =
       body && typeof body.client_id === "string" ? body.client_id : null;
-    const client = clientId ? await findOAuthClient(database, clientId) : null;
-    return { platform: client !== null, flowId: null, rawQuery: null };
+    const platform = clientId
+      ? await hasPlatformOAuthClient(database, clientId)
+      : false;
+    return { platform, flowId: null, rawQuery: null };
   }
   // Better Auth keeps the signed provider query in its OAuth state while the
   // social callback is running. Passing the request-local production config to
@@ -691,6 +695,36 @@ async function requestBody(
   } catch {
     return null;
   }
+}
+
+async function normalizeOAuthConsentRequest(
+  request: Request,
+): Promise<{ request: Request; browserForm: boolean }> {
+  const contentType = request.headers.get("content-type") ?? "";
+  if (
+    !contentType.toLowerCase().startsWith("application/x-www-form-urlencoded")
+  ) {
+    return { request, browserForm: false };
+  }
+  const body = await requestBody(request);
+  if (!body) return { request, browserForm: true };
+  const payload: Record<string, unknown> = {
+    accept: body.accept === true || body.accept === "true",
+  };
+  if (typeof body.oauth_query === "string") {
+    payload.oauth_query = body.oauth_query;
+  }
+  const headers = new Headers(request.headers);
+  headers.set("content-type", "application/json");
+  headers.delete("content-length");
+  return {
+    request: new Request(request.url, {
+      method: request.method,
+      headers,
+      body: JSON.stringify(payload),
+    }),
+    browserForm: true,
+  };
 }
 
 function validOrganizationName(value: unknown): value is string {
@@ -2390,7 +2424,10 @@ export async function authenticateCredential(
                 credential.membership_id, credential.grant_id, credential.audience,
                 credential.capabilities, credential.resource_ids, credential.expires_at,
                 installation.id AS installation_id,
+                installation.client_id,
                 installation.capabilities AS installation_capabilities,
+                oauth_client.redirect_uri AS client_redirect_uri,
+                flow.oauth_query AS oauth_query,
                 access.id AS provider_row_id,
                 access.resources AS provider_resources,
                 access.scopes AS provider_scopes,
@@ -2420,6 +2457,9 @@ export async function authenticateCredential(
            ON oauth_client.client_id = installation.client_id
           AND oauth_client.service_id = installation.service_id
           AND oauth_client.active = 1
+         JOIN platform_oauth_flow AS flow
+           ON flow.installation_id = installation.id
+          AND flow.status = 'activated'
          JOIN oauthClient AS registered_client
            ON registered_client.clientId = oauth_client.client_id
           AND registered_client.disabled = 0
@@ -2468,7 +2508,10 @@ export async function authenticateCredential(
         resource_ids: string;
         expires_at: number;
         installation_id: string;
+        client_id: string;
         installation_capabilities: string;
+        client_redirect_uri: string;
+        oauth_query: string;
         provider_row_id: string;
         provider_resources: string | null;
         provider_scopes: string;
@@ -2500,6 +2543,7 @@ export async function authenticateCredential(
       currentOAuth.client_capabilities,
     );
     const registeredScopes = parseStringArray(currentOAuth.registered_scopes);
+    const binding = parseOAuthQuery(currentOAuth.oauth_query);
     if (
       !installationCapabilities ||
       !serviceCapabilities ||
@@ -2511,6 +2555,7 @@ export async function authenticateCredential(
       !consentScopes ||
       !clientCapabilities ||
       !registeredScopes ||
+      !binding ||
       currentResourceIds.length !== 0 ||
       !validCapabilities(installationCapabilities) ||
       !validCapabilities(serviceCapabilities) ||
@@ -2519,8 +2564,17 @@ export async function authenticateCredential(
       !validCapabilities(consentScopes) ||
       !validCapabilities(clientCapabilities) ||
       !validCapabilities(registeredScopes) ||
+      binding.clientId !== currentOAuth.client_id ||
+      binding.redirectUri !== currentOAuth.client_redirect_uri ||
+      binding.resource !== currentOAuth.audience ||
       !providerResources.includes(currentOAuth.audience) ||
       !consentResources.includes(currentOAuth.audience) ||
+      providerResources.length !== 1 ||
+      consentResources.length !== 1 ||
+      providerScopes.length !== currentCapabilities.length ||
+      consentScopes.length !== currentCapabilities.length ||
+      binding.scopes.length !== currentCapabilities.length ||
+      binding.scopes.some((scope) => !currentCapabilities.includes(scope)) ||
       currentCapabilities.some(
         (capability) =>
           !installationCapabilities.includes(capability) ||
@@ -3410,6 +3464,10 @@ export default {
             }
           }
           const scopes = await oauthConfiguredScopes(env);
+          const consentRequest =
+            pathname === "/api/auth/oauth2/consent" && request.method === "POST"
+              ? await normalizeOAuthConsentRequest(request)
+              : { request, browserForm: false };
           const authResponse = await createAuth(env, {
             oauthPlatform: true,
             oauthGrantTypes: ["authorization_code"],
@@ -3418,7 +3476,7 @@ export default {
               env.IDENTITY_DB.withSession("first-primary"),
               oauthState.flowId,
             ),
-          }).handler(request);
+          }).handler(consentRequest.request);
           if (pathname === "/api/auth/oauth2/token") {
             const bound = await completeInitialOAuthAccess(
               env.IDENTITY_DB.withSession("first-primary"),
@@ -3437,6 +3495,34 @@ export default {
                 flow,
                 authResponse,
               );
+              if (consentRequest.browserForm && authResponse.status === 200) {
+                try {
+                  const body: unknown = await authResponse.clone().json();
+                  if (isObject(body)) {
+                    const redirect =
+                      typeof body.redirect_uri === "string"
+                        ? body.redirect_uri
+                        : typeof body.url === "string"
+                          ? body.url
+                          : null;
+                    const binding = parseOAuthQuery(flow.oauth_query);
+                    if (redirect && binding) {
+                      const target = new URL(redirect);
+                      const registered = new URL(binding.redirectUri);
+                      if (
+                        target.origin === registered.origin &&
+                        target.pathname === registered.pathname &&
+                        !target.hash
+                      ) {
+                        return Response.redirect(target, 303);
+                      }
+                    }
+                  }
+                } catch {
+                  return json(500, { error: "invalid_consent_redirect" });
+                }
+                return json(500, { error: "invalid_consent_redirect" });
+              }
             }
           }
           if (pathname === "/api/auth/oauth2/introspect") {
