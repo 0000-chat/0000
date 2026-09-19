@@ -70,15 +70,14 @@ bunx vitest run --config vitest.worker.config.ts worker/test/agents.test.ts
 2 tests passed
 ```
 
-`bun run typecheck` and the full Platform format check pass. The full Worker
-suite reaches 50 passing tests in 13 files and one pre-existing account fixture
-failure in `worker/test/account.test.ts`. After the concurrent provider unlink
-flow can leave GitHub as the surviving account, the fixture still starts a
-hard-coded Google login and expects `user_disabled`; the callback returns
-`account_not_linked`. The parent-owned fixture correction is isolated in
-`de7af31`; the remaining assertion is outside this change. The same run with
-that account file excluded passes all 12 other files and 50 tests.
+`bun run typecheck` and the full Platform format check pass. The final
+`bun run check` passes all 13 Worker/D1 files and 52 tests, including the
+parent-owned account fixture, then passes the D1 persistence restart probe.
+An earlier concurrent run with the accepted fixture correction reproduced its
+known survivor-provider race (`account_not_linked` where a hard-coded Google
+login expected `user_disabled`); the rerun passed without any production or
+account-test edits in this branch. The fixture correction remains isolated in
+`de7af31`.
 
-`bun run test:restart` passes the D1 persistence probe, and
 `bun scripts/test-oauth-refresh-restart.mjs` passes the actual refresh restart
 probe. No external provider HTTP or consumer deployment is claimed here.
