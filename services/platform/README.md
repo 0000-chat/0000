@@ -31,6 +31,9 @@ confirmed defect. T12's server-side rate limits and audit remain outstanding.
 T03 aggregate checks passed at `c51d285`; T04 checks passed at `dc30cd4`.
 [T14_RECONNECT_REPORT.md](T14_RECONNECT_REPORT.md) records the independently
 reviewed reconnect fixture, integrated and verified at `166e54d`.
+[T06_OAUTH_REPORT.md](T06_OAUTH_REPORT.md) records the bounded code-only
+personal-harness OAuth installation flow and its Worker/D1 evidence. T07
+refresh rotation and installation revocation remain open.
 The full MVP is not implemented or accepted, and these reports do not establish
 production readiness or consumer adoption.
 
@@ -102,8 +105,10 @@ scoped to the selected organization and registered service audience, with
 one-time issue display, metadata listing, rotation and revocation. See the T03
 and T04 reports for bounded local evidence and review status. T05 adds
 organization-owned agent creation, lifecycle, per-service grants and agent
-credential controls to this account UI. OAuth consent remains later Platform
-work. Platform does not own product
+credential controls to this account UI. T06 covers the bounded
+authorization-code/PKCE personal-harness
+consent and installation path; T07 refresh rotation and installation
+revocation remain later Platform work. Platform does not own product
 Spaces, threads, agent execution or the full product's agent-control
 experience.
 
@@ -247,13 +252,16 @@ agents, separate audience grants and agent credential lifecycle in the local
 Worker/D1 path; [T05_AGENT_REPORT.md](T05_AGENT_REPORT.md) records its bounded
 worker evidence and limitations, independently reviewed and verified on the
 aggregate at `10d31c8`.
-Local Worker tests exercise Better Auth callbacks, sessions, D1 persistence,
-signup policy, profile, organization, human credential and agent controls;
+T06 adds a bounded code-only OAuth installation flow; [T06_OAUTH_REPORT.md](T06_OAUTH_REPORT.md)
+records its evidence and remaining T07 gates. Local Worker tests exercise
+Better Auth callbacks, sessions, D1 persistence, signup policy, profile,
+organization, human credential, agent and T06 OAuth controls;
 Google/GitHub
 HTTP responses are simulated at the provider boundary. The service and
 protected-resource checks remain fixtures. This is not a deployed identity
-service or a complete shared-auth integration. Production OAuth installation
-state, consumer adoption and managed deployment ownership remain later work.
+service or a complete shared-auth integration. T06 does not claim a live
+external provider/client or consumer adoption; refresh rotation, installation
+revocation and managed deployment ownership remain later work.
 Database is also a scaffold.
 Communicator and the message service still need to move their authentication
 paths to the shared Platform path while leaving resource ACLs local. No

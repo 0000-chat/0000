@@ -6,6 +6,9 @@ import {
   authSchema,
   createAuthPlugins,
   platformUserAdditionalFields,
+  type PlatformOAuthGrantTypes,
+  type PlatformOAuthPostLogin,
+  type PlatformOAuthScopes,
 } from "./auth-schema";
 import {
   pendingSocialBindingFromSource,
@@ -99,7 +102,15 @@ async function hasActiveLinkSession(
   return activeUser !== null;
 }
 
-export function createAuth(env: Cloudflare.Env) {
+export function createAuth(
+  env: Cloudflare.Env,
+  options: {
+    oauthPlatform?: boolean;
+    oauthPostLogin?: PlatformOAuthPostLogin;
+    oauthGrantTypes?: PlatformOAuthGrantTypes;
+    oauthScopes?: PlatformOAuthScopes;
+  } = {},
+) {
   const schema = authSchema;
   let pendingSocialBinding: ReturnType<typeof pendingSocialBindingFromSource> =
     null;
@@ -227,7 +238,20 @@ export function createAuth(env: Cloudflare.Env) {
           recoverSocialProfile("github", profile),
       },
     },
-    plugins: createAuthPlugins(),
+    plugins: createAuthPlugins(
+      options.oauthPlatform
+        ? {
+            resources: [],
+            clientRegistrationDefaultResources: [],
+            clientRegistrationAllowedResources: [],
+            grantTypes: options.oauthGrantTypes ?? ["authorization_code"],
+            scopes: options.oauthScopes ?? ["resource:read"],
+            ...(options.oauthPostLogin
+              ? { postLogin: options.oauthPostLogin }
+              : {}),
+          }
+        : {},
+    ),
   });
 }
 

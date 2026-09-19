@@ -1,6 +1,10 @@
 import { getAuthTables } from "better-auth/db";
 import { jwt, organization } from "better-auth/plugins";
-import { oauthProvider } from "@better-auth/oauth-provider";
+import {
+  oauthProvider,
+  type OAuthOptions,
+  type Scope,
+} from "@better-auth/oauth-provider";
 import {
   integer,
   sqliteTable,
@@ -28,7 +32,26 @@ export const platformUserAdditionalFields = {
   pendingSocialSubject: pendingSocialBindingField,
 };
 
-export const createAuthPlugins = () => [
+type AuthPluginOptions = {
+  scopes?: OAuthOptions<Scope[]>["scopes"];
+  grantTypes?: OAuthOptions<Scope[]>["grantTypes"];
+  resources?: Array<
+    string | { identifier: string; name?: string; allowedScopes?: string[] }
+  >;
+  clientRegistrationDefaultResources?: string[];
+  clientRegistrationAllowedResources?: string[];
+  postLogin?: OAuthOptions<Scope[]>["postLogin"];
+};
+
+export type PlatformOAuthPostLogin = NonNullable<
+  OAuthOptions<Scope[]>["postLogin"]
+>;
+export type PlatformOAuthGrantTypes = NonNullable<
+  OAuthOptions<Scope[]>["grantTypes"]
+>;
+export type PlatformOAuthScopes = NonNullable<OAuthOptions<Scope[]>["scopes"]>;
+
+export const createAuthPlugins = (options: AuthPluginOptions = {}) => [
   jwt({ disableSettingJwtHeader: true }),
   organization({
     schema: {
@@ -44,24 +67,38 @@ export const createAuthPlugins = () => [
     storeTokens: "hashed",
     loginPage: "/login",
     consentPage: "/consent",
-    scopes: ["openid", "profile", "email", "offline_access", "resource:read"],
-    resources: [
+    scopes: options.scopes ?? [
+      "openid",
+      "profile",
+      "email",
+      "offline_access",
+      "resource:read",
+    ],
+    resources: options.resources ?? [
       {
         identifier: "https://fixture.0000.test",
         name: "Platform T01 resource fixture",
         allowedScopes: ["resource:read", "offline_access"],
       },
     ],
+    ...(options.grantTypes ? { grantTypes: options.grantTypes } : {}),
     refreshTokenReuseInterval: 0,
     enforcePerClientResources: true,
-    clientRegistrationDefaultResources: ["https://fixture.0000.test"],
-    clientRegistrationAllowedResources: ["https://fixture.0000.test"],
+    clientRegistrationDefaultResources:
+      options.clientRegistrationDefaultResources ?? [
+        "https://fixture.0000.test",
+      ],
+    clientRegistrationAllowedResources:
+      options.clientRegistrationAllowedResources ?? [
+        "https://fixture.0000.test",
+      ],
     clientRegistrationRequirePKCE: true,
     allowDynamicClientRegistration: false,
     // T02 does not expose operator provisioning. Keep the Better Auth admin
     // endpoints closed until a Platform-owned provisioning path is approved.
     clientPrivileges: async () => false,
     resourcePrivileges: async () => false,
+    ...(options.postLogin ? { postLogin: options.postLogin } : {}),
   }),
 ];
 

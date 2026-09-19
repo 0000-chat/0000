@@ -1,0 +1,134 @@
+import { spawn } from "node:child_process";
+import { symmetricEncrypt } from "better-auth/crypto";
+import { opaqueSecret } from "../src/platform-state";
+
+const databaseName = "platform-identity";
+
+function sql(value: string | null): string {
+  return value === null ? "NULL" : `'${value.replaceAll("'", "''")}'`;
+}
+
+function required(values: Map<string, string>, name: string): string {
+  const value = values.get(name);
+  if (!value) throw new Error(`Missing --${name}.`);
+  return value;
+}
+
+function parse(argv: string[]): {
+  remote: boolean;
+  values: Map<string, string>;
+} {
+  const values = new Map<string, string>();
+  let remote = false;
+  for (let index = 0; index < argv.length; index += 1) {
+    const arg = argv[index];
+    if (arg === "--remote") {
+      remote = true;
+      continue;
+    }
+    if (!arg?.startsWith("--")) {
+      throw new Error(
+        "Usage: bun scripts/provision-oauth-client.ts [--remote] --service-id ID --redirect-uri URI --capability NAME [--capability NAME] [--public|--confidential] [--owner-user-id ID]",
+      );
+    }
+    const key = arg.slice(2);
+    if (key === "public" || key === "confidential") {
+      values.set(
+        "auth-method",
+        key === "public" ? "none" : "client_secret_post",
+      );
+      continue;
+    }
+    const value = argv[++index];
+    if (!value || value.startsWith("--")) throw new Error(`Missing --${key}.`);
+    if (key === "capability") {
+      values.set(
+        "capabilities",
+        `${values.get("capabilities") ?? ""}${values.has("capabilities") ? "," : ""}${value}`,
+      );
+    } else {
+      values.set(key, value);
+    }
+  }
+  return { remote, values };
+}
+
+async function wrangler(sqlText: string, remote: boolean): Promise<string> {
+  const child = spawn(
+    "bun",
+    [
+      "x",
+      "wrangler",
+      "d1",
+      "execute",
+      databaseName,
+      remote ? "--remote" : "--local",
+      "--command",
+      sqlText,
+      "--json",
+    ],
+    { cwd: new URL("../", import.meta.url), stdio: ["ignore", "pipe", "pipe"] },
+  );
+  let stdout = "";
+  let stderr = "";
+  child.stdout.on("data", (chunk) => (stdout += String(chunk)));
+  child.stderr.on("data", (chunk) => (stderr += String(chunk)));
+  const status = await new Promise<number>((resolve, reject) => {
+    child.once("error", reject);
+    child.once("close", (code) => resolve(code ?? 1));
+  });
+  if (status !== 0)
+    throw new Error(stderr.trim() || "OAuth client provisioning failed.");
+  return stdout;
+}
+
+const { remote, values } = parse(process.argv.slice(2));
+const serviceId = required(values, "service-id");
+const redirectUri = required(values, "redirect-uri");
+const capabilities = (values.get("capabilities") ?? "")
+  .split(",")
+  .filter(Boolean);
+if (capabilities.length === 0)
+  throw new Error("Provide at least one --capability.");
+const authMethod = values.get("auth-method") ?? "none";
+if (authMethod !== "none" && authMethod !== "client_secret_post") {
+  throw new Error("Choose --public or --confidential.");
+}
+const secretKey = process.env.BETTER_AUTH_SECRET;
+if (!secretKey)
+  throw new Error(
+    "BETTER_AUTH_SECRET must be supplied in the protected environment.",
+  );
+const clientId = `platform-oauth-${crypto.randomUUID()}`;
+const clientSecret =
+  authMethod === "client_secret_post" ? opaqueSecret("oauth_secret_") : null;
+const encryptedSecret = clientSecret
+  ? await symmetricEncrypt({ key: secretKey, data: clientSecret })
+  : null;
+const now = Date.now();
+const capabilityJson = JSON.stringify(capabilities);
+const redirectJson = JSON.stringify([redirectUri]);
+const grantJson = JSON.stringify(["authorization_code"]);
+const responseJson = JSON.stringify(["code"]);
+const result = await wrangler(
+  `BEGIN;
+INSERT INTO oauthResource (id, identifier, name, accessTokenTtl, refreshTokenTtl, allowedScopes, disabled, createdAt, updatedAt)
+SELECT lower(hex(randomblob(16))), audience, service_id, 3600, NULL, ${sql(capabilityJson)}, 0, ${now}, ${now}
+FROM platform_service WHERE service_id = ${sql(serviceId)} AND disabled = 0
+ON CONFLICT(identifier) DO UPDATE SET allowedScopes = excluded.allowedScopes, disabled = 0, updatedAt = excluded.updatedAt;
+INSERT INTO oauthClient (id, clientId, clientSecret, disabled, skipConsent, scopes, clientCredentialsScopes, userId, createdAt, updatedAt, name, redirectUris, grantTypes, responseTypes, tokenEndpointAuthMethod, applicationType, requirePKCE, dpopBoundAccessTokens)
+SELECT lower(hex(randomblob(16))), ${sql(clientId)}, ${sql(encryptedSecret)}, 0, 0, ${sql(capabilityJson)}, '[]', ${sql(values.get("owner-user-id") ?? null)}, ${now}, ${now}, ${sql(values.get("name") ?? `0000 ${serviceId}`)}, ${sql(redirectJson)}, ${sql(grantJson)}, ${sql(responseJson)}, ${sql(authMethod)}, 'web', 1, 0
+WHERE EXISTS (SELECT 1 FROM platform_service WHERE service_id = ${sql(serviceId)} AND disabled = 0);
+INSERT INTO oauthClientResource (id, clientId, resourceId, createdAt)
+SELECT lower(hex(randomblob(16))), ${sql(clientId)}, audience, ${now} FROM platform_service WHERE service_id = ${sql(serviceId)} AND disabled = 0;
+INSERT INTO platform_oauth_client (client_id, service_id, owner_user_id, redirect_uri, capabilities, active, created_at, updated_at)
+SELECT ${sql(clientId)}, service_id, ${sql(values.get("owner-user-id") ?? null)}, ${sql(redirectUri)}, ${sql(capabilityJson)}, 1, ${now}, ${now}
+FROM platform_service WHERE service_id = ${sql(serviceId)} AND disabled = 0;
+SELECT changes() AS changed;
+COMMIT;`,
+  remote,
+);
+if (!/"changed"\s*:\s*1/.test(result))
+  throw new Error("OAuth client registration did not complete.");
+process.stdout.write(`registered ${clientId}\n`);
+if (clientSecret) process.stdout.write(`client_secret=${clientSecret}\n`);

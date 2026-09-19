@@ -176,9 +176,12 @@ export function htmlResponse(body: string, status = 200): Response {
   });
 }
 
-export function loginPage(message = ""): Response {
+export function loginPage(message = "", oauthQuery = ""): Response {
   const error = message
     ? `<p class="notice" role="alert">${escapeHtml(message)}</p>`
+    : "";
+  const query = oauthQuery
+    ? `<input id="oauth-query" type="hidden" value="${escapeHtml(oauthQuery)}">`
     : "";
   return htmlResponse(
     document(
@@ -189,6 +192,7 @@ export function loginPage(message = ""): Response {
         <p class="lede">Use a Google or GitHub account to manage your Platform identity.</p>
       </header>
       ${error}
+      ${query}
       <div class="actions" aria-label="Sign-in providers">
         <button type="button" class="provider-button" data-auth-provider="google">Continue with Google</button>
         <button type="button" class="provider-button" data-auth-provider="github">Continue with GitHub</button>
@@ -680,22 +684,30 @@ async function responseData(response) {
   return data;
 }
 
-function accountCallback() {
-  return new URL("/account", window.location.origin).href;
+function accountCallback(oauthQuery) {
+  const callback = new URL(
+    oauthQuery ? "/oauth2/selection" : "/account",
+    window.location.origin,
+  );
+  if (oauthQuery) callback.search = "?" + oauthQuery;
+  return callback.href;
 }
 
 async function beginProvider(provider, linking) {
   const endpoint = linking ? "/api/auth/link-social" : "/api/auth/sign-in/social";
+  const oauthQuery = document.getElementById("oauth-query")?.value || "";
+  const body = {
+    provider,
+    callbackURL: accountCallback(oauthQuery),
+    errorCallbackURL: new URL("/login", window.location.origin).href,
+    disableRedirect: true,
+    ...(oauthQuery ? { oauth_query: oauthQuery } : {}),
+  };
   const response = await fetch(endpoint, {
     method: "POST",
     credentials: "same-origin",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      provider,
-      callbackURL: accountCallback(),
-      errorCallbackURL: new URL("/login", window.location.origin).href,
-      disableRedirect: true,
-    }),
+    body: JSON.stringify(body),
   });
   const data = await responseData(response);
   if (typeof data.url !== "string") throw new Error("The provider did not return a sign-in URL.");
