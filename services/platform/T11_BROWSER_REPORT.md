@@ -35,28 +35,29 @@ The passing Chromium run proves:
   Platform access expiry, and the actual issued access token, cookie value and
   confidential client secret are absent from the DOM, URL, `localStorage` and
   `sessionStorage`;
-- a distinct value typed into the mounted consumer input survives in-place
-  authenticated 401 and 503 responses without navigation; 401 offers sign-in
-  again while 503 keeps the sign-in control hidden;
-- expiry and installation revocation return 401 while preserving the draft;
-  an authority outage is classified as `authority_unavailable` during the
-  real callback and preserves the return draft; and no browser page errors
-  occur.
+- a distinct value typed into the mounted consumer input survives an in-place
+  shared-client authority outage (503) and real verifier 401 responses after
+  D1 expiry or account-UI installation revocation; 401 offers sign-in again
+  while 503 keeps the sign-in control hidden, with no navigation;
+- the callback outage is separately classified as `authority_unavailable` and
+  preserves its return draft; no browser page errors occur.
 
 The shared-client unit suite passes 18 tests and 140 assertions, including
 malformed, duplicate, mixed and configuration-mismatch callback rejection;
 rejected human, agent-principal, authority, audience, capability, expiry,
 invalid-grant and refresh responses; callback body-delay, redirect and late
 transport regressions; a delayed callback regression for post-verification
-cookie expiry; and the default consumer-origin CSRF rule. The Worker/D1 acceptance suite
-passes 10 tests across the OAuth installation and browser OAuth fixtures. It
-proves first-party provisioning constraints, request and purpose binding,
-stale-flow and PKCE/audience rejection, two-audience and two-organization
-isolation, current client/user/organization/catalog/consent invalidation,
-the final publication authority boundary, and manual API-key rotation and
-revocation alongside a live OAuth credential. It also covers consent copy and
-the rejection of OAuth credentials by ordinary human-key controls. The
-separate
+cookie expiry; and the default consumer-origin CSRF rule. The Worker/D1
+acceptance suite passes 10 tests across the OAuth installation and browser
+OAuth fixtures. It proves first-party provisioning constraints, request and
+purpose binding, selection races and stale-authority rejection, PKCE/audience
+rejection, immutable-purpose enforcement and both directions of request-purpose
+spoof resistance, two-audience and two-organization isolation, provider-client,
+platform-client, user, organization, service/catalog and consent invalidation
+with inactive introspection, the final publication authority boundary, and
+manual API-key rotation and revocation alongside a live OAuth credential. It
+also covers consent copy and the
+rejection of OAuth credentials by ordinary human-key controls. The separate
 `bun scripts/test-oauth-refresh-restart.mjs` probe exits 0 after reusing its
 persistent D1 directory and proves the injected refresh write failure remains
 pending across restart, a healthy sibling remains usable, and reauthorization

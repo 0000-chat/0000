@@ -284,6 +284,7 @@ async function prepareAuthorizationCode(input: {
   organizationId: string;
   client: Awaited<ReturnType<typeof provisionTrustedOAuthClient>>;
   audience: string;
+  requestPurpose?: "personal_harness" | "first_party_browser";
 }): Promise<{ verifier: string; code: string; flowId: string }> {
   const verifier = opaqueSecret("t06-flow-verifier_");
   const query = new URLSearchParams({
@@ -296,6 +297,7 @@ async function prepareAuthorizationCode(input: {
     code_challenge: await challenge(verifier),
     code_challenge_method: "S256",
   });
+  if (input.requestPurpose) query.set("purpose", input.requestPurpose);
   const authorize = await SELF.fetch(
     `http://localhost/api/auth/oauth2/authorize?${query}`,
     { headers: { cookie: input.cookies }, redirect: "manual" },
@@ -370,6 +372,7 @@ async function completeFlow(input: {
   client: Awaited<ReturnType<typeof provisionTrustedOAuthClient>>;
   audience: string;
   clientSecret?: string;
+  requestPurpose?: "personal_harness" | "first_party_browser";
 }): Promise<{ accessToken: string; verifier: string; code: string }> {
   const prepared = await prepareAuthorizationCode(input);
   const tokenValues: Record<string, string> = {
@@ -1606,6 +1609,63 @@ describe("T06 production OAuth installation", () => {
       .first<{ id: string }>();
     expect(purposeSpoofInstallation).toBeNull();
 
+    const harnessClient = await provisionTrustedOAuthClient(
+      testEnv.IDENTITY_DB,
+      testEnv.BETTER_AUTH_SECRET,
+      {
+        serviceId: service.serviceId,
+        clientId: `t11-harness-purpose-spoof-${suffix}`,
+        redirectUri: `https://t11-harness-purpose-spoof-${suffix}.example.test/callback`,
+        capabilities: ["resource:read"],
+        authMethod: "none",
+        purpose: "personal_harness",
+      },
+    );
+    const harnessIssued = await completeFlow({
+      cookies: user.cookies,
+      userId: user.userId,
+      organizationId,
+      client: harnessClient,
+      audience: service.audience,
+      requestPurpose: "first_party_browser",
+    });
+    const harnessInstallation = await testEnv.IDENTITY_DB.prepare(
+      `SELECT i.purpose, i.grant_id, c.kind, c.grant_id AS credential_grant_id
+       FROM platform_oauth_installation AS i
+       JOIN platform_credential AS c ON c.oauth_installation_id = i.id
+       WHERE i.client_id = ? ORDER BY i.created_at DESC LIMIT 1`,
+    )
+      .bind(harnessClient.clientId)
+      .first<{
+        purpose: string;
+        grant_id: string | null;
+        kind: string;
+        credential_grant_id: string | null;
+      }>();
+    expect(harnessInstallation).toMatchObject({
+      purpose: "personal_harness",
+      kind: "agent",
+    });
+    expect(harnessInstallation?.grant_id).toBeTruthy();
+    expect(harnessInstallation?.credential_grant_id).toBeTruthy();
+    const harnessVerifier = createPlatformClient({
+      baseUrl: testEnv.PLATFORM_BASE_URL,
+      authority: testEnv.PLATFORM_AUTHORITY_ID,
+      audience: service.audience,
+      serviceVerifier: service.verifier,
+      fetch: SELF.fetch,
+    });
+    const harnessAuthentication = await harnessVerifier.authenticate(
+      harnessIssued.accessToken,
+    );
+    expect(harnessAuthentication).toMatchObject({
+      status: "authenticated",
+      principal: {
+        kind: "agent",
+        organizationId,
+      },
+    });
+
     const preview = await beginSelection({
       cookies: user.cookies,
       userId: user.userId,
@@ -2179,6 +2239,18 @@ describe("T06 production OAuth installation", () => {
       audience: service.audience,
       clientSecret: client.clientSecret!,
     });
+    const introspectionClient = await provisionTrustedOAuthClient(
+      testEnv.IDENTITY_DB,
+      testEnv.BETTER_AUTH_SECRET,
+      {
+        serviceId: service.serviceId,
+        clientId: `t11-introspection-client-${suffix}`,
+        redirectUri: `https://t11-introspection-client-${suffix}.example.test/callback`,
+        capabilities: ["resource:read"],
+        authMethod: "client_secret_post",
+        purpose: "personal_harness",
+      },
+    );
     const installationId = await latestOAuthInstallationId(client.clientId);
     const sharedClient = createPlatformClient({
       baseUrl: testEnv.PLATFORM_BASE_URL,
@@ -2210,8 +2282,8 @@ describe("T06 production OAuth installation", () => {
           headers: { "content-type": "application/x-www-form-urlencoded" },
           body: new URLSearchParams({
             token: issued.accessToken,
-            client_id: client.clientId,
-            client_secret: client.clientSecret!,
+            client_id: introspectionClient.clientId,
+            client_secret: introspectionClient.clientSecret!,
           }),
         },
       );
@@ -2240,6 +2312,7 @@ describe("T06 production OAuth installation", () => {
       .bind(client.clientId)
       .run();
     await expectInvalid();
+    await expectIntrospection(false);
     await testEnv.IDENTITY_DB.prepare(
       "UPDATE oauthClient SET disabled = 0 WHERE clientId = ?",
     )
@@ -2253,6 +2326,7 @@ describe("T06 production OAuth installation", () => {
       .bind(service.serviceId)
       .run();
     await expectUnavailable();
+    await expectIntrospection(false);
     await testEnv.IDENTITY_DB.prepare(
       "UPDATE platform_service SET disabled = 0 WHERE service_id = ?",
     )
@@ -2266,6 +2340,7 @@ describe("T06 production OAuth installation", () => {
       .bind("[]", service.serviceId)
       .run();
     await expectUnavailable();
+    await expectIntrospection(false);
     await testEnv.IDENTITY_DB.prepare(
       "UPDATE platform_service SET allowed_capabilities = ? WHERE service_id = ?",
     )
@@ -2279,6 +2354,7 @@ describe("T06 production OAuth installation", () => {
       .bind(Date.now(), organizationId)
       .run();
     await expectInvalid();
+    await expectIntrospection(false);
     await testEnv.IDENTITY_DB.prepare(
       "UPDATE organization SET suspendedAt = NULL WHERE id = ?",
     )
@@ -2292,6 +2368,7 @@ describe("T06 production OAuth installation", () => {
       .bind(Date.now(), user.userId)
       .run();
     await expectInvalid();
+    await expectIntrospection(false);
     await testEnv.IDENTITY_DB.prepare(
       'UPDATE "user" SET disabledAt = NULL WHERE id = ?',
     )

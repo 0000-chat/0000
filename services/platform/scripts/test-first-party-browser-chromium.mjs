@@ -362,7 +362,6 @@ async function listenConsumerFixture({
   resourceId,
 }) {
   const state = {
-    apiMode: "normal",
     outageMode: false,
     csrfDenied: false,
     browserCsrfDenied: false,
@@ -491,15 +490,6 @@ async function listenConsumerFixture({
       );
     }
     if (url.pathname.startsWith("/api/resource/") && request.method === "GET") {
-      if (state.apiMode === "unauthorized") {
-        return Response.json({ error: "invalid_credential" }, { status: 401 });
-      }
-      if (state.apiMode === "outage") {
-        return Response.json(
-          { error: "authority_unavailable" },
-          { status: 503 },
-        );
-      }
       return handleBrowserFixtureRequest(request, resourceConfig);
     }
     if (url.pathname === "/logout" && request.method === "POST") {
@@ -946,16 +936,7 @@ try {
   const retainedDraft = `typed-browser-draft-${crypto.randomUUID()}`;
   await page.locator("#work-input").fill(retainedDraft);
   const appUrlBeforeFailures = page.url();
-  consumer.state.apiMode = "unauthorized";
-  await page.evaluate(() => window.reloadResource());
-  await page.waitForFunction(
-    () =>
-      document.querySelector("#status")?.textContent ===
-      "session expired; sign in again",
-  );
-  assert.equal(await page.locator("#work-input").inputValue(), retainedDraft);
-  assert.equal(page.url(), appUrlBeforeFailures);
-  consumer.state.apiMode = "outage";
+  consumer.state.outageMode = true;
   await page.evaluate(() => window.reloadResource());
   await page.waitForFunction(
     () =>
@@ -964,7 +945,13 @@ try {
   assert.equal(await page.locator("#work-input").inputValue(), retainedDraft);
   assert.equal(page.url(), appUrlBeforeFailures);
   assert.equal(await page.locator("#login-link").isHidden(), true);
-  consumer.state.apiMode = "normal";
+  await page.evaluate(() => window.reloadResource());
+  await page.waitForFunction(
+    () => document.querySelector("#status")?.textContent === "authenticated",
+  );
+  assert.equal(await page.locator("#work-input").inputValue(), retainedDraft);
+  assert.equal(page.url(), appUrlBeforeFailures);
+  assert.equal(await page.locator("#login-link").isHidden(), true);
 
   const attackerUrl = new URL("/test/csrf-attacker", platformBridge.baseUrl);
   attackerUrl.searchParams.set("target", `${consumer.baseUrl}/logout`);
@@ -1031,13 +1018,19 @@ try {
     database,
     clientRegistration.clientId,
   );
+  const expiredDraft = `typed-expired-draft-${crypto.randomUUID()}`;
+  await page.locator("#work-input").fill(expiredDraft);
+  const expiredAppUrl = page.url();
   await expireInstallation(database, expiredInstallation.id);
-  await page.goto(`${consumer.baseUrl}/app?draft=expired-draft`, {
-    waitUntil: "domcontentloaded",
-  });
-  await page.locator("#status").waitFor();
-  assert.match(await page.locator("#status").textContent(), /expired|sign in/);
-  assert.equal(await page.locator("#work-input").inputValue(), "expired-draft");
+  await page.evaluate(() => window.reloadResource());
+  await page.waitForFunction(
+    () =>
+      document.querySelector("#status")?.textContent ===
+      "session expired; sign in again",
+  );
+  assert.equal(await page.locator("#work-input").inputValue(), expiredDraft);
+  assert.equal(page.url(), expiredAppUrl);
+  assert.equal(await page.locator("#login-link").isHidden(), false);
 
   await completeConsumerLogin(
     page,
@@ -1050,17 +1043,27 @@ try {
     database,
     clientRegistration.clientId,
   );
+  const revokedDraft = `typed-revoked-draft-${crypto.randomUUID()}`;
+  await page.locator("#work-input").fill(revokedDraft);
+  const revokedAppUrl = page.url();
+  const controlPage = await context.newPage();
+  controlPage.setDefaultTimeout(operationTimeoutMs);
+  controlPage.setDefaultNavigationTimeout(operationTimeoutMs);
   await revokeInstallation(
-    page,
+    controlPage,
     platformBridge.baseUrl,
     revokedInstallation.id,
   );
-  await page.goto(`${consumer.baseUrl}/app?draft=revoked-draft`, {
-    waitUntil: "domcontentloaded",
-  });
-  await page.locator("#status").waitFor();
-  assert.match(await page.locator("#status").textContent(), /expired|sign in/);
-  assert.equal(await page.locator("#work-input").inputValue(), "revoked-draft");
+  await controlPage.close();
+  await page.evaluate(() => window.reloadResource());
+  await page.waitForFunction(
+    () =>
+      document.querySelector("#status")?.textContent ===
+      "session expired; sign in again",
+  );
+  assert.equal(await page.locator("#work-input").inputValue(), revokedDraft);
+  assert.equal(page.url(), revokedAppUrl);
+  assert.equal(await page.locator("#login-link").isHidden(), false);
 
   await completeConsumerLogin(
     page,
