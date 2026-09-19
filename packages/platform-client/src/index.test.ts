@@ -1,5 +1,13 @@
 import { describe, expect, it, mock } from "bun:test";
-import { createPlatformClient, createPlatformGuestClient } from "./index";
+import {
+  createPlatformBrowserClient,
+  createPlatformClient,
+  createPlatformGuestClient,
+  isSameOriginUnsafeBrowserRequest,
+  selectBrowserCredential,
+  type BrowserOAuthTransaction,
+  type BrowserOAuthTransactionStore,
+} from "./index";
 
 const now = Date.now();
 const validPrincipal = {
@@ -278,6 +286,252 @@ describe("Platform verification client", () => {
         timeoutMs: 60_000,
       }),
     ).toBeDefined();
+  });
+});
+
+class MemoryBrowserTransactionStore implements BrowserOAuthTransactionStore {
+  private readonly rows = new Map<string, BrowserOAuthTransaction>();
+
+  async put(transaction: BrowserOAuthTransaction): Promise<void> {
+    this.rows.set(transaction.stateHash, transaction);
+  }
+
+  async consume(input: {
+    stateHash: string;
+    browserBindingHash: string;
+    now: number;
+  }): Promise<BrowserOAuthTransaction | null> {
+    const row = this.rows.get(input.stateHash);
+    if (
+      !row ||
+      row.browserBindingHash !== input.browserBindingHash ||
+      row.expiresAt <= input.now
+    ) {
+      return null;
+    }
+    this.rows.delete(input.stateHash);
+    return row;
+  }
+
+  async cleanup(input: { now: number; limit: number }): Promise<number> {
+    let removed = 0;
+    for (const [stateHash, row] of this.rows) {
+      if (removed >= input.limit) break;
+      if (row.expiresAt <= input.now) {
+        this.rows.delete(stateHash);
+        removed += 1;
+      }
+    }
+    return removed;
+  }
+
+  size(): number {
+    return this.rows.size;
+  }
+}
+
+function cookiePair(header: string): string {
+  return header.split(";", 1)[0]!;
+}
+
+function browserOptions(
+  store: BrowserOAuthTransactionStore,
+  fetch: typeof globalThis.fetch,
+  now: () => number,
+) {
+  return {
+    baseUrl: "https://platform.test",
+    authority: "platform-deployment",
+    audience: "https://service.0000.test",
+    serviceVerifier: "service-verifier-only",
+    clientId: "first-party-client",
+    clientSecret: "client-secret-only-on-server",
+    redirectUri: "https://browser.test/oauth/callback",
+    resource: "https://service.0000.test",
+    scopes: ["resource:read"],
+    returnOrigin: "https://browser.test",
+    transactionStore: store,
+    fetch,
+    now,
+    timeoutMs: 25,
+  };
+}
+
+describe("Platform browser OAuth client", () => {
+  it("binds PKCE and browser state, verifies a human token, and issues only a host cookie", async () => {
+    const store = new MemoryBrowserTransactionStore();
+    const clock = Date.now();
+    const calls: Array<{ path: string; body: string; authorization: string | null }> = [];
+    const fetch = mock(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input));
+      calls.push({
+        path: url.pathname,
+        body: String(init?.body ?? ""),
+        authorization: new Headers(init?.headers).get("authorization"),
+      });
+      if (url.pathname.endsWith("/token")) {
+        return Response.json({
+          access_token: "opaque-human-access",
+          token_type: "Bearer",
+          expires_in: 60,
+        });
+      }
+      return Response.json({ status: "authenticated", principal: validPrincipal });
+    }) as unknown as typeof globalThis.fetch;
+    const client = createPlatformBrowserClient(
+      browserOptions(store, fetch, () => clock),
+    );
+    const started = await client.start({ returnTo: "/settings?tab=security" });
+    expect(started.status).toBe("started");
+    if (started.status !== "started") return;
+    const authorization = new URL(started.authorizationUrl);
+    expect(authorization.searchParams.get("client_id")).toBe("first-party-client");
+    expect(authorization.searchParams.get("redirect_uri")).toBe(
+      "https://browser.test/oauth/callback",
+    );
+    expect(authorization.searchParams.get("resource")).toBe(
+      "https://service.0000.test",
+    );
+    expect(authorization.searchParams.get("code_challenge_method")).toBe("S256");
+    expect(authorization.searchParams.get("state")).toBeTruthy();
+    expect(authorization.searchParams.get("code")).toBeNull();
+
+    const callback = await client.callback(
+      new Request(
+        `https://browser.test/oauth/callback?${new URLSearchParams({
+          code: "authorization-code",
+          state: authorization.searchParams.get("state")!,
+        })}`,
+        { headers: { cookie: cookiePair(started.setCookie) } },
+      ),
+    );
+    expect(callback.status).toBe("authenticated");
+    if (callback.status === "authenticated") {
+      expect(callback.returnTo).toBe("/settings?tab=security");
+      expect(callback).not.toHaveProperty("credential");
+      expect(callback.setCookie).toContain("Secure");
+      expect(callback.setCookie).toContain("HttpOnly");
+      expect(callback.setCookie).toContain("SameSite=Lax");
+      expect(callback.setCookie).not.toContain("Domain=");
+      expect(callback.clearBrowserBindingCookie).toContain("Max-Age=0");
+    }
+    expect(calls.map((call) => call.path)).toEqual([
+      "/api/auth/oauth2/token",
+      "/internal/v1/authenticate",
+    ]);
+    expect(calls[0]?.body).toContain("client_secret=client-secret-only-on-server");
+    expect(calls[1]?.authorization).toBe("Bearer service-verifier-only");
+  });
+
+  it("preserves a transaction for the wrong browser and lets only one concurrent callback win", async () => {
+    const store = new MemoryBrowserTransactionStore();
+    const nowValue = Date.now();
+    const fetch = async (input: RequestInfo | URL): Promise<Response> => {
+      const path = new URL(String(input)).pathname;
+      return path.endsWith("/token")
+        ? Response.json({
+            access_token: "opaque-human-access",
+            token_type: "Bearer",
+            expires_in: 60,
+          })
+        : Response.json({ status: "authenticated", principal: validPrincipal });
+    };
+    const client = createPlatformBrowserClient(
+      browserOptions(store, fetch, () => nowValue),
+    );
+    const started = await client.start();
+    expect(started.status).toBe("started");
+    if (started.status !== "started") return;
+    const url = new URL(started.authorizationUrl);
+    const callbackUrl = `https://browser.test/oauth/callback?code=code&state=${encodeURIComponent(url.searchParams.get("state")!)}`;
+    const wrongBrowser = await client.callback(
+      new Request(callbackUrl, { headers: { cookie: "__Host-0000-oauth-binding=wrong" } }),
+    );
+    expect(wrongBrowser).toMatchObject({ status: "invalid_login", reason: "invalid_state" });
+    expect(store.size()).toBe(1);
+    const results = await Promise.all([
+      client.callback(new Request(callbackUrl, { headers: { cookie: cookiePair(started.setCookie) } })),
+      client.callback(new Request(callbackUrl, { headers: { cookie: cookiePair(started.setCookie) } })),
+    ]);
+    expect(results.filter((result) => result.status === "authenticated")).toHaveLength(1);
+    expect(results.filter((result) => result.status === "invalid_login")).toHaveLength(1);
+    expect(store.size()).toBe(0);
+  });
+
+  it("distinguishes expired and unavailable callbacks, bounds cleanup, and gives Authorization precedence", async () => {
+    const store = new MemoryBrowserTransactionStore();
+    let clock = Date.now();
+    const hangingFetch = mock(
+      () => new Promise<Response>(() => undefined),
+    ) as unknown as typeof globalThis.fetch;
+    const client = createPlatformBrowserClient(
+      browserOptions(store, hangingFetch, () => clock),
+    );
+    const started = await client.start();
+    expect(started.status).toBe("started");
+    if (started.status !== "started") return;
+    const url = new URL(started.authorizationUrl);
+    clock += 301_000;
+    const expired = await client.callback(
+      new Request(
+        `https://browser.test/oauth/callback?code=code&state=${encodeURIComponent(url.searchParams.get("state")!)}`,
+        { headers: { cookie: cookiePair(started.setCookie) } },
+      ),
+    );
+    expect(expired).toMatchObject({ status: "invalid_login", reason: "invalid_state" });
+
+    const unavailableStore = new MemoryBrowserTransactionStore();
+    let current = Date.now();
+    const unavailableClient = createPlatformBrowserClient(
+      browserOptions(unavailableStore, hangingFetch, () => current),
+    );
+    const unavailableStart = await unavailableClient.start();
+    expect(unavailableStart.status).toBe("started");
+    if (unavailableStart.status !== "started") return;
+    const unavailableUrl = new URL(unavailableStart.authorizationUrl);
+    const unavailable = await unavailableClient.callback(
+      new Request(
+        `https://browser.test/oauth/callback?code=code&state=${encodeURIComponent(unavailableUrl.searchParams.get("state")!)}`,
+        { headers: { cookie: cookiePair(unavailableStart.setCookie) } },
+      ),
+    );
+    expect(unavailable.status).toBe("authority_unavailable");
+
+    const cookieRequest = new Request("https://browser.test/resource", {
+      headers: {
+        authorization: "Basic malformed",
+        cookie: "__Host-0000-access=valid-cookie",
+      },
+    });
+    expect(selectBrowserCredential(cookieRequest)).toEqual({
+      source: "authorization",
+      status: "invalid",
+      credential: null,
+    });
+    expect(
+      isSameOriginUnsafeBrowserRequest(
+        new Request("https://browser.test/mutate", {
+          method: "POST",
+          headers: { origin: "https://attacker.test" },
+        }),
+        "https://browser.test",
+      ),
+    ).toBe(false);
+    expect(
+      isSameOriginUnsafeBrowserRequest(
+        new Request("https://browser.test/mutate", {
+          method: "POST",
+          headers: { origin: "https://browser.test" },
+        }),
+        "https://browser.test",
+      ),
+    ).toBe(true);
+    expect(
+      isSameOriginUnsafeBrowserRequest(
+        new Request("https://browser.test/read", { method: "GET" }),
+        "https://browser.test",
+      ),
+    ).toBe(true);
   });
 });
 

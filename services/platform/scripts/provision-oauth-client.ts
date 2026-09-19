@@ -119,8 +119,14 @@ if (authMethod !== "none" && authMethod !== "client_secret_post") {
   throw new Error("Choose --public or --confidential.");
 }
 const purpose = values.get("purpose") as OAuthClientPurpose | undefined;
-if (purpose && purpose !== "personal_harness" && purpose !== "first_party_browser") {
-  throw new Error("Choose --purpose personal_harness or --purpose first_party_browser.");
+if (
+  purpose &&
+  purpose !== "personal_harness" &&
+  purpose !== "first_party_browser"
+) {
+  throw new Error(
+    "Choose --purpose personal_harness or --purpose first_party_browser.",
+  );
 }
 const secretKey = process.env.BETTER_AUTH_SECRET;
 if (!secretKey)

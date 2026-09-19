@@ -1582,7 +1582,7 @@ export async function completeInitialOAuthAccess(
   }
   const durable = await database
     .prepare(
-       `SELECT c.id AS credential_id, i.active, f.status, a.sessionId
+      `SELECT c.id AS credential_id, i.active, f.status, a.sessionId
        FROM platform_credential AS c
        JOIN platform_oauth_installation AS i ON i.id = c.oauth_installation_id
        JOIN platform_oauth_flow AS f

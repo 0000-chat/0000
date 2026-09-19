@@ -3366,13 +3366,15 @@ export async function authenticateCredential(
         currentOAuth.client_auth_method === "client_secret_post" &&
         currentOAuth.kind === "human" &&
         currentOAuth.subject_id === currentOAuth.installation_user_id &&
-        currentOAuth.membership_id === currentOAuth.installation_membership_id &&
+        currentOAuth.membership_id ===
+          currentOAuth.installation_membership_id &&
         currentOAuth.grant_id === null) ||
       (currentOAuth.installation_purpose === "personal_harness" &&
         currentOAuth.client_purpose === "personal_harness" &&
         currentOAuth.kind === "agent" &&
         currentOAuth.subject_id === currentOAuth.installation_subject_id &&
-        currentOAuth.membership_id === currentOAuth.installation_membership_id &&
+        currentOAuth.membership_id ===
+          currentOAuth.installation_membership_id &&
         currentOAuth.grant_id === currentOAuth.installation_grant_id);
     const installationCapabilities = parseStringArray(
       currentOAuth.installation_capabilities,

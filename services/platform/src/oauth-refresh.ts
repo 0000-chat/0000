@@ -1476,7 +1476,7 @@ export async function completeInitialOAuthRefresh(
     .prepare(
       `SELECT i.id, i.client_id, i.user_id, i.membership_id, i.organization_id,
               i.service_id, i.audience, i.capabilities, i.subject_id, i.grant_id,
-              i.active, i.revoked_at, i.expires_at,
+              i.purpose, i.active, i.revoked_at, i.expires_at,
               f.id AS flow_id, f.oauth_query, f.status AS flow_status,
               f.expires_at AS flow_expires_at, f.consumed_at,
               pc.redirect_uri, pc.refresh_enabled, pc.capabilities AS client_capabilities,
@@ -1512,6 +1512,7 @@ export async function completeInitialOAuthRefresh(
       capabilities: string;
       subject_id: string;
       grant_id: string;
+      purpose: "personal_harness" | "first_party_browser";
       active: number;
       revoked_at: number | null;
       expires_at: number;
@@ -1579,6 +1580,7 @@ export async function completeInitialOAuthRefresh(
     !clientCapabilities ||
     !registeredScopes ||
     !serviceCapabilities ||
+    context.purpose !== "personal_harness" ||
     !context.refresh_enabled ||
     context.flow_status !== "consumed" ||
     context.active !== 0 ||
