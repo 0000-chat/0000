@@ -1359,14 +1359,31 @@ describe("Platform human account providers", () => {
     await testEnv.IDENTITY_DB.prepare("DELETE FROM member WHERE id = ?")
       .bind(receiptMembership?.membership_id)
       .run();
-    const existingUserStartAfterLogout = await startSocialLogin("google");
+    const existingUserStartAfterLogout =
+      await startSocialLogin(existingProvider);
     const existingUserCallbackAfterLogout = await completeSocialCallback(
-      "google",
+      existingProvider,
       existingUserStartAfterLogout,
-      "post-logout-existing-google-sign-in",
+      "post-logout-existing-provider-sign-in",
     );
     expect(existingUserCallbackAfterLogout.status).toBe(302);
+    expect(
+      new URL(existingUserCallbackAfterLogout.headers.get("location")!)
+        .pathname,
+    ).toBe("/account");
     const afterLogoutCookies = cookiesFrom(existingUserCallbackAfterLogout);
+    expect(afterLogoutCookies).toContain("better-auth.session_token=");
+    const afterLogoutSessionResponse = await SELF.fetch(
+      "http://localhost/api/auth/get-session",
+      { headers: { cookie: afterLogoutCookies } },
+    );
+    expect(afterLogoutSessionResponse.status).toBe(200);
+    const afterLogoutSession = (await afterLogoutSessionResponse.json()) as {
+      user?: { id: string };
+      session?: { id: string };
+    };
+    expect(afterLogoutSession.user?.id).toBe(session.user?.id);
+    expect(afterLogoutSession.session?.id).toBeTruthy();
     const accountAfterMembershipRemoval = await SELF.fetch(
       "http://localhost/account",
       { headers: { cookie: afterLogoutCookies } },
