@@ -19,6 +19,11 @@ reviewed and independently verified at aggregate `10d31c8`. The evidence
 does not complete the design's acceptance gates
 or establish production authentication.
 
+[SIGNUP_RECOVERY_REPORT.md](SIGNUP_RECOVERY_REPORT.md) records the reviewed
+interrupted-signup repair, integrated and independently verified at `54fc212`.
+Combined checks pass eight Worker/D1 files/twenty tests and both guest/resource
+and actual human runtime restart probes with simulated provider HTTP.
+
 ## MVP outcome and deployment
 
 Use the same open-source Platform for self-hosted deployments and managed 0000
@@ -308,12 +313,16 @@ alone:
   fixture in persistent D1. Human login/session and social linking work across
   local Worker requests with simulated provider HTTP. T03's local Worker/D1
   tests exercise final-owner and invitation races and pass on the reviewed
-  aggregate at `c51d285`. An isolated human recovery probe at `e32e821`
-  demonstrates actual provider-mocked signup/session/key persistence across a
-  fresh runtime; parent independently reran it, but it is not yet integrated.
-  The same probe reproduces interrupted signup leaving an unlinked user whose
-  valid retry fails. A proof-bound recovery follow-up is required before MVP
-  readiness. Concurrent signup and OAuth rotation remain separate gates.
+  aggregate at `c51d285`. The interrupted-signup defect reproduced at `e32e821`
+  is repaired and verified at aggregate `54fc212`: exact provider-subject
+  recovery, pending-owner constraints, denied-link preservation, concurrent
+  retry convergence and positive Google/GitHub callback recovery are covered.
+  Deterministic D1 assertions prove the owner constraint; callback races are
+  bounded overlap tests, not every possible database interleaving. Actual human
+  signup/session/key persistence across a fresh runtime, independent revocation
+  and logout pass without migration replay. A losing concurrent link may return
+  a provider callback error while preserving recoverability. OAuth lifecycle
+  acceptance remains separate.
 - The versioned principal, verification route, service registration fixture,
   service-verifier bootstrap and guest-grant exchange are candidate T01
   contracts. T04 now exercises local trusted service registration, human

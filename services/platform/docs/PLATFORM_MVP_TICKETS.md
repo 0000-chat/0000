@@ -20,7 +20,7 @@
 | T14 | [#68](https://github.com/0000-chat/0000/issues/68) | Prove reconnect authorization without building offline sync | ready-for-agent |
 | T15 | [#69](https://github.com/0000-chat/0000/issues/69) | Make self-hosted and managed deployment setup reproducible | ready-for-agent |
 
-T01 through T05 are reviewed and verified on the aggregate, most recently at `10d31c8`; T14's focused reconnect proof is accepted at `166e54d`. T02 interrupted-signup recovery remains under review in an isolated worktree. T08's guest lifecycle contract is resolved and implementation dispatched from `10d31c8`; T06 still requires its owned-consent-flow experiment before dispatch. Slice reports record exact evidence and limits. The ready-for-agent label does not assert completed dependencies or production adoption.
+T01 through T05 are reviewed and verified on the aggregate, including T02's recovery follow-up at `54fc212`; T14's focused reconnect proof is accepted at `166e54d`. T08's guest lifecycle contract is resolved and implementation dispatched from `10d31c8`; T06 still requires its owned-consent-flow experiment before dispatch. Slice reports record exact evidence and limits. The ready-for-agent label does not assert completed dependencies or production adoption.
 
 ## Existing issue disposition
 
@@ -50,7 +50,7 @@ T01 through T05 are reviewed and verified on the aggregate, most recently at `10
 
 ### T02. Deliver social sign-in, default organization, profile and logout
 
-**Readiness:** Initial T02 is reviewed, integrated and independently verified on `codex/platform-mvp` at `7152bcd`. A separate interrupted-signup probe at `e32e821` now reproduces an unlinked-user retry failure; targeted recovery is dispatched on `codex/platform-signup-recovery` from `9a80311` and is required before MVP readiness. The issue stays open; full MVP is not accepted.
+**Readiness:** Initial T02 is reviewed and verified at `7152bcd`; interrupted-signup recovery implementation/fixes are integrated as `b9d1e63`, `382acf9`, `7209b4a`, `08cbfc2`. Parent combined checks at `54fc212` pass eight Worker/D1 files/twenty tests, guest/resource and human restart, format/typecheck and root manifests. Independent native and external review completed. The issue stays open; full MVP is not accepted.
 
 **Blocked by (contract):** T01's accepted human principal, session and D1 behavior.
 
