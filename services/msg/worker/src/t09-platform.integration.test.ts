@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import { readD1Migrations } from "../../../platform/node_modules/@cloudflare/vitest-plugin";
 import { expect, test } from "bun:test";
 import { convertV4MiniflareOptions, Miniflare } from "../../../platform/node_modules/miniflare";
-import { createPlatformGuestClient } from "@0000/platform-client";
+import { createPlatformClient, createPlatformGuestClient } from "@0000/platform-client";
 import WebSocketClient from "ws";
 
 import { registerGuestIssuer, registerService } from "../../../platform/src/service-registration";
@@ -16,6 +16,7 @@ import { ensureDefaultOrganization, hashOpaque, issueHumanCredential, opaqueSecr
 import { MSG_OPERATOR, MSG_READ } from "./auth";
 import { createMsgMiniflareTempDirectory, startMsgMiniflare, TEST_ROOM_LIMITS } from "../test-fixtures/msg-worker.miniflare-fixture";
 import { PersistentCookieJar } from "../../cli/src/cookie-jar";
+import { joinConversation } from "../../cli/src/join";
 
 const platformRoot = fileURLToPath(new URL("../../../platform/", import.meta.url));
 const platformWorkerEntry = fileURLToPath(new URL("../../../platform/src/worker.ts", import.meta.url));
@@ -400,6 +401,8 @@ test.serial("crosses the actual Platform Worker/D1 and msg Worker/DO boundary", 
     const participantCookies = cookieHeader(participantRead);
     expect(participantCookies).toContain("msg_guest_control=");
     expect(participantCookies).toContain("msg_resource=");
+    const participantCliJar = new PersistentCookieJar({ filePath: join(msgPersistence, "participant-cli-cookies.json"), serviceOrigin: audience });
+    participantCliJar.store(`https://msg.0000.chat/${created.room.id}`, participantRead.clone());
     const participantPost = await firstMsg.miniflare.dispatchFetch(`https://msg.0000.chat/${created.room.id}`, roomRequest(participantCookies, {
       method: "POST",
       body: JSON.stringify({ content: "participant", author: "participant", display_name: "Participant", semantic_type: "message" }),
@@ -483,6 +486,31 @@ test.serial("crosses the actual Platform Worker/D1 and msg Worker/DO boundary", 
     const restartedParticipant = await secondMsg.miniflare.dispatchFetch(`https://msg.0000.chat/${created.room.id}`, roomRequest(participantCookies));
     expect(restartedParticipant.status).toBe(200);
     expect((await restartedParticipant.json() as { latest_message: number }).latest_message).toBe(3);
+
+    const participantControlBeforeRecovery = cookieValue(participantCliJar.cookieHeader(`https://msg.0000.chat/${created.room.id}`) ?? "", "msg_guest_control");
+    expect(participantControlBeforeRecovery).toBeString();
+    const staleResource = () => new Response(null, { headers: { "set-cookie": `msg_resource=stale-cli-resource; Path=/${created.room.id}; Secure` } });
+    participantCliJar.store(`https://msg.0000.chat/${created.room.id}`, staleResource());
+    const participantCliFetch = participantCliJar.wrapFetch((input, init) => secondMsg!.miniflare.dispatchFetch(input, init));
+    await expect(joinConversation({ conversationUrl: `https://msg.0000.chat/${created.room.id}`, fetch: participantCliFetch })).rejects.toThrow("HTTP 401");
+    expect(participantCliJar.cookieHeader(`https://msg.0000.chat/${created.room.id}`)).toContain("msg_resource=stale-cli-resource");
+    expect(cookieValue(participantCliJar.cookieHeader(`https://msg.0000.chat/${created.room.id}`) ?? "", "msg_guest_control")).toBe(participantControlBeforeRecovery);
+    const recoveredCliJoin = await joinConversation({ conversationUrl: `https://msg.0000.chat/${created.room.id}`, recover: true, fetch: participantCliFetch });
+    expect(recoveredCliJoin).toContain("0000 msg agent handoff");
+    expect(cookieValue(participantCliJar.cookieHeader(`https://msg.0000.chat/${created.room.id}`) ?? "", "msg_guest_control")).toBe(participantControlBeforeRecovery);
+    expect(cookieValue(participantCliJar.cookieHeader(`https://msg.0000.chat/${created.room.id}`) ?? "", "msg_resource")).not.toBe("stale-cli-resource");
+
+    const participantPlatform = createPlatformClient({ baseUrl: bridge!.baseUrl, authority, audience, serviceVerifier: service.verifier });
+    const participantCredential = cookieValue(participantCliJar.cookieHeader(`https://msg.0000.chat/${created.room.id}`) ?? "", "msg_resource");
+    if (!participantCredential) throw new Error("The participant resource credential was not stored.");
+    const participantAuthentication = await participantPlatform.authenticate(participantCredential);
+    if (participantAuthentication.status !== "authenticated" || participantAuthentication.principal.kind !== "guest" || !participantAuthentication.principal.grantId) throw new Error("The participant resource credential did not authenticate as a guest grant.");
+    expect(await platformGuest.revokeGuestGrant(participantAuthentication.principal.grantId)).toEqual({ status: "success", revoked: true });
+    participantCliJar.store(`https://msg.0000.chat/${created.room.id}`, staleResource());
+    await expect(joinConversation({ conversationUrl: `https://msg.0000.chat/${created.room.id}`, recover: true, fetch: participantCliFetch })).rejects.toThrow("HTTP 403");
+    participantCliJar.store(`https://msg.0000.chat/${created.room.id}`, new Response(null, { headers: { "set-cookie": "msg_guest_control=invalid-cli-control; Path=/; Secure" } }));
+    await expect(joinConversation({ conversationUrl: `https://msg.0000.chat/${created.room.id}`, recover: true, fetch: participantCliFetch })).rejects.toThrow("HTTP 401");
+    expect(participantCliJar.cookieHeader(`https://msg.0000.chat/${created.room.id}`)).toContain("msg_guest_control=invalid-cli-control");
 
     await platform.dispose();
     platform = undefined;

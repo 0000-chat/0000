@@ -229,16 +229,26 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
     const auth = this.parseAuth(request);
     await this.requireAccess(auth, "read", url.searchParams.get("resource") ?? "");
     const state = await this.requireActive(this.now());
-    const sockets = this.ctx.getWebSockets(socketTag) as HibernatingSocket[];
+    const sockets = this.liveSockets();
     if (sockets.length >= this.limits.maxSockets) throw new ProtocolError(ERROR_CODES.serviceUnavailable, "The room has reached its socket limit.", 503);
     const pair = new WebSocketPair();
     const [client, server] = Object.values(pair) as [WebSocket, HibernatingSocket];
-    this.ctx.acceptWebSocket(server, [socketTag]);
     const after = Number(url.searchParams.get("after") ?? 0);
     this.socketCredentials.set(server, auth.credential ?? "");
     const resource = url.searchParams.get("resource") ?? "";
     this.socketContexts.set(server, { after, guestId: auth.guestId, resource, source: auth.source });
-    server.serializeAttachment({ after, guestId: auth.guestId, resource, source: auth.source });
+    if (this.config.MSG_AUTH_REQUIRED === "1") {
+      // Authenticated sockets use the standard WebSocket API so their current
+      // credential remains in memory while this DO instance is alive. Raw
+      // credentials are never serialized for hibernation.
+      server.accept();
+      server.addEventListener("message", () => { void this.webSocketMessage(server); });
+      server.addEventListener("close", () => { void this.webSocketClose(server); });
+      server.addEventListener("error", () => { void this.webSocketClose(server); });
+    } else {
+      this.ctx.acceptWebSocket(server, [socketTag]);
+      server.serializeAttachment({ after, guestId: auth.guestId, resource, source: auth.source });
+    }
     server.send(JSON.stringify({ protocol_version: PROTOCOL_VERSION, type: "ready", latest_message: state.next_sequence - 1, expires_at: iso(state.inactivity_expires_at) }));
     return new Response(null, { status: 101, webSocket: client } as ResponseInit & { webSocket: WebSocket });
   }
@@ -389,8 +399,9 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
   private toMessage(message: StoredMessage) { return { id: message.id, sequence: message.sequence, content: message.content, author: message.author, display_name: message.display_name, identity_verified: false as const, ...(message.client ? { client: message.client } : {}), semantic_type: message.semantic_type, ...(message.reply_to ? { reply_to: message.reply_to } : {}), created_at: iso(message.created_at), ...(message.client_message_id ? { client_message_id: message.client_message_id } : {}), byte_count: message.byte_count }; }
   private async expire(now: number, reason: string): Promise<void> { if (!this.deleteToTombstone(now)) return; const state = this.requireState(); await this.broadcast({ protocol_version: PROTOCOL_VERSION, type: "conversation.expired" }); this.closeSockets(1001, reason); await this.schedule(state); }
   private async schedule(state: RoomState): Promise<void> { const at = state.status === "deleted" ? state.tombstone_expires_at : state.inactivity_expires_at; if (at === null || at === undefined) await this.ctx.storage.deleteAlarm(); else await this.ctx.storage.setAlarm(at); }
-  private async broadcast(frame: unknown): Promise<void> { const payload = JSON.stringify(frame); for (const socket of this.ctx.getWebSockets(socketTag) as HibernatingSocket[]) { if (this.config.MSG_AUTH_REQUIRED !== "1") { socket.send(payload); continue; } const context = this.socketContexts.get(socket) ?? this.attachmentContext(socket); const credential = this.socketCredentials.get(socket); if (!context || !credential || !(await this.verifySocket(context, credential))) { socket.close(1008, "The live authorization is no longer valid"); continue; } socket.send(payload); } }
-  private closeSockets(code: number, reason: string): void { for (const socket of this.ctx.getWebSockets(socketTag) as HibernatingSocket[]) { this.socketCredentials.delete(socket); this.socketContexts.delete(socket); socket.close(code, reason); } }
+  private async broadcast(frame: unknown): Promise<void> { const payload = JSON.stringify(frame); for (const socket of this.liveSockets()) { if (this.config.MSG_AUTH_REQUIRED !== "1") { socket.send(payload); continue; } const context = this.socketContexts.get(socket) ?? this.attachmentContext(socket); const credential = this.socketCredentials.get(socket); if (!context || !credential || !(await this.verifySocket(context, credential))) { socket.close(1008, "The live authorization is no longer valid"); continue; } socket.send(payload); } }
+  private closeSockets(code: number, reason: string): void { for (const socket of this.liveSockets()) { this.socketCredentials.delete(socket); this.socketContexts.delete(socket); socket.close(code, reason); } }
+  private liveSockets(): WebSocket[] { return [...new Set([...this.ctx.getWebSockets(socketTag), ...this.socketContexts.keys()])]; }
   private json(value: unknown): Response { return new Response(JSON.stringify(value), { headers: { "content-type": "application/json; charset=utf-8" } }); }
   private error(code: string, message: string, status: number): Response { return new Response(JSON.stringify({ error: { code, message } }), { headers: { "content-type": "application/json; charset=utf-8" }, status }); }
 }

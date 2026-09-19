@@ -72,9 +72,6 @@ export class PersistentCookieJar {
       return response;
     };
     return async (input, init) => {
-      const url = new URL(typeof input === "string" || input instanceof URL ? input.toString() : input.url);
-      const existing = this.cookieHeader(url);
-      if (existing?.split("; ").some((cookie) => cookie.startsWith(`${CONTROL_COOKIE}=`))) return request(input, init);
       const lock = acquireFileLock(this.filePath);
       try {
         return await request(input, init, true);
@@ -438,5 +435,3 @@ function cookieHeaderFor(cookies: readonly StoredCookie[], url: URL, serviceOrig
   });
   return matches.length === 0 ? undefined : matches.map((cookie) => `${cookie.name}=${encodeURIComponent(cookie.value)}`).join("; ");
 }
-
-const CONTROL_COOKIE = "msg_guest_control";

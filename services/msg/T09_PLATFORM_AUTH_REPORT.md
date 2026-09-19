@@ -20,11 +20,19 @@ permission proofs. Every public read, post, export, management request, and
 WebSocket handshake sends the shared Platform credential through the room
 service boundary. The DO verifies the current Platform guest grant, exact
 returned grant ID, and its current source/action ACL before returning data.
-WebSocket attachments contain only guest, room, source, and cursor; raw
-credentials remain volatile. A revoked credential closes the socket before the
-next broadcast. Creation receipts retain the owner grant reference so replay
-renews that grant with a fresh local ACL check instead of re-attesting a
-conflicting permission.
+When `MSG_AUTH_REQUIRED=1`, authenticated live sockets use the standard
+WebSocket API (`accept()` plus event listeners). Their current credential and
+room context stay in the DO's in-memory socket maps, are cleared on message,
+close, and error, and are rechecked through Platform before every broadcast.
+They are never serialized as a Durable Object attachment. The unauthenticated
+legacy path retains hibernating sockets with a non-secret attachment containing
+only guest, room, source, and cursor. Standard sockets can still be evicted by
+normal Durable Object lifecycle behavior (Cloudflare documents an idle window
+of roughly 70–140 seconds), so clients must reconnect and reauthenticate; this
+keeps the live verification proof while using active DO duration and memory.
+A revoked credential closes the socket before the next broadcast. Creation
+receipts retain the owner grant reference so replay renews that grant with a
+fresh local ACL check instead of re-attesting a conflicting permission.
 
 The accepted Platform permission migration is present in this branch. Msg
 chooses stable service-owned permission IDs `msg-owner`, `msg-public`, and
@@ -56,6 +64,9 @@ existing jar file remains intact. No Platform credential is put in a URL,
 JavaScript storage, or a message author.
 An invalid presented resource cookie remains a denial; an explicit `?recover=1`
 request rechecks the current control and room link before replacing that cookie.
+The browser-free CLI exposes the same action as `msg join <room-url> --recover`;
+it forwards `recover=1` only when that flag is present and never falls back to
+recovery after an authorization failure.
 When the room already has an active local grant for that source, recovery renews
 that exact Platform grant with its stable permission ID; it does not re-attest a
 revoked local ACL or widen capabilities. The wrapped CLI fetch holds the jar
@@ -97,20 +108,28 @@ to read through the same guest's independent `msg-public` grant.
 Commands and results on this branch:
 
 - `bun run check:application` from `services/msg`: passed 192 Worker tests,
-  17 tooling tests, 64 CLI tests, build, pack, typecheck, and lint. The
-  existing `production-synthetic.ts:142` constant-condition warning remains.
+  17 tooling tests, and 66 CLI tests, plus build, pack, typecheck, and lint.
+  The existing `production-synthetic.ts:142` constant-condition warning
+  remains.
 - `bun test src/t09-platform.integration.test.ts` from `services/msg/worker`:
-  passed 1 actual boundary test with 46 assertions, including D1 creation
+  passed 1 actual boundary test with 57 assertions, including D1 creation
   receipt replay/renewal, public and management recovery renewal, positive
   human and issued agent operator authentication, underprivileged agent
   denial, independent management/public revocation, and an actual CLI-cookie
-  WebSocket handshake.
+  WebSocket handshake. With `MSG_AUTH_REQUIRED=1`, that handshake takes the
+  standard WebSocket registration path; the live frame, Platform revocation
+  close (`1008`), outage, and reconnect assertions therefore exercise the
+  in-memory authenticated socket path rather than a fabricated
+  attachment-only seam. The same test runs the real CLI join transport: a
+  stale resource stays denied without recovery, `--recover` keeps the control
+  cookie while replacing the resource credential, a revoked grant returns
+  `403`, and an invalid control returns `401`.
 - `bun test src/auth.test.ts src/conversation-room.test.ts src/room-schema.test.ts src/worker.test.ts`:
   passed the focused Worker/DO/auth suite.
 - `bun test src/operations.test.ts`:
   passed the guest-scoped D1 operation tests, including the persisted owner
   grant reference.
-- `bun test src/cookie-jar.test.ts` from `services/msg/cli`: passed 11 tests
+- `bun test src/cookie-jar.test.ts` from `services/msg/cli`: passed 12 tests
   covering persistence, path/Secure, redirect, `wss:` lookup, concurrent
   merge behavior, ticket/UUID acquisition order, a choosing entrant crossing
   the ready boundary, separate-process first-use bootstrap overlap, crash
@@ -122,6 +141,11 @@ Commands and results on this branch:
   As a negative proof, temporarily bypassing `waitForDefinedSnapshot` made
   that test time out waiting for the observation marker; the source was
   restored before this commit.
+- The existing-control concurrent mutation test has a negative proof: restoring
+  the old control-cookie lock bypass lets the second process enter while the
+  first request is paused, and the focused test fails; the bypass was restored
+  before this commit. The committed wrapper holds the same local bakery lock
+  across request and response even when a control cookie already exists.
 - `T09_PLAYWRIGHT_MODULE=/path/to/@playwright/test/index.mjs bun
   services/msg/worker/scripts/t09-platform-browser-smoke.mjs`: passed the real
   Chromium bridge against the actual Platform Worker/D1 and msg Worker/DO. It

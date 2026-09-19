@@ -158,6 +158,58 @@ test("serializes separate-process first-use bootstrap across request and respons
   expect(secondResource).toBe(control);
 });
 
+test("serializes concurrent existing-control cookie mutations", async () => {
+  const { filePath, jar } = await temporaryJar();
+  const roomUrl = "https://msg.0000.chat/room-existing-control";
+  jar.store(roomUrl, new Response(null, { headers: { "set-cookie": "msg_guest_control=stable-control; Path=/; Secure" } }));
+  const moduleUrl = new URL("./cookie-jar.ts", import.meta.url).href;
+  const goPath = `${filePath}.existing-control-go`;
+  const contenders = Array.from({ length: 2 }, (_, index) => {
+    const readyPath = `${filePath}.existing-control-${index}-ready`;
+    const enteredPath = `${filePath}.existing-control-${index}-entered`;
+    const releasePath = `${filePath}.existing-control-${index}-release`;
+    const source = `
+      import { existsSync, writeFileSync } from "node:fs";
+      import { PersistentCookieJar } from ${JSON.stringify(moduleUrl)};
+      const filePath = process.env.T09_COOKIE_JAR;
+      const jar = new PersistentCookieJar({ filePath, serviceOrigin: "https://msg.0000.chat" });
+      writeFileSync(process.env.T09_COOKIE_READY, "ready");
+      while (!existsSync(process.env.T09_COOKIE_GO)) await new Promise((resolve) => setTimeout(resolve, 5));
+      const fetcher = jar.wrapFetch(async () => {
+        writeFileSync(process.env.T09_COOKIE_ENTERED, "entered");
+        while (!existsSync(process.env.T09_COOKIE_RELEASE)) await new Promise((resolve) => setTimeout(resolve, 5));
+        return new Response(null, { headers: { "set-cookie": "msg_resource=grant-${index}; Path=/room-existing-control; Secure" } });
+      });
+      await fetcher(${JSON.stringify(roomUrl)});
+    `;
+    return { readyPath, enteredPath, releasePath, source };
+  });
+  const start = (entry: typeof contenders[number]): Promise<void> => new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, ["-e", entry.source], {
+      env: { ...process.env, T09_COOKIE_JAR: filePath, T09_COOKIE_READY: entry.readyPath, T09_COOKIE_GO: goPath, T09_COOKIE_ENTERED: entry.enteredPath, T09_COOKIE_RELEASE: entry.releasePath },
+      stdio: ["ignore", "ignore", "pipe"],
+    });
+    let error = "";
+    child.stderr.on("data", (chunk: Buffer) => { error += chunk.toString(); });
+    child.once("error", reject);
+    child.once("close", (code) => code === 0 ? resolve() : reject(new Error(`Existing-control process exited ${code}: ${error}`)));
+  });
+  const processes = contenders.map(start);
+  await Promise.all(contenders.map(({ readyPath }) => waitForFile(readyPath)));
+  await writeFile(goPath, "go");
+  const firstIndex = await waitForAnyFile(contenders.map(({ enteredPath }) => enteredPath));
+  const secondIndex = firstIndex === 0 ? 1 : 0;
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  expect(existsSync(contenders[secondIndex].enteredPath)).toBe(false);
+  await writeFile(contenders[firstIndex].releasePath, "release");
+  await waitForFile(contenders[secondIndex].enteredPath);
+  await writeFile(contenders[secondIndex].releasePath, "release");
+  await Promise.all(processes);
+
+  expect(jar.cookieHeader(roomUrl)).toContain(`msg_resource=grant-${secondIndex}`);
+  expect(jar.cookieHeader(roomUrl)).toContain("msg_guest_control=stable-control");
+});
+
 test("recovers a crashed unique claim while preserving existing jar state", async () => {
   const { filePath, jar } = await temporaryJar();
   jar.store("https://msg.0000.chat/room-preserved", new Response(null, { headers: { "set-cookie": "msg_resource=preserved; Path=/room-preserved; Secure" } }));

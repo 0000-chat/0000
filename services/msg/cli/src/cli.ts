@@ -22,7 +22,7 @@ export interface CliDependencies {
 
 export async function runCli(args: readonly string[], dependencies: CliDependencies): Promise<number> {
   if (args.length === 1 && args[0] === "--help") {
-    dependencies.stdout("Usage: msg join <conversation-url>\nUsage: msg post <conversation-url> --author <author> [--content <content>] [--client-message-id <id>]\nUsage: msg wait <conversation-url> --after <positive integer> [--timeout <duration>]\n");
+    dependencies.stdout("Usage: msg join <conversation-url> [--recover]\nUsage: msg post <conversation-url> --author <author> [--content <content>] [--client-message-id <id>]\nUsage: msg wait <conversation-url> --after <positive integer> [--timeout <duration>]\n");
     return 0;
   }
   if (args.length === 1 && args[0] === "--version") {

@@ -20,6 +20,7 @@ interface AgentRepresentation {
 
 export interface JoinCommand {
   readonly conversationUrl: string;
+  readonly recover?: true;
 }
 
 export interface JoinOptions extends JoinCommand {
@@ -33,8 +34,14 @@ export class JoinSignalError extends Error {
 }
 
 export function parseJoinCommand(args: readonly string[], serviceOrigin?: string): JoinCommand {
-  if (args.length !== 2 || args[0] !== "join") throw new Error("Usage: msg join <conversation-url>");
-  return { conversationUrl: validateConversationUrl(args[1] ?? "", serviceOrigin) };
+  if (args[0] !== "join" || args.length < 2 || args.length > 3) throw new Error("Usage: msg join <conversation-url> [--recover]");
+  const values = args.slice(1);
+  const recover = values.filter((value) => value === "--recover").length;
+  const urls = values.filter((value) => value !== "--recover");
+  if (recover > 1 || urls.length !== 1) throw new Error("Usage: msg join <conversation-url> [--recover]");
+  const conversationUrl = urls[0];
+  if (conversationUrl === undefined) throw new Error("Usage: msg join <conversation-url> [--recover]");
+  return { conversationUrl: validateConversationUrl(conversationUrl, serviceOrigin), ...(recover === 1 ? { recover: true as const } : {}) };
 }
 
 export async function joinConversation(options: JoinOptions): Promise<string> {
@@ -42,6 +49,7 @@ export async function joinConversation(options: JoinOptions): Promise<string> {
   if (options.signal?.aborted) throw new JoinSignalError();
   const endpoint = new URL(conversationUrl);
   endpoint.pathname = `${endpoint.pathname}/agent`;
+  if (options.recover) endpoint.searchParams.set("recover", "1");
   let response: Response;
   try {
     response = await options.fetch(endpoint, {
