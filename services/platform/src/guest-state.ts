@@ -112,6 +112,17 @@ function grantCapabilityPredicate(
     )`;
 }
 
+async function hasCurrentGuestAuthority(
+  database: D1Database | D1DatabaseSession,
+  issuer: GuestIssuer,
+): Promise<boolean> {
+  const authority = await database
+    .prepare(`SELECT ${issuerAuthorityPredicate("'[]'")} AS authority_valid`)
+    .bind(issuer.service.serviceId, issuer.service.audience, issuer.issuerHash)
+    .first<{ authority_valid: number }>();
+  return authority?.authority_valid === 1;
+}
+
 function success(
   authority: string,
   input: {
@@ -346,7 +357,12 @@ export async function issueGuestGrant(
     .bind(credentialId, await hashOpaque(credential), now, grantId);
   try {
     const results = await database.batch([grantInsert, credentialInsert]);
-    if (results[0]?.meta.changes !== 1) return { status: "conflict" };
+    if (results[0]?.meta.changes !== 1) {
+      if (!(await hasCurrentGuestAuthority(database, input.issuer))) {
+        throw new GuestAuthorityUnavailable();
+      }
+      return { status: "conflict" };
+    }
     if (results[1]?.meta.changes !== 1) {
       throw new Error("Guest grant credential insertion was incomplete.");
     }
@@ -543,6 +559,9 @@ export async function renewGuestGrant(
     );
   const results = await database.batch([update, insert]);
   if (results[0]?.meta.changes !== 1 || results[1]?.meta.changes !== 1) {
+    if (!(await hasCurrentGuestAuthority(database, input.issuer))) {
+      throw new GuestAuthorityUnavailable();
+    }
     throw new GuestGrantConflict();
   }
   return success(input.authority, {
@@ -608,15 +627,7 @@ export async function revokeGuestGrant(
       ),
   ]);
   if (results[0]?.meta.changes === 1) return true;
-  const authority = await database
-    .prepare(`SELECT ${issuerAuthorityPredicate("'[]'")} AS authority_valid`)
-    .bind(
-      input.issuer.service.serviceId,
-      input.issuer.service.audience,
-      input.issuer.issuerHash,
-    )
-    .first<{ authority_valid: number }>();
-  if (authority?.authority_valid !== 1) {
+  if (!(await hasCurrentGuestAuthority(database, input.issuer))) {
     throw new GuestAuthorityUnavailable();
   }
   return false;

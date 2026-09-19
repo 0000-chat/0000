@@ -16,6 +16,7 @@ import {
   renewGuestGrant,
   revokeGuestGrant,
 } from "../../src/guest-state";
+import platformWorker from "../../src/worker";
 import { hashOpaque, opaqueSecret } from "../../src/platform-state";
 import {
   attestGuestResource,
@@ -37,14 +38,73 @@ function service(suffix: string, audience: string): TestService {
   };
 }
 
-function guestClient(service: TestService) {
+function guestClient(service: TestService, requestFetch?: typeof fetch) {
   return createPlatformGuestClient({
     baseUrl: testEnv.PLATFORM_BASE_URL,
     authority: testEnv.PLATFORM_AUTHORITY_ID,
     audience: service.audience,
     guestGrantIssuer: service.guestGrantIssuer,
-    fetch: (input, init) => SELF.fetch(input, init),
+    fetch: requestFetch ?? ((input, init) => SELF.fetch(input, init)),
   });
+}
+
+function workerBatchRace(onBatch: () => Promise<void>) {
+  let batchTriggered = false;
+  let responseStatus: number | null = null;
+  let responseBody: unknown = null;
+
+  const wrapDatabase = (
+    database: D1Database | D1DatabaseSession,
+  ): D1Database | D1DatabaseSession =>
+    new Proxy(database, {
+      get(target, property, receiver) {
+        if (property === "prepare") {
+          return (query: string) => target.prepare(query);
+        }
+        if (property === "batch") {
+          return async (statements: D1PreparedStatement[]) => {
+            if (!batchTriggered) {
+              batchTriggered = true;
+              await onBatch();
+            }
+            return (target as D1Database).batch(statements);
+          };
+        }
+        if (property === "withSession") {
+          return (constraint: unknown) =>
+            wrapDatabase(
+              (target as D1Database).withSession(constraint as never),
+            );
+        }
+        return Reflect.get(target, property, receiver);
+      },
+    }) as D1Database | D1DatabaseSession;
+
+  const wrappedDatabase = wrapDatabase(testEnv.IDENTITY_DB) as D1Database;
+  const wrappedEnv = new Proxy(testEnv, {
+    get(target, property, receiver) {
+      if (property === "IDENTITY_DB") return wrappedDatabase;
+      return Reflect.get(target, property, receiver);
+    },
+  }) as Cloudflare.Env;
+  const requestFetch: typeof fetch = async (input, init) => {
+    const response = await platformWorker.fetch(
+      new Request(input, init),
+      wrappedEnv,
+    );
+    responseStatus = response.status;
+    try {
+      responseBody = await response.clone().json();
+    } catch {
+      responseBody = null;
+    }
+    return response;
+  };
+
+  return {
+    fetch: requestFetch,
+    response: () => ({ status: responseStatus, body: responseBody }),
+  };
 }
 
 function resourceConfig(service: TestService): ResourceServiceConfig {
@@ -652,6 +712,9 @@ describe("T08 persistent guest control and resource grants", () => {
     expect(
       await currentIssuerClient.revokeGuestGrant(current.value.grantId),
     ).toMatchObject({ status: "success", revoked: true });
+    expect(
+      await currentIssuerClient.revokeGuestGrant(current.value.grantId),
+    ).toMatchObject({ status: "success", revoked: true });
     releaseRenewLookup();
     expect(await pendingRenew).toMatchObject({ status: "conflict" });
     const liveSuccessor = await testEnv.IDENTITY_DB.prepare(
@@ -859,5 +922,141 @@ describe("T08 persistent guest control and resource grants", () => {
     expect((await currentIssuerClient.createGuest()).status).toBe(
       "authority_unavailable",
     );
+  });
+
+  it("maps issuer retirement during each guest mutation batch to authority_unavailable", async () => {
+    const raceService = service(
+      "route-race",
+      "https://t08-route-race.0000.test",
+    );
+    await registerTestService(testEnv.IDENTITY_DB, raceService);
+    const bootstrapClient = guestClient(raceService);
+    const guest = await bootstrapClient.createGuest();
+    expect(guest.status).toBe("success");
+    if (guest.status !== "success") return;
+
+    const issueRace = workerBatchRace(async () => {
+      const rotated = await rotateGuestIssuer(
+        testEnv.IDENTITY_DB,
+        raceService.serviceId,
+      );
+      raceService.guestGrantIssuer = rotated.guestGrantIssuer;
+    });
+    const issueClient = guestClient(raceService, issueRace.fetch);
+    const issue = await issueClient.attestGuestGrant({
+      bootstrapCredential: guest.bootstrapCredential,
+      resourceId: "t08-route-race",
+      capabilities: ["resource:read"],
+      assertion: { kind: "owner", storedOwnerId: guest.guestId },
+    });
+    expect(issue).toMatchObject({ status: "authority_unavailable" });
+    expect(issueRace.response()).toEqual({
+      status: 503,
+      body: { status: "authority_unavailable" },
+    });
+    const issueGrant = await testEnv.IDENTITY_DB.prepare(
+      `SELECT COUNT(*) AS count
+       FROM platform_guest_grant
+       WHERE guest_id = ? AND service_id = ? AND resource_id = ?`,
+    )
+      .bind(guest.guestId, raceService.serviceId, "t08-route-race")
+      .first<{ count: number }>();
+    expect(issueGrant?.count).toBe(0);
+    const issueCredential = await testEnv.IDENTITY_DB.prepare(
+      `SELECT COUNT(*) AS count
+       FROM platform_credential
+       WHERE kind = 'guest' AND subject_id = ? AND audience = ?`,
+    )
+      .bind(guest.guestId, raceService.audience)
+      .first<{ count: number }>();
+    expect(issueCredential?.count).toBe(0);
+
+    const currentClient = guestClient(raceService);
+    const created = await currentClient.attestGuestGrant({
+      bootstrapCredential: guest.bootstrapCredential,
+      resourceId: "t08-route-race",
+      capabilities: ["resource:read"],
+      assertion: { kind: "owner", storedOwnerId: guest.guestId },
+    });
+    expect(created.status).toBe("success");
+    if (created.status !== "success") return;
+    const platform = createPlatformClient({
+      baseUrl: testEnv.PLATFORM_BASE_URL,
+      authority: testEnv.PLATFORM_AUTHORITY_ID,
+      audience: raceService.audience,
+      serviceVerifier: raceService.verifier,
+      fetch: (input, init) => SELF.fetch(input, init),
+    });
+
+    const renewRace = workerBatchRace(async () => {
+      const rotated = await rotateGuestIssuer(
+        testEnv.IDENTITY_DB,
+        raceService.serviceId,
+      );
+      raceService.guestGrantIssuer = rotated.guestGrantIssuer;
+    });
+    const renewClient = guestClient(raceService, renewRace.fetch);
+    const renew = await renewClient.renewGuestGrant({
+      grantId: created.value.grantId,
+      bootstrapCredential: guest.bootstrapCredential,
+      resourceId: "t08-route-race",
+      capabilities: ["resource:read"],
+      assertion: { kind: "owner", storedOwnerId: guest.guestId },
+    });
+    expect(renew).toMatchObject({ status: "authority_unavailable" });
+    expect(renewRace.response()).toEqual({
+      status: 503,
+      body: { status: "authority_unavailable" },
+    });
+    expect((await platform.authenticate(created.value.credential)).status).toBe(
+      "authenticated",
+    );
+    const renewalState = await testEnv.IDENTITY_DB.prepare(
+      `SELECT revoked_at, replaced_by_id
+       FROM platform_credential
+       WHERE id = ? AND grant_id = ?`,
+    )
+      .bind(created.value.credentialId, created.value.grantId)
+      .first<{ revoked_at: number | null; replaced_by_id: string | null }>();
+    expect(renewalState).toMatchObject({
+      revoked_at: null,
+      replaced_by_id: null,
+    });
+
+    const revokeRace = workerBatchRace(async () => {
+      const rotated = await rotateGuestIssuer(
+        testEnv.IDENTITY_DB,
+        raceService.serviceId,
+      );
+      raceService.guestGrantIssuer = rotated.guestGrantIssuer;
+    });
+    const revokeClient = guestClient(raceService, revokeRace.fetch);
+    const revoke = await revokeClient.revokeGuestGrant(created.value.grantId);
+    expect(revoke).toMatchObject({ status: "authority_unavailable" });
+    expect(revokeRace.response()).toEqual({
+      status: 503,
+      body: { status: "authority_unavailable" },
+    });
+    expect((await platform.authenticate(created.value.credential)).status).toBe(
+      "authenticated",
+    );
+    const revokeState = await testEnv.IDENTITY_DB.prepare(
+      `SELECT guest_grant.revoked_at AS grant_revoked_at,
+              platform_credential.revoked_at AS credential_revoked_at
+       FROM platform_guest_grant AS guest_grant
+       JOIN platform_credential
+         ON platform_credential.grant_id = guest_grant.id
+        AND platform_credential.id = ?
+       WHERE guest_grant.id = ?`,
+    )
+      .bind(created.value.credentialId, created.value.grantId)
+      .first<{
+        grant_revoked_at: number | null;
+        credential_revoked_at: number | null;
+      }>();
+    expect(revokeState).toMatchObject({
+      grant_revoked_at: null,
+      credential_revoked_at: null,
+    });
   });
 });

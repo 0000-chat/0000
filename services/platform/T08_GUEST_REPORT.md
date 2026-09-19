@@ -22,8 +22,12 @@ The focused Worker test `worker/test/guest-lifecycle.test.ts` exercises:
   with no successor left active;
 - same-guest sibling-resource and sibling-service grants created before the
   affected grant is revoked, both authenticated and read after revocation; a
-  held renewal versus real HTTP revoke interleaving returns `409` and leaves no
-  live successor credential;
+  held renewal helper versus real HTTP revoke interleaving returns a helper
+  conflict and leaves no live successor credential;
+- actual Worker issue, renewal, and revoke routes hold their real D1 mutation
+  batch while the issuer rotates, return HTTP `503` with
+  `authority_unavailable`, map the same result through `createPlatformGuestClient`,
+  and leave the existing grant and bearer usable;
 - permanent grant revocation, guest disable, service disable, issuer rotation
   and disable, retired issuer control returning `authority_unavailable`, and
   verifier/authority outage mapping;
@@ -33,7 +37,7 @@ The focused Worker test `worker/test/guest-lifecycle.test.ts` exercises:
 
 Validation run on this branch:
 
-- `bun run check` in `services/platform`: passed 8 Worker files / 11 tests,
+- `bun run check` in `services/platform`: passed 8 Worker files / 12 tests,
   typecheck, format check, and persistent Miniflare restart probe;
 - `bun run check` in `packages/contracts`: passed typecheck and 3 tests;
 - `bun run check` in `packages/platform-client`: passed typecheck and 5 tests,
