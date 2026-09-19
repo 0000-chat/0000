@@ -14,8 +14,7 @@ Platform authentication. Service ingestion requires `ingestion.write`, a
 service principal, an active local binding, and the exact gateway, connection,
 and account route. Provider dispatch claims require `outbound.claim` and the
 same local route and account authorization checks. The retired local issuer and
-inbound gateway-secret production paths are unavailable when Platform is
-configured.
+inbound gateway-secret production paths are unavailable.
 
 The browser OAuth path uses the shared SDK and the local atomic transaction
 store. Redirect cookies are host-only, Secure, HttpOnly, and SameSite=Lax.
@@ -24,10 +23,9 @@ changed binding or identity context pauses adoption until the user reviews it.
 Realtime live and replay delivery recheck current authority, lease expiry, and
 account/chat ACLs, including rebuild reset paths.
 
-The source checkpoint is commit `4b92c03d6929f3ca3af5d14b19c3729ec71c4f45`.
-It includes the parent T12 Platform dependency and the Communicator formatter
-cleanup. The worktree was clean after the checks below. No Platform or shared
-SDK production file was edited in this worker.
+The source checkpoint includes the parent T12 Platform dependency and the
+Communicator formatter cleanup. No Platform or shared SDK production file was
+edited in this worker.
 
 ## Checks
 
@@ -50,10 +48,10 @@ from the actual Platform authority evidence.
 
 ## Issued Rust caller proof
 
-A fresh local Platform Worker was started from the current Platform source at
-`http://127.0.0.1:36089`, and a fresh Communicator Worker/D1 state was started
-at `http://127.0.0.1:18794`. The Platform service principal, grant, and two
-finite credentials were created through the production account endpoints:
+A fresh local Platform Worker was started from the current Platform source, and
+a fresh Communicator Worker/D1 state was started from the current Communicator
+source. The Platform service principal, grant, and two finite credentials were
+created through the production account endpoints:
 
 - `POST /api/account/service-principals`
 - `POST /api/account/service-principals/grants`
@@ -79,70 +77,40 @@ require HTTPS. Results:
 - The replacement issued credential returned `Accepted` for ingestion and
   `Allowed` for the outbound claim.
 
-Evidence logs (metadata and result classifications only; no credential values)
-are:
+The completed checked-in runner recorded safe metadata and result
+classifications in `/tmp/platform-t11-rust-composition-final.log`; it does not
+contain credential values, OAuth callback values, or claim bodies. The earlier
+temporary-hook logs remain available as historical evidence, but the acceptance
+run described here is the checked-in runner execution.
 
-- `/tmp/platform-t11-issue-service.log`
-- `/tmp/platform-t11-revoke-issued-service.log`
-- `/tmp/platform-t11-rust-issued-ingestion-before-revocation.log`
-- `/tmp/platform-t11-rust-issued-claim-before-revocation.log`
-- `/tmp/platform-t11-rust-issued-ingestion-after-revocation.log`
-- `/tmp/platform-t11-rust-issued-claim-after-revocation.log`
-
-The corresponding direct Worker status check recorded HTTP 401 for both old
-credential routes in `/tmp/platform-t11-rust-old-credential-http-status.log`;
-the Rust clients above preserve their own bounded failure classifications.
-
-The reproducible caller harness is checked in at
-`services/communicator/services/matrix-gateway/tests/t11_issued_live_http.rs`.
-It is an ignored integration test behind the explicit `loopback-test` Cargo
-feature; that feature only exposes the loopback constructors used by the
-fixture, while the production constructors continue to require HTTPS. Its two
-tests preserve the exact positive and post-revocation/replacement sequences
-above without printing credential values. The no-run builds for the default
-and `loopback-test` configurations both completed successfully.
-
-With the isolated fixtures running, the reproducible commands are:
+The complete reproducible fixture runner is checked in at
+`services/communicator/scripts/platform-rust-composition/run.mjs`. Its bridge,
+issuer, revoker, D1 seed template, and three ingestion batches are all in that
+directory. It starts a fresh Platform Worker from the current
+`services/platform/src`, uses the simulated GitHub responses only to establish
+the Platform account session, calls the public issuance routes above, seeds
+only the local Communicator binding/resource rows, runs both ignored Rust
+stages, asserts the direct revoked-claim HTTP 401, and stops/removes its local
+processes and state by default:
 
 ```sh
 cd /home/ubuntu/0000-full/worktrees/platform-communicator-adoption/services/communicator
-
-# Run before the revoke command; this exercises the first issued credential.
 CARGO_TARGET_DIR=/home/ubuntu/cargo-target-t11 \
-T11_ISSUED_SERVICE_PATH=/tmp/platform-t11-issued-service.json \
-T11_RUST_WORKER_BASE_URL=http://127.0.0.1:18794 \
-T11_RUST_BATCH_ONE=/tmp/platform-t11-rust-ingestion-1.json \
-T11_RUST_BATCH_TWO=/tmp/platform-t11-rust-ingestion-2.json \
-T11_RUST_BATCH_THREE=/tmp/platform-t11-rust-ingestion-3.json \
-cargo test -p communicator-matrix-gateway --features loopback-test \
-  --test t11_issued_live_http issued_platform_credential_reaches_live_ingestion_and_claim \
-  -- --ignored --nocapture
-
-# Revoke the first credential through Platform, then run the recovery case.
-bun /tmp/platform-t11-revoke-issued-service.mjs
-CARGO_TARGET_DIR=/home/ubuntu/cargo-target-t11 \
-T11_ISSUED_SERVICE_PATH=/tmp/platform-t11-issued-service.json \
-T11_RUST_WORKER_BASE_URL=http://127.0.0.1:18794 \
-T11_RUST_BATCH_ONE=/tmp/platform-t11-rust-ingestion-1.json \
-T11_RUST_BATCH_TWO=/tmp/platform-t11-rust-ingestion-2.json \
-T11_RUST_BATCH_THREE=/tmp/platform-t11-rust-ingestion-3.json \
-cargo test -p communicator-matrix-gateway --features loopback-test \
-  --test t11_issued_live_http revoked_credential_pauses_and_replacement_credential_recovers_both_callers \
-  -- --ignored --nocapture
+  node scripts/platform-rust-composition/run.mjs
 ```
 
-The Platform fixture is started by `/tmp/platform-t11-rust-platform-bridge.mjs`
-from the current Platform source, and the Communicator fixture is the local
-Wrangler Worker at port `18794` with `/tmp/platform-t11-rust-communicator-issued-seed.sql`
-and `/tmp/platform-t11-rust-communicator-issued-more.sql`. The issuance helper
-`/tmp/platform-t11-issue-service.mjs` uses the simulated GitHub provider only
-to establish a Platform account session, then calls the three production
-service-principal/grant/credential endpoint families listed above. The local
-Communicator seed creates the binding and resource ACL rows, but never inserts
-a Platform credential. Temporary hooks used for the original run were removed;
-the checked-in harness and these setup/revoke commands preserve that caller
-boundary. Issued metadata, fixture processes, and state directories remain
-outside the repository and are local test state only.
+The checked-in Rust test is an ignored integration test behind the explicit
+`loopback-test` Cargo feature; that feature only exposes the loopback
+constructors used by the fixture, while production constructors continue to
+require HTTPS. A completed default-cleanup runner log is
+`/tmp/platform-t11-rust-composition-final.log`: the runner exited 0, with two
+assertions in the pre-revocation stage and six in the revocation/replacement
+stage. It recorded ingestion `Accepted`, claim `Allowed`, Platform revoke
+HTTP 200, direct revoked claim HTTP 401, old ingestion `Paused` with
+`ingestion_unauthorized`, old Rust claim `Uncertain`, and replacement ingestion
+`Accepted`/claim `Allowed`. The runner's safe log contains statuses and counts
+only; issued metadata and fixture state were removed by the runner's bounded
+default cleanup and are not repository files.
 
 ## Browser and realtime evidence boundary
 

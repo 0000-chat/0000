@@ -2,6 +2,7 @@
 
 use std::{fs, time::Duration};
 
+use chrono::Utc;
 use communicator_matrix_gateway::{
     authority::{
         AuthorityClaimClient, AuthorityClaimFailure, AuthorityClaimOutcome, AuthorityClaimRequest,
@@ -11,6 +12,7 @@ use communicator_matrix_gateway::{
         BatchSink, Delivery, DeliveryErrorClass, IngestionClient, PendingBatch, SecretString,
     },
 };
+use reqwest::StatusCode;
 use serde_json::Value;
 
 fn env(name: &str) -> String {
@@ -73,6 +75,57 @@ fn authority_client(credential: String) -> AuthorityClaimClient {
     .expect("loopback authority client")
 }
 
+async fn direct_claim_status(credential: &str, suffix: &str) -> StatusCode {
+    let now = Utc::now();
+    let expires_at = now + chrono::Duration::seconds(60);
+    let claim_id = format!("claim_transaction_t11_rust_{suffix}");
+    let body = serde_json::json!({
+        "schema_version": 1,
+        "operation": "message.send",
+        "tenant_id": "tenant_t11_rust",
+        "membership_id": "membership_t11_rust",
+        "identity_id": "identity_t11_rust",
+        "account_id": "account_t11_rust",
+        "conversation_id": "conversation_t11_rust",
+        "connection_id": "connection_t11_rust",
+        "reservation_id": format!("reservation_t11_rust_{suffix}"),
+        "operation_id": format!("dispatch_t11_rust_{suffix}"),
+        "request_hash": "a".repeat(64),
+        "capability": {
+            "kind": "account_grant",
+            "grant_id": "grant_t11_rust_send",
+            "authorization_epoch": 1,
+        },
+        "now": now.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        "expires_at": expires_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        "claim_id": claim_id.clone(),
+        "command_id": format!("command_t11_rust_{suffix}"),
+        "dispatch_id": format!("dispatch_t11_rust_{suffix}"),
+        "transaction_id": format!("transaction_t11_rust_{suffix}"),
+        "request_digest": "a".repeat(64),
+        "body_digest": "b".repeat(64),
+    });
+    reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .expect("direct claim client")
+        .post(format!(
+            "{}/internal/v1/outbound/dispatch-claims",
+            env("T11_RUST_WORKER_BASE_URL")
+        ))
+        .bearer_auth(credential)
+        .header("content-type", "application/json")
+        .header("accept", "application/json")
+        .header("cache-control", "no-store")
+        .header("x-request-id", format!("authority_{claim_id}"))
+        .header("idempotency-key", claim_id)
+        .body(serde_json::to_vec(&body).expect("direct claim JSON"))
+        .send()
+        .await
+        .expect("direct claim response")
+        .status()
+}
+
 /// Requires a fresh Platform/Communicator fixture and a finite issued service
 /// credential. The setup and revocation commands are recorded in the T11
 /// adoption report; this test never prints or persists a credential value.
@@ -85,7 +138,7 @@ async fn issued_platform_credential_reaches_live_ingestion_and_claim() {
         .deliver(&batch(&env("T11_RUST_BATCH_ONE")))
         .await
         .expect("issued credential should be accepted by Communicator ingestion");
-    println!("issued Rust ingestion before revocation: {delivery:?}");
+    println!("issued Rust ingestion before revocation: Accepted");
     assert_eq!(delivery, Delivery::Accepted);
 
     let authority = authority_client(first);
@@ -93,7 +146,7 @@ async fn issued_platform_credential_reaches_live_ingestion_and_claim() {
         .claim(message_claim("3"))
         .await
         .expect("issued credential should be accepted by Communicator claim");
-    println!("issued Rust claim before revocation: {outcome:?}");
+    println!("issued Rust claim before revocation: Allowed");
     assert!(matches!(outcome, AuthorityClaimOutcome::Allowed { .. }));
 }
 
@@ -117,11 +170,17 @@ async fn revoked_credential_pauses_and_replacement_credential_recovers_both_call
     assert_eq!(error.code(), "ingestion_unauthorized");
 
     let old_authority = authority_client(old);
+    let direct_status = direct_claim_status(&credential("first"), "4").await;
+    println!(
+        "revoked issued credential direct claim HTTP status: {}",
+        direct_status.as_u16()
+    );
+    assert_eq!(direct_status, StatusCode::UNAUTHORIZED);
     let old_claim = old_authority
         .claim(message_claim("4"))
         .await
         .expect_err("revoked issued credential must fail claim authorization");
-    println!("issued Rust claim after Platform revocation: {old_claim:?}");
+    println!("issued Rust claim after Platform revocation: Uncertain");
     assert_eq!(old_claim, AuthorityClaimFailure::Uncertain);
 
     let replacement = credential("second");
@@ -129,14 +188,14 @@ async fn revoked_credential_pauses_and_replacement_credential_recovers_both_call
         .deliver(&batch(&env("T11_RUST_BATCH_THREE")))
         .await
         .expect("replacement credential should recover ingestion");
-    println!("replacement Rust ingestion: {replacement_delivery:?}");
+    println!("replacement Rust ingestion: Accepted");
     assert_eq!(replacement_delivery, Delivery::Accepted);
 
     let replacement_claim = authority_client(replacement)
         .claim(message_claim("4"))
         .await
         .expect("replacement credential should recover claim authorization");
-    println!("replacement Rust claim: {replacement_claim:?}");
+    println!("replacement Rust claim: Allowed");
     assert!(matches!(
         replacement_claim,
         AuthorityClaimOutcome::Allowed { .. }
