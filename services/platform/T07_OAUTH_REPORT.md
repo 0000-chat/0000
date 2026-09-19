@@ -41,7 +41,7 @@ provider adoption, consumer integration, or full Platform MVP acceptance.
 
 ## Focused Worker/D1 evidence
 
-`worker/test/oauth-refresh.test.ts` contains four actual Worker/D1 tests:
+`worker/test/oauth-refresh.test.ts` contains eleven actual Worker/D1 tests:
 
 - A confidential `client_secret_post` client completes PKCE and explicit
   `offline_access` consent, publishes an exact root family and credential,
@@ -49,11 +49,28 @@ provider adoption, consumer integration, or full Platform MVP acceptance.
   the original flow and browser session, rotates three successive times (the
   first after its predecessor access row is expired), rejects each predecessor
   access credential, and terminalizes a replay after deleting the original
-  provider rows. An excess-scope request leaves the active root untouched.
-- A public `none` refresh-enabled client receives a normal access-only response
-  when `offline_access` is omitted: no family is created, no refresh value is
-  returned, and the provider access row has `refreshId = NULL`. A code-only
-  Platform client rejects a refresh request with `unsupported_grant_type`.
+  provider rows. An excess-scope, wrong-resource, wrong-client, wrong-secret
+  and foreign-token request leaves the active root and provider rows untouched.
+- A refresh ledger remains usable after both its predecessor provider access
+  row and Platform access credential naturally expire; its ledger deadline is
+  asserted to outlive the access deadline. A public client without
+  `offline_access` remains access-only, while a code-only client rejects a
+  refresh request before provider handling.
+- Initial publication is exercised with a real `BEFORE INSERT ... RAISE(IGNORE)`
+  family-insert trigger and a separate partial-credential trigger. Both leave
+  no family, lineage, credential or live provider rows. The refresh fence also
+  covers one concurrent predecessor winner, an exact pending duplicate, and a
+  consumed ancestor replay while a later token is pending.
+- Provider and Platform successor insert failures target the actual replacement
+  rows and assert their exact injected errors. A mapped successor is withheld
+  when service authority changes after the publication batch, and the family
+  is quarantined while a sibling installation remains usable after restoration.
+- Current-authority checks independently cover organization suspension,
+  catalog narrowing, consent deletion/restoration, user disablement and
+  original-membership removal/rejoin; each begins from a fresh positive
+  issuance where needed and leaves the predecessor unrevoked. A failed
+  quarantine remains durably pending through a fresh D1 session and denies
+  retries without reviving the predecessor.
 - Real D1 `BEFORE INSERT` triggers abort the exact provider successor insert
   (`t07_provider_refresh_insert_failure`) and the exact Platform successor
   mapping (`t07_platform_mapping_insert_failure`). Both routes return 503;
@@ -64,8 +81,8 @@ provider adoption, consumer integration, or full Platform MVP acceptance.
   provider-row fields, reject machine bearer and untrusted-origin requests,
   revoke the family and installation durably, and remain idempotent on repeat.
 
-The focused run passed `1` file and `4` tests. The full Worker/D1 run passed
-`12` files and `36` tests. Provider HTTP in these tests is simulated only at
+The focused run passed `1` file and `11` tests. The full Worker/D1 run passed
+`12` files and `43` tests. Provider HTTP in these tests is simulated only at
 the GitHub social-login boundary; OAuth provider token rows and Platform
 verification are real local Better Auth/D1 rows. Existing non-Platform Better
 Auth provider lifecycle tests remain on their native provider path; Platform
@@ -77,9 +94,10 @@ clients are the refresh-fenced boundary.
   files.
 - `bun run typecheck` passed.
 - `bunx vitest run --config vitest.worker.config.ts worker/test/oauth-refresh.test.ts`
-  passed: 1 file, 4 tests, including the provider and Platform mapping abort
-  triggers above.
-- `bunx vitest run --config vitest.worker.config.ts` passed: 12 files, 36
+  passed: 1 file, 11 tests, including the concurrent fence, initial
+  zero-row/partial publication, late authority and exact provider/Platform
+  mapping abort triggers above.
+- `bunx vitest run --config vitest.worker.config.ts` passed: 12 files, 43
   tests.
 - `bun run test:restart` passed the Miniflare D1 runtime restart persistence
   probe.
