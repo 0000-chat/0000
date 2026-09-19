@@ -3712,7 +3712,7 @@ export default {
             pathname === "/api/auth/oauth2/consent" && request.method === "POST"
               ? await normalizeOAuthConsentRequest(request)
               : { request, browserForm: false };
-          const auth = createAuth(env, {
+          const authOptions = {
             oauthPlatform: true,
             oauthGrantTypes: oauthState.refreshEnabled
               ? ["authorization_code", "refresh_token"]
@@ -3722,7 +3722,8 @@ export default {
               env.IDENTITY_DB.withSession("first-primary"),
               oauthState.flowId,
             ),
-          });
+          } as const;
+          let auth = createAuth(env, authOptions);
           let refreshPreparation: OAuthRefreshPreparation = {
             kind: "not_refresh",
           };
@@ -3740,6 +3741,12 @@ export default {
             if (refreshPreparation.kind === "response") {
               return refreshPreparation.response;
             }
+          }
+          if (refreshPreparation.kind === "refresh") {
+            auth = createAuth(env, {
+              ...authOptions,
+              oauthRefreshInstallationId: refreshPreparation.installationId,
+            });
           }
           let authResponse: Response;
           try {

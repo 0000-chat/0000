@@ -1,6 +1,11 @@
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import { APIError, getOAuthState } from "better-auth/api";
-import { betterAuth } from "better-auth";
+import {
+  betterAuth,
+  type DBAdapter,
+  type DBTransactionAdapter,
+  type Where,
+} from "better-auth";
 import { drizzle } from "drizzle-orm/d1";
 import {
   authSchema,
@@ -51,6 +56,73 @@ export const disabledOrganizationPaths = [
   "/organization/remove-team-member",
   "/delete-user",
 ];
+
+function scopedOAuthWhere(
+  model: string,
+  where: Where[] | undefined,
+  installationId: string,
+): Where[] | undefined {
+  if (model !== "oauthAccessToken" && model !== "oauthRefreshToken") {
+    return where;
+  }
+  return [
+    ...(where ?? []),
+    {
+      field: "referenceId",
+      operator: "eq",
+      value: installationId,
+      connector: "AND",
+    },
+  ];
+}
+
+function scopedFindMany(
+  findMany: DBTransactionAdapter["findMany"],
+  installationId: string,
+): DBTransactionAdapter["findMany"] {
+  return <T>(data: Parameters<DBTransactionAdapter["findMany"]>[0]) =>
+    findMany<T>({
+      ...data,
+      where: scopedOAuthWhere(data.model, data.where, installationId),
+    });
+}
+
+function scopedDeleteMany(
+  deleteMany: DBTransactionAdapter["deleteMany"],
+  installationId: string,
+): DBTransactionAdapter["deleteMany"] {
+  return (data) =>
+    deleteMany({
+      ...data,
+      where: scopedOAuthWhere(data.model, data.where, installationId) ?? [],
+    });
+}
+
+function scopedOAuthTransactionAdapter(
+  adapter: DBTransactionAdapter,
+  installationId: string,
+): DBTransactionAdapter {
+  return {
+    ...adapter,
+    findMany: scopedFindMany(adapter.findMany, installationId),
+    deleteMany: scopedDeleteMany(adapter.deleteMany, installationId),
+  };
+}
+
+function scopedOAuthAdapter(
+  adapter: DBAdapter,
+  installationId: string,
+): DBAdapter {
+  return {
+    ...adapter,
+    findMany: scopedFindMany(adapter.findMany, installationId),
+    deleteMany: scopedDeleteMany(adapter.deleteMany, installationId),
+    transaction: (callback) =>
+      adapter.transaction((transaction) =>
+        callback(scopedOAuthTransactionAdapter(transaction, installationId)),
+      ),
+  };
+}
 
 function requiresSignupInvitation(env: Cloudflare.Env): boolean {
   const deploymentMode: string = env.PLATFORM_DEPLOYMENT_MODE;
@@ -109,9 +181,24 @@ export function createAuth(
     oauthPostLogin?: PlatformOAuthPostLogin;
     oauthGrantTypes?: PlatformOAuthGrantTypes;
     oauthScopes?: PlatformOAuthScopes;
+    oauthRefreshInstallationId?: string;
   } = {},
 ) {
   const schema = authSchema;
+  const oauthRefreshInstallationId = options.oauthRefreshInstallationId;
+  const databaseFactory = drizzleAdapter(drizzle(env.IDENTITY_DB, { schema }), {
+    provider: "sqlite",
+    schema,
+    camelCase: true,
+    transaction: false,
+  });
+  const database = oauthRefreshInstallationId
+    ? (authOptions: Parameters<typeof databaseFactory>[0]) =>
+        scopedOAuthAdapter(
+          databaseFactory(authOptions),
+          oauthRefreshInstallationId,
+        )
+    : databaseFactory;
   let pendingSocialBinding: ReturnType<typeof pendingSocialBindingFromSource> =
     null;
   const recoverSocialProfile = async (
@@ -163,12 +250,7 @@ export function createAuth(
       },
     },
     session: { freshAge: PLATFORM_SESSION_FRESH_AGE_SECONDS },
-    database: drizzleAdapter(drizzle(env.IDENTITY_DB, { schema }), {
-      provider: "sqlite",
-      schema,
-      camelCase: true,
-      transaction: false,
-    }),
+    database,
     databaseHooks: {
       user: {
         create: {

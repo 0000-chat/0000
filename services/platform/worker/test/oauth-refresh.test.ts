@@ -237,6 +237,7 @@ type RefreshPhaseCallbacks = {
   onPendingFence?: () => Promise<void>;
   onProviderRowsRead?: () => Promise<void>;
   onPublicationRead?: () => Promise<void>;
+  onDatabaseError?: (error: unknown) => void;
 };
 
 function phaseRefreshDatabase(
@@ -248,6 +249,9 @@ function phaseRefreshDatabase(
   let providerRowsReadComplete = false;
   let publicationReadComplete = false;
   const originals = new WeakMap<object, D1PreparedStatement>();
+  const reportDatabaseError = (error: unknown): void => {
+    callbacks.onDatabaseError?.(error);
+  };
   const wrapStatement = (
     statement: D1PreparedStatement,
     query: string,
@@ -273,10 +277,16 @@ function phaseRefreshDatabase(
           publicationReadComplete = true;
           await callbacks.onPublicationRead?.();
         }
-        const result =
-          columnName === undefined
-            ? await statement.first<T>()
-            : await statement.first<T>(columnName);
+        let result: T | null;
+        try {
+          result =
+            columnName === undefined
+              ? await statement.first<T>()
+              : await statement.first<T>(columnName);
+        } catch (error) {
+          reportDatabaseError(error);
+          throw error;
+        }
         if (isCurrentRefreshRead && result && !currentReadComplete) {
           currentReadComplete = true;
           await callbacks.onCurrentRead?.();
@@ -291,10 +301,30 @@ function phaseRefreshDatabase(
         }
         return result;
       },
-      run: <T = Record<string, unknown>>() => statement.run<T>(),
-      all: <T = Record<string, unknown>>() => statement.all<T>(),
-      raw: <T = unknown[]>(options?: { columnNames?: boolean }) =>
-        statement.raw<T>(options as never),
+      run: async <T = Record<string, unknown>>() => {
+        try {
+          return await statement.run<T>();
+        } catch (error) {
+          reportDatabaseError(error);
+          throw error;
+        }
+      },
+      all: async <T = Record<string, unknown>>() => {
+        try {
+          return await statement.all<T>();
+        } catch (error) {
+          reportDatabaseError(error);
+          throw error;
+        }
+      },
+      raw: async <T = unknown[]>(options?: { columnNames?: boolean }) => {
+        try {
+          return await statement.raw<T>(options as never);
+        } catch (error) {
+          reportDatabaseError(error);
+          throw error;
+        }
+      },
     } as unknown as D1PreparedStatement;
     originals.set(wrapped, statement);
     return wrapped;
@@ -305,12 +335,18 @@ function phaseRefreshDatabase(
         return (query: string) => wrapStatement(target.prepare(query), query);
       }
       if (property === "batch") {
-        return (statements: D1PreparedStatement[]) =>
-          target.batch(
-            statements.map(
-              (statement) => originals.get(statement) ?? statement,
-            ),
-          );
+        return async (statements: D1PreparedStatement[]) => {
+          try {
+            return await target.batch(
+              statements.map(
+                (statement) => originals.get(statement) ?? statement,
+              ),
+            );
+          } catch (error) {
+            reportDatabaseError(error);
+            throw error;
+          }
+        };
       }
       return Reflect.get(target, property, receiver);
     },
@@ -355,18 +391,24 @@ function workerRefreshRaceEnv(
 function workerRefreshPhaseEnv(
   callbacks: RefreshPhaseCallbacks,
 ): Cloudflare.Env {
-  const wrappedDatabase = new Proxy(testEnv.IDENTITY_DB, {
-    get(target, property, receiver) {
-      if (property === "withSession") {
-        return (constraint: unknown) =>
-          phaseRefreshDatabase(
-            target.withSession(constraint as never),
-            callbacks,
-          );
-      }
-      return Reflect.get(target, property, receiver);
+  const wrappedDatabase = new Proxy(
+    phaseRefreshDatabase(
+      testEnv.IDENTITY_DB as unknown as D1DatabaseSession,
+      callbacks,
+    ) as unknown as D1Database,
+    {
+      get(target, property, receiver) {
+        if (property === "withSession") {
+          return (constraint: unknown) =>
+            phaseRefreshDatabase(
+              target.withSession(constraint as never),
+              callbacks,
+            );
+        }
+        return Reflect.get(target, property, receiver);
+      },
     },
-  }) as D1Database;
+  );
   return new Proxy(testEnv, {
     get(target, property, receiver) {
       if (property === "IDENTITY_DB") return wrappedDatabase;
@@ -1360,6 +1402,95 @@ describe("T07 production OAuth refresh lineage", () => {
     });
   });
 
+  it("scopes the factory adapter token operations through transactions", async () => {
+    const suffix = crypto.randomUUID().slice(0, 8);
+    const service = await registerService(testEnv.IDENTITY_DB, {
+      serviceId: `t07-adapter-scope-service-${suffix}`,
+      audience: `https://t07-adapter-scope-${suffix}.0000.test`,
+      capabilities: ["resource:read"],
+    });
+    const user = await signIn();
+    const organization = await organizationId(user.cookies);
+    const client = await provisionTrustedOAuthClient(
+      testEnv.IDENTITY_DB,
+      testEnv.BETTER_AUTH_SECRET,
+      {
+        serviceId: service.serviceId,
+        clientId: `t07-adapter-scope-client-${suffix}`,
+        redirectUri: `https://t07-adapter-scope-client-${suffix}.example.test/callback`,
+        capabilities: ["resource:read"],
+        authMethod: "none",
+        refreshEnabled: true,
+      },
+    );
+    const issued = await issueHarnessFlow({
+      cookies: user.cookies,
+      userId: user.userId,
+      organizationId: organization,
+      client,
+      audience: service.audience,
+      offline: true,
+    });
+    const sibling = await issueHarnessFlow({
+      cookies: user.cookies,
+      userId: user.userId,
+      organizationId: organization,
+      client,
+      audience: service.audience,
+      offline: true,
+    });
+    const scopedAuth = createAuth(testEnv, {
+      oauthPlatform: true,
+      oauthGrantTypes: ["authorization_code", "refresh_token"],
+      oauthScopes: ["resource:read", "offline_access"],
+      oauthRefreshInstallationId: issued.installationId,
+    });
+    const context = await scopedAuth.$context;
+    const tokenWhere = [
+      { field: "clientId", value: client.clientId },
+      { field: "userId", value: user.userId },
+    ];
+    const directRows = await context.adapter.findMany<{
+      referenceId: string;
+    }>({
+      model: "oauthRefreshToken",
+      where: tokenWhere,
+    });
+    expect(directRows).toHaveLength(1);
+    expect(directRows[0]?.referenceId).toBe(issued.installationId);
+    const transactionRows = await context.adapter.transaction((transaction) =>
+      transaction.findMany<{ referenceId: string }>({
+        model: "oauthRefreshToken",
+        where: tokenWhere,
+      }),
+    );
+    expect(transactionRows).toHaveLength(1);
+    expect(transactionRows[0]?.referenceId).toBe(issued.installationId);
+    const siblingDelete = await context.adapter.transaction((transaction) =>
+      transaction.deleteMany({
+        model: "oauthRefreshToken",
+        where: [{ field: "referenceId", value: sibling.installationId }],
+      }),
+    );
+    expect(siblingDelete).toBe(0);
+    const siblingRefresh = await SELF.fetch(
+      "http://localhost/api/auth/oauth2/token",
+      {
+        method: "POST",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          grant_type: "refresh_token",
+          client_id: client.clientId,
+          refresh_token: sibling.refreshToken!,
+          resource: service.audience,
+        }),
+      },
+    );
+    expect(siblingRefresh.status, await siblingRefresh.clone().text()).toBe(
+      200,
+    );
+  });
+
   it("rejects malformed refresh presentations before provider cleanup", async () => {
     const suffix = crypto.randomUUID().slice(0, 8);
     const service = await registerService(testEnv.IDENTITY_DB, {
@@ -1529,6 +1660,19 @@ describe("T07 production OAuth refresh lineage", () => {
       "invalid_request",
     );
     await assertMalformed(
+      await SELF.fetch("http://localhost/api/auth/oauth2/token", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          grant_type: " refresh_token ",
+          client_id: client.clientId,
+          refresh_token: issued.refreshToken,
+          resource: service.audience,
+        }),
+      }),
+      "invalid_request",
+    );
+    await assertMalformed(
       await SELF.fetch(request({ grant_type: " refresh_token " })),
       "invalid_request",
     );
@@ -1652,47 +1796,42 @@ describe("T07 production OAuth refresh lineage", () => {
          SELECT RAISE(ABORT, 't07_provider_refresh_insert_failure');
        END`,
     ).run();
-    let providerTriggerError = "";
-    try {
-      await testEnv.IDENTITY_DB.prepare(
-        `INSERT INTO oauthRefreshToken
-           (id, token, clientId, userId, referenceId, scopes)
-         VALUES (?, ?, ?, ?, ?, '[]')`,
-      )
-        .bind(
-          crypto.randomUUID(),
-          `t07-provider-trigger-probe-${suffix}`,
-          client.clientId,
-          user.userId,
-          issued.installationId,
-        )
-        .run();
-    } catch (error) {
-      providerTriggerError = String(error);
-    }
-    expect(providerTriggerError).toContain(
-      "t07_provider_refresh_insert_failure",
-    );
+    const providerDatabaseErrors: string[] = [];
     let failed: Response;
     try {
-      failed = await SELF.fetch("http://localhost/api/auth/oauth2/token", {
-        method: "POST",
-        headers: { "content-type": "application/x-www-form-urlencoded" },
-        body: new URLSearchParams({
-          grant_type: "refresh_token",
-          client_id: client.clientId,
-          refresh_token: issued.refreshToken!,
-          resource: service.audience,
+      failed = await platformWorker.fetch(
+        new Request("http://localhost/api/auth/oauth2/token", {
+          method: "POST",
+          headers: { "content-type": "application/x-www-form-urlencoded" },
+          body: new URLSearchParams({
+            grant_type: "refresh_token",
+            client_id: client.clientId,
+            refresh_token: issued.refreshToken!,
+            resource: service.audience,
+          }),
         }),
-      });
+        workerRefreshPhaseEnv({
+          onDatabaseError: (error) =>
+            providerDatabaseErrors.push(String(error)),
+        }),
+      );
     } finally {
       await testEnv.IDENTITY_DB.prepare(`DROP TRIGGER "${triggerName}"`).run();
     }
+    expect(providerDatabaseErrors.join("\n")).toContain(
+      "t07_provider_refresh_insert_failure",
+    );
     expect(failed!.status).toBe(503);
-    expect((await failed!.json()) as Record<string, unknown>).toMatchObject({
+    const providerFailureBody = (await failed!.json()) as Record<
+      string,
+      unknown
+    >;
+    expect(providerFailureBody).toMatchObject({
       status: "authority_unavailable",
       error: "temporarily_unavailable",
     });
+    expect(providerFailureBody.access_token).toBeUndefined();
+    expect(providerFailureBody.refresh_token).toBeUndefined();
     const state = await testEnv.IDENTITY_DB.prepare(
       `SELECT f.state AS family_state, i.active,
               t.state AS token_state, COUNT(all_tokens.id) AS token_count
@@ -1733,7 +1872,8 @@ describe("T07 production OAuth refresh lineage", () => {
       offline: true,
     });
     const mappingRoot = await testEnv.IDENTITY_DB.prepare(
-      `SELECT f.id AS family_id, t.id AS token_id
+      `SELECT f.id AS family_id, t.id AS token_id,
+              t.provider_refresh_row_id, t.provider_access_row_id
        FROM platform_oauth_refresh_family AS f
        JOIN platform_oauth_refresh_token AS t ON t.family_id = f.id
        WHERE f.installation_id = ? AND t.sequence = 0`,
@@ -1742,6 +1882,8 @@ describe("T07 production OAuth refresh lineage", () => {
       .first<{
         family_id: string;
         token_id: string;
+        provider_refresh_row_id: string;
+        provider_access_row_id: string;
       }>();
     expect(mappingRoot).toBeTruthy();
     const mappingTriggerName = `t07_abort_mapping_${suffix}`;
@@ -1755,41 +1897,11 @@ describe("T07 production OAuth refresh lineage", () => {
          SELECT RAISE(ABORT, 't07_platform_mapping_insert_failure');
        END`,
     ).run();
-    let mappingTriggerError = "";
-    try {
-      await testEnv.IDENTITY_DB.prepare(
-        `INSERT INTO platform_oauth_refresh_token
-         (id, family_id, installation_id, provider_refresh_row_id,
-          provider_refresh_token_hash, provider_access_row_id, predecessor_id,
-          predecessor_consumption_nonce, sequence, resources, capabilities,
-          expires_at, state, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, '[]', '[]', ?, 'issued', ?, ?)`,
-      )
-        .bind(
-          crypto.randomUUID(),
-          mappingRoot!.family_id,
-          mappingIssued.installationId,
-          crypto.randomUUID(),
-          `t07-mapping-trigger-probe-${suffix}`,
-          crypto.randomUUID(),
-          crypto.randomUUID(),
-          crypto.randomUUID(),
-          Date.now() + 60_000,
-          Date.now(),
-          Date.now(),
-        )
-        .run();
-    } catch (error) {
-      mappingTriggerError = String(error);
-    }
-    expect(mappingTriggerError).toContain(
-      "t07_platform_mapping_insert_failure",
-    );
+    const mappingDatabaseErrors: string[] = [];
     let mappingFailed: Response;
     try {
-      mappingFailed = await SELF.fetch(
-        "http://localhost/api/auth/oauth2/token",
-        {
+      mappingFailed = await platformWorker.fetch(
+        new Request("http://localhost/api/auth/oauth2/token", {
           method: "POST",
           headers: { "content-type": "application/x-www-form-urlencoded" },
           body: new URLSearchParams({
@@ -1798,20 +1910,30 @@ describe("T07 production OAuth refresh lineage", () => {
             refresh_token: mappingIssued.refreshToken!,
             resource: service.audience,
           }),
-        },
+        }),
+        workerRefreshPhaseEnv({
+          onDatabaseError: (error) => mappingDatabaseErrors.push(String(error)),
+        }),
       );
     } finally {
       await testEnv.IDENTITY_DB.prepare(
         `DROP TRIGGER "${mappingTriggerName}"`,
       ).run();
     }
+    expect(mappingDatabaseErrors.join("\n")).toContain(
+      "t07_platform_mapping_insert_failure",
+    );
     expect(mappingFailed!.status).toBe(503);
-    expect(
-      (await mappingFailed!.json()) as Record<string, unknown>,
-    ).toMatchObject({
+    const mappingFailureBody = (await mappingFailed!.json()) as Record<
+      string,
+      unknown
+    >;
+    expect(mappingFailureBody).toMatchObject({
       status: "authority_unavailable",
       error: "temporarily_unavailable",
     });
+    expect(mappingFailureBody.access_token).toBeUndefined();
+    expect(mappingFailureBody.refresh_token).toBeUndefined();
     const mappingState = await testEnv.IDENTITY_DB.prepare(
       `SELECT f.state AS family_state, i.active,
               t.state AS token_state, COUNT(all_tokens.id) AS token_count
@@ -1842,16 +1964,37 @@ describe("T07 production OAuth refresh lineage", () => {
       .first<{ count: number }>();
     expect(mappingSuccessor?.count).toBe(1);
     const mappingProviderRows = await testEnv.IDENTITY_DB.prepare(
-      `SELECT COUNT(*) AS count,
-              SUM(CASE WHEN revoked IS NULL THEN 1 ELSE 0 END) AS active
-       FROM oauthRefreshToken WHERE clientId = ? AND referenceId = ?`,
+      `SELECT refresh.id AS refresh_id,
+              refresh.revoked AS refresh_revoked,
+              access.id AS access_id,
+              access.revoked AS access_revoked
+       FROM oauthRefreshToken AS refresh
+       JOIN oauthAccessToken AS access ON access.refreshId = refresh.id
+       WHERE refresh.clientId = ? AND refresh.referenceId = ?
+         AND access.clientId = ? AND access.referenceId = ?
+         AND refresh.id <> ? AND access.id <> ?`,
     )
-      .bind(client.clientId, mappingIssued.installationId)
-      .first<{
-        count: number;
-        active: number;
+      .bind(
+        client.clientId,
+        mappingIssued.installationId,
+        client.clientId,
+        mappingIssued.installationId,
+        mappingRoot!.provider_refresh_row_id,
+        mappingRoot!.provider_access_row_id,
+      )
+      .all<{
+        refresh_id: string;
+        refresh_revoked: number | null;
+        access_id: string;
+        access_revoked: number | null;
       }>();
-    expect(mappingProviderRows).toEqual({ count: 2, active: 0 });
+    expect(mappingProviderRows.results).toHaveLength(1);
+    expect(mappingProviderRows.results[0]).toEqual({
+      refresh_id: expect.any(String),
+      refresh_revoked: expect.any(Number),
+      access_id: expect.any(String),
+      access_revoked: expect.any(Number),
+    });
   });
 
   it("denies the durable pending fence and terminalizes an ancestor replay during a later rotation", async () => {
@@ -2210,7 +2353,7 @@ describe("T07 production OAuth refresh lineage", () => {
     );
   });
 
-  it("withholds provider completion after a pending family is terminalized", async () => {
+  it("terminalizes a consumed family through an ancestor replay before provider delivery", async () => {
     const suffix = crypto.randomUUID().slice(0, 8);
     const service = await registerService(testEnv.IDENTITY_DB, {
       serviceId: `t07-before-provider-service-${suffix}`,
@@ -2247,60 +2390,10 @@ describe("T07 production OAuth refresh lineage", () => {
       audience: service.audience,
       offline: true,
     });
-    let terminalized = false;
-    const envWithBarrier = workerRefreshPhaseEnv({
-      onPendingFence: async () => {
-        const pending = await testEnv.IDENTITY_DB.prepare(
-          `SELECT f.id AS family_id, f.pending_token_id,
-                  f.pending_consumption_nonce,
-                  t.provider_refresh_row_id, t.provider_access_row_id
-           FROM platform_oauth_refresh_family AS f
-           JOIN platform_oauth_refresh_token AS t ON t.id = f.pending_token_id
-           WHERE f.state = 'pending' AND f.pending_token_id IS NOT NULL
-             AND f.pending_consumption_nonce IS NOT NULL
-             AND f.installation_id = ?`,
-        )
-          .bind(issued.installationId)
-          .first<{
-            family_id: string;
-            pending_token_id: string;
-            pending_consumption_nonce: string;
-            provider_refresh_row_id: string;
-            provider_access_row_id: string;
-          }>();
-        expect(pending).toBeTruthy();
-        const now = Date.now();
-        await testEnv.IDENTITY_DB.batch([
-          testEnv.IDENTITY_DB.prepare(
-            `UPDATE platform_oauth_refresh_family
-             SET state = 'revoked', pending_token_id = NULL,
-                 pending_consumption_nonce = NULL, revoked_at = ?,
-                 revoked_reason = 't07_after_consume_terminalization', updated_at = ?
-             WHERE id = ? AND state = 'pending'`,
-          ).bind(now, now, pending!.family_id),
-          testEnv.IDENTITY_DB.prepare(
-            `UPDATE platform_oauth_refresh_token
-             SET state = 'replayed', replayed_at = ?,
-                 revoked_reason = 't07_after_consume_terminalization', updated_at = ?
-             WHERE id = ? AND family_id = ? AND state = 'pending'`,
-          ).bind(now, now, pending!.pending_token_id, pending!.family_id),
-          testEnv.IDENTITY_DB.prepare(
-            `UPDATE platform_credential
-             SET revoked_at = ?, revoked_reason = 't07_after_consume_terminalization'
-             WHERE oauth_refresh_token_id = ?`,
-          ).bind(now, pending!.pending_token_id),
-          testEnv.IDENTITY_DB.prepare(
-            `UPDATE platform_oauth_installation
-             SET active = 0, revoked_at = COALESCE(revoked_at, ?)
-             WHERE id = (SELECT installation_id
-                         FROM platform_oauth_refresh_family WHERE id = ?)`,
-          ).bind(now, pending!.family_id),
-        ]);
-        terminalized = true;
-      },
-    });
-    const response = await platformWorker.fetch(
-      new Request("http://localhost/api/auth/oauth2/token", {
+    expect(sibling.refreshToken).toBeTruthy();
+    const firstRotation = await SELF.fetch(
+      "http://localhost/api/auth/oauth2/token",
+      {
         method: "POST",
         headers: { "content-type": "application/x-www-form-urlencoded" },
         body: new URLSearchParams({
@@ -2309,10 +2402,41 @@ describe("T07 production OAuth refresh lineage", () => {
           refresh_token: issued.refreshToken!,
           resource: service.audience,
         }),
-      }),
+      },
+    );
+    expect(firstRotation.status, await firstRotation.clone().text()).toBe(200);
+    const successor = (await firstRotation.json()) as {
+      access_token: string;
+      refresh_token: string;
+    };
+    const refreshRequest = (refreshToken: string) =>
+      new Request("http://localhost/api/auth/oauth2/token", {
+        method: "POST",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          grant_type: "refresh_token",
+          client_id: client.clientId,
+          refresh_token: refreshToken,
+          resource: service.audience,
+        }),
+      });
+    let ancestorReplay: Response | null = null;
+    const envWithBarrier = workerRefreshPhaseEnv({
+      onPendingFence: async () => {
+        ancestorReplay = await SELF.fetch(refreshRequest(issued.refreshToken!));
+      },
+    });
+    const response = await platformWorker.fetch(
+      refreshRequest(successor.refresh_token),
       envWithBarrier,
     );
-    expect(terminalized).toBe(true);
+    expect(ancestorReplay).toBeTruthy();
+    const replay = ancestorReplay!;
+    expect(replay.status, await replay.clone().text()).toBe(400);
+    const replayBody = (await replay.json()) as Record<string, unknown>;
+    expect(replayBody).toMatchObject({ error: "invalid_grant" });
+    expect(replayBody.access_token).toBeUndefined();
+    expect(replayBody.refresh_token).toBeUndefined();
     expect(response.status, await response.clone().text()).toBe(503);
     const body = (await response.json()) as Record<string, unknown>;
     expect(body).toMatchObject({
@@ -2322,35 +2446,44 @@ describe("T07 production OAuth refresh lineage", () => {
     expect(body.access_token).toBeUndefined();
     expect(body.refresh_token).toBeUndefined();
     const terminal = await testEnv.IDENTITY_DB.prepare(
-      `SELECT i.active, f.state AS family_state, t.state AS token_state,
+      `SELECT i.active, f.state AS family_state,
+              root.state AS root_state, successor.state AS successor_state,
               COUNT(all_tokens.id) AS token_count,
+              SUM(CASE WHEN all_tokens.sequence > 0
+                        AND all_tokens.state = 'issued' THEN 1 ELSE 0 END)
+                AS live_descendant,
               (SELECT COUNT(*) FROM oauthAccessToken
                WHERE referenceId = i.id AND revoked IS NULL) AS live_access,
               (SELECT COUNT(*) FROM oauthRefreshToken
                WHERE referenceId = i.id AND revoked IS NULL) AS live_refresh
        FROM platform_oauth_installation AS i
        JOIN platform_oauth_refresh_family AS f ON f.installation_id = i.id
-       JOIN platform_oauth_refresh_token AS t
-         ON t.id = f.pending_token_id OR
-            (t.family_id = f.id AND t.sequence = 0)
+       JOIN platform_oauth_refresh_token AS root
+         ON root.family_id = f.id AND root.sequence = 0
+       LEFT JOIN platform_oauth_refresh_token AS successor
+         ON successor.family_id = f.id AND successor.sequence = 1
        JOIN platform_oauth_refresh_token AS all_tokens ON all_tokens.family_id = f.id
        WHERE i.id = ?
-       GROUP BY i.id, i.active, f.state, t.state`,
+       GROUP BY i.id, i.active, f.state, root.state, successor.state`,
     )
       .bind(issued.installationId)
       .first<{
         active: number;
         family_state: string;
-        token_state: string;
+        root_state: string;
+        successor_state: string | null;
         token_count: number;
+        live_descendant: number;
         live_access: number;
         live_refresh: number;
       }>();
     expect(terminal).toEqual({
       active: 0,
       family_state: "revoked",
-      token_state: "replayed",
-      token_count: 1,
+      root_state: "replayed",
+      successor_state: "revoked",
+      token_count: 2,
+      live_descendant: 0,
       live_access: 0,
       live_refresh: 0,
     });
@@ -2370,6 +2503,12 @@ describe("T07 production OAuth refresh lineage", () => {
     expect(siblingRefresh.status, await siblingRefresh.clone().text()).toBe(
       200,
     );
+    const siblingBody = (await siblingRefresh.json()) as Record<
+      string,
+      unknown
+    >;
+    expect(siblingBody.access_token).toEqual(expect.any(String));
+    expect(siblingBody.refresh_token).toEqual(expect.any(String));
   });
 
   it("withholds a mapped successor when replay wins before delivery", async () => {

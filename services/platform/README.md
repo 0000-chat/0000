@@ -60,8 +60,10 @@ confirmed defect. Limits remain per-location and permissive; private Cloud
 configuration publication remains T15. Communicator integration remains T11.
 [T07_OAUTH_REPORT.md](T07_OAUTH_REPORT.md) records the bounded trusted-client
 refresh rotation, replay protection and installation-control implementation.
-T07 remains subject to parent review and aggregate integration. Its report
-records the current local evidence; external-client adoption remains separate.
+The T07 branch's local checks pass twelve Worker/D1 files and forty-nine tests,
+formatting, typecheck and restart persistence. T07 remains subject to parent
+review and aggregate integration. Provider HTTP remains simulated; these checks
+do not establish external-client adoption.
 The full MVP is not implemented or accepted, and these reports do not establish
 production readiness.
 

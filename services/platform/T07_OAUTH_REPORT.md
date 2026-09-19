@@ -1,6 +1,6 @@
 # T07 refresh rotation and installation report
 
-Date: 2026-09-19. This report records the bounded T07 implementation on
+Date: 2026-09-20. This report records the bounded T07 implementation on
 `codex/platform-t07`, based on the accepted T06 Platform boundary. It covers
 explicitly trusted personal-harness OAuth clients. It does not claim external
 provider adoption, consumer integration, or full Platform MVP acceptance.
@@ -34,13 +34,17 @@ provider adoption, consumer integration, or full Platform MVP acceptance.
 - The refresh fence is independent of the original OAuth flow and installation
   deadline. A live family remains refreshable after those initial records expire,
   subject to the provider refresh, Platform family and current-authority
-  limits. Platform clients reject JSON refresh bodies and noncanonical padded
-  `grant_type` values before Better Auth can perform broad provider-family
-  cleanup.
-- Consumed ancestors remain recognizable after provider-row deletion. A replay
-  terminalizes only its installation family and descendants; a duplicate of
-  the exact pending token receives a 503 fence response. Access credentials and
-  introspection use the active effective lineage and current service catalog.
+  limits. Platform clients reject JSON refresh bodies, including padded
+  `grant_type` values, and noncanonical padded form values before Better Auth
+  can perform broad provider-family cleanup.
+- Successful Platform-prepared refreshes use a request-scoped Better Auth
+  adapter whose `findMany` and `deleteMany` operations on provider access and
+  refresh rows require the immutable ledger installation reference, including
+  inside transaction callbacks. Consumed ancestors remain recognizable after
+  provider-row deletion. A replay terminalizes only its installation family and
+  descendants; a duplicate of the exact pending token receives a 503 fence
+  response. Access credentials and introspection use the active effective
+  lineage and current service catalog.
 - Account HTML and same-origin session routes list installation metadata without
   secrets or provider IDs and provide an idempotent terminal revoke. Machine
   bearer requests are denied. Organization owners/admins can manage current
@@ -49,7 +53,7 @@ provider adoption, consumer integration, or full Platform MVP acceptance.
 
 ## Focused Worker/D1 evidence
 
-`worker/test/oauth-refresh.test.ts` contains sixteen actual Worker/D1 tests:
+`worker/test/oauth-refresh.test.ts` contains seventeen actual Worker/D1 tests:
 
 - A confidential `client_secret_post` client completes PKCE and explicit
   `offline_access` consent, publishes an exact root family and credential,
@@ -72,10 +76,13 @@ provider adoption, consumer integration, or full Platform MVP acceptance.
   access credential and protected-resource verification are denied during that
   pending window.
 - Provider and Platform successor insert failures target the exact installation
-  and family rows, assert the injected trigger text with isolated D1 probes,
-  and assert route-specific 503 bodies plus unchanged one-row lineage. A
-  mapped successor is withheld when an ancestor replay wins after provider
-  rows exist but before Platform mapping; the late provider rows are revoked.
+  and family rows, capture the injected trigger text through a bounded D1 proxy
+  on the tested Worker route, and assert route-specific 503 bodies without
+  either response token field plus unchanged one-row lineage. The mapping case
+  queries the exact returned provider access and refresh rows and proves both
+  are revoked. A mapped successor is withheld when an ancestor replay wins
+  after provider rows exist but before Platform mapping; the late provider rows
+  are revoked.
 - Current-authority checks independently cover organization suspension,
   catalog narrowing, consent deletion/restoration, user disablement and
   original-membership removal/rejoin; each begins from a fresh positive
@@ -91,8 +98,12 @@ provider adoption, consumer integration, or full Platform MVP acceptance.
   the winning family is quarantined with one token and no released successor.
   The mapping case also revokes both exact returned provider rows, leaving no
   active provider descendant.
-- A malformed JSON refresh, padded form `grant_type`, duplicate scope and
-  invalid capability scope are each rejected without changing the consumed
+- The factory-provided request-scoped adapter returns only the selected
+  installation's provider refresh rows from direct and transaction reads, and
+  a transaction delete targeting a sibling returns zero while the sibling
+  remains refreshable.
+- A malformed JSON refresh, padded JSON and form `grant_type`, duplicate scope
+  and invalid capability scope are each rejected without changing the consumed
   family or sibling installation. A canonical replay still revokes only its
   bound family, while the sibling remains usable. A refresh succeeds after the
   original flow and installation deadlines are expired, and a family deadline
@@ -102,15 +113,17 @@ provider adoption, consumer integration, or full Platform MVP acceptance.
   removal/rejoin at the joined-read, pending-fence, provider-row-to-mapping and
   publication authority barriers. Each route returns a structured 503 without
   token fields and leaves no usable descendant; positive controls and mutation
-  restoration keep the cases independent. A post-consume terminalization
-  barrier resumes the real provider route and confirms provider completion and
-  mapping cannot release a secret or a live provider row.
+  restoration keep the cases independent. The real Worker route rotates once,
+  pauses the successor after the consume fence, replays the original ancestor
+  through the token endpoint, resumes the provider request and proves both
+  responses omit access and refresh secrets, the target has no live descendant
+  or provider rows, and a sibling installation remains healthy.
 - Browser account controls render installation metadata, omit refresh values and
   provider-row fields, reject machine bearer and untrusted-origin requests,
   revoke the family and installation durably, and remain idempotent on repeat.
 
-The focused run passed `1` file and `16` tests. The full Worker/D1 run passed
-`12` files and `48` tests. Provider HTTP in these tests is simulated only at
+The focused run passed `1` file and `17` tests. The full Worker/D1 run passed
+`12` files and `49` tests. Provider HTTP in these tests is simulated only at
 the GitHub social-login boundary; OAuth provider token rows and Platform
 verification are real local Better Auth/D1 rows. Existing non-Platform Better
 Auth provider lifecycle tests remain on their native provider path; Platform
@@ -121,11 +134,11 @@ clients are the refresh-fenced boundary.
 - `sh scripts/format-check .` passed.
 - `bun run typecheck` passed.
 - `bunx vitest run --config vitest.worker.config.ts worker/test/oauth-refresh.test.ts`
-  passed: 1 file, 16 tests, including the full-route concurrent fence,
+  passed: 1 file, 17 tests, including the full-route concurrent fence,
   initial zero-row/partial publication, pending ancestor replay, current-read
-  CAS, post-consume/provider completion barrier, late authority barriers and
-  exact provider/Platform mapping abort triggers above.
-- `bunx vitest run --config vitest.worker.config.ts` passed: 12 files, 48
+  CAS, request-scoped adapter transaction isolation, late authority barriers
+  and exact provider/Platform mapping abort triggers above.
+- `bunx vitest run --config vitest.worker.config.ts` passed: 12 files, 49
   tests.
 - `bun run test:restart` passed the Miniflare D1 runtime restart persistence
   probe.

@@ -28,7 +28,13 @@ type AuthLike = {
 
 export type OAuthRefreshPreparation =
   | { kind: "not_refresh" }
-  | { kind: "refresh"; familyId: string; tokenId: string; nonce: string }
+  | {
+      kind: "refresh";
+      familyId: string;
+      tokenId: string;
+      nonce: string;
+      installationId: string;
+    }
   | { kind: "response"; response: Response };
 
 interface RefreshLedgerRow {
@@ -812,7 +818,13 @@ export async function prepareOAuthRefresh(
       ),
     };
   }
-  return { kind: "refresh", familyId: row.family_id, tokenId: row.id, nonce };
+  return {
+    kind: "refresh",
+    familyId: row.family_id,
+    tokenId: row.id,
+    nonce,
+    installationId: row.installation_id,
+  };
 }
 
 function jsonAuthorityUnavailable(description: string): Response {
