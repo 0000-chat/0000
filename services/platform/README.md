@@ -33,7 +33,12 @@ T03 aggregate checks passed at `c51d285`; T04 checks passed at `dc30cd4`.
 reviewed reconnect fixture, integrated and verified at `166e54d`.
 [T06_OAUTH_REPORT.md](T06_OAUTH_REPORT.md) records the bounded code-only
 personal-harness OAuth installation flow and its Worker/D1 evidence. T07
-refresh rotation and installation revocation remain open.
+refresh rotation and installation revocation remain open. T06 is reviewed and
+integrated at `86324b0`; combined checks pass eleven Worker/D1 files, thirty-two
+tests, formatting/typecheck and restart persistence. Independent browser
+approve/deny and trusted CLI rollback checks pass. Final review's login-error
+retry regression is corrected and independently verified. Provider HTTP remains
+simulated; these checks do not establish external-client adoption.
 The full MVP is not implemented or accepted, and these reports do not establish
 production readiness or consumer adoption.
 

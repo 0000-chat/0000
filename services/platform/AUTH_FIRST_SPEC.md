@@ -355,9 +355,10 @@ alone:
   tokens. The pinned callback assigns `idToken` directly, and T02's test
   asserts only that the stored Google access token differs from its synthetic
   raw value. OAuth server access tokens are configured as opaque and hashed,
-  but are not yet normalized through `/internal/v1/authenticate` or bound to a
-  Platform installation. T06/T07 must resolve that seam without caller-supplied
-  authority.
+  and T06 now normalizes code-issued access through `/internal/v1/authenticate`
+  with an exact Platform installation and provider-row binding. Current
+  membership, client, service, catalog and consent are checked without
+  caller-supplied authority. T07 refresh lifecycle remains outstanding.
 - T05 exercises organization-owned agent creation, stable identity across two
   service audiences, live grant and agent lifecycle checks, one-time opaque
   credential issue/rotation/revocation and creator-departure administration in
@@ -377,7 +378,13 @@ Chromium organization flows. T04 is reviewed, integrated and independently
 verified at `dc30cd4`, including credential and organization browser flows. T05
 is reviewed, integrated and independently verified at `10d31c8`, with bounded
 Worker/D1 agent lifecycle, two-audience and coherent verification evidence.
-Its local credential and registration evidence does not establish deployed
+T06 is reviewed and integrated at `86324b0`: combined checks pass eleven
+Worker/D1 files/thirty-two tests plus restart persistence. Native Chromium
+approve/deny navigation, real CLI transaction rollback and failed-login retry
+are independently verified. The bounded adversarial review found no confirmed
+exploitable defect; its login retry regression was corrected and reviewed.
+Refresh issuance remains disabled until T07 acceptance.
+This local credential and registration evidence does not establish deployed
 provisioning, live provider behavior or consumer
 adoption. The full Platform authentication MVP remains unimplemented until
 every acceptance gate passes. Each report limits its claims to the named flows
