@@ -20,7 +20,7 @@
 | T14 | [#68](https://github.com/0000-chat/0000/issues/68) | Prove reconnect authorization without building offline sync | ready-for-agent |
 | T15 | [#69](https://github.com/0000-chat/0000/issues/69) | Make self-hosted and managed deployment setup reproducible | ready-for-agent |
 
-T01 through T05 are reviewed and verified on the aggregate, most recently at `10d31c8`; T14's focused reconnect proof is accepted at `166e54d`. T02 interrupted-signup recovery remains under review in an isolated worktree. T06 and T08 remain in parent-owned contract preparation; OAuth request-scoped consent binding and guest lifecycle contracts must be settled before dispatch. Slice reports record exact evidence and limits. The ready-for-agent label does not assert completed dependencies or production adoption.
+T01 through T05 are reviewed and verified on the aggregate, most recently at `10d31c8`; T14's focused reconnect proof is accepted at `166e54d`. T02 interrupted-signup recovery remains under review in an isolated worktree. T08's guest lifecycle contract is resolved and implementation dispatched from `10d31c8`; T06 still requires its owned-consent-flow experiment before dispatch. Slice reports record exact evidence and limits. The ready-for-agent label does not assert completed dependencies or production adoption.
 
 ## Existing issue disposition
 
@@ -134,7 +134,7 @@ T01 through T05 are reviewed and verified on the aggregate, most recently at `10
 
 ### T08. Create and renew per-client guest access through the verifier
 
-**Readiness:** T01's owner-attested fixture is reviewed. Parent preparation must settle the shared owner/participant grant lifecycle, issuer provisioning and retry outcomes, then verify the post-T05 boundary before dispatch.
+**Readiness:** Contract resolved and dispatched on `codex/platform-t08` from verified aggregate `10d31c8`. The self-contained brief covers shared guest client, separate control purpose, owner/participant service attestation, nonexpiring grants, atomic renewal/revocation, trusted issuer provisioning and caller migration. Parent baseline passes seven Worker/D1 files/ten tests plus restart and root checks. This slice uses a real resource fixture; msg adoption follows in T09.
 
 **Blocked by (contract):** T01 guest principal, bootstrap purpose/audience and resource-grant exchange; T04 shared verifier.
 
@@ -142,7 +142,7 @@ T01 through T05 are reviewed and verified on the aggregate, most recently at `10
 
 **Existing pattern:** Use the fixture's resource-owner behavior; msg is the real guest consumer in T09.
 
-**Open decisions:** T01's guest exchange result only. The API-key 90-day default must not become an arbitrary guest expiry that strands valid resources or revoke unrelated grants.
+**Open decisions:** None. Guest control can recover a lost renewal response, revoked grant IDs cannot revive, and service ACLs remain final. The API-key 90-day default does not apply to guests or unrelated grants.
 
 **Verification:** The same client resumes access to a still-valid resource after renewal; a different client is not linked; invalid guest proof cannot access the resource. Invalidating one resource grant leaves unrelated guest resources usable.
 
