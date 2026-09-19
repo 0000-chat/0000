@@ -20,7 +20,7 @@
 | T14 | [#68](https://github.com/0000-chat/0000/issues/68) | Prove reconnect authorization without building offline sync | ready-for-agent |
 | T15 | [#69](https://github.com/0000-chat/0000/issues/69) | Make self-hosted and managed deployment setup reproducible | ready-for-agent |
 
-T01 through T05 are reviewed and verified on the aggregate, including T02's recovery follow-up at `54fc212`; T14's focused reconnect proof is accepted at `166e54d`. T08's guest lifecycle contract is resolved and implementation dispatched from `10d31c8`; T06 still requires its owned-consent-flow experiment before dispatch. Slice reports record exact evidence and limits. The ready-for-agent label does not assert completed dependencies or production adoption.
+T01 through T05 are reviewed and verified on the aggregate, including T02's recovery follow-up at `54fc212`; T14's focused reconnect proof is accepted at `166e54d`. T08's guest lifecycle contract is resolved and implementation dispatched from `10d31c8`. T06's isolated consent probe passes at `41cd96f`; production preparation must address the review findings before dispatch. Slice reports record exact evidence and limits. The ready-for-agent label does not assert completed dependencies or production adoption.
 
 ## Existing issue disposition
 
@@ -106,7 +106,7 @@ T01 through T05 are reviewed and verified on the aggregate, including T02's reco
 
 ### T06. Authorize a personal harness with OAuth consent
 
-**Readiness:** T01 findings are reviewed; a later isolated lifecycle probe exercises installation-scoped replay and supported hooks. Per-request auth construction, initial consent/reference binding and concurrent browser-flow isolation still require proof before production dispatch.
+**Readiness:** Isolated probe `41cd96f` proves per-request auth construction, public PKCE consent/reference binding and separate concurrent browser flows; the parent rerun passes one Worker/D1 file with three tests. Independent review confirms the supported integration path but requires conditional current-authority activation, exact selection-race outcomes and rejection of malformed/unbound token responses. Production implementation remains undispatched, pending its complete brief and serialization after T08. The probe is not integrated or accepted as production auth.
 
 **Blocked by (contract):** T01 OAuth feasibility/resource-binding result; T03 current membership; T04 live consumer verification.
 

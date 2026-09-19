@@ -309,6 +309,14 @@ alone:
   concurrent race documented in the pinned source. T06/T07 must add authoritative
   Platform installation/grant checks and prove concurrent replay and revocation
   before OAuth acceptance.
+- Isolated consent probe `41cd96f` adds per-request auth construction, public
+  PKCE, signed flow/reference binding and concurrent organization selection;
+  the parent focused Worker/D1 rerun passes three tests. Independent review
+  requires coherent current-authority predicates during activation, exact
+  selection-race outcomes and fail-closed handling of unbound token responses.
+  The code-exchange response bypasses the pinned provider's after hook, so
+  production needs a Worker response wrapper with complete route coverage.
+  This experiment remains outside the aggregate and does not pass T06/T07.
 - A real Miniflare runtime restart preserves a bounded guest grant and resource
   fixture in persistent D1. Human login/session and social linking work across
   local Worker requests with simulated provider HTTP. T03's local Worker/D1
