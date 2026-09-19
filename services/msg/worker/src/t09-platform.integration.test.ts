@@ -228,8 +228,12 @@ function socketMessage(socket: WebSocketClient): Promise<string> {
 }
 
 test.serial("crosses the actual Platform Worker/D1 and msg Worker/DO boundary", { timeout: 45_000 }, async () => {
+  const t09StartedAt = performance.now();
+  const markT09Phase = (phase: string) => console.info(`[t09-phase] ${phase} ${Math.round(performance.now() - t09StartedAt)}ms`);
+  markT09Phase("start");
   const platformPersistence = await mkdtemp(join(tmpdir(), "platform-t09-d1-"));
   const msgPersistence = await createMsgMiniflareTempDirectory("t09-auth-state");
+  markT09Phase("persistence-ready");
   let platform: Miniflare | undefined;
   let bridge: RuntimeBridge | undefined;
   let firstMsg: Awaited<ReturnType<typeof startMsgMiniflare>> | undefined;
@@ -244,6 +248,7 @@ test.serial("crosses the actual Platform Worker/D1 and msg Worker/DO boundary", 
       allowedCapabilities: ["msg:read", "msg:write", "msg:manage", "msg:operator"],
     };
     const platformScript = await buildPlatformWorker();
+    markT09Phase("platform-bundle-ready");
 
     // The bridge gives the actual Platform Worker a reachable origin so the
     // actual msg workerd runtime can call it through the shared clients.
@@ -261,7 +266,9 @@ test.serial("crosses the actual Platform Worker/D1 and msg Worker/DO boundary", 
       baseUrl: placeholder.baseUrl,
       close: () => new Promise<void>((resolve, reject) => placeholder.server.close((error) => error ? reject(error) : resolve())),
     };
+    markT09Phase("bridge-ready");
     platform = await createPlatformRuntime(platformScript, platformPersistence, bridge.baseUrl);
+    markT09Phase("platform-runtime-ready");
     placeholder.server.removeAllListeners("request");
     placeholder.server.on("request", (request, response) => {
       void (async () => {
@@ -293,6 +300,7 @@ test.serial("crosses the actual Platform Worker/D1 and msg Worker/DO boundary", 
 
     const database = await platform.getD1Database("IDENTITY_DB");
     await applyPlatformMigrations(database);
+    markT09Phase("platform-migrations-ready");
     await registerService(database, {
       serviceId: service.serviceId,
       audience: service.audience,
@@ -328,6 +336,7 @@ test.serial("crosses the actual Platform Worker/D1 and msg Worker/DO boundary", 
       allowedCapabilities: wrongAudienceService.allowedCapabilities,
     };
     const wrongAudienceOperator = await provisionHuman(database, wrongAudienceServiceRegistration, "wrong-audience-t09@example.test");
+    markT09Phase("platform-fixtures-ready");
 
     const msgBindings = {
       MSG_AUTH_REQUIRED: "1",
@@ -348,12 +357,14 @@ test.serial("crosses the actual Platform Worker/D1 and msg Worker/DO boundary", 
       }]),
     };
     firstMsg = await startMsgMiniflare(msgPersistence, TEST_ROOM_LIMITS, { ...msgBindings, MSG_DATA_ENCRYPTION_KEY_V1: "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8" }, false, true);
+    markT09Phase("msg-runtime-ready");
     const creationKey = crypto.randomUUID();
     const cliCookieJar = new PersistentCookieJar({ filePath: join(msgPersistence, "cli-cookies.json"), serviceOrigin: audience });
     const create = await firstMsg.miniflare.dispatchFetch("https://msg.0000.chat/", {
       method: "POST",
       ...roomRequest("", { headers: { "idempotency-key": creationKey }, body: JSON.stringify({ content: "owner", author: "owner", display_name: "Owner", semantic_type: "message" }) }),
     });
+    markT09Phase("first-create-response");
     expect(create.status).toBe(201);
     const createdFromReceipt = await create.clone().json() as { room: { id: string } };
     cliCookieJar.store(`https://msg.0000.chat/${createdFromReceipt.room.id}`, create);
@@ -372,6 +383,7 @@ test.serial("crosses the actual Platform Worker/D1 and msg Worker/DO boundary", 
     expect(cookieValue(ownerCookies, "msg_resource")).not.toBe(cookieValue(cookieHeader(replay), "msg_resource"));
     cliCookieJar.store(`https://msg.0000.chat/${created.room.id}`, replay);
     ownerCookies = mergeCookieHeader(ownerCookies, replay);
+    markT09Phase("creation-replay-proved");
 
     const operatorStatus = await firstMsg.miniflare.dispatchFetch("https://msg.0000.chat/operator/v1/status", {
       headers: { authorization: `Bearer ${allowlistedOperator.credential}`, accept: "application/json" },
@@ -407,6 +419,7 @@ test.serial("crosses the actual Platform Worker/D1 and msg Worker/DO boundary", 
       headers: { authorization: `Bearer ${allowlistedOperator.credential}`, accept: "application/json" },
     });
     expect(revokedOperatorStatus.status).toBe(401);
+    markT09Phase("operator-auth-proved");
 
     const ownerRead = await firstMsg.miniflare.dispatchFetch(`https://msg.0000.chat/${created.room.id}`, roomRequest(ownerCookies));
     expect(ownerRead.status).toBe(200);
@@ -438,6 +451,7 @@ test.serial("crosses the actual Platform Worker/D1 and msg Worker/DO boundary", 
       "SELECT id FROM platform_guest_grant WHERE service_id = ? AND resource_id = ? AND permission_id = 'msg-management' AND revoked_at IS NULL",
     ).bind(service.serviceId, created.room.id).first<{ id: string }>();
     expect(managementGrantAfterRecovery?.id).toBe(managementGrantBeforeRecovery?.id);
+    markT09Phase("guest-management-proved");
 
     const ownerGrant = await database.prepare(
       "SELECT id FROM platform_guest_grant WHERE service_id = ? AND resource_id = ? AND assertion_kind = 'owner' AND revoked_at IS NULL",
@@ -500,6 +514,7 @@ test.serial("crosses the actual Platform Worker/D1 and msg Worker/DO boundary", 
     expect(unrelatedPublic.status).toBe(200);
     const unrelatedParticipant = await firstMsg.miniflare.dispatchFetch(`https://msg.0000.chat/${created.room.id}`, roomRequest(participantCookies));
     expect(unrelatedParticipant.status).toBe(200);
+    markT09Phase("live-and-independent-grants-proved");
 
     await firstMsg.dispose();
     firstMsg = undefined;
@@ -507,6 +522,7 @@ test.serial("crosses the actual Platform Worker/D1 and msg Worker/DO boundary", 
     const restartedParticipant = await secondMsg.miniflare.dispatchFetch(`https://msg.0000.chat/${created.room.id}`, roomRequest(participantCookies));
     expect(restartedParticipant.status).toBe(200);
     expect((await restartedParticipant.json() as { latest_message: number }).latest_message).toBe(4);
+    markT09Phase("restart-proved");
 
     const participantControlBeforeRecovery = cookieValue(participantCliJar.cookieHeader(`https://msg.0000.chat/${created.room.id}`) ?? "", "msg_guest_control");
     expect(participantControlBeforeRecovery).toBeString();
@@ -532,19 +548,27 @@ test.serial("crosses the actual Platform Worker/D1 and msg Worker/DO boundary", 
     participantCliJar.store(`https://msg.0000.chat/${created.room.id}`, new Response(null, { headers: { "set-cookie": "msg_guest_control=invalid-cli-control; Path=/; Secure" } }));
     await expect(joinConversation({ conversationUrl: `https://msg.0000.chat/${created.room.id}`, recover: true, fetch: participantCliFetch })).rejects.toThrow("HTTP 401");
     expect(participantCliJar.cookieHeader(`https://msg.0000.chat/${created.room.id}`)).toContain("msg_guest_control=invalid-cli-control");
+    markT09Phase("cli-recovery-and-revocation-proved");
 
     await platform.dispose();
     platform = undefined;
     const authorityOutage = await secondMsg.miniflare.dispatchFetch(`https://msg.0000.chat/${created.room.id}`, roomRequest(participantCookies));
     expect(authorityOutage.status).toBe(503);
+    markT09Phase("authority-outage-proved");
   } finally {
+    markT09Phase("cleanup-start");
     live?.socket.close();
     await secondMsg?.dispose();
+    markT09Phase("second-msg-disposed");
     await firstMsg?.dispose();
+    markT09Phase("first-msg-disposed");
     await bridge?.close();
+    markT09Phase("bridge-closed");
     await platform?.dispose();
+    markT09Phase("platform-disposed");
     await rm(platformPersistence, { force: true, recursive: true });
     await rm(msgPersistence, { force: true, recursive: true });
     await rm(`${msgPersistence}-d1`, { force: true, recursive: true });
+    markT09Phase("cleanup-complete");
   }
 });
