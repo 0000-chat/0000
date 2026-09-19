@@ -124,6 +124,31 @@ describe("Platform verification client", () => {
     expect(outage.status).toBe("authority_unavailable");
   });
 
+  it("maps a malformed base URL to authority_unavailable", async () => {
+    const fetch = mock(async () => {
+      throw new Error("the malformed endpoint must not be fetched");
+    }) as unknown as typeof globalThis.fetch;
+
+    const authenticated = await createPlatformClient({
+      baseUrl: "not a URL",
+      authority: "platform-deployment",
+      audience: "https://service.0000.test",
+      serviceVerifier: "service-verifier-only",
+      fetch,
+    }).authenticate("end-user-credential");
+    const guest = await createPlatformGuestClient({
+      baseUrl: "not a URL",
+      authority: "platform-deployment",
+      audience: "https://service.0000.test",
+      guestGrantIssuer: "guest-issuer-only",
+      fetch,
+    }).createGuest();
+
+    expect(authenticated).toEqual({ status: "authority_unavailable" });
+    expect(guest).toEqual({ status: "authority_unavailable" });
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
   it("expires a delayed fetch and aborts it without accepting its late success", async () => {
     let resolveFetch!: (response: Response) => void;
     let signal: AbortSignal | undefined;

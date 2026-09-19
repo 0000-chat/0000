@@ -83,6 +83,14 @@ function validateTimeout(timeoutMs: number | undefined): number {
   return value;
 }
 
+function resolveEndpoint(path: string, baseUrl: string): URL | null {
+  try {
+    return new URL(path, baseUrl);
+  } catch {
+    return null;
+  }
+}
+
 function unexpectedRedirect(response: Response, endpoint: URL): boolean {
   if (response.type === "opaqueredirect") return true;
   if (response.status >= 300 && response.status < 400) return true;
@@ -182,8 +190,14 @@ export function createPlatformClient(
   ): Promise<AuthenticationResult> => {
     if (!presentedCredential) return { status: "invalid_credential" };
 
+    const endpoint = resolveEndpoint(
+      "/internal/v1/authenticate",
+      options.baseUrl,
+    );
+    if (!endpoint) return { status: "authority_unavailable" };
+
     const result = await transport(
-      new URL("/internal/v1/authenticate", options.baseUrl),
+      endpoint,
       {
         method: "POST",
         headers: {
@@ -239,7 +253,9 @@ export function createPlatformGuestClient(
     path: string,
     body?: unknown,
   ): Promise<JsonTransportResult> {
-    return transport(new URL(path, options.baseUrl), {
+    const endpoint = resolveEndpoint(path, options.baseUrl);
+    if (!endpoint) return { response: null, value: null };
+    return transport(endpoint, {
       method: "POST",
       headers: {
         authorization: `Bearer ${options.guestGrantIssuer}`,
