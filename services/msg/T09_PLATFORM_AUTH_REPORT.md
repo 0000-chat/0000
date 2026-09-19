@@ -39,9 +39,12 @@ credentials use `msg_management` at `/manage/{room}`. The CLI stores these
 cookies in a private JSON jar with host, path, expiry, and Secure filtering,
 manual redirect handling, and explicit `MSG_SERVICE_ORIGIN` self-hosting. Its
 `wss:` lookup is normalized to HTTPS before matching Secure cookies, and each
-write reloads under a lock and atomically replaces the mode-0600 file so two
-CLI processes merge rather than overwrite each other's state. No Platform
-credential is put in a URL, JavaScript storage, or a message author.
+write reloads under an owner-aware lock and atomically replaces the mode-0600
+file so two CLI processes merge rather than overwrite each other's state. The
+lock records an owner token and PID, waits for a live owner even when its
+metadata is old, removes only dead-owner locks, and releases only when the
+token still belongs to that process. No Platform credential is put in a URL,
+JavaScript storage, or a message author.
 An invalid presented resource cookie remains a denial; an explicit `?recover=1`
 request rechecks the current control and room link before replacing that cookie.
 When the room already has an active local grant for that source, recovery renews
@@ -84,7 +87,7 @@ to read through the same guest's independent `msg-public` grant.
 Commands and results on this branch:
 
 - `bun run check` from `services/msg`: passed the workspace check, 192 Worker
-  tests, 17 tooling tests, 59 CLI tests, build, pack, typecheck, and lint. The
+  tests, 17 tooling tests, 60 CLI tests, build, pack, typecheck, and lint. The
   existing `production-synthetic.ts:142` constant-condition warning remains.
 - `bun test src/t09-platform.integration.test.ts` from `services/msg/worker`:
   passed 1 actual boundary test with 44 assertions, including D1 creation
@@ -96,15 +99,18 @@ Commands and results on this branch:
 - `bun test src/operations.test.ts`:
   passed the guest-scoped D1 operation tests, including the persisted owner
   grant reference.
-- `bun test src/cookie-jar.test.ts` from `services/msg/cli`: passed 6 tests
+- `bun test src/cookie-jar.test.ts` from `services/msg/cli`: passed 7 tests
   covering persistence, path/Secure, redirect, `wss:` lookup, concurrent
-  merge behavior, and separate-process first-use bootstrap overlap.
-- `bun services/msg/worker/scripts/t09-platform-browser-smoke.mjs`: passed the
-  real Chromium bridge against the actual Platform Worker/D1 and msg
-  Worker/DO. It covers owner/participant create, read, post, reload/reconnect,
-  positive management, revocation and live close, denied owner post with
-  visible preserved draft, explicit recovery, and authority outage `503`; no
-  uncaught page errors.
+  merge behavior, separate-process first-use bootstrap overlap, and a delayed
+  live owner whose lock metadata appears stale.
+- `T09_PLAYWRIGHT_MODULE=/path/to/@playwright/test/index.mjs bun
+  services/msg/worker/scripts/t09-platform-browser-smoke.mjs`: passed the real
+  Chromium bridge against the actual Platform Worker/D1 and msg Worker/DO. It
+  covers owner/participant create, read, post, reload/reconnect, positive
+  management, revocation and live close, denied owner post with visible
+  preserved draft, explicit recovery, and authority outage `503`; no uncaught
+  page errors. The browser smoke is an optional harness and takes the
+  installed Playwright module path explicitly.
 - `bun install --frozen-lockfile` and `git diff --check`: passed. The lockfile
   change is limited to msg's two workspace client dependencies.
 

@@ -2,15 +2,18 @@ import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join, resolve } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { createPlatformGuestClient } from "@0000/platform-client";
 import { convertV4MiniflareOptions, Miniflare } from "../../../platform/node_modules/miniflare/dist/src/index.js";
 import { readD1Migrations } from "../../../platform/node_modules/@cloudflare/vitest-plugin/dist/pool/index.mjs";
 import { registerGuestIssuer, registerService } from "../../../platform/src/service-registration";
 import { opaqueSecret } from "../../../platform/src/platform-state";
-import { chromium } from "/home/ubuntu/0000-full/worktrees/platform-mvp/services/communicator/node_modules/.pnpm/@playwright+test@1.62.1/node_modules/@playwright/test/index.mjs";
+
+const playwrightModule = process.env.T09_PLAYWRIGHT_MODULE;
+if (!playwrightModule) throw new Error("Set T09_PLAYWRIGHT_MODULE to the installed @playwright/test module before running the optional T09 browser smoke.");
+const { chromium } = await import(pathToFileURL(resolve(playwrightModule)).href);
 
 import { createMsgMiniflareTempDirectory, startMsgMiniflare, TEST_ROOM_LIMITS } from "../test-fixtures/msg-worker.miniflare-fixture.ts";
 

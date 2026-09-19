@@ -13,6 +13,19 @@ async function temporaryJar(): Promise<{ jar: PersistentCookieJar; filePath: str
   return { filePath, jar: new PersistentCookieJar({ filePath, serviceOrigin: "https://msg.0000.chat" }) };
 }
 
+async function waitForFile(path: string): Promise<void> {
+  const deadline = Date.now() + 2_000;
+  while (Date.now() < deadline) {
+    try {
+      await readFile(path, "utf8");
+      return;
+    } catch {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  }
+  throw new Error(`Timed out waiting for ${path}`);
+}
+
 test("stores host and path scoped cookies without forwarding room credentials", async () => {
   const { jar } = await temporaryJar();
   const response = new Response(null, { headers: [
@@ -118,4 +131,64 @@ test("serializes separate-process first-use bootstrap across request and respons
   expect(control).toBeString();
   expect(firstResource).toBe(control);
   expect(secondResource).toBe(control);
+});
+
+test("does not steal a live owner whose lock looks stale during delayed first use", async () => {
+  const { filePath } = await temporaryJar();
+  const readyPath = `${filePath}.ready`;
+  const moduleUrl = new URL("./cookie-jar.ts", import.meta.url).href;
+  const ownerSource = `
+    import { utimesSync, writeFileSync } from "node:fs";
+    import { PersistentCookieJar } from ${JSON.stringify(moduleUrl)};
+    const filePath = process.env.T09_COOKIE_JAR;
+    const jar = new PersistentCookieJar({ filePath, serviceOrigin: "https://msg.0000.chat" });
+    const fetcher = jar.wrapFetch(async (_input, init) => {
+      utimesSync(filePath + ".lock", new Date(0), new Date(0));
+      writeFileSync(process.env.T09_COOKIE_READY, "ready");
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      const cookie = new Headers(init?.headers).get("cookie") ?? "";
+      const control = cookie.split("; ").find((value) => value.startsWith("msg_guest_control="))?.slice("msg_guest_control=".length) ?? "guest-owner";
+      return new Response(null, { headers: [
+        ["set-cookie", "msg_guest_control=" + control + "; Path=/; Secure"],
+        ["set-cookie", "msg_resource=" + control + "; Path=/room-delayed-owner; Secure"],
+      ] });
+    });
+    await fetcher("https://msg.0000.chat/room-delayed-owner");
+  `;
+  const followerSource = `
+    import { PersistentCookieJar } from ${JSON.stringify(moduleUrl)};
+    const jar = new PersistentCookieJar({ filePath: process.env.T09_COOKIE_JAR, serviceOrigin: "https://msg.0000.chat" });
+    const fetcher = jar.wrapFetch(async (_input, init) => {
+      const cookie = new Headers(init?.headers).get("cookie") ?? "";
+      const control = cookie.split("; ").find((value) => value.startsWith("msg_guest_control="))?.slice("msg_guest_control=".length) ?? "guest-follower";
+      return new Response(null, { headers: [
+        ["set-cookie", "msg_guest_control=" + control + "; Path=/; Secure"],
+        ["set-cookie", "msg_resource=" + control + "; Path=/room-delayed-follower; Secure"],
+      ] });
+    });
+    await fetcher("https://msg.0000.chat/room-delayed-follower");
+  `;
+  const start = (source: string, extraEnv: Record<string, string> = {}): Promise<void> => new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, ["-e", source], {
+      env: { ...process.env, T09_COOKIE_JAR: filePath, ...extraEnv },
+      stdio: ["ignore", "ignore", "pipe"],
+    });
+    let error = "";
+    child.stderr.on("data", (chunk: Buffer) => { error += chunk.toString(); });
+    child.once("error", reject);
+    child.once("close", (code) => code === 0 ? resolve() : reject(new Error(`Delayed owner process exited ${code}: ${error}`)));
+  });
+
+  const owner = start(ownerSource, { T09_COOKIE_READY: readyPath });
+  await waitForFile(readyPath);
+  const follower = start(followerSource);
+  await Promise.all([owner, follower]);
+
+  const jar = new PersistentCookieJar({ filePath, serviceOrigin: "https://msg.0000.chat" });
+  const control = jar.cookieHeader("https://msg.0000.chat/room-delayed-owner")?.match(/(?:^|; )msg_guest_control=([^;]+)/u)?.[1];
+  const ownerResource = jar.cookieHeader("https://msg.0000.chat/room-delayed-owner")?.match(/(?:^|; )msg_resource=([^;]+)/u)?.[1];
+  const followerResource = jar.cookieHeader("https://msg.0000.chat/room-delayed-follower")?.match(/(?:^|; )msg_resource=([^;]+)/u)?.[1];
+  expect(control).toBe("guest-owner");
+  expect(ownerResource).toBe(control);
+  expect(followerResource).toBe(control);
 });

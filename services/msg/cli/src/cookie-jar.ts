@@ -1,4 +1,4 @@
-import { chmodSync, closeSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { dirname } from "node:path";
@@ -103,6 +103,7 @@ export class PersistentCookieJar {
 
 interface FileLock {
   readonly fd: number;
+  readonly owner: string;
   readonly path: string;
 }
 
@@ -163,16 +164,20 @@ function acquireFileLock(path: string): FileLock {
   const lockPath = `${path}.lock`;
   const started = Date.now();
   const waitBuffer = new Int32Array(new SharedArrayBuffer(4));
+  const owner = randomUUID();
   while (true) {
+    let fd: number | undefined;
     try {
-      return { fd: openSync(lockPath, "wx", 0o600), path: lockPath };
+      fd = openSync(lockPath, "wx", 0o600);
+      writeSync(fd, JSON.stringify({ owner, pid: process.pid, startedAt: Date.now() }));
+      return { fd, owner, path: lockPath };
     } catch (error) {
-      if (!(error instanceof Error) || !("code" in error) || error.code !== "EEXIST") throw error;
-      try {
-        if (Date.now() - statSync(lockPath).mtimeMs > 30_000) unlinkSync(lockPath);
-      } catch {
-        // The owner may have released the lock between stat and unlink.
+      if (fd !== undefined) {
+        closeSync(fd);
+        try { unlinkSync(lockPath); } catch { /* The incomplete lock was already removed. */ }
       }
+      if (!(error instanceof Error) || !("code" in error) || error.code !== "EEXIST") throw error;
+      removeDeadLock(lockPath);
       if (Date.now() - started > 5_000) throw new Error("The msg cookie jar is locked by another process.");
       Atomics.wait(waitBuffer, 0, 0, 10);
     }
@@ -180,8 +185,47 @@ function acquireFileLock(path: string): FileLock {
 }
 
 function releaseFileLock(lock: FileLock): void {
+  const ownsLock = readLock(lock.path)?.owner === lock.owner;
   closeSync(lock.fd);
-  try { unlinkSync(lock.path); } catch { /* Another process already removed a stale lock. */ }
+  if (ownsLock) {
+    try { unlinkSync(lock.path); } catch { /* Another process already removed a dead owner lock. */ }
+  }
+}
+
+interface LockRecord {
+  readonly owner: string;
+  readonly pid: number;
+  readonly startedAt: number;
+}
+
+function readLock(path: string): LockRecord | undefined {
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
+    const record = parsed as Record<string, unknown>;
+    return typeof record.owner === "string" && record.owner.length > 0 && typeof record.pid === "number" && Number.isInteger(record.pid) && record.pid > 0 && typeof record.startedAt === "number" && Number.isFinite(record.startedAt)
+      ? { owner: record.owner, pid: record.pid, startedAt: record.startedAt }
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function removeDeadLock(path: string): void {
+  const lock = readLock(path);
+  if (!lock || processAlive(lock.pid)) return;
+  const current = readLock(path);
+  if (current?.owner !== lock.owner) return;
+  try { unlinkSync(path); } catch { /* The dead owner lock was released by another waiter. */ }
+}
+
+function processAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error instanceof Error && "code" in error && error.code !== "ESRCH";
+  }
 }
 
 function writeAtomic(path: string, cookies: readonly StoredCookie[]): void {
