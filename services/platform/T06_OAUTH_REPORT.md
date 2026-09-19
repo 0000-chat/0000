@@ -91,12 +91,15 @@ OAuth installation boundary; it does not complete T07 or the full Platform MVP.
   fallback. A JSON token request is still classified as the disabled Platform
   client and returns the code-only `unsupported_grant_type` response rather
   than reaching the default provider;
-- a pre-activation authority read followed by service disablement leaves no
-  credential: the provider row is revoked and the pending installation stays
-  inactive. A second real SQLite trigger suspends the organization between
-  the activation predicates and the active update; that exchange also fails
-  closed and leaves the provider row, installation, credential and flow
-  invalidated;
+- the initial token completion is run with the pinned Better Auth handler and
+  an interleaved D1 session. The session pauses the production completion
+  function immediately after its successful current-authority `SELECT`, then
+  disables the service before the guarded credential batch resumes. The
+  completion returns 400, revokes the provider row, leaves the installation
+  inactive and creates zero credentials. A second real SQLite trigger
+  suspends the organization between the activation predicates and the active
+  update; that exchange also fails closed and leaves the provider row,
+  installation, credential and flow invalidated;
 - two clients for one service prove that the service `oauthResource` catalog
   remains the union catalog while each client's requested scope page is its
   own ceiling. A prepared stale registration run after service narrowing
@@ -118,9 +121,18 @@ fixture and its refresh-token probe is not part of this code-only boundary.
 - `git diff --check` passed;
 - local CLI evidence passed for public and confidential registration. Invalid
   query-bearing redirects and `offline_access` were rejected before writes.
-  A deliberately invalid owner foreign key failed through the `--file` path,
-  and a follow-up query found zero rows for the attempted client name, proving
-  no partial registration was left behind;
+  For the rollback check, `t06-cli-rollback-proof` was registered with the
+  catalog `["resource:read","resource:write"]`, then a valid seed client
+  established this resource row before the failing call:
+  `name='T06 rollback seed', allowedScopes='["resource:read","resource:write"]', disabled=0`.
+  `bun scripts/provision-oauth-client.ts --service-id
+  t06-cli-rollback-proof --redirect-uri
+  https://t06-cli-invalid.example.test/callback --capability resource:write
+  --public --owner-user-id t06-no-such-owner` exited 1 with a foreign-key
+  error. The same post-failure query returned the identical resource row and
+  zero `oauthClient` and `platform_oauth_client` rows for the failed redirect,
+  proving that the preceding resource upsert was rolled back with the failed
+  `--file` batch;
 - a real Chromium/Miniflare navigation rendered the selection and consent
   pages, sent native form POSTs with `Origin: http://localhost:18792`, and
   completed both approve and deny cases against a separate local callback

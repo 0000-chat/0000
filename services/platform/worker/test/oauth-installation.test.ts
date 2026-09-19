@@ -6,6 +6,7 @@ import {
   provisionTrustedOAuthClient,
   trustedOAuthClientStatements,
 } from "../../src/oauth-installation";
+import { createAuth } from "../../src/auth";
 import { registerService } from "../../src/service-registration";
 import { opaqueSecret } from "../../src/platform-state";
 import { createPlatformClient } from "@0000/platform-client";
@@ -40,6 +41,70 @@ async function challenge(verifier: string): Promise<string> {
       await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier)),
     ),
   );
+}
+
+function interleavedOAuthAuthorityDatabase(
+  database: D1Database,
+  afterAuthorityRead: () => Promise<void>,
+): D1Database {
+  let callbackComplete = false;
+  const originalStatements = new WeakMap<object, D1PreparedStatement>();
+  const wrapStatement = (
+    statement: D1PreparedStatement,
+    query: string,
+  ): D1PreparedStatement => {
+    const isAuthorityLookup =
+      query.includes("SELECT member.id, pc.redirect_uri") &&
+      query.includes("FROM member JOIN organization") &&
+      query.includes("JOIN platform_oauth_client AS pc");
+    const wrapped = {
+      bind: (...values: unknown[]) =>
+        wrapStatement(statement.bind(...values), query),
+      first: async <T = Record<string, unknown>>(columnName?: string) => {
+        const result =
+          columnName === undefined
+            ? await statement.first<T>()
+            : await statement.first<T>(columnName);
+        if (isAuthorityLookup && result && !callbackComplete) {
+          callbackComplete = true;
+          await afterAuthorityRead();
+        }
+        return result;
+      },
+      run: <T = Record<string, unknown>>() => statement.run<T>(),
+      all: <T = Record<string, unknown>>() => statement.all<T>(),
+      raw: <T = unknown[]>(options?: { columnNames?: boolean }) =>
+        statement.raw<T>(options as never),
+    } as unknown as D1PreparedStatement;
+    originalStatements.set(wrapped, statement);
+    return wrapped;
+  };
+  const wrapSession = (session: D1DatabaseSession): D1DatabaseSession =>
+    new Proxy(session, {
+      get(target, property, receiver) {
+        if (property === "prepare") {
+          return (query: string) => wrapStatement(target.prepare(query), query);
+        }
+        if (property === "batch") {
+          return (statements: D1PreparedStatement[]) =>
+            target.batch(
+              statements.map(
+                (statement) => originalStatements.get(statement) ?? statement,
+              ),
+            );
+        }
+        return Reflect.get(target, property, receiver);
+      },
+    }) as unknown as D1DatabaseSession;
+  return new Proxy(database, {
+    get(target, property, receiver) {
+      if (property === "withSession") {
+        return (constraint: string) =>
+          wrapSession(target.withSession(constraint as never));
+      }
+      return Reflect.get(target, property, receiver);
+    },
+  }) as unknown as D1Database;
 }
 
 async function signIn(
@@ -1107,41 +1172,45 @@ describe("T06 production OAuth installation", () => {
       preActivationBody.redirect_uri ?? preActivationBody.url ?? "",
     ).searchParams.get("code");
     expect(preActivationCode).toBeTruthy();
-    const preBatchAuthority = await testEnv.IDENTITY_DB.prepare(
-      `SELECT service.service_id, service.disabled, client.active
-       FROM platform_service AS service
-       JOIN platform_oauth_client AS client ON client.service_id = service.service_id
-       WHERE service.service_id = ? AND client.client_id = ?`,
-    )
-      .bind(service.serviceId, client.clientId)
-      .first<{ service_id: string; disabled: number; active: number }>();
-    expect(preBatchAuthority).toMatchObject({
-      service_id: service.serviceId,
-      disabled: 0,
-      active: 1,
-    });
-    await testEnv.IDENTITY_DB.prepare(
-      "UPDATE platform_service SET disabled = 1 WHERE service_id = ?",
-    )
-      .bind(service.serviceId)
-      .run();
+    const providerTokenResponse = await createAuth(testEnv, {
+      oauthPlatform: true,
+      oauthGrantTypes: ["authorization_code"],
+      oauthScopes: ["resource:read"],
+    }).handler(
+      new Request("http://localhost/api/auth/oauth2/token", {
+        method: "POST",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          grant_type: "authorization_code",
+          client_id: client.clientId,
+          redirect_uri: client.redirectUri,
+          code: preActivationCode!,
+          code_verifier: preActivation.verifier,
+          resource: service.audience,
+        }),
+      }),
+    );
+    expect(providerTokenResponse.status).toBe(200);
+    let authorityRead = false;
+    const interleavedDatabase = interleavedOAuthAuthorityDatabase(
+      testEnv.IDENTITY_DB,
+      async () => {
+        authorityRead = true;
+        const disabled = await testEnv.IDENTITY_DB.prepare(
+          "UPDATE platform_service SET disabled = 1 WHERE service_id = ?",
+        )
+          .bind(service.serviceId)
+          .run();
+        expect(disabled.meta.changes).toBe(1);
+      },
+    );
     try {
-      const staleActivation = await SELF.fetch(
-        "http://localhost/api/auth/oauth2/token",
-        {
-          method: "POST",
-          headers: { "content-type": "application/x-www-form-urlencoded" },
-          body: new URLSearchParams({
-            grant_type: "authorization_code",
-            client_id: client.clientId,
-            redirect_uri: client.redirectUri,
-            code: preActivationCode!,
-            code_verifier: preActivation.verifier,
-            resource: service.audience,
-          }),
-        },
+      const staleActivation = await completeInitialOAuthAccess(
+        interleavedDatabase.withSession("first-primary"),
+        providerTokenResponse,
       );
-      expect(staleActivation.status).toBe(400);
+      expect(authorityRead).toBe(true);
+      expect(staleActivation?.status).toBe(400);
       const staleBinding = await testEnv.IDENTITY_DB.prepare(
         `SELECT installation.active, access.revoked,
                 COUNT(credential.id) AS credential_count
