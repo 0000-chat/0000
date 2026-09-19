@@ -20,7 +20,7 @@
 | T14 | [#68](https://github.com/0000-chat/0000/issues/68) | Prove reconnect authorization without building offline sync | ready-for-agent |
 | T15 | [#69](https://github.com/0000-chat/0000/issues/69) | Make self-hosted and managed deployment setup reproducible | ready-for-agent |
 
-T03 is reviewed and verified at `c51d285`. T04 worker commits `24507b2`, `109e44f` and `9b3842a` are integrated as `454894b`, `5426c2c` and `dc30cd4`; parent Platform, root manifest and combined Chromium checks pass. Native reviewers confirmed fixes and the bounded external SQL review found no confirmed defect. [T04_CREDENTIAL_REPORT.md](../T04_CREDENTIAL_REPORT.md) records the evidence and limits. T14's focused reconnect proof is accepted at `166e54d`. T05 review fixes and T02 interrupted-signup recovery are underway in isolated worktrees. T06 and T08 remain in parent-owned contract preparation; OAuth request-scoped consent binding and guest lifecycle contracts must be settled before dispatch. The ready-for-agent label does not assert completed dependencies or production adoption.
+T01 through T05 are reviewed and verified on the aggregate, most recently at `10d31c8`; T14's focused reconnect proof is accepted at `166e54d`. T02 interrupted-signup recovery remains under review in an isolated worktree. T06 and T08 remain in parent-owned contract preparation; OAuth request-scoped consent binding and guest lifecycle contracts must be settled before dispatch. Slice reports record exact evidence and limits. The ready-for-agent label does not assert completed dependencies or production adoption.
 
 ## Existing issue disposition
 
@@ -92,7 +92,7 @@ T03 is reviewed and verified at `c51d285`. T04 worker commits `24507b2`, `109e44
 
 ### T05. Add organization-owned agents across service audiences
 
-**Readiness:** Delivered at isolated `0ed62d2`, with narrowing and resource/departure fixes independently confirmed at `500db9b`. External review and native triage identified an inconsistent credential/agent snapshot: separately read states can authorize a combination that was never valid. A joint verification snapshot and precise replacement-INSERT failure proof are underway on `codex/platform-t05`. Aggregate acceptance remains pending.
+**Readiness:** Reviewed implementation and fixes `0ed62d2`, `500db9b`, `6b88e21`, `034e853` integrated as `4e602f2`, `190ac68`, `14fe44f`, `10d31c8`. Parent aggregate checks pass seven Worker/D1 files/ten tests, restart, format/typecheck and root manifests; combined browser controls pass. Narrowing, coherent verification snapshots and exact replacement-INSERT rollback proofs are confirmed. Consumer adoption and remaining MVP gates are separate.
 
 **Blocked by (contract):** T03 supplies current administrator/membership controls; T04 supplies credential and verifier flows; T01's agreed machine-principal/grant contract is prerequisite.
 

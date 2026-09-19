@@ -1,8 +1,8 @@
 # Platform authentication MVP
 
-Date: 2026-09-19. Status: agreed MVP design; T01 through T04 reviewed and verified
+Date: 2026-09-19. Status: agreed MVP design; T01 through T05 reviewed and verified
 on the aggregate; T14 reconnect fixture reviewed and verified at `166e54d`;
-T05 reviewed and integrating, pending aggregate checks; full MVP not accepted.
+T05 verified at `10d31c8`; full MVP not accepted.
 
 [README.md](README.md) defines Platform's ownership. This specification records
 the agreed product and security decisions for the implementation.
@@ -14,8 +14,8 @@ records the organization and lifecycle slice, reviewed and verified on the
 aggregate at `c51d285`. [T04_CREDENTIAL_REPORT.md](T04_CREDENTIAL_REPORT.md)
 records the bounded human credential, service registration and two-audience
 fixture evidence, reviewed and verified at aggregate `dc30cd4`. [T05_AGENT_REPORT.md](T05_AGENT_REPORT.md)
-records the local organization-owned agent and per-audience grant evidence;
-its worker branch is pending aggregate review. The evidence
+records the local organization-owned agent and per-audience grant evidence,
+reviewed and independently verified at aggregate `10d31c8`. The evidence
 does not complete the design's acceptance gates
 or establish production authentication.
 
@@ -329,9 +329,11 @@ alone:
 - T05 exercises organization-owned agent creation, stable identity across two
   service audiences, live grant and agent lifecycle checks, one-time opaque
   credential issue/rotation/revocation and creator-departure administration in
-  local Worker/D1 tests. Its service and resource checks remain fixtures, and
-  the worker evidence does not establish aggregate acceptance or production
-  consumer adoption.
+  local Worker/D1 tests, including controlled narrowing races, coherent live
+  verification snapshots and replacement-insert rollback. Aggregate checks pass
+  seven Worker/D1 files/ten tests plus restart at `10d31c8`; independent review
+  and combined browser controls pass. Service/resource checks remain fixtures,
+  not production consumer adoption.
 - Confirm managed configuration's real owning workspace and keep runtime
   anonymous enforcement independent of a Cloud network call.
 
@@ -341,8 +343,8 @@ organization, invitation and operator behavior and review fixes are integrated
 and independently verified at `c51d285` with real Worker/D1 route tests and
 Chromium organization flows. T04 is reviewed, integrated and independently
 verified at `dc30cd4`, including credential and organization browser flows. T05
-has bounded Worker/D1 agent lifecycle and two-audience evidence on its isolated
-worker branch; aggregate review and integration remain pending.
+is reviewed, integrated and independently verified at `10d31c8`, with bounded
+Worker/D1 agent lifecycle, two-audience and coherent verification evidence.
 Its local credential and registration evidence does not establish deployed
 provisioning, live provider behavior or consumer
 adoption. The full Platform authentication MVP remains unimplemented until
