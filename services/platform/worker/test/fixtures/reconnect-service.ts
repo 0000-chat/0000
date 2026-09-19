@@ -30,7 +30,6 @@ export interface ReconnectTransport {
     credential: string,
     payload: ReconnectPayload,
   ) => Promise<Response>;
-  beforeSubmit?: (payload: ReconnectPayload) => Promise<void>;
   submit: (credential: string, payload: ReconnectPayload) => Promise<Response>;
 }
 
@@ -249,7 +248,6 @@ export class ReconnectFixtureClient {
           continue;
         }
       }
-      await transport.beforeSubmit?.(payload);
       let response: Response;
       try {
         response = await transport.submit(credential, payload);

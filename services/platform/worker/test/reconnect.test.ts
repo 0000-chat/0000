@@ -633,12 +633,6 @@ describe("T14 reconnect proof fixture", () => {
     expect(
       (await ownerClient.authenticate(memberCredential.credential)).status,
     ).toBe("invalid_credential");
-    const removedIssue = await issueCredential(
-      member,
-      service.serviceId,
-      organization.organizationId,
-    );
-    expect(removedIssue.status).toBe(403);
     await signOut(member.cookie);
     const reestablishedMember = await loginAs(memberIdentity);
     const reestablishedSession = await SELF.fetch(
@@ -651,6 +645,12 @@ describe("T14 reconnect proof fixture", () => {
       },
     );
     expect(reestablishedSession.status).toBe(200);
+    const removedIssue = await issueCredential(
+      reestablishedMember,
+      service.serviceId,
+      organization.organizationId,
+    );
+    expect(removedIssue.status).toBe(403);
     const removedAttempts = await removedMemberQueue.reconnect(
       memberCredential.credential,
       submitOnlyTransport(service),
