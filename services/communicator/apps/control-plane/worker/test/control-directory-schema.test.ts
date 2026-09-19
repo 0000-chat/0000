@@ -40,6 +40,7 @@ const applicationTables = [
   "oauth_authorization_transactions",
   "oauth_authorization_codes",
   "oauth_upstream_login_transactions",
+  "platform_browser_oauth_transactions",
   "platform_bindings",
   "webhook_subscriptions",
   "webhook_subscription_account_rules",
@@ -164,6 +165,7 @@ async function dropControlDirectorySchema(db: D1Database) {
     "oauth_authorization_transactions",
     "oauth_client_installations",
     "oauth_clients",
+    "platform_browser_oauth_transactions",
     "platform_bindings",
     "webhook_deliveries",
     "webhook_subscription_chat_rules",
@@ -390,6 +392,7 @@ describe("control directory schema", () => {
       "created_at",
       "expires_at",
       "expires_at_ms",
+      "platform_json",
     ]);
     expect(columns.results.map((column) => column.name)).not.toContain(
       "ticket",

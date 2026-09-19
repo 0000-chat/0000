@@ -68,6 +68,7 @@ async function resetSchema() {
     "oauth_authorization_transactions",
     "oauth_client_installations",
     "oauth_clients",
+    "platform_browser_oauth_transactions",
     "webhook_deliveries",
     "webhook_subscription_chat_rules",
     "webhook_subscription_account_rules",

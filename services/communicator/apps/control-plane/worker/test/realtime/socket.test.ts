@@ -19,11 +19,16 @@ import {
 import { describe, expect, it, vi } from "vitest";
 import {
   batchRealtimeChanges,
+  broadcastRealtimeChanges,
+  resetRealtimeSocketsForRebuild,
   sendRealtimeFrame,
   REALTIME_SOCKET_TAG,
 } from "../../realtime/tenant-sockets";
 import { RealtimeSocketTelemetryEventSchema } from "../../realtime/telemetry";
-import type { RealtimeUpgradeContext } from "../../realtime/contracts";
+import type {
+  RealtimeSocketAttachment,
+  RealtimeUpgradeContext,
+} from "../../realtime/contracts";
 import type { TenantProjectionDO } from "../../projection/tenant-projection";
 import { clearDirectory } from "../support/directory-fixtures";
 
@@ -1566,5 +1571,191 @@ describe("TenantProjectionDO hibernatable realtime sockets", () => {
       ],
       connection_expires_at: "2026-09-11T00:00:00.000Z",
     });
+  });
+
+  it("filters Platform live changes by account and resets across a denied sequence", () => {
+    const expiresAt = new Date(Date.now() + 60_000).toISOString();
+    const attachment: RealtimeSocketAttachment = {
+      schema_version: 1,
+      tenant_id: TENANT,
+      principal_id: "principal_human",
+      membership_id: "membership_human",
+      subscriptions: [
+        { identity_id: "identity_human", families: ["projection"] },
+      ],
+      positions: [
+        { identity_id: "identity_human", generation: 1, sequence: 0 },
+      ],
+      lease_expires_at: expiresAt,
+      resumed: false,
+      platform: {
+        binding_id: "binding_platform_human",
+        authority: "platform-test-authority",
+        kind: "human",
+        subject_id: "platform-user",
+        organization_id: "platform-org",
+        membership_id: "platform-membership",
+        grant_id: null,
+        credential_id: "credential-platform-user",
+        expires_at: expiresAt,
+      },
+    };
+    let storedAttachment: unknown = attachment;
+    const messages: unknown[] = [];
+    let closeCode: number | undefined;
+    const socket = {
+      close: (code: number) => {
+        closeCode = code;
+      },
+      deserializeAttachment: () => storedAttachment,
+      serializeAttachment: (value: unknown) => {
+        storedAttachment = value;
+      },
+      send: (message: string) => messages.push(JSON.parse(message)),
+    };
+    const changes = [
+      {
+        identity_id: "identity_human",
+        account_id: "account_allowed",
+        generation: 1,
+        sequence: 1,
+        event_type: "conversation.updated" as const,
+        connection_id: "connection_allowed",
+        conversation_id: "conversation_allowed",
+        occurred_at: expiresAt,
+      },
+      {
+        identity_id: "identity_human",
+        account_id: "account_denied",
+        generation: 1,
+        sequence: 2,
+        event_type: "conversation.updated" as const,
+        connection_id: "connection_denied",
+        conversation_id: "conversation_denied",
+        occurred_at: expiresAt,
+      },
+    ];
+
+    broadcastRealtimeChanges(
+      [socket],
+      TENANT,
+      changes,
+      (_socket, _currentAttachment, change) =>
+        change.account_id === "account_allowed",
+    );
+
+    expect(closeCode).toBeUndefined();
+    expect(messages).toHaveLength(2);
+    expect(messages[0]).toMatchObject({
+      type: "projection.changes",
+      from_sequence: 1,
+      to_sequence: 2,
+      changes: [{ sequence: 1, conversation_id: "conversation_allowed" }],
+    });
+    expect(messages[1]).toMatchObject({
+      type: "reset_required",
+      latest_sequence: 2,
+      reason: "history_unavailable",
+    });
+    expect(JSON.stringify(messages)).not.toContain("account_denied");
+    expect((storedAttachment as RealtimeSocketAttachment).positions).toEqual([
+      { identity_id: "identity_human", generation: 1, sequence: 2 },
+    ]);
+  });
+
+  it("rejects live delivery after a lease expires even before the alarm runs", () => {
+    const storedAttachment: RealtimeSocketAttachment = {
+      schema_version: 1,
+      tenant_id: TENANT,
+      principal_id: "principal_human",
+      membership_id: "membership_human",
+      subscriptions: [
+        { identity_id: "identity_human", families: ["projection"] },
+      ],
+      positions: [
+        { identity_id: "identity_human", generation: 1, sequence: 0 },
+      ],
+      lease_expires_at: new Date(Date.now() - 1).toISOString(),
+      resumed: false,
+    };
+    let closeCode: number | undefined;
+    let sends = 0;
+    const socket = {
+      close: (code: number) => {
+        closeCode = code;
+      },
+      deserializeAttachment: () => storedAttachment,
+      serializeAttachment: () => undefined,
+      send: () => {
+        sends += 1;
+      },
+    };
+    broadcastRealtimeChanges([socket], TENANT, [
+      {
+        identity_id: "identity_human",
+        account_id: "account_allowed",
+        generation: 1,
+        sequence: 1,
+        event_type: "conversation.updated",
+        connection_id: "connection_allowed",
+        conversation_id: "conversation_allowed",
+        occurred_at: new Date().toISOString(),
+      },
+    ]);
+    expect(closeCode).toBe(1000);
+    expect(sends).toBe(0);
+  });
+
+  it("does not send rebuild resets to expired or revalidation-rejected sockets", () => {
+    const makeSocket = (leaseExpiresAt: string) => {
+      const attachment: RealtimeSocketAttachment = {
+        schema_version: 1,
+        tenant_id: TENANT,
+        principal_id: "principal_human",
+        membership_id: "membership_human",
+        subscriptions: [
+          { identity_id: "identity_human", families: ["projection"] },
+        ],
+        positions: [
+          { identity_id: "identity_human", generation: 1, sequence: 0 },
+        ],
+        lease_expires_at: leaseExpiresAt,
+        resumed: false,
+      };
+      let sends = 0;
+      let closeCode: number | undefined;
+      return {
+        socket: {
+          close: (code: number) => {
+            closeCode = code;
+          },
+          deserializeAttachment: () => attachment,
+          serializeAttachment: () => undefined,
+          send: () => {
+            sends += 1;
+          },
+        },
+        get sends() {
+          return sends;
+        },
+        get closeCode() {
+          return closeCode;
+        },
+      };
+    };
+    const expired = makeSocket(new Date(Date.now() - 1).toISOString());
+    const rejected = makeSocket(new Date(Date.now() + 60_000).toISOString());
+
+    resetRealtimeSocketsForRebuild(
+      [expired.socket, rejected.socket],
+      TENANT,
+      2,
+      (socket) => socket !== rejected.socket,
+    );
+
+    expect(expired.sends).toBe(0);
+    expect(expired.closeCode).toBe(1000);
+    expect(rejected.sends).toBe(0);
+    expect(rejected.closeCode).toBe(1008);
   });
 });

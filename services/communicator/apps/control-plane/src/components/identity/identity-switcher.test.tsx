@@ -6,6 +6,7 @@ import { renderApp } from "@/test/render-app";
 import { server } from "@/mocks/server";
 import { simulatedStore } from "@/mocks/store";
 import { queryKeys } from "@/lib/api/query-keys";
+import { apiClient } from "@/lib/api/client";
 
 describe("IdentitySwitcher", () => {
   it("switches a thread to the new identity All inbox", async () => {
@@ -98,6 +99,42 @@ describe("IdentitySwitcher", () => {
           ),
         ),
       ).toBeUndefined();
+    });
+  });
+
+  it("clears a background auth pause after an identical successful session read", async () => {
+    const { queryClient } = renderApp("/");
+    await screen.findByRole("option", { name: "Agent" });
+
+    server.use(
+      http.get("*/api/v1/identities/identity_human/channels", () =>
+        HttpResponse.json(
+          {
+            error: {
+              code: "unauthenticated",
+              message: "Session expired",
+            },
+          },
+          { status: 401 },
+        ),
+      ),
+    );
+    await expect(apiClient.getChannels("identity_human")).rejects.toMatchObject(
+      { status: 401 },
+    );
+    expect(
+      await screen.findByText(
+        "Sign in to read and change protected Communicator data.",
+      ),
+    ).toBeVisible();
+
+    await queryClient.invalidateQueries({ queryKey: queryKeys.session });
+    await waitFor(() => {
+      expect(
+        screen.queryByText(
+          "Sign in to read and change protected Communicator data.",
+        ),
+      ).not.toBeInTheDocument();
     });
   });
 });

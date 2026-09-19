@@ -442,6 +442,7 @@ export async function clearDirectory(db: D1Database): Promise<void> {
     db.prepare("DELETE FROM history_imports"),
     db.prepare("DELETE FROM provider_capability_records"),
     db.prepare("DELETE FROM platform_bindings"),
+    db.prepare("DELETE FROM platform_browser_oauth_transactions"),
     db.prepare("DELETE FROM oauth_authorization_codes"),
     db.prepare("DELETE FROM oauth_upstream_login_transactions"),
     db.prepare("DELETE FROM oauth_authorization_transactions"),

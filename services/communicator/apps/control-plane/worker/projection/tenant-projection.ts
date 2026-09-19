@@ -118,6 +118,7 @@ import {
   type ProjectionConnectionBinding,
   type ProjectionEventEnvelope,
 } from "@communicator/contracts";
+import type { AuthenticatedPrincipal } from "@0000/contracts";
 import { DurableObject } from "cloudflare:workers";
 import { deriveManifestPrefix } from "../archive/keys";
 import { decodeReplayCursor } from "../archive/reader";
@@ -151,6 +152,7 @@ import {
   REALTIME_CONTEXT_HEADER,
   REALTIME_INTERNAL_HOST,
   REALTIME_INTERNAL_PATH,
+  REALTIME_PLATFORM_CREDENTIAL_HEADER,
   REALTIME_SOCKET_TAG,
   batchRealtimeChanges,
   broadcastRealtimeChanges,
@@ -158,11 +160,13 @@ import {
   nextSocketExpiry,
   readRealtimeReplay,
   realtimeConnectionExpiry,
+  realtimeLeaseIsCurrent,
   resetRealtimeSocketsForRebuild,
   serializeSafeRealtimeAttachment,
   sendRealtimeFrame,
   type RealtimeBroadcastChange,
   type RealtimeReplayRow,
+  type RealtimeSocket,
   tryParseRealtimeAttachment,
 } from "../realtime/tenant-sockets";
 import {
@@ -173,9 +177,15 @@ import {
 import {
   parseRealtimeUpgradeContext,
   type RealtimeSocketAttachment,
+  type RealtimePlatformContext,
   type RealtimeUpgradeContext,
 } from "../realtime/contracts";
-import { revalidateRealtimeSocketAuthorization } from "../realtime/authorization";
+import {
+  revalidateRealtimeAuthorization,
+  revalidateRealtimeSocketAuthorization,
+} from "../realtime/authorization";
+import { createPlatformClientForRevalidation } from "../auth/platform";
+import { resolvePlatformBinding } from "../control-directory/platform-bindings";
 import { transitionOutboundLifecycle } from "../outbound/lifecycle";
 import {
   contentGenerationForResource,
@@ -1919,6 +1929,13 @@ const REALTIME_INTERNAL_HEADER_NAMES = new Set([
   "upgrade",
   "sec-websocket-protocol",
   REALTIME_CONTEXT_HEADER.toLowerCase(),
+  REALTIME_PLATFORM_CREDENTIAL_HEADER.toLowerCase(),
+]);
+const REALTIME_REQUIRED_INTERNAL_HEADER_NAMES = new Set([
+  "connection",
+  "upgrade",
+  "sec-websocket-protocol",
+  REALTIME_CONTEXT_HEADER.toLowerCase(),
 ]);
 const realtimeTextEncoder = new TextEncoder();
 
@@ -1951,7 +1968,10 @@ const isInternalRealtimeUpgrade = (request: Request): boolean => {
       headerNames.add(normalizedName);
     }
     return (
-      headerNames.size === REALTIME_INTERNAL_HEADER_NAMES.size &&
+      [...REALTIME_REQUIRED_INTERNAL_HEADER_NAMES].every((name) =>
+        headerNames.has(name),
+      ) &&
+      headerNames.size <= REALTIME_INTERNAL_HEADER_NAMES.size &&
       request.headers.get("Upgrade") === "websocket" &&
       request.headers.get("Connection") === "Upgrade" &&
       request.headers.get("Sec-WebSocket-Protocol") === REALTIME_SUBPROTOCOL &&
@@ -1984,13 +2004,20 @@ const parseInternalRealtimeContext = (
 
   try {
     const context = parseRealtimeUpgradeContext(value);
+    const credential = request.headers.get(REALTIME_PLATFORM_CREDENTIAL_HEADER);
+    if (context.platform !== undefined) {
+      if (credential === null || credential.length === 0) return null;
+    } else if (credential !== null) {
+      return null;
+    }
     const issuedAt = Date.parse(context.issued_at);
     const expiresAt = Date.parse(context.expires_at);
     const now = Date.now();
     if (
       !Number.isSafeInteger(issuedAt) ||
       !Number.isSafeInteger(expiresAt) ||
-      expiresAt - issuedAt !== REALTIME_TICKET_TTL_MS ||
+      expiresAt <= issuedAt ||
+      expiresAt - issuedAt > REALTIME_TICKET_TTL_MS ||
       issuedAt > now ||
       expiresAt <= now
     ) {
@@ -2001,6 +2028,22 @@ const parseInternalRealtimeContext = (
     return null;
   }
 };
+
+const platformPrincipalMatches = (
+  principal: Exclude<AuthenticatedPrincipal, { kind: "guest" }>,
+  platform: RealtimePlatformContext,
+): boolean =>
+  principal.authority === platform.authority &&
+  principal.kind === platform.kind &&
+  principal.subjectId === platform.subject_id &&
+  principal.organizationId === platform.organization_id &&
+  principal.credentialId === platform.credential_id &&
+  principal.expiresAt === platform.expires_at &&
+  (principal.kind === "human"
+    ? platform.membership_id === principal.membershipId &&
+      platform.grant_id === null
+    : platform.membership_id === null &&
+      platform.grant_id === principal.grantId);
 
 const readRealtimeLatestSequence = (
   storage: DurableObjectStorage,
@@ -2046,7 +2089,101 @@ const changesFromReplayRows = (
     occurred_at: row.occurred_at,
   }));
 
+type RealtimeResourceAccess = {
+  readonly allAccounts: ReadonlySet<string>;
+  readonly selectedChats: ReadonlySet<string>;
+};
+
+const realtimeResourceKey = (
+  identityId: string,
+  accountId: string,
+  conversationId?: string,
+): string =>
+  conversationId === undefined
+    ? `${identityId}\u0000${accountId}`
+    : `${identityId}\u0000${accountId}\u0000${conversationId}`;
+
+const realtimeResourceChangeAllowed = (
+  access: RealtimeResourceAccess,
+  identityId: string,
+  accountId: string,
+  conversationId: string,
+): boolean =>
+  access.allAccounts.has(realtimeResourceKey(identityId, accountId)) ||
+  access.selectedChats.has(
+    realtimeResourceKey(identityId, accountId, conversationId),
+  );
+
+const readRealtimeResourceAccess = async (
+  db: D1DatabaseSession,
+  tenantId: string,
+  membershipId: string,
+  identityIds: readonly string[],
+): Promise<RealtimeResourceAccess> => {
+  const uniqueIdentityIds = [...new Set(identityIds)];
+  if (uniqueIdentityIds.length === 0) {
+    return { allAccounts: new Set(), selectedChats: new Set() };
+  }
+  const placeholders = uniqueIdentityIds.map(() => "?").join(", ");
+  const rows = await db
+    .prepare(
+      `SELECT g.identity_id, g.account_id, g.chat_scope, gc.chat_id
+       FROM account_grants AS g
+       JOIN identity_grants AS ig
+         ON ig.tenant_id = g.tenant_id
+        AND ig.membership_id = g.membership_id
+        AND ig.identity_id = g.identity_id
+        AND ig.operation_scope = 'conversation.read'
+       JOIN identities AS i
+         ON i.tenant_id = g.tenant_id
+        AND i.id = g.identity_id
+        AND i.status = 'active'
+       JOIN connection_accounts AS ca
+         ON ca.account_id = g.account_id
+        AND ca.status = 'active'
+       JOIN connections AS c
+         ON c.id = ca.connection_id
+        AND c.tenant_id = g.tenant_id
+       LEFT JOIN account_grant_chats AS gc
+         ON gc.tenant_id = g.tenant_id
+        AND gc.grant_id = g.id
+        AND gc.account_id = g.account_id
+       WHERE g.tenant_id = ?
+         AND g.membership_id = ?
+         AND g.operation_scope = 'conversation.read'
+         AND g.status = 'active'
+         AND g.identity_id IN (${placeholders})
+       ORDER BY g.identity_id, g.account_id, gc.chat_id`,
+    )
+    .bind(tenantId, membershipId, ...uniqueIdentityIds)
+    .all<{
+      identity_id: string;
+      account_id: string;
+      chat_scope: "all_chats" | "selected_chats";
+      chat_id: string | null;
+    }>();
+  const allAccounts = new Set<string>();
+  const selectedChats = new Set<string>();
+  for (const row of rows.results) {
+    if (row.chat_scope === "all_chats") {
+      allAccounts.add(realtimeResourceKey(row.identity_id, row.account_id));
+    } else if (row.chat_id !== null) {
+      selectedChats.add(
+        realtimeResourceKey(row.identity_id, row.account_id, row.chat_id),
+      );
+    }
+  }
+  return { allAccounts, selectedChats };
+};
+
 export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
+  /**
+   * Opaque Platform credentials are retained only while the socket is live.
+   * Durable Object hibernation intentionally drops this map, forcing a fresh
+   * verified upgrade before a restored attachment can receive data.
+   */
+  #realtimeCredentials = new WeakMap<WebSocket, string>();
+
   constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
     super(ctx, env);
     this.ctx.setWebSocketAutoResponse(
@@ -2061,12 +2198,57 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
     const context = parseInternalRealtimeContext(request);
     if (context === null) return realtimeResponse("invalid_request");
 
+    const platformCredential =
+      context.platform === undefined
+        ? undefined
+        : (request.headers.get(REALTIME_PLATFORM_CREDENTIAL_HEADER) ??
+          undefined);
+    if (context.platform !== undefined) {
+      const database = this.env.CONTROL_DB;
+      if (
+        database === undefined ||
+        typeof database.withSession !== "function" ||
+        platformCredential === undefined ||
+        !(await this.#revalidatePlatformContext(
+          database,
+          context,
+          platformCredential,
+        ))
+      ) {
+        return realtimeResponse("service_unavailable");
+      }
+      try {
+        if (
+          !(await revalidateRealtimeAuthorization(
+            database.withSession("first-primary"),
+            context,
+          ))
+        ) {
+          return realtimeResponse("service_unavailable");
+        }
+      } catch {
+        return realtimeResponse("service_unavailable");
+      }
+    }
+
     try {
       const meta = readProjectionMeta(this.ctx.storage);
       if (meta === undefined || meta.tenant_id !== context.tenant_id) {
         return realtimeResponse("service_unavailable");
       }
       this.#requireReadyState(meta);
+
+      const resourceAccess =
+        context.platform === undefined
+          ? null
+          : await readRealtimeResourceAccess(
+              this.env.CONTROL_DB.withSession("first-primary"),
+              context.tenant_id,
+              context.membership_id,
+              context.subscriptions.map(
+                (subscription) => subscription.identity_id,
+              ),
+            );
 
       const resumeByIdentity = new Map(
         context.resume.map((position) => [position.identity_id, position]),
@@ -2158,12 +2340,42 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
           continue;
         }
 
-        replayActions.push({
-          identityId: subscription.identity_id,
-          latestSequence,
-          resetReason: null,
-          changes: changesFromReplayRows(replayRows),
-        });
+        const firstDeniedIndex =
+          resourceAccess === null
+            ? -1
+            : replayRows.findIndex(
+                (row) =>
+                  !realtimeResourceChangeAllowed(
+                    resourceAccess,
+                    subscription.identity_id,
+                    row.account_id,
+                    row.conversation_id,
+                  ),
+              );
+        if (firstDeniedIndex >= 0) {
+          const permittedPrefix = replayRows.slice(0, firstDeniedIndex);
+          if (permittedPrefix.length > 0) {
+            replayActions.push({
+              identityId: subscription.identity_id,
+              latestSequence,
+              resetReason: null,
+              changes: changesFromReplayRows(permittedPrefix),
+            });
+          }
+          replayActions.push({
+            identityId: subscription.identity_id,
+            latestSequence,
+            resetReason: "history_unavailable",
+            changes: [],
+          });
+        } else {
+          replayActions.push({
+            identityId: subscription.identity_id,
+            latestSequence,
+            resetReason: null,
+            changes: changesFromReplayRows(replayRows),
+          });
+        }
       }
 
       // Existing sockets are revalidated before replay delivery and on every
@@ -2192,7 +2404,10 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
         return realtimeResponse("service_unavailable");
       }
 
-      const connectionExpiresAt = realtimeConnectionExpiry();
+      const connectionExpiresAt = realtimeConnectionExpiry(
+        Date.now(),
+        context.platform?.expires_at,
+      );
       let attachment = serializeSafeRealtimeAttachment({
         schema_version: 1,
         tenant_id: context.tenant_id,
@@ -2202,6 +2417,9 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
         positions,
         lease_expires_at: connectionExpiresAt,
         resumed: context.resume.length > 0,
+        ...(context.platform === undefined
+          ? {}
+          : { platform: context.platform }),
       });
       const connectedFrame = RealtimeConnectedFrameSchema.parse({
         schema_version: 1,
@@ -2216,11 +2434,18 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
       const server = pair[1];
       this.ctx.acceptWebSocket(server, [REALTIME_SOCKET_TAG]);
       try {
+        if (platformCredential !== undefined) {
+          this.#realtimeCredentials.set(server, platformCredential);
+        }
         server.serializeAttachment(attachment);
         await this.#scheduleRealtimeSocketAlarm();
         sendRealtimeFrame(server, connectedFrame);
 
         for (const action of replayActions) {
+          if (!realtimeLeaseIsCurrent(attachment)) {
+            this.#closeSocket(server, 1000, "realtime lease expired");
+            return realtimeResponse("service_unavailable");
+          }
           if (action.resetReason !== null) {
             const resetFrame: RealtimeResetRequiredFrame =
               RealtimeResetRequiredFrameSchema.parse({
@@ -2247,6 +2472,10 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
             const first = changes[0];
             const last = changes.at(-1);
             if (first === undefined || last === undefined) continue;
+            if (!realtimeLeaseIsCurrent(attachment)) {
+              this.#closeSocket(server, 1000, "realtime lease expired");
+              return realtimeResponse("service_unavailable");
+            }
             sendRealtimeFrame(server, {
               schema_version: 1,
               type: "projection.changes",
@@ -2277,6 +2506,7 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
           this.#activeTenantSocketCount(),
         );
       } catch {
+        this.#realtimeCredentials.delete(server);
         this.#closeSocket(server, 1011, "realtime socket unavailable");
         return realtimeResponse("service_unavailable");
       }
@@ -2295,6 +2525,13 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
     const attachment = tryParseRealtimeAttachment(socket);
     if (attachment === null) {
       this.#closeSocket(socket, 1008, "invalid realtime attachment");
+      return;
+    }
+    if (
+      attachment.platform !== undefined &&
+      this.#realtimeCredentials.get(socket) === undefined
+    ) {
+      this.#closeSocket(socket, 1008, "realtime authority unavailable");
       return;
     }
     if (message === "ping") return;
@@ -2436,6 +2673,14 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
     const candidates = [socketExpiry, outboundExpiry].filter(
       (value): value is number => value !== null,
     );
+    if (
+      sockets.some((socket) => {
+        const attachment = tryParseRealtimeAttachment(socket);
+        return attachment?.platform !== undefined;
+      })
+    ) {
+      candidates.push(Date.now() + 60_000);
+    }
     if (candidates.length === 0) {
       await this.ctx.storage.deleteAlarm();
       return;
@@ -2493,13 +2738,58 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
   #validSocketsForAdmission(): WebSocket[] {
     const valid: WebSocket[] = [];
     for (const socket of this.ctx.getWebSockets(REALTIME_SOCKET_TAG)) {
-      if (tryParseRealtimeAttachment(socket) === null) {
+      const attachment = tryParseRealtimeAttachment(socket);
+      if (attachment === null) {
         this.#closeSocket(socket, 1008, "invalid realtime attachment");
+        continue;
+      }
+      if (!realtimeLeaseIsCurrent(attachment)) {
+        this.#closeSocket(socket, 1000, "realtime lease expired");
         continue;
       }
       valid.push(socket);
     }
     return valid;
+  }
+
+  async #readRealtimeResourceAccessForSockets(
+    sockets: readonly WebSocket[],
+  ): Promise<Map<RealtimeSocket, RealtimeResourceAccess>> {
+    const database = this.env.CONTROL_DB;
+    if (database === undefined || typeof database.withSession !== "function") {
+      throw new Error("realtime resource authorization unavailable");
+    }
+    const db = database.withSession("first-primary");
+    const accessBySocket = new Map<RealtimeSocket, RealtimeResourceAccess>();
+    const accessByKey = new Map<string, RealtimeResourceAccess>();
+    for (const socket of sockets) {
+      const attachment = tryParseRealtimeAttachment(socket);
+      if (attachment?.platform === undefined) continue;
+      const identityIds = attachment.subscriptions.map(
+        (subscription) => subscription.identity_id,
+      );
+      const membershipId = attachment.membership_id;
+      if (membershipId === undefined) {
+        throw new Error("realtime membership is missing");
+      }
+      const cacheKey = [
+        attachment.tenant_id,
+        membershipId,
+        ...[...new Set(identityIds)].sort(),
+      ].join("\u0000");
+      let access = accessByKey.get(cacheKey);
+      if (access === undefined) {
+        access = await readRealtimeResourceAccess(
+          db,
+          attachment.tenant_id,
+          membershipId,
+          identityIds,
+        );
+        accessByKey.set(cacheKey, access);
+      }
+      accessBySocket.set(socket, access);
+    }
+    return accessBySocket;
   }
 
   async #revalidateRealtimeSockets(): Promise<WebSocket[]> {
@@ -2529,7 +2819,25 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
         this.#closeSocket(socket, 1008, "invalid realtime attachment");
         continue;
       }
+      if (!realtimeLeaseIsCurrent(attachment)) {
+        this.#closeSocket(socket, 1000, "realtime lease expired");
+        continue;
+      }
       try {
+        if (attachment.platform !== undefined) {
+          const credential = this.#realtimeCredentials.get(socket);
+          if (
+            credential === undefined ||
+            !(await this.#revalidatePlatformContext(
+              database,
+              attachment,
+              credential,
+            ))
+          ) {
+            this.#closeSocket(socket, 1008, "realtime authority revoked");
+            continue;
+          }
+        }
         if (!(await revalidateRealtimeSocketAuthorization(db, attachment))) {
           this.#closeSocket(socket, 1008, "realtime authorization revoked");
           continue;
@@ -2541,6 +2849,47 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
       valid.push(socket);
     }
     return valid;
+  }
+
+  async #revalidatePlatformContext(
+    database: D1Database,
+    context: {
+      readonly tenant_id: string;
+      readonly principal_id: string;
+      readonly membership_id?: string | undefined;
+      readonly platform?: RealtimePlatformContext | undefined;
+    },
+    credential: string,
+  ): Promise<boolean> {
+    try {
+      if (context.platform === undefined) return true;
+      const client = createPlatformClientForRevalidation(this.env);
+      if (client === null) return false;
+      const authentication = await client.authenticate(credential);
+      if (authentication.status !== "authenticated") return false;
+      const principal = authentication.principal;
+      if (
+        principal.kind === "guest" ||
+        !principal.capabilities.includes("conversation.read") ||
+        !platformPrincipalMatches(principal, context.platform)
+      ) {
+        return false;
+      }
+      const binding = await resolvePlatformBinding(
+        database,
+        principal,
+        context.tenant_id,
+      );
+      return (
+        binding.ok &&
+        binding.binding.bindingId === context.platform.binding_id &&
+        binding.binding.localTenantId === context.tenant_id &&
+        binding.binding.localPrincipalId === context.principal_id &&
+        binding.binding.localMembershipId === context.membership_id
+      );
+    } catch {
+      return false;
+    }
   }
 
   #emitSocketOutcome(
@@ -2568,6 +2917,7 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
   }
 
   #closeSocket(socket: WebSocket, code: number, reason: string): void {
+    this.#realtimeCredentials.delete(socket);
     try {
       socket.close(code, reason);
     } catch {
@@ -2787,10 +3137,14 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
       });
 
       try {
+        const sockets = await this.#revalidateRealtimeSockets();
         resetRealtimeSocketsForRebuild(
-          this.ctx.getWebSockets(REALTIME_SOCKET_TAG),
+          sockets,
           parsed.tenant_id,
           nextGeneration,
+          (socket, attachment) =>
+            attachment.platform === undefined ||
+            this.#realtimeCredentials.get(socket as WebSocket) !== undefined,
         );
       } catch {
         // Rebuild lifecycle state remains authoritative if socket cleanup fails.
@@ -5234,7 +5588,26 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
       if (input.mode === "live" && applied.changes.length > 0) {
         try {
           const sockets = await this.#revalidateRealtimeSockets();
-          broadcastRealtimeChanges(sockets, input.tenantId, applied.changes);
+          const resourceAccessBySocket =
+            await this.#readRealtimeResourceAccessForSockets(sockets);
+          broadcastRealtimeChanges(
+            sockets,
+            input.tenantId,
+            applied.changes,
+            (socket, attachment, change) => {
+              if (attachment.platform === undefined) return true;
+              const access = resourceAccessBySocket.get(socket);
+              return (
+                access !== undefined &&
+                realtimeResourceChangeAllowed(
+                  access,
+                  change.identity_id,
+                  change.account_id,
+                  change.conversation_id,
+                )
+              );
+            },
+          );
         } catch {
           // A live notification failure must never change the durable result.
         }
@@ -5311,6 +5684,7 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
       );
       changes.push({
         identity_id: prepared.event.identity_id,
+        account_id: prepared.event.account_id,
         generation: meta.generation,
         sequence: identitySequenceRow.identity_sequence,
         event_type: prepared.event.event_type,
