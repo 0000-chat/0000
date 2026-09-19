@@ -434,8 +434,8 @@ approve/deny navigation, real CLI transaction rollback and failed-login retry
 are independently verified. The bounded adversarial review found no confirmed
 exploitable defect; its login retry regression was corrected and reviewed.
 Refresh issuance is enabled only for explicitly provisioned trusted clients with
-the T07 refresh gate; aggregate T07 acceptance and external-client adoption
-remain outstanding.
+the T07 refresh gate. T07 is reviewed, integrated and independently verified at
+`1d519cd`; live external-client acceptance remains separate.
 This local credential and registration evidence does not establish deployed
 provisioning, live provider behavior or consumer
 adoption. The full Platform authentication MVP remains unimplemented until

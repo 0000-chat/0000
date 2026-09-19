@@ -170,8 +170,8 @@ and T04 reports for bounded local evidence and review status. T05 adds
 organization-owned agent creation, lifecycle, per-service grants and agent
 credential controls to this account UI. T06 covers the bounded
 authorization-code/PKCE personal-harness
-consent and installation path; T07 refresh rotation and installation
-revocation remain later Platform work. Platform does not own product
+consent and installation path; T07 adds verified refresh rotation and installation
+revocation. Platform does not own product
 Spaces, threads, agent execution or the full product's agent-control
 experience.
 
@@ -337,8 +337,9 @@ Google/GitHub
 HTTP responses are simulated at the provider boundary. The service and
 protected-resource checks remain fixtures. This is not a deployed identity
 service or a complete shared-auth integration. T06 does not claim a live
-external provider/client or consumer adoption; managed deployment ownership and
-aggregate T07 acceptance remain later work.
+external provider/client or consumer adoption. T07 is reviewed, integrated and
+independently verified at `1d519cd`; managed deployment setup and live external
+client acceptance remain separate work.
 Database is also a scaffold.
 The message service now uses shared Platform authentication with local resource
 ACLs; Communicator still needs that migration. No
