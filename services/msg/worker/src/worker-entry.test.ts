@@ -8,7 +8,8 @@ import type { RoomService } from "./protocol";
 
 mock.module("cloudflare:workers", () => ({
   DurableObject: class {
-    constructor(..._args: unknown[]) {}
+    protected ctx: unknown;
+    constructor(ctx: unknown) { this.ctx = ctx; }
   },
 }));
 
