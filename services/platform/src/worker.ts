@@ -1,5 +1,18 @@
 import { createAuth, PLATFORM_SESSION_FRESH_AGE_SECONDS } from "./auth";
 import {
+  createAgent,
+  createOrNarrowAgentGrant,
+  issueAgentCredential,
+  listAgentCredentials,
+  listAgentGrants,
+  listOrganizationAgents,
+  renameAgent,
+  revokeAgentCredential,
+  revokeAgentGrant,
+  rotateAgentCredential,
+  setAgentEnabled,
+} from "./agent-state";
+import {
   accountPage,
   accountScript,
   accountCss,
@@ -12,6 +25,7 @@ import {
   type AccountOrganization,
   type AccountCredential,
   type AccountCredentialService,
+  type AccountAgent,
   type OrganizationDetails,
 } from "./account-ui";
 import {
@@ -21,6 +35,7 @@ import {
   listActiveServices,
   listHumanCredentials,
   issueHumanCredential,
+  isSafeCredentialExpiry,
   opaqueSecret,
   parseStringArray,
   resolveCredentialExpiry,
@@ -325,6 +340,23 @@ function validCredentialId(value: unknown): value is string {
   return typeof value === "string" && value.length > 0 && value.length <= 256;
 }
 
+function validAgentName(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    value.trim().length > 0 &&
+    value.trim().length <= 100 &&
+    !/[\u0000-\u001f\u007f]/.test(value)
+  );
+}
+
+function validAgentId(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0 && value.length <= 256;
+}
+
+function validAgentGrantId(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0 && value.length <= 256;
+}
+
 function isOperator(env: Cloudflare.Env, userId: string): boolean {
   const configuredId = env.PLATFORM_OPERATOR_USER_ID;
   return (
@@ -375,6 +407,53 @@ async function authorizeOrganizationRequest(
         error: "organization_not_found",
         message: "You do not have current membership in this organization.",
       });
+}
+
+async function loadAgentManagement(
+  database: D1DatabaseSession,
+  organizationId: string,
+): Promise<{
+  agents: Array<{
+    id: string;
+    organizationId: string;
+    name: string;
+    enabled: boolean;
+    createdByUserId: string;
+    createdAt: number;
+    updatedAt: number;
+    grants: Awaited<ReturnType<typeof listAgentGrants>>;
+    credentials: Awaited<ReturnType<typeof listAgentCredentials>>;
+  }>;
+  services: AccountCredentialService[];
+}> {
+  const [agents, services] = await Promise.all([
+    listOrganizationAgents(database, organizationId),
+    listActiveServices(database),
+  ]);
+  const managedAgents = await Promise.all(
+    agents.map(async (agent) => {
+      const [grants, credentials] = await Promise.all([
+        listAgentGrants(database, {
+          organizationId,
+          agentId: agent.id,
+        }),
+        listAgentCredentials(database, {
+          organizationId,
+          agentId: agent.id,
+        }),
+      ]);
+      return { ...agent, grants, credentials };
+    }),
+  );
+  return {
+    agents: managedAgents,
+    services: services.map((service) => ({
+      id: service.serviceId,
+      name: service.displayName || service.serviceId,
+      audience: service.audience,
+      capabilities: service.allowedCapabilities,
+    })),
+  };
 }
 
 async function accountManagementRoute(
@@ -436,6 +515,546 @@ async function accountManagementRoute(
       invitations,
     };
     return htmlResponse(organizationDetailsMarkup(details));
+  }
+
+  if (pathname === "/api/account/agents" && request.method === "GET") {
+    const current = await getSession(request, env);
+    if (!current) return json(401, { error: "unauthenticated" });
+    const organizationId = new URL(request.url).searchParams.get(
+      "organizationId",
+    );
+    if (!validOrganizationId(organizationId)) {
+      return json(400, { error: "invalid_request" });
+    }
+    const authorization = await authorizeOrganizationRequest(
+      request,
+      env,
+      organizationId,
+    );
+    if (authorization instanceof Response) return authorization;
+    if (authorization.authority.role === "member") {
+      return json(403, {
+        error: "organization_manager_required",
+        message: "An organization owner or admin can manage agents.",
+      });
+    }
+    const management = await loadAgentManagement(
+      env.IDENTITY_DB.withSession("first-primary"),
+      organizationId,
+    );
+    return json(200, { organizationId, ...management });
+  }
+
+  if (pathname === "/api/account/agents" && request.method === "POST") {
+    const body = await requestBody(request);
+    if (
+      !body ||
+      !validOrganizationId(body.organizationId) ||
+      !validAgentName(body.name)
+    ) {
+      return json(400, {
+        error: "invalid_agent_name",
+        message: "Enter an agent name of 1 to 100 characters.",
+      });
+    }
+    const authorization = await authorizeOrganizationRequest(
+      request,
+      env,
+      body.organizationId,
+    );
+    if (authorization instanceof Response) return authorization;
+    if (authorization.authority.role === "member") {
+      return json(403, {
+        error: "organization_manager_required",
+        message: "An organization owner or admin can create agents.",
+      });
+    }
+    const agent = await createAgent(env.IDENTITY_DB, {
+      actorUserId: authorization.current.user.id,
+      organizationId: body.organizationId,
+      name: body.name.trim(),
+    });
+    return agent
+      ? json(201, agent)
+      : json(409, {
+          error: "agent_changed",
+          message: "Agent authority changed. Refresh and try again.",
+        });
+  }
+
+  if (pathname === "/api/account/agents/update" && request.method === "POST") {
+    const body = await requestBody(request);
+    if (
+      !body ||
+      !validOrganizationId(body.organizationId) ||
+      !validAgentId(body.agentId) ||
+      !validAgentName(body.name)
+    ) {
+      return json(400, { error: "invalid_request" });
+    }
+    const authorization = await authorizeOrganizationRequest(
+      request,
+      env,
+      body.organizationId,
+    );
+    if (authorization instanceof Response) return authorization;
+    if (authorization.authority.role === "member") {
+      return json(403, {
+        error: "organization_manager_required",
+        message: "An organization owner or admin can rename agents.",
+      });
+    }
+    const updated = await renameAgent(
+      env.IDENTITY_DB.withSession("first-primary"),
+      {
+        actorUserId: authorization.current.user.id,
+        organizationId: body.organizationId,
+        agentId: body.agentId,
+        name: body.name.trim(),
+      },
+    );
+    return updated
+      ? json(200, { updated: true, organizationId: body.organizationId })
+      : json(404, { error: "agent_not_found" });
+  }
+
+  if (
+    pathname === "/api/account/agents/lifecycle" &&
+    request.method === "POST"
+  ) {
+    const body = await requestBody(request);
+    if (
+      !body ||
+      !validOrganizationId(body.organizationId) ||
+      !validAgentId(body.agentId) ||
+      (body.action !== "disable" && body.action !== "restore")
+    ) {
+      return json(400, { error: "invalid_request" });
+    }
+    const authorization = await authorizeOrganizationRequest(
+      request,
+      env,
+      body.organizationId,
+    );
+    if (authorization instanceof Response) return authorization;
+    if (authorization.authority.role === "member") {
+      return json(403, {
+        error: "organization_manager_required",
+        message: "An organization owner or admin can change agent state.",
+      });
+    }
+    const changed = await setAgentEnabled(
+      env.IDENTITY_DB.withSession("first-primary"),
+      {
+        actorUserId: authorization.current.user.id,
+        organizationId: body.organizationId,
+        agentId: body.agentId,
+        enabled: body.action === "restore",
+      },
+    );
+    return changed
+      ? json(200, {
+          enabled: body.action === "restore",
+          organizationId: body.organizationId,
+        })
+      : json(404, { error: "agent_not_found" });
+  }
+
+  if (pathname === "/api/account/agents/grants" && request.method === "GET") {
+    const current = await getSession(request, env);
+    if (!current) return json(401, { error: "unauthenticated" });
+    const url = new URL(request.url);
+    const organizationId = url.searchParams.get("organizationId");
+    const agentId = url.searchParams.get("agentId");
+    if (!validOrganizationId(organizationId) || !validAgentId(agentId)) {
+      return json(400, { error: "invalid_request" });
+    }
+    const authorization = await authorizeOrganizationRequest(
+      request,
+      env,
+      organizationId,
+    );
+    if (authorization instanceof Response) return authorization;
+    if (authorization.authority.role === "member") {
+      return json(403, { error: "organization_manager_required" });
+    }
+    const grants = await listAgentGrants(
+      env.IDENTITY_DB.withSession("first-primary"),
+      { organizationId, agentId },
+    );
+    const agent = await env.IDENTITY_DB.withSession("first-primary")
+      .prepare(
+        "SELECT id FROM platform_agent WHERE id = ? AND organization_id = ?",
+      )
+      .bind(agentId, organizationId)
+      .first<{ id: string }>();
+    return agent
+      ? json(200, { organizationId, agentId, grants })
+      : json(404, { error: "agent_not_found" });
+  }
+
+  if (pathname === "/api/account/agents/grants" && request.method === "POST") {
+    const body = await requestBody(request);
+    if (
+      !body ||
+      !validOrganizationId(body.organizationId) ||
+      !validAgentId(body.agentId) ||
+      !validServiceId(body.serviceId) ||
+      !validCapabilities(body.capabilities)
+    ) {
+      return json(400, {
+        error: "invalid_grant",
+        message: "Choose a service and one or more unique capabilities.",
+      });
+    }
+    const authorization = await authorizeOrganizationRequest(
+      request,
+      env,
+      body.organizationId,
+    );
+    if (authorization instanceof Response) return authorization;
+    if (authorization.authority.role === "member") {
+      return json(403, {
+        error: "organization_manager_required",
+        message: "An organization owner or admin can manage agent grants.",
+      });
+    }
+    const service = await findActiveServiceById(
+      env.IDENTITY_DB.withSession("first-primary"),
+      body.serviceId,
+    );
+    if (!service)
+      return json(503, { error: "service_registration_unavailable" });
+    const result = await createOrNarrowAgentGrant(
+      env.IDENTITY_DB.withSession("first-primary"),
+      {
+        actorUserId: authorization.current.user.id,
+        organizationId: body.organizationId,
+        agentId: body.agentId,
+        service,
+        capabilities: body.capabilities,
+      },
+    );
+    if (result.status === "created" || result.status === "narrowed") {
+      return json(result.status === "created" ? 201 : 200, {
+        ...result.grant,
+        status: result.status,
+      });
+    }
+    if (result.status === "unchanged") {
+      return json(200, { ...result.grant, status: result.status });
+    }
+    if (result.status === "widening") {
+      return json(409, {
+        error: "grant_widening_requires_reauthorization",
+        message: "Revoke the current grant before requesting wider access.",
+      });
+    }
+    if (result.status === "invalid") {
+      return json(400, { error: "invalid_grant" });
+    }
+    return json(404, { error: "agent_not_found" });
+  }
+
+  if (
+    pathname === "/api/account/agents/grants/revoke" &&
+    request.method === "POST"
+  ) {
+    const body = await requestBody(request);
+    if (
+      !body ||
+      !validOrganizationId(body.organizationId) ||
+      !validAgentId(body.agentId) ||
+      !validAgentGrantId(body.grantId)
+    ) {
+      return json(400, { error: "invalid_request" });
+    }
+    const authorization = await authorizeOrganizationRequest(
+      request,
+      env,
+      body.organizationId,
+    );
+    if (authorization instanceof Response) return authorization;
+    if (authorization.authority.role === "member") {
+      return json(403, {
+        error: "organization_manager_required",
+        message: "An organization owner or admin can revoke agent grants.",
+      });
+    }
+    const revoked = await revokeAgentGrant(
+      env.IDENTITY_DB.withSession("first-primary"),
+      {
+        actorUserId: authorization.current.user.id,
+        organizationId: body.organizationId,
+        agentId: body.agentId,
+        grantId: body.grantId,
+      },
+    );
+    return revoked
+      ? json(200, { revoked: true, organizationId: body.organizationId })
+      : json(404, { error: "grant_not_found" });
+  }
+
+  if (
+    pathname === "/api/account/agents/credentials" &&
+    request.method === "GET"
+  ) {
+    const current = await getSession(request, env);
+    if (!current) return json(401, { error: "unauthenticated" });
+    const url = new URL(request.url);
+    const organizationId = url.searchParams.get("organizationId");
+    const agentId = url.searchParams.get("agentId");
+    if (!validOrganizationId(organizationId) || !validAgentId(agentId)) {
+      return json(400, { error: "invalid_request" });
+    }
+    const authorization = await authorizeOrganizationRequest(
+      request,
+      env,
+      organizationId,
+    );
+    if (authorization instanceof Response) return authorization;
+    if (authorization.authority.role === "member") {
+      return json(403, { error: "organization_manager_required" });
+    }
+    const database = env.IDENTITY_DB.withSession("first-primary");
+    const agent = await database
+      .prepare(
+        "SELECT id FROM platform_agent WHERE id = ? AND organization_id = ?",
+      )
+      .bind(agentId, organizationId)
+      .first<{ id: string }>();
+    if (!agent) return json(404, { error: "agent_not_found" });
+    const credentials = await listAgentCredentials(database, {
+      organizationId,
+      agentId,
+    });
+    return json(200, { organizationId, agentId, credentials });
+  }
+
+  if (
+    pathname === "/api/account/agents/credentials" &&
+    request.method === "POST"
+  ) {
+    const body = await requestBody(request);
+    if (
+      !body ||
+      !validOrganizationId(body.organizationId) ||
+      !validAgentId(body.agentId) ||
+      !validAgentGrantId(body.grantId) ||
+      (body.serviceId !== undefined && !validServiceId(body.serviceId)) ||
+      (body.capabilities !== undefined &&
+        !validCapabilities(body.capabilities)) ||
+      (body.name !== undefined && !validCredentialName(body.name))
+    ) {
+      return json(400, { error: "invalid_request" });
+    }
+    const maxLifetimeDays = parseConfiguredCredentialLifetimeDays(
+      env.PLATFORM_CREDENTIAL_MAX_LIFETIME_DAYS,
+    );
+    if (maxLifetimeDays === null) {
+      return json(503, { error: "credential_configuration_unavailable" });
+    }
+    const hasRequestedLifetime = Object.hasOwn(body, "lifetimeDays");
+    if (
+      hasRequestedLifetime &&
+      (typeof body.lifetimeDays !== "number" ||
+        !Number.isFinite(body.lifetimeDays) ||
+        body.lifetimeDays <= 0 ||
+        body.lifetimeDays > maxLifetimeDays)
+    ) {
+      return json(400, { error: "invalid_lifetime" });
+    }
+    const expiresAt = resolveCredentialExpiry(
+      maxLifetimeDays,
+      body.lifetimeDays,
+    );
+    if (expiresAt === null) return json(503, { error: "invalid_lifetime" });
+    const authorization = await authorizeOrganizationRequest(
+      request,
+      env,
+      body.organizationId,
+    );
+    if (authorization instanceof Response) return authorization;
+    if (authorization.authority.role === "member") {
+      return json(403, {
+        error: "organization_manager_required",
+        message: "An organization owner or admin can issue agent credentials.",
+      });
+    }
+    const database = env.IDENTITY_DB.withSession("first-primary");
+    const grants = await listAgentGrants(database, {
+      organizationId: body.organizationId,
+      agentId: body.agentId,
+    });
+    const grant = grants.find(
+      (candidate) =>
+        candidate.id === body.grantId && candidate.revokedAt === null,
+    );
+    if (!grant) return json(404, { error: "grant_not_found" });
+    const serviceId =
+      typeof body.serviceId === "string" ? body.serviceId : grant.serviceId;
+    if (serviceId !== grant.serviceId) {
+      return json(404, { error: "grant_not_found" });
+    }
+    const service = await findActiveServiceById(database, serviceId);
+    if (!service)
+      return json(503, { error: "service_registration_unavailable" });
+    const capabilities =
+      body.capabilities === undefined ? grant.capabilities : body.capabilities;
+    try {
+      const issued = await issueAgentCredential(env.IDENTITY_DB, {
+        actorUserId: authorization.current.user.id,
+        service,
+        organizationId: body.organizationId,
+        agentId: body.agentId,
+        grantId: body.grantId,
+        capabilities,
+        name: body.name,
+        expiresAt,
+      });
+      return json(201, {
+        ...issued,
+        audience: service.audience,
+        organizationId: body.organizationId,
+        agentId: body.agentId,
+        grantId: body.grantId,
+        capabilities,
+      });
+    } catch (error) {
+      if (error instanceof RangeError) {
+        return json(403, { error: "grant_exceeds_agent_authority" });
+      }
+      throw error;
+    }
+  }
+
+  if (
+    pathname === "/api/account/agents/credentials/rotate" &&
+    request.method === "POST"
+  ) {
+    const body = await requestBody(request);
+    if (
+      !body ||
+      !validOrganizationId(body.organizationId) ||
+      !validAgentId(body.agentId) ||
+      !validCredentialId(body.credentialId)
+    ) {
+      return json(400, { error: "invalid_request" });
+    }
+    const maxLifetimeDays = parseConfiguredCredentialLifetimeDays(
+      env.PLATFORM_CREDENTIAL_MAX_LIFETIME_DAYS,
+    );
+    if (maxLifetimeDays === null) {
+      return json(503, { error: "credential_configuration_unavailable" });
+    }
+    const hasRequestedLifetime = Object.hasOwn(body, "lifetimeDays");
+    if (
+      hasRequestedLifetime &&
+      (typeof body.lifetimeDays !== "number" ||
+        !Number.isFinite(body.lifetimeDays) ||
+        body.lifetimeDays <= 0 ||
+        body.lifetimeDays > maxLifetimeDays)
+    ) {
+      return json(400, { error: "invalid_lifetime" });
+    }
+    const expiresAt = resolveCredentialExpiry(
+      maxLifetimeDays,
+      body.lifetimeDays,
+    );
+    if (expiresAt === null) return json(503, { error: "invalid_lifetime" });
+    const authorization = await authorizeOrganizationRequest(
+      request,
+      env,
+      body.organizationId,
+    );
+    if (authorization instanceof Response) return authorization;
+    if (authorization.authority.role === "member") {
+      return json(403, { error: "organization_manager_required" });
+    }
+    const database = env.IDENTITY_DB.withSession("first-primary");
+    const credentials = await listAgentCredentials(database, {
+      organizationId: body.organizationId,
+      agentId: body.agentId,
+    });
+    const old = credentials.find(
+      (credential) => credential.id === body.credentialId,
+    );
+    if (!old) return json(404, { error: "credential_not_found" });
+    const grants = await listAgentGrants(database, {
+      organizationId: body.organizationId,
+      agentId: body.agentId,
+    });
+    const grant = grants.find((candidate) => candidate.id === old.grantId);
+    if (!grant || grant.revokedAt !== null) {
+      return json(404, { error: "credential_not_found" });
+    }
+    const service = await findActiveServiceById(database, grant.serviceId);
+    if (!service) return json(404, { error: "credential_not_found" });
+    try {
+      const rotated = await rotateAgentCredential(env.IDENTITY_DB, {
+        actorUserId: authorization.current.user.id,
+        service,
+        organizationId: body.organizationId,
+        agentId: body.agentId,
+        grantId: grant.id,
+        credentialId: body.credentialId,
+        expiresAt,
+      });
+      return json(201, {
+        ...rotated,
+        audience: service.audience,
+        organizationId: body.organizationId,
+        agentId: body.agentId,
+        grantId: grant.id,
+      });
+    } catch (error) {
+      if (error instanceof CredentialRotationConflict) {
+        return json(409, {
+          error: "credential_changed",
+          message:
+            "This agent credential expired, was revoked, or was rotated already.",
+        });
+      }
+      if (error instanceof RangeError)
+        return json(400, { error: "invalid_lifetime" });
+      throw error;
+    }
+  }
+
+  if (
+    pathname === "/api/account/agents/credentials/revoke" &&
+    request.method === "POST"
+  ) {
+    const body = await requestBody(request);
+    if (
+      !body ||
+      !validOrganizationId(body.organizationId) ||
+      !validAgentId(body.agentId) ||
+      !validCredentialId(body.credentialId)
+    ) {
+      return json(400, { error: "invalid_request" });
+    }
+    const authorization = await authorizeOrganizationRequest(
+      request,
+      env,
+      body.organizationId,
+    );
+    if (authorization instanceof Response) return authorization;
+    if (authorization.authority.role === "member") {
+      return json(403, { error: "organization_manager_required" });
+    }
+    const revoked = await revokeAgentCredential(
+      env.IDENTITY_DB.withSession("first-primary"),
+      {
+        actorUserId: authorization.current.user.id,
+        organizationId: body.organizationId,
+        agentId: body.agentId,
+        credentialId: body.credentialId,
+      },
+    );
+    return revoked
+      ? json(200, { revoked: true, organizationId: body.organizationId })
+      : json(404, { error: "credential_not_found" });
   }
 
   if (
@@ -1089,6 +1708,9 @@ async function accountRoute(
     let credentialOrganizationId: string | null = null;
     let credentialServices: AccountCredentialService[] = [];
     let credentials: AccountCredential[] = [];
+    let agentOrganizationId: string | null = null;
+    let agentServices: AccountCredentialService[] = [];
+    let agents: AccountAgent[] = [];
     if (selectedOrganization) {
       const currentAuthority = await getCurrentOrganizationAuthority(
         database,
@@ -1112,6 +1734,18 @@ async function accountRoute(
           capabilities: service.allowedCapabilities,
         }));
         credentials = listedCredentials;
+        if (
+          currentAuthority.role === "owner" ||
+          currentAuthority.role === "admin"
+        ) {
+          const managed = await loadAgentManagement(
+            database,
+            currentAuthority.organizationId,
+          );
+          agentOrganizationId = currentAuthority.organizationId;
+          agentServices = managed.services;
+          agents = managed.agents as AccountAgent[];
+        }
       }
     }
     const accountOrganizations: AccountOrganization[] = organizations.map(
@@ -1141,6 +1775,9 @@ async function accountRoute(
       credentialServices,
       credentials,
       credentialMaxLifetimeDays: configuredCredentialLifetimeDays,
+      agentOrganizationId,
+      agentServices,
+      agents,
       providers: linkedAccounts.map((account) => ({
         id: account.id,
         providerId: account.providerId,
@@ -1380,6 +2017,79 @@ async function authenticateCredential(
         expiresAt: new Date(row.expires_at!).toISOString(),
         organizationId: row.organization_id,
         membershipId: membership.id,
+      },
+    });
+  }
+
+  if (row.kind === "agent") {
+    if (
+      !row.organization_id ||
+      row.membership_id !== null ||
+      !row.grant_id ||
+      resourceIds.length !== 0 ||
+      row.expires_at === null ||
+      !isSafeCredentialExpiry(row.expires_at)
+    ) {
+      return json(503, { status: "authority_unavailable" });
+    }
+    const agent = await database
+      .prepare(
+        `SELECT agent.id, agent_grant.id AS grant_id,
+                agent_grant.capabilities AS grant_capabilities
+         FROM platform_agent AS agent
+         JOIN organization AS owning_org ON owning_org.id = agent.organization_id
+         JOIN platform_agent_grant AS agent_grant
+           ON agent_grant.agent_id = agent.id
+          AND agent_grant.organization_id = agent.organization_id
+         JOIN platform_service AS registered_service
+           ON registered_service.service_id = agent_grant.service_id
+          AND registered_service.audience = agent_grant.audience
+         WHERE agent.id = ? AND agent.organization_id = ?
+           AND agent.enabled = 1
+           AND owning_org.suspendedAt IS NULL
+           AND agent_grant.id = ?
+           AND agent_grant.revoked_at IS NULL
+           AND agent_grant.audience = ?
+           AND registered_service.service_id = ?
+           AND registered_service.disabled = 0`,
+      )
+      .bind(
+        row.subject_id,
+        row.organization_id,
+        row.grant_id,
+        service.audience,
+        service.serviceId,
+      )
+      .first<{
+        id: string;
+        grant_id: string;
+        grant_capabilities: string;
+      }>();
+    if (!agent || agent.grant_id !== row.grant_id) {
+      return json(401, { status: "invalid_credential" });
+    }
+    const grantCapabilities = parseStringArray(agent.grant_capabilities);
+    if (!grantCapabilities || !validCapabilities(grantCapabilities)) {
+      return json(503, { status: "authority_unavailable" });
+    }
+    if (
+      capabilities.some((capability) => !grantCapabilities.includes(capability))
+    ) {
+      return json(401, { status: "invalid_credential" });
+    }
+    return json(200, {
+      status: "authenticated",
+      principal: {
+        version: 1,
+        authority: env.PLATFORM_AUTHORITY_ID,
+        kind: "agent",
+        subjectId: row.subject_id,
+        credentialId: row.id,
+        organizationId: row.organization_id,
+        grantId: row.grant_id,
+        audience: service.audience,
+        capabilities,
+        expiresAt: new Date(row.expires_at).toISOString(),
       },
     });
   }

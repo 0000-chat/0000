@@ -5,9 +5,11 @@ ownership boundaries. [AUTH_FIRST_SPEC.md](AUTH_FIRST_SPEC.md) records the
 agreed authentication MVP and its acceptance gates. [T01_RUNTIME_REPORT.md](T01_RUNTIME_REPORT.md),
 [T02_ACCOUNT_REPORT.md](T02_ACCOUNT_REPORT.md),
 [T03_ORGANIZATION_REPORT.md](T03_ORGANIZATION_REPORT.md), and
-[T04_CREDENTIAL_REPORT.md](T04_CREDENTIAL_REPORT.md) record bounded
-Worker/D1 evidence. T01 through T04 are reviewed and verified on the aggregate
-branch. T03 aggregate checks passed at `c51d285`; T04 checks passed at `dc30cd4`.
+[T04_CREDENTIAL_REPORT.md](T04_CREDENTIAL_REPORT.md), and
+[T05_AGENT_REPORT.md](T05_AGENT_REPORT.md) record bounded Worker/D1 evidence.
+T01 through T04 are reviewed and verified on the aggregate branch. T05 is
+reviewed and integrating, pending aggregate checks.
+T03 aggregate checks passed at `c51d285`; T04 checks passed at `dc30cd4`.
 [T14_RECONNECT_REPORT.md](T14_RECONNECT_REPORT.md) records the independently
 reviewed reconnect fixture, integrated and verified at `166e54d`.
 The full MVP is not implemented or accepted, and these reports do not establish
@@ -79,8 +81,10 @@ restore organizations and disable or restore human accounts when an existing
 user ID is explicitly configured. T04 adds personal opaque API credentials
 scoped to the selected organization and registered service audience, with
 one-time issue display, metadata listing, rotation and revocation. See the T03
-and T04 reports for bounded local evidence and review status. Agent identities
-and OAuth consent remain later Platform work. Platform does not own product
+and T04 reports for bounded local evidence and review status. T05 adds
+organization-owned agent creation, lifecycle, per-service grants and agent
+credential controls to this account UI. OAuth consent remains later Platform
+work. Platform does not own product
 Spaces, threads, agent execution or the full product's agent-control
 experience.
 
@@ -219,14 +223,18 @@ operator lifecycle controls; its implementation and review fixes are integrated
 and verified at `c51d285`. T04 adds bounded personal credential lifecycle UI,
 validated local service registration tooling and a two-audience Worker/D1
 fixture, reviewed and independently verified at `dc30cd4`; its exact evidence
-and limits are in `T04_CREDENTIAL_REPORT.md`.
+and limits are in `T04_CREDENTIAL_REPORT.md`. T05 implements organization-owned
+agents, separate audience grants and agent credential lifecycle in the local
+Worker/D1 path; [T05_AGENT_REPORT.md](T05_AGENT_REPORT.md) records its bounded
+worker evidence and limitations pending aggregate review.
 Local Worker tests exercise Better Auth callbacks, sessions, D1 persistence,
-signup policy, profile, organization and credential controls; Google/GitHub
+signup policy, profile, organization, human credential and agent controls;
+Google/GitHub
 HTTP responses are simulated at the provider boundary. The service and
 protected-resource checks remain fixtures. This is not a deployed identity
-service or a complete shared-auth integration. Agent UI, production OAuth
-installation state, consumer adoption and managed deployment ownership remain
-later work. Database is also a scaffold.
+service or a complete shared-auth integration. Production OAuth installation
+state, consumer adoption and managed deployment ownership remain later work.
+Database is also a scaffold.
 Communicator and the message service still need to move their authentication
 paths to the shared Platform path while leaving resource ACLs local. No
 apps/0000 implementation was found, so its login and offline-sync integration

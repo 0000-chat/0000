@@ -61,6 +61,34 @@ export interface AccountCredential {
   predecessorId: string | null;
 }
 
+export interface AccountAgentGrant {
+  id: string;
+  agentId: string;
+  organizationId: string;
+  serviceId: string;
+  audience: string;
+  capabilities: string[];
+  createdAt: number;
+  revokedAt: number | null;
+  revokedReason: string | null;
+}
+
+export interface AccountAgentCredential extends AccountCredential {
+  grantId: string;
+}
+
+export interface AccountAgent {
+  id: string;
+  organizationId: string;
+  name: string;
+  enabled: boolean;
+  createdByUserId: string;
+  createdAt: number;
+  updatedAt: number;
+  grants: AccountAgentGrant[];
+  credentials: AccountAgentCredential[];
+}
+
 export interface AccountView {
   name: string;
   email: string;
@@ -80,6 +108,9 @@ export interface AccountView {
   credentialServices: AccountCredentialService[];
   credentials: AccountCredential[];
   credentialMaxLifetimeDays: number | null;
+  agentOrganizationId: string | null;
+  agentServices: AccountCredentialService[];
+  agents: AccountAgent[];
 }
 
 const securityHeaders = {
@@ -354,6 +385,76 @@ function credentialManagementMarkup(view: AccountView): string {
   </section>`;
 }
 
+function agentManagementMarkup(view: AccountView): string {
+  const selected = view.selectedOrganization;
+  const organizationId = view.agentOrganizationId;
+  const scoped = Boolean(
+    selected &&
+      organizationId &&
+      selected.id === organizationId &&
+      !selected.suspended,
+  );
+  const manager =
+    scoped && (selected?.role === "owner" || selected?.role === "admin");
+  const canIssueOrRotate = manager && view.credentialMaxLifetimeDays !== null;
+  const serviceOptions = view.agentServices
+    .map(
+      (service, index) =>
+        `<option value="${escapeHtml(service.id)}" data-capabilities="${escapeHtml(service.capabilities.join(","))}"${index === 0 ? " selected" : ""}>${escapeHtml(service.name || service.id)} · ${escapeHtml(service.audience)}</option>`,
+    )
+    .join("");
+  const agents = view.agents
+    .map((agent) => {
+      const grants = agent.grants
+        .map((grant) => {
+          const revoked = grant.revokedAt !== null;
+          const grantCapabilities = grant.capabilities
+            .map(
+              (capability) =>
+                `<label><input type="checkbox" name="capabilities" value="${escapeHtml(capability)}" checked${revoked ? " disabled" : ""}>${escapeHtml(capability)}</label>`,
+            )
+            .join("");
+          const grantActions = manager
+            ? `<div class="row-actions">${!revoked ? `<form class="inline-form" data-agent-grant-narrow><input type="hidden" name="organizationId" value="${escapeHtml(agent.organizationId)}"><input type="hidden" name="agentId" value="${escapeHtml(agent.id)}"><input type="hidden" name="grantId" value="${escapeHtml(grant.id)}"><input type="hidden" name="serviceId" value="${escapeHtml(grant.serviceId)}"><div class="capability-inline">${grantCapabilities}</div><button type="submit" class="quiet-button">Narrow grant</button></form>` : ""}${!revoked ? `<button type="button" class="quiet-button" data-agent-revoke-grant="${escapeHtml(grant.id)}">Revoke grant</button>` : ""}</div>`
+            : "";
+          const issueForm =
+            !revoked && canIssueOrRotate && agent.enabled
+              ? `<form class="inline-form agent-credential-issue" data-agent-credential-issue><input type="hidden" name="organizationId" value="${escapeHtml(agent.organizationId)}"><input type="hidden" name="agentId" value="${escapeHtml(agent.id)}"><input type="hidden" name="grantId" value="${escapeHtml(grant.id)}"><label for="agent-credential-name-${escapeHtml(grant.id)}">Credential name</label><input id="agent-credential-name-${escapeHtml(grant.id)}" name="name" type="text" maxlength="100" value="${escapeHtml(agent.name)} automation" required><label for="agent-credential-lifetime-${escapeHtml(grant.id)}">Lifetime in days <span class="optional">optional</span></label><input id="agent-credential-lifetime-${escapeHtml(grant.id)}" name="lifetimeDays" type="number" min="0.000001" step="any" placeholder="${escapeHtml(String(view.credentialMaxLifetimeDays))}"><button type="submit" class="quiet-button">Issue credential</button><p class="status" data-agent-credential-status role="status" aria-live="polite"></p></form>`
+              : "";
+          return `<li class="management-row agent-grant-row"><div><strong>${escapeHtml(grant.serviceId)}</strong><span>${escapeHtml(grant.audience)}</span><small>${escapeHtml(grant.capabilities.join(", "))} · ${revoked ? `revoked${grant.revokedReason ? ` (${escapeHtml(grant.revokedReason)})` : ""}` : "current"}</small>${grantActions}${issueForm}</div></li>`;
+        })
+        .join("");
+      const credentials = agent.credentials
+        .map((credential) => {
+          const status = credential.revokedAt
+            ? credential.revokedReason === "rotated"
+              ? "rotated"
+              : credential.revokedReason === "grant_revoked"
+                ? "grant revoked"
+                : "revoked"
+            : credential.expiresAt <= Date.now()
+              ? "expired"
+              : "active";
+          const controls =
+            manager && status === "active"
+              ? `<div class="row-actions">${canIssueOrRotate ? `<button type="button" class="quiet-button" data-agent-rotate-credential="${escapeHtml(credential.id)}">Rotate</button>` : ""}<button type="button" class="quiet-button" data-agent-revoke-credential="${escapeHtml(credential.id)}">Revoke</button></div>`
+              : "";
+          return `<li class="management-row"><div><strong>${escapeHtml(credential.name)}</strong><span>${escapeHtml(credential.audience)}</span><small>${escapeHtml(credential.capabilities.join(", "))} · expires ${escapeHtml(new Date(credential.expiresAt).toLocaleString())} · ${escapeHtml(status)}</small></div>${controls}</li>`;
+        })
+        .join("");
+      const lifecycleLabel = agent.enabled
+        ? "Disable agent"
+        : "Re-enable agent";
+      return `<li class="agent-card" data-agent-id="${escapeHtml(agent.id)}"><div class="management-row"><div><strong>${escapeHtml(agent.name)}</strong><span>${escapeHtml(agent.id)}</span><small>${agent.enabled ? "enabled" : "disabled"} · created by ${escapeHtml(agent.createdByUserId)}</small></div><div class="row-actions">${manager ? `<form class="inline-form" data-agent-rename><input type="hidden" name="organizationId" value="${escapeHtml(agent.organizationId)}"><input type="hidden" name="agentId" value="${escapeHtml(agent.id)}"><input name="name" type="text" maxlength="100" value="${escapeHtml(agent.name)}" aria-label="Agent name"><button type="submit" class="quiet-button">Save name</button></form><button type="button" class="quiet-button" data-agent-lifecycle="${escapeHtml(agent.id)}" data-agent-enabled="${agent.enabled ? "true" : "false"}">${lifecycleLabel}</button>` : ""}</div></div><h4>Service grants</h4><ul class="management-list">${grants || `<li class="muted">No service grants.</li>`}</ul>${manager && agent.enabled && view.agentServices.length > 0 ? `<form class="inline-form agent-grant-issue" data-agent-grant-create><input type="hidden" name="organizationId" value="${escapeHtml(agent.organizationId)}"><input type="hidden" name="agentId" value="${escapeHtml(agent.id)}"><label for="agent-service-${escapeHtml(agent.id)}">Grant service access</label><select id="agent-service-${escapeHtml(agent.id)}" name="serviceId" data-agent-grant-service required>${serviceOptions}</select><fieldset><legend>Capabilities</legend><div data-agent-capability-options></div></fieldset><button type="submit" class="primary-button">Create or narrow grant</button><p class="status" data-agent-grant-status role="status" aria-live="polite"></p></form>` : ""}<h4>Agent credentials</h4><ul class="management-list">${credentials || `<li class="muted">No agent credentials.</li>`}</ul></li>`;
+    })
+    .join("");
+  const body =
+    manager && organizationId
+      ? `<form id="agent-create-form"><input type="hidden" name="organizationId" value="${escapeHtml(organizationId)}"><label for="agent-name">Create an organization agent</label><input id="agent-name" name="name" type="text" maxlength="100" required placeholder="Automation agent"><button type="submit" class="primary-button">Create agent</button><p id="agent-create-status" class="status" role="status" aria-live="polite"></p></form><div id="agent-secret" class="secret-panel" hidden><strong>Copy this agent credential now</strong><code data-agent-secret-value></code><p class="hint">The secret is shown once and is never stored in browser storage or a URL.</p></div><ul class="management-list" id="agent-list">${agents || `<li class="muted">No organization agents.</li>`}</ul><p id="agent-status" class="status" role="status" aria-live="polite"></p>`
+      : `<p class="hint">${selected?.suspended ? "Agent management is unavailable while this organization is suspended." : selected ? "Only an organization owner or admin can manage agents." : "Choose an active organization to manage agents."}</p>`;
+  return `<section class="card" aria-labelledby="agent-heading"><h2 id="agent-heading">Organization agents</h2><p class="hint">Agents are organization-owned identities. They keep a stable subject ID, use a separate grant for each service audience, and never inherit a creator's human role.</p>${body}</section>`;
+}
+
 export function accountPage(view: AccountView): Response {
   const image = safeAvatarUrl(view.image);
   const avatar = image
@@ -443,6 +544,7 @@ export function accountPage(view: AccountView): Response {
         ${defaultOrganization}
       </section>
       ${credentialManagementMarkup(view)}
+      ${agentManagementMarkup(view)}
       <section class="card" aria-labelledby="invitations-heading">
         <h2 id="invitations-heading">Invitations for you</h2>
         <ul class="management-list">${pendingInvitations || `<li class="muted">No current invitations for your verified email.</li>`}</ul>
@@ -532,6 +634,15 @@ h3 { margin: 22px 0 12px; font-size: 1rem; }
 .management-row span, .management-row small, .muted { color: #677895; font-size: 0.87rem; overflow-wrap: anywhere; }
 .row-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
 .row-actions select { width: auto; min-height: 38px; }
+.inline-form { display: grid; gap: 8px; margin-top: 10px; }
+.inline-form label { margin: 8px 0 0; }
+.inline-form input, .inline-form select { min-height: 38px; }
+.agent-card { padding: 14px; border: 1px solid #e8edf5; border-radius: 10px; }
+.agent-card h4 { margin: 16px 0 8px; color: #465875; font-size: 0.9rem; }
+.agent-grant-row { display: block; }
+.capability-inline { display: flex; flex-wrap: wrap; gap: 8px; }
+.capability-inline label { display: flex; align-items: center; gap: 5px; margin: 0; font-weight: 500; }
+.capability-inline input { width: auto; min-height: auto; }
 .secret-panel { display: grid; gap: 8px; margin-top: 18px; padding: 14px; border: 1px solid #9bc6a8; border-radius: 10px; background: #f0fbf2; color: #1f5930; }
 .secret-panel[hidden] { display: none; }
 .secret-panel code { display: block; overflow-wrap: anywhere; padding: 10px; border-radius: 7px; background: #fff; color: #17233a; user-select: all; }
@@ -784,6 +895,209 @@ credentialSection?.addEventListener("click", async (event) => {
   }
 });
 
+function agentViewMatches(organizationId, generation) {
+  return credentialViewMatches(organizationId, generation);
+}
+
+function renderAgentGrantCapabilities() {
+  document.querySelectorAll("[data-agent-grant-service]").forEach((select) => {
+    if (!(select instanceof HTMLSelectElement)) return;
+    const form = select.closest("form");
+    const options = form?.querySelector("[data-agent-capability-options]");
+    if (!(options instanceof HTMLElement)) return;
+    const selected = select.selectedOptions[0];
+    const capabilities = (selected?.dataset.capabilities || "").split(",").filter(Boolean);
+    options.replaceChildren();
+    capabilities.forEach((capability) => {
+      const label = document.createElement("label");
+      const input = document.createElement("input");
+      input.type = "checkbox";
+      input.name = "capabilities";
+      input.value = capability;
+      input.checked = true;
+      label.append(input, document.createTextNode(capability));
+      options.append(label);
+    });
+  });
+}
+
+document.querySelectorAll("[data-agent-grant-service]").forEach((select) => {
+  select.addEventListener("change", renderAgentGrantCapabilities);
+});
+renderAgentGrantCapabilities();
+
+function showAgentIssuedSecret(data, status) {
+  const panel = document.getElementById("agent-secret");
+  const value = panel?.querySelector("[data-agent-secret-value]");
+  if (!(panel instanceof HTMLElement) || !(value instanceof HTMLElement) || typeof data.credential !== "string") {
+    throw new Error("The agent credential was issued without a displayable secret.");
+  }
+  value.textContent = data.credential;
+  panel.hidden = false;
+  showMessage(status, "Agent credential issued. Save the secret now; Platform cannot recover it.");
+}
+
+const agentCreateForm = document.getElementById("agent-create-form");
+agentCreateForm?.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const data = new FormData(form);
+  const organizationId = String(data.get("organizationId") || "");
+  const status = document.getElementById("agent-create-status");
+  const button = form.querySelector("button[type=submit]");
+  const requestGeneration = credentialViewGeneration;
+  if (button) button.disabled = true;
+  showMessage(status, "Creating agent…");
+  try {
+    await postAccountJson("/api/account/agents", {
+      organizationId,
+      name: data.get("name"),
+    });
+    if (!agentViewMatches(organizationId, requestGeneration)) return;
+    window.location.assign(accountLocation(organizationId));
+  } catch (error) {
+    if (agentViewMatches(organizationId, requestGeneration)) {
+      if (button) button.disabled = false;
+      showMessage(status, error instanceof Error ? error.message : "Agent could not be created.");
+    }
+  }
+});
+
+const agentList = document.getElementById("agent-list");
+agentList?.addEventListener("submit", async (event) => {
+  const form = event.target;
+  if (!(form instanceof HTMLFormElement)) return;
+  const data = new FormData(form);
+  const organizationId = String(data.get("organizationId") || "");
+  const status = form.querySelector("[data-agent-grant-status], [data-agent-credential-status]");
+  const requestGeneration = credentialViewGeneration;
+  if (form.matches("[data-agent-rename]")) {
+    event.preventDefault();
+    try {
+      await postAccountJson("/api/account/agents/update", {
+        organizationId,
+        agentId: data.get("agentId"),
+        name: data.get("name"),
+      });
+      if (!agentViewMatches(organizationId, requestGeneration)) return;
+      window.location.assign(accountLocation(organizationId));
+    } catch (error) {
+      if (agentViewMatches(organizationId, requestGeneration)) {
+        showMessage(status, error instanceof Error ? error.message : "Agent name could not be saved.");
+      }
+    }
+    return;
+  }
+  if (form.matches("[data-agent-grant-create], [data-agent-grant-narrow]")) {
+    event.preventDefault();
+    const capabilities = data.getAll("capabilities").map(String);
+    if (!capabilities.length) {
+      showMessage(status, "Choose at least one capability.");
+      return;
+    }
+    try {
+      await postAccountJson("/api/account/agents/grants", {
+        organizationId,
+        agentId: data.get("agentId"),
+        grantId: data.get("grantId") || undefined,
+        serviceId: data.get("serviceId"),
+        capabilities,
+      });
+      if (!agentViewMatches(organizationId, requestGeneration)) return;
+      window.location.assign(accountLocation(organizationId));
+    } catch (error) {
+      if (agentViewMatches(organizationId, requestGeneration)) {
+        showMessage(status, error instanceof Error ? error.message : "Agent grant could not be saved.");
+      }
+    }
+    return;
+  }
+  if (form.matches("[data-agent-credential-issue]")) {
+    event.preventDefault();
+    const button = form.querySelector("button[type=submit]");
+    const requestGeneration = credentialViewGeneration;
+    if (button) button.disabled = true;
+    showMessage(status, "Issuing agent credential…");
+    try {
+      const result = await postAccountJson("/api/account/agents/credentials", {
+        organizationId,
+        agentId: data.get("agentId"),
+        grantId: data.get("grantId"),
+        name: data.get("name"),
+        lifetimeDays: requestedCredentialLifetime(form),
+      });
+      if (!agentViewMatches(organizationId, requestGeneration)) return;
+      showAgentIssuedSecret(result, status);
+      if (button) button.disabled = false;
+    } catch (error) {
+      if (agentViewMatches(organizationId, requestGeneration)) {
+        showMessage(status, error instanceof Error ? error.message : "Agent credential could not be issued.");
+        if (button) button.disabled = false;
+      }
+    }
+  }
+});
+
+agentList?.addEventListener("click", async (event) => {
+  const target = event.target instanceof Element
+    ? event.target.closest("button[data-agent-lifecycle], button[data-agent-revoke-grant], button[data-agent-rotate-credential], button[data-agent-revoke-credential]")
+    : null;
+  if (!(target instanceof HTMLButtonElement)) return;
+  const card = target.closest("[data-agent-id]");
+  const organizationId = document.getElementById("organization-select")?.value || "";
+  const agentId = card?.getAttribute("data-agent-id") || "";
+  const requestGeneration = credentialViewGeneration;
+  const status = document.getElementById("agent-status");
+  target.disabled = true;
+  try {
+    if (target.dataset.agentLifecycle) {
+      await postAccountJson("/api/account/agents/lifecycle", {
+        organizationId,
+        agentId: target.dataset.agentLifecycle,
+        action: target.dataset.agentEnabled === "true" ? "disable" : "restore",
+      });
+      if (!agentViewMatches(organizationId, requestGeneration)) return;
+      window.location.assign(accountLocation(organizationId));
+      return;
+    }
+    if (target.dataset.agentRevokeGrant) {
+      await postAccountJson("/api/account/agents/grants/revoke", {
+        organizationId,
+        agentId,
+        grantId: target.dataset.agentRevokeGrant,
+      });
+      if (!agentViewMatches(organizationId, requestGeneration)) return;
+      window.location.assign(accountLocation(organizationId));
+      return;
+    }
+    if (target.dataset.agentRotateCredential || target.dataset.agentRevokeCredential) {
+      const credentialId = target.dataset.agentRotateCredential || target.dataset.agentRevokeCredential;
+      if (!credentialId) return;
+      if (target.dataset.agentRotateCredential) {
+        const result = await postAccountJson("/api/account/agents/credentials/rotate", {
+          organizationId,
+          agentId,
+          credentialId,
+        });
+        if (!agentViewMatches(organizationId, requestGeneration)) return;
+        showAgentIssuedSecret(result, status);
+      } else {
+        await postAccountJson("/api/account/agents/credentials/revoke", {
+          organizationId,
+          agentId,
+          credentialId,
+        });
+        if (agentViewMatches(organizationId, requestGeneration)) window.location.reload();
+      }
+    }
+  } catch (error) {
+    if (agentViewMatches(organizationId, requestGeneration)) {
+      showMessage(status, error instanceof Error ? error.message : "Agent change could not be completed.");
+      target.disabled = false;
+    }
+  }
+});
+
 let organizationDetailsGeneration = 0;
 
 async function loadOrganizationDetails(organizationId) {
@@ -824,8 +1138,12 @@ organizationSelect?.addEventListener("change", () => {
   const secretValue = secretPanel?.querySelector("[data-secret-value]");
   if (secretPanel instanceof HTMLElement) secretPanel.hidden = true;
   if (secretValue instanceof HTMLElement) secretValue.textContent = "";
+  const agentSecretPanel = document.getElementById("agent-secret");
+  const agentSecretValue = agentSecretPanel?.querySelector("[data-agent-secret-value]");
+  if (agentSecretPanel instanceof HTMLElement) agentSecretPanel.hidden = true;
+  if (agentSecretValue instanceof HTMLElement) agentSecretValue.textContent = "";
   document
-    .querySelectorAll("#credential-issue-form input, #credential-issue-form select, #credential-issue-form button, [data-rotate-credential], [data-revoke-credential]")
+    .querySelectorAll("#credential-issue-form input, #credential-issue-form select, #credential-issue-form button, [data-rotate-credential], [data-revoke-credential], #agent-create-form input, #agent-create-form select, #agent-create-form button, #agent-list input, #agent-list select, #agent-list button")
     .forEach((control) => {
       if (control instanceof HTMLButtonElement || control instanceof HTMLInputElement || control instanceof HTMLSelectElement) {
         control.disabled = true;

@@ -2,7 +2,7 @@
 
 Date: 2026-09-19. Status: agreed MVP design; T01 through T04 reviewed and verified
 on the aggregate; T14 reconnect fixture reviewed and verified at `166e54d`;
-full MVP not accepted.
+T05 reviewed and integrating, pending aggregate checks; full MVP not accepted.
 
 [README.md](README.md) defines Platform's ownership. This specification records
 the agreed product and security decisions for the implementation.
@@ -13,7 +13,9 @@ records local evidence for the initial account slice. [T03_ORGANIZATION_REPORT.m
 records the organization and lifecycle slice, reviewed and verified on the
 aggregate at `c51d285`. [T04_CREDENTIAL_REPORT.md](T04_CREDENTIAL_REPORT.md)
 records the bounded human credential, service registration and two-audience
-fixture evidence, reviewed and verified at aggregate `dc30cd4`. The evidence
+fixture evidence, reviewed and verified at aggregate `dc30cd4`. [T05_AGENT_REPORT.md](T05_AGENT_REPORT.md)
+records the local organization-owned agent and per-audience grant evidence;
+its worker branch is pending aggregate review. The evidence
 does not complete the design's acceptance gates
 or establish production authentication.
 
@@ -54,7 +56,9 @@ Platform owns the account experience for profile, organizations, memberships,
 organization-owned agent identities, consent and credentials. The current T03
 slice adds explicit organization selection, member and invitation management,
 atomic owner protection and configured operator lifecycle recovery. It includes
-the identity administration needed by service-only customers. Product Spaces,
+the identity administration needed by service-only customers. T05 adds
+organization-owned agent creation, lifecycle, per-service grants and opaque
+agent credentials to the Platform account UI. Product Spaces,
 threads, agent execution and full-product agent control remain with the product
 UI. Integrate a full application's login only where that application exists;
 no apps/0000 implementation was found. Building full-product login or offline
@@ -322,6 +326,12 @@ alone:
   but are not yet normalized through `/internal/v1/authenticate` or bound to a
   Platform installation. T06/T07 must resolve that seam without caller-supplied
   authority.
+- T05 exercises organization-owned agent creation, stable identity across two
+  service audiences, live grant and agent lifecycle checks, one-time opaque
+  credential issue/rotation/revocation and creator-departure administration in
+  local Worker/D1 tests. Its service and resource checks remain fixtures, and
+  the worker evidence does not establish aggregate acceptance or production
+  consumer adoption.
 - Confirm managed configuration's real owning workspace and keep runtime
   anonymous enforcement independent of a Cloud network call.
 
@@ -330,7 +340,9 @@ aggregate at `7152bcd`, with provider HTTP simulated in Worker/D1 tests. T03
 organization, invitation and operator behavior and review fixes are integrated
 and independently verified at `c51d285` with real Worker/D1 route tests and
 Chromium organization flows. T04 is reviewed, integrated and independently
-verified at `dc30cd4`, including credential and organization browser flows.
+verified at `dc30cd4`, including credential and organization browser flows. T05
+has bounded Worker/D1 agent lifecycle and two-audience evidence on its isolated
+worker branch; aggregate review and integration remain pending.
 Its local credential and registration evidence does not establish deployed
 provisioning, live provider behavior or consumer
 adoption. The full Platform authentication MVP remains unimplemented until
