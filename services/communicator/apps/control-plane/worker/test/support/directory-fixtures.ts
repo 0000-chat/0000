@@ -390,13 +390,13 @@ export async function seedAccountAccess(db: D1Database): Promise<void> {
 }
 
 export async function clearDirectory(db: D1Database): Promise<void> {
-  // Ingestion history is intentionally append-only in production. Tests need
-  // an isolated database between cases, so temporarily remove only the
-  // ingestion triggers, clear fixture rows in FK order, and restore the exact
-  // trigger definitions from sqlite_schema before returning.
+  // Ingestion history and Platform binding history are intentionally
+  // append-only in production. Tests need an isolated database between cases,
+  // so temporarily remove only the history triggers, clear fixture rows in FK
+  // order, and restore the exact trigger definitions from sqlite_schema.
   const triggerRows = await db
     .prepare(
-      "SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'ingestion_%' ORDER BY name",
+      "SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND (name LIKE 'ingestion_%' OR name LIKE 'platform_bindings_%') ORDER BY name",
     )
     .all<{ name: string; sql: string }>();
   for (const trigger of triggerRows.results) {
@@ -441,6 +441,7 @@ export async function clearDirectory(db: D1Database): Promise<void> {
     db.prepare("DELETE FROM history_import_ranges"),
     db.prepare("DELETE FROM history_imports"),
     db.prepare("DELETE FROM provider_capability_records"),
+    db.prepare("DELETE FROM platform_bindings"),
     db.prepare("DELETE FROM oauth_authorization_codes"),
     db.prepare("DELETE FROM oauth_upstream_login_transactions"),
     db.prepare("DELETE FROM oauth_authorization_transactions"),
