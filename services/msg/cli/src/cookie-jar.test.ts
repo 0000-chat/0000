@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { mkdtemp, readFile, stat } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -156,6 +156,7 @@ test("does not steal a live owner whose lock looks stale during delayed first us
     await fetcher("https://msg.0000.chat/room-delayed-owner");
   `;
   const followerSource = `
+    import { writeFileSync } from "node:fs";
     import { PersistentCookieJar } from ${JSON.stringify(moduleUrl)};
     const jar = new PersistentCookieJar({ filePath: process.env.T09_COOKIE_JAR, serviceOrigin: "https://msg.0000.chat" });
     const fetcher = jar.wrapFetch(async (_input, init) => {
@@ -166,6 +167,7 @@ test("does not steal a live owner whose lock looks stale during delayed first us
         ["set-cookie", "msg_resource=" + control + "; Path=/room-delayed-follower; Secure"],
       ] });
     });
+    writeFileSync(process.env.T09_COOKIE_FOLLOWER_STARTED, "started");
     await fetcher("https://msg.0000.chat/room-delayed-follower");
   `;
   const start = (source: string, extraEnv: Record<string, string> = {}): Promise<void> => new Promise((resolve, reject) => {
@@ -181,7 +183,9 @@ test("does not steal a live owner whose lock looks stale during delayed first us
 
   const owner = start(ownerSource, { T09_COOKIE_READY: readyPath });
   await waitForFile(readyPath);
-  const follower = start(followerSource);
+  const followerStartedPath = `${filePath}.follower-started`;
+  const follower = start(followerSource, { T09_COOKIE_FOLLOWER_STARTED: followerStartedPath });
+  await waitForFile(followerStartedPath);
   await Promise.all([owner, follower]);
 
   const jar = new PersistentCookieJar({ filePath, serviceOrigin: "https://msg.0000.chat" });
@@ -191,4 +195,64 @@ test("does not steal a live owner whose lock looks stale during delayed first us
   expect(control).toBe("guest-owner");
   expect(ownerResource).toBe(control);
   expect(followerResource).toBe(control);
+});
+
+test("competing dead-owner reclaimers preserve the replacement owner", async () => {
+  const { filePath } = await temporaryJar();
+  const lockPath = `${filePath}.lock`;
+  const deadOwner = spawn(process.execPath, ["-e", ""], { stdio: "ignore" });
+  const deadPid = deadOwner.pid;
+  if (!deadPid) throw new Error("Could not allocate a dead lock owner process.");
+  await new Promise<void>((resolve, reject) => {
+    deadOwner.once("error", reject);
+    deadOwner.once("close", () => resolve());
+  });
+  await mkdir(lockPath, { mode: 0o700 });
+  await writeFile(join(lockPath, "owner.json"), JSON.stringify({ owner: "dead-owner", pid: deadPid, startedAt: 0 }), { mode: 0o600 });
+
+  const moduleUrl = new URL("./cookie-jar.ts", import.meta.url).href;
+  const goPath = `${filePath}.go`;
+  const sources = Array.from({ length: 3 }, (_, index) => ({
+    readyPath: `${filePath}.reclaimer-${index}`,
+    source: `
+      import { existsSync, writeFileSync } from "node:fs";
+      import { PersistentCookieJar } from ${JSON.stringify(moduleUrl)};
+      const filePath = process.env.T09_COOKIE_JAR;
+      const jar = new PersistentCookieJar({ filePath, serviceOrigin: "https://msg.0000.chat" });
+      writeFileSync(process.env.T09_COOKIE_READY, "ready");
+      while (!existsSync(process.env.T09_COOKIE_GO)) await new Promise((resolve) => setTimeout(resolve, 5));
+      const fetcher = jar.wrapFetch(async (_input, init) => {
+        const cookie = new Headers(init?.headers).get("cookie") ?? "";
+        const control = cookie.split("; ").find((value) => value.startsWith("msg_guest_control="))?.slice("msg_guest_control=".length) ?? ${JSON.stringify(`guest-reclaimer-${index}`)};
+        await new Promise((resolve) => setTimeout(resolve, 25));
+        return new Response(null, { headers: [
+          ["set-cookie", "msg_guest_control=" + control + "; Path=/; Secure"],
+          ["set-cookie", "msg_resource=" + control + "; Path=/room-reclaimer-${index}; Secure"],
+        ] });
+      });
+      await fetcher("https://msg.0000.chat/room-reclaimer-${index}");
+    `,
+  }));
+  const start = (source: string, readyPath: string): Promise<void> => new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, ["-e", source], {
+      env: { ...process.env, T09_COOKIE_JAR: filePath, T09_COOKIE_READY: readyPath, T09_COOKIE_GO: goPath },
+      stdio: ["ignore", "ignore", "pipe"],
+    });
+    let error = "";
+    child.stderr.on("data", (chunk: Buffer) => { error += chunk.toString(); });
+    child.once("error", reject);
+    child.once("close", (code) => code === 0 ? resolve() : reject(new Error(`Reclaimer process exited ${code}: ${error}`)));
+  });
+  const reclaimers = sources.map(({ source, readyPath }) => start(source, readyPath));
+  await Promise.all(sources.map(({ readyPath }) => waitForFile(readyPath)));
+  await writeFile(goPath, "go");
+  await Promise.all(reclaimers);
+
+  const jar = new PersistentCookieJar({ filePath, serviceOrigin: "https://msg.0000.chat" });
+  const control = jar.cookieHeader("https://msg.0000.chat/room-reclaimer-0")?.match(/(?:^|; )msg_guest_control=([^;]+)/u)?.[1];
+  expect(control).toBeString();
+  for (let index = 0; index < sources.length; index += 1) {
+    const resource = jar.cookieHeader(`https://msg.0000.chat/room-reclaimer-${index}`)?.match(/(?:^|; )msg_resource=([^;]+)/u)?.[1];
+    expect(resource).toBe(control);
+  }
 });

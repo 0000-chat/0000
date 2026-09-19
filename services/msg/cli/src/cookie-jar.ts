@@ -1,7 +1,7 @@
-import { chmodSync, closeSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
+import { chmodSync, mkdirSync, readFileSync, renameSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
 
 interface StoredCookie {
   readonly domain: string;
@@ -102,7 +102,6 @@ export class PersistentCookieJar {
 }
 
 interface FileLock {
-  readonly fd: number;
   readonly owner: string;
   readonly path: string;
 }
@@ -166,29 +165,26 @@ function acquireFileLock(path: string): FileLock {
   const waitBuffer = new Int32Array(new SharedArrayBuffer(4));
   const owner = randomUUID();
   while (true) {
-    let fd: number | undefined;
     try {
-      fd = openSync(lockPath, "wx", 0o600);
-      writeSync(fd, JSON.stringify({ owner, pid: process.pid, startedAt: Date.now() }));
-      return { fd, owner, path: lockPath };
+      const candidate = `${lockPath}.${owner}.tmp`;
+      mkdirSync(candidate, { mode: 0o700 });
+      writeFileSync(join(candidate, "owner.json"), JSON.stringify({ owner, pid: process.pid, startedAt: Date.now() }), { mode: 0o600 });
+      renameSync(candidate, lockPath);
+      return { owner, path: lockPath };
     } catch (error) {
-      if (fd !== undefined) {
-        closeSync(fd);
-        try { unlinkSync(lockPath); } catch { /* The incomplete lock was already removed. */ }
-      }
-      if (!(error instanceof Error) || !("code" in error) || error.code !== "EEXIST") throw error;
-      removeDeadLock(lockPath);
-      if (Date.now() - started > 5_000) throw new Error("The msg cookie jar is locked by another process.");
-      Atomics.wait(waitBuffer, 0, 0, 10);
+      removeLockDirectory(`${lockPath}.${owner}.tmp`);
+      if (!isLockExistsError(error)) throw error;
     }
+    removeDeadLock(lockPath);
+    if (Date.now() - started > 5_000) throw new Error("The msg cookie jar is locked by another process.");
+    Atomics.wait(waitBuffer, 0, 0, 10);
   }
 }
 
 function releaseFileLock(lock: FileLock): void {
   const ownsLock = readLock(lock.path)?.owner === lock.owner;
-  closeSync(lock.fd);
   if (ownsLock) {
-    try { unlinkSync(lock.path); } catch { /* Another process already removed a dead owner lock. */ }
+    removeLockDirectory(lock.path);
   }
 }
 
@@ -200,7 +196,7 @@ interface LockRecord {
 
 function readLock(path: string): LockRecord | undefined {
   try {
-    const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
+    const parsed: unknown = JSON.parse(readFileSync(join(path, "owner.json"), "utf8"));
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
     const record = parsed as Record<string, unknown>;
     return typeof record.owner === "string" && record.owner.length > 0 && typeof record.pid === "number" && Number.isInteger(record.pid) && record.pid > 0 && typeof record.startedAt === "number" && Number.isFinite(record.startedAt)
@@ -214,9 +210,26 @@ function readLock(path: string): LockRecord | undefined {
 function removeDeadLock(path: string): void {
   const lock = readLock(path);
   if (!lock || processAlive(lock.pid)) return;
-  const current = readLock(path);
-  if (current?.owner !== lock.owner) return;
-  try { unlinkSync(path); } catch { /* The dead owner lock was released by another waiter. */ }
+  const quarantine = `${path}.${lock.owner}.${randomUUID()}.reclaim`;
+  try {
+    renameSync(path, quarantine);
+  } catch (error) {
+    if (!isPathRace(error)) throw error;
+    return;
+  }
+  removeLockDirectory(quarantine);
+}
+
+function removeLockDirectory(path: string): void {
+  try { rmSync(path, { force: true, recursive: true }); } catch { /* Another waiter completed reclamation. */ }
+}
+
+function isLockExistsError(error: unknown): boolean {
+  return error instanceof Error && "code" in error && (error.code === "EEXIST" || error.code === "ENOTEMPTY");
+}
+
+function isPathRace(error: unknown): boolean {
+  return error instanceof Error && "code" in error && (error.code === "ENOENT" || error.code === "EEXIST" || error.code === "ENOTEMPTY");
 }
 
 function processAlive(pid: number): boolean {

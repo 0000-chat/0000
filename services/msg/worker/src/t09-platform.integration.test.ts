@@ -11,8 +11,9 @@ import { createPlatformGuestClient } from "@0000/platform-client";
 import WebSocketClient from "ws";
 
 import { registerGuestIssuer, registerService } from "../../../platform/src/service-registration";
+import { createAgent, createOrNarrowAgentGrant, issueAgentCredential } from "../../../platform/src/agent-state";
 import { ensureDefaultOrganization, hashOpaque, issueHumanCredential, opaqueSecret, type ServiceRegistration } from "../../../platform/src/platform-state";
-import { MSG_OPERATOR } from "./auth";
+import { MSG_OPERATOR, MSG_READ } from "./auth";
 import { createMsgMiniflareTempDirectory, startMsgMiniflare, TEST_ROOM_LIMITS } from "../test-fixtures/msg-worker.miniflare-fixture";
 import { PersistentCookieJar } from "../../cli/src/cookie-jar";
 
@@ -127,6 +128,36 @@ async function provisionHuman(
     expiresAt: now + 86_400_000,
   });
   return { credential: issued.credential, organizationId: organization.organizationId, subjectId };
+}
+
+async function provisionAgent(
+  database: D1Database,
+  service: ServiceRegistration,
+  actor: { organizationId: string; subjectId: string },
+  capabilities: string[],
+  name: string,
+): Promise<{ agentId: string; credential: string }> {
+  const agent = await createAgent(database, { actorUserId: actor.subjectId, organizationId: actor.organizationId, name });
+  if (!agent) throw new Error(`Could not create ${name}.`);
+  const grant = await createOrNarrowAgentGrant(database, {
+    actorUserId: actor.subjectId,
+    organizationId: actor.organizationId,
+    agentId: agent.id,
+    service,
+    capabilities,
+  });
+  if (grant.status !== "created") throw new Error(`Could not create the ${name} service grant: ${grant.status}.`);
+  const issued = await issueAgentCredential(database, {
+    actorUserId: actor.subjectId,
+    service,
+    organizationId: actor.organizationId,
+    agentId: agent.id,
+    grantId: grant.grant.id,
+    capabilities,
+    name,
+    expiresAt: Date.now() + 86_400_000,
+  });
+  return { agentId: agent.id, credential: issued.credential };
 }
 
 function roomRequest(cookies: string, init: RequestInit = {}): RequestInit {
@@ -261,6 +292,8 @@ test.serial("crosses the actual Platform Worker/D1 and msg Worker/DO boundary", 
     };
     const allowlistedOperator = await provisionHuman(database, serviceRegistration, "allowlisted-t09@example.test");
     const unlistedOperator = await provisionHuman(database, serviceRegistration, "unlisted-t09@example.test");
+    const allowlistedAgent = await provisionAgent(database, serviceRegistration, allowlistedOperator, [MSG_OPERATOR], "allowlisted-t09-agent");
+    const underprivilegedAgent = await provisionAgent(database, serviceRegistration, allowlistedOperator, [MSG_READ], "underprivileged-t09-agent");
     const wrongAudienceService = {
       serviceId: "msg-t09-wrong-audience",
       audience: "https://other.0000.chat",
@@ -292,6 +325,10 @@ test.serial("crosses the actual Platform Worker/D1 and msg Worker/DO boundary", 
       MSG_OPERATOR_ALLOWLIST: JSON.stringify([{
         kind: "human",
         subjectId: allowlistedOperator.subjectId,
+        organizationId: allowlistedOperator.organizationId,
+      }, {
+        kind: "agent",
+        subjectId: allowlistedAgent.agentId,
         organizationId: allowlistedOperator.organizationId,
       }]),
     };
@@ -325,6 +362,14 @@ test.serial("crosses the actual Platform Worker/D1 and msg Worker/DO boundary", 
       headers: { authorization: `Bearer ${allowlistedOperator.credential}`, accept: "application/json" },
     });
     expect(operatorStatus.status).toBe(200);
+    const agentOperatorStatus = await firstMsg.miniflare.dispatchFetch("https://msg.0000.chat/operator/v1/status", {
+      headers: { authorization: `Bearer ${allowlistedAgent.credential}`, accept: "application/json" },
+    });
+    expect(agentOperatorStatus.status).toBe(200);
+    const underprivilegedAgentStatus = await firstMsg.miniflare.dispatchFetch("https://msg.0000.chat/operator/v1/status", {
+      headers: { authorization: `Bearer ${underprivilegedAgent.credential}`, accept: "application/json" },
+    });
+    expect(underprivilegedAgentStatus.status).toBe(403);
     const unlistedStatus = await firstMsg.miniflare.dispatchFetch("https://msg.0000.chat/operator/v1/status", {
       headers: { authorization: `Bearer ${unlistedOperator.credential}`, accept: "application/json" },
     });

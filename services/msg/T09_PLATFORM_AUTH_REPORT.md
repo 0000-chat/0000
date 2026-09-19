@@ -43,8 +43,10 @@ write reloads under an owner-aware lock and atomically replaces the mode-0600
 file so two CLI processes merge rather than overwrite each other's state. The
 lock records an owner token and PID, waits for a live owner even when its
 metadata is old, removes only dead-owner locks, and releases only when the
-token still belongs to that process. No Platform credential is put in a URL,
-JavaScript storage, or a message author.
+token still belongs to that process. Dead-owner reclamation uses an atomic
+same-directory rename to a unique quarantine path before cleanup, which keeps
+replacement acquisition independent of competing reclamation. No Platform
+credential is put in a URL, JavaScript storage, or a message author.
 An invalid presented resource cookie remains a denial; an explicit `?recover=1`
 request rechecks the current control and room link before replacing that cookie.
 When the room already has an active local grant for that source, recovery renews
@@ -75,7 +77,8 @@ Worker. It proves:
 - the CLI's actual WebSocket transport receives the persisted control and room
   cookies from a `wss:` lookup;
 - an actual allowlisted human operator succeeds, while an unlisted human,
-  guest, wrong-audience, revoked, and disabled operator are denied; and
+  issued agent without the operator grant, guest, wrong-audience, revoked, and
+  disabled operator are denied; an allowlisted issued agent also succeeds; and
   authority outage maps to `503`.
 
 The accepted Platform permission discriminator now allows management access
@@ -86,23 +89,25 @@ to read through the same guest's independent `msg-public` grant.
 
 Commands and results on this branch:
 
-- `bun run check` from `services/msg`: passed the workspace check, 192 Worker
-  tests, 17 tooling tests, 60 CLI tests, build, pack, typecheck, and lint. The
+- `bun run check:application` from `services/msg`: passed 192 Worker tests,
+  17 tooling tests, 61 CLI tests, build, pack, typecheck, and lint. The
   existing `production-synthetic.ts:142` constant-condition warning remains.
 - `bun test src/t09-platform.integration.test.ts` from `services/msg/worker`:
-  passed 1 actual boundary test with 44 assertions, including D1 creation
+  passed 1 actual boundary test with 46 assertions, including D1 creation
   receipt replay/renewal, public and management recovery renewal, positive
-  management, independent management/public revocation, and an actual
-  CLI-cookie WebSocket handshake.
+  human and issued agent operator authentication, underprivileged agent
+  denial, independent management/public revocation, and an actual CLI-cookie
+  WebSocket handshake.
 - `bun test src/auth.test.ts src/conversation-room.test.ts src/room-schema.test.ts src/worker.test.ts`:
   passed the focused Worker/DO/auth suite.
 - `bun test src/operations.test.ts`:
   passed the guest-scoped D1 operation tests, including the persisted owner
   grant reference.
-- `bun test src/cookie-jar.test.ts` from `services/msg/cli`: passed 7 tests
+- `bun test src/cookie-jar.test.ts` from `services/msg/cli`: passed 8 tests
   covering persistence, path/Secure, redirect, `wss:` lookup, concurrent
   merge behavior, separate-process first-use bootstrap overlap, and a delayed
-  live owner whose lock metadata appears stale.
+  live owner whose lock metadata appears stale; competing dead-owner
+  reclaimers preserve a replacement owner.
 - `T09_PLAYWRIGHT_MODULE=/path/to/@playwright/test/index.mjs bun
   services/msg/worker/scripts/t09-platform-browser-smoke.mjs`: passed the real
   Chromium bridge against the actual Platform Worker/D1 and msg Worker/DO. It
