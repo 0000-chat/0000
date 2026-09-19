@@ -89,9 +89,60 @@ are:
 - `/tmp/platform-t11-rust-issued-ingestion-after-revocation.log`
 - `/tmp/platform-t11-rust-issued-claim-after-revocation.log`
 
-The temporary Rust test hooks and all issued credentials remain outside the
-repository. The live fixture processes and state directories are local test
-state only.
+The corresponding direct Worker status check recorded HTTP 401 for both old
+credential routes in `/tmp/platform-t11-rust-old-credential-http-status.log`;
+the Rust clients above preserve their own bounded failure classifications.
+
+The reproducible caller harness is checked in at
+`services/communicator/services/matrix-gateway/tests/t11_issued_live_http.rs`.
+It is an ignored integration test behind the explicit `loopback-test` Cargo
+feature; that feature only exposes the loopback constructors used by the
+fixture, while the production constructors continue to require HTTPS. Its two
+tests preserve the exact positive and post-revocation/replacement sequences
+above without printing credential values. The no-run builds for the default
+and `loopback-test` configurations both completed successfully.
+
+With the isolated fixtures running, the reproducible commands are:
+
+```sh
+cd /home/ubuntu/0000-full/worktrees/platform-communicator-adoption/services/communicator
+
+# Run before the revoke command; this exercises the first issued credential.
+CARGO_TARGET_DIR=/home/ubuntu/cargo-target-t11 \
+T11_ISSUED_SERVICE_PATH=/tmp/platform-t11-issued-service.json \
+T11_RUST_WORKER_BASE_URL=http://127.0.0.1:18794 \
+T11_RUST_BATCH_ONE=/tmp/platform-t11-rust-ingestion-1.json \
+T11_RUST_BATCH_TWO=/tmp/platform-t11-rust-ingestion-2.json \
+T11_RUST_BATCH_THREE=/tmp/platform-t11-rust-ingestion-3.json \
+cargo test -p communicator-matrix-gateway --features loopback-test \
+  --test t11_issued_live_http issued_platform_credential_reaches_live_ingestion_and_claim \
+  -- --ignored --nocapture
+
+# Revoke the first credential through Platform, then run the recovery case.
+bun /tmp/platform-t11-revoke-issued-service.mjs
+CARGO_TARGET_DIR=/home/ubuntu/cargo-target-t11 \
+T11_ISSUED_SERVICE_PATH=/tmp/platform-t11-issued-service.json \
+T11_RUST_WORKER_BASE_URL=http://127.0.0.1:18794 \
+T11_RUST_BATCH_ONE=/tmp/platform-t11-rust-ingestion-1.json \
+T11_RUST_BATCH_TWO=/tmp/platform-t11-rust-ingestion-2.json \
+T11_RUST_BATCH_THREE=/tmp/platform-t11-rust-ingestion-3.json \
+cargo test -p communicator-matrix-gateway --features loopback-test \
+  --test t11_issued_live_http revoked_credential_pauses_and_replacement_credential_recovers_both_callers \
+  -- --ignored --nocapture
+```
+
+The Platform fixture is started by `/tmp/platform-t11-rust-platform-bridge.mjs`
+from the current Platform source, and the Communicator fixture is the local
+Wrangler Worker at port `18794` with `/tmp/platform-t11-rust-communicator-issued-seed.sql`
+and `/tmp/platform-t11-rust-communicator-issued-more.sql`. The issuance helper
+`/tmp/platform-t11-issue-service.mjs` uses the simulated GitHub provider only
+to establish a Platform account session, then calls the three production
+service-principal/grant/credential endpoint families listed above. The local
+Communicator seed creates the binding and resource ACL rows, but never inserts
+a Platform credential. Temporary hooks used for the original run were removed;
+the checked-in harness and these setup/revoke commands preserve that caller
+boundary. Issued metadata, fixture processes, and state directories remain
+outside the repository and are local test state only.
 
 ## Browser and realtime evidence boundary
 
