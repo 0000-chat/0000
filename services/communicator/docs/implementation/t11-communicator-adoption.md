@@ -32,8 +32,8 @@ edited in this worker.
 The following checks passed on the current source or its unchanged affected
 baseline:
 
-- Communicator `./scripts/check`: 374 files, exit 0; log
-  `/tmp/platform-parent-t11-service-check-fixed.log`.
+- Communicator `./scripts/check`: 382 files, exit 0; log
+  `/tmp/platform-t11-rust-composition-service-check.log`.
 - Communicator Worker: 84 files and 903 tests, exit 0; log
   `/tmp/platform-parent-t11-worker-fixed.log`.
 - UI: 129 tests, exit 0.
