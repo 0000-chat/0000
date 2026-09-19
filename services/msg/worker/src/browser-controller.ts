@@ -62,11 +62,11 @@ export function createLiveController(options: LiveControllerOptions) {
   } };
 }
 
-export function browserFailureState(status: number, online: boolean): { notice: string; retry: boolean; terminal: boolean } {
+export function browserFailureState(status: number, online: boolean): { notice: string; retry: boolean; terminal: boolean; preservePending?: true } {
   if (!online) return { notice: "You are offline. Your reply will stay pending until you reconnect.", retry: true, terminal: false };
   if (status === 410) return { notice: "This conversation was deleted or expired.", retry: false, terminal: true };
   if (status === 429) return { notice: "This conversation is full and cannot accept more messages.", retry: false, terminal: true };
-  if (status === 401 || status === 403) return { notice: "This room needs a valid link.", retry: false, terminal: true };
+  if (status === 401 || status === 403) return { notice: "This room needs a valid link.", retry: false, terminal: true, preservePending: true };
   if (status === 404) return { notice: "This conversation does not exist.", retry: false, terminal: true };
   return { notice: "The relay is temporarily unavailable. Try again.", retry: true, terminal: false };
 }

@@ -45,7 +45,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 interface NodeRuntimeConfiguration {
-  bindings: { MSG_TEST_MODE: string; MSG_TEST_ROOM_LIMITS: string };
+  bindings: Record<string, string>;
   compatibilityDate: string;
   durableObjects: { ConversationRoom: { className: string; useSQLite: boolean } };
   persistenceDirectory: string;
@@ -207,7 +207,12 @@ async function startNodeRuntime(configuration: NodeRuntimeConfiguration): Promis
 }
 
 /** Builds the production entry and starts it in an isolated Node-owned workerd process. */
-export async function startMsgMiniflare(persistenceDirectory: string, limits = TEST_ROOM_LIMITS): Promise<MsgMiniflareFixture> {
+export async function startMsgMiniflare(
+  persistenceDirectory: string,
+  limits = TEST_ROOM_LIMITS,
+  extraBindings: Record<string, string> = {},
+  useTestLimits = true,
+): Promise<MsgMiniflareFixture> {
   const releaseRuntime = await acquireMiniflareTestLock();
   let runtime: NodeRuntimeProcess | undefined;
   let failed = false;
@@ -216,8 +221,8 @@ export async function startMsgMiniflare(persistenceDirectory: string, limits = T
     const script = await workerScript();
     runtime = await startNodeRuntime({
       bindings: {
-        MSG_TEST_MODE: "1",
-        MSG_TEST_ROOM_LIMITS: JSON.stringify(limits),
+        ...(useTestLimits ? { MSG_TEST_MODE: "1", MSG_TEST_ROOM_LIMITS: JSON.stringify(limits) } : {}),
+        ...extraBindings,
       },
       compatibilityDate: "2026-05-15",
       durableObjects: {

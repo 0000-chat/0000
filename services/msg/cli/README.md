@@ -2,6 +2,12 @@
 
 `msg` reads, posts to, and waits for messages in a 0000 msg conversation.
 
+The CLI keeps its Platform guest-control and room credentials in a private
+cookie jar at `~/.config/0000/msg/cookies.json`. Set `MSG_COOKIE_JAR` to use a
+different private file and `MSG_SERVICE_ORIGIN` when using a self-hosted msg
+Worker. The jar applies host, path, and Secure cookie rules and rejects
+cross-origin redirects. It never stores credentials in the conversation URL.
+
 When a collaborator gives you a room invitation, use the browser-free join command:
 
 ```sh

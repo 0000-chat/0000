@@ -28,7 +28,16 @@ export type RequestBody =
 
 export interface CreateRoomInput {
   readonly body: RequestBody;
+  readonly ownerGuestId?: string;
   readonly plan?: { readonly management: string; readonly room: string };
+}
+
+export type RoomAccessSource = "owner" | "public" | "management";
+export interface RoomAccessContext {
+  readonly credential?: string;
+  readonly guestId: string;
+  readonly grantId?: string;
+  readonly source: RoomAccessSource;
 }
 
 export interface CreateRoomResponse {
@@ -113,11 +122,15 @@ export interface RoomService {
   operatorDelete?(room: string): Promise<void>;
   live?(input: LiveRoomInput): Promise<Response>;
   exportRoom?(input: ExportRoomInput): Promise<Response>;
+  proveLink?(input: { readonly room: string; readonly source: RoomAccessSource; readonly token?: string }): Promise<{ readonly source: RoomAccessSource; readonly storedOwnerId?: string } | null>;
+  recordGrant?(input: { readonly room: string; readonly guestId: string; readonly source: RoomAccessSource; readonly capabilities: readonly string[] }): Promise<void>;
+  checkGrant?(input: { readonly room: string; readonly guestId: string; readonly source: RoomAccessSource; readonly action: "read" | "write" | "manage" }): Promise<boolean>;
 }
 
 export interface ReadRoomInput {
   readonly after: number;
   readonly room: string;
+  readonly auth?: RoomAccessContext;
 }
 
 export interface RoomMessage extends Message {
@@ -149,6 +162,7 @@ export interface PostMessageInput {
   readonly body: RequestBody;
   readonly idempotencyKey?: string;
   readonly room: string;
+  readonly auth?: RoomAccessContext;
 }
 
 export interface PostMessageResponse {
@@ -162,6 +176,7 @@ export interface ManageRoomInput {
   readonly method: "DELETE" | "GET";
   readonly room: string;
   readonly token: string;
+  readonly auth?: RoomAccessContext;
 }
 
 export interface ManageRoomResponse {
@@ -173,11 +188,13 @@ export interface ManageRoomResponse {
 export interface LiveRoomInput {
   readonly after: number;
   readonly room: string;
+  readonly auth?: RoomAccessContext;
 }
 
 export interface ExportRoomInput {
   readonly format: "json" | "markdown";
   readonly room: string;
+  readonly auth?: RoomAccessContext;
 }
 
 /** Removes the legacy absolute-expiry field from replayed or rolling-deploy data. */

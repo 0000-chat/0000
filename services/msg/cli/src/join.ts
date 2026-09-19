@@ -24,6 +24,7 @@ export interface JoinCommand {
 
 export interface JoinOptions extends JoinCommand {
   readonly fetch: typeof globalThis.fetch;
+  readonly serviceOrigin?: string;
   readonly signal?: AbortSignal;
 }
 
@@ -31,13 +32,13 @@ export class JoinSignalError extends Error {
   constructor() { super("The msg join was interrupted."); }
 }
 
-export function parseJoinCommand(args: readonly string[]): JoinCommand {
+export function parseJoinCommand(args: readonly string[], serviceOrigin?: string): JoinCommand {
   if (args.length !== 2 || args[0] !== "join") throw new Error("Usage: msg join <conversation-url>");
-  return { conversationUrl: validateConversationUrl(args[1] ?? "") };
+  return { conversationUrl: validateConversationUrl(args[1] ?? "", serviceOrigin) };
 }
 
 export async function joinConversation(options: JoinOptions): Promise<string> {
-  const conversationUrl = validateConversationUrl(options.conversationUrl);
+  const conversationUrl = validateConversationUrl(options.conversationUrl, options.serviceOrigin);
   if (options.signal?.aborted) throw new JoinSignalError();
   const endpoint = new URL(conversationUrl);
   endpoint.pathname = `${endpoint.pathname}/agent`;

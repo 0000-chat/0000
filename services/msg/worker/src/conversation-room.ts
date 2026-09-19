@@ -1,5 +1,7 @@
 import { DurableObject } from "cloudflare:workers";
 
+import { createPlatformClient } from "@0000/platform-client";
+
 import { ERROR_CODES, ProtocolError } from "./errors";
 import { compareCapabilities, messageStorageBytes, ROOM_LIMITS } from "./room-domain";
 import type { MessageInput } from "./room-domain";
@@ -7,6 +9,11 @@ import { PROTOCOL_VERSION } from "./protocol";
 import { CURRENT_ROOM_SCHEMA_VERSION, migrateRoomSchema } from "./room-schema";
 
 export interface ConversationRoomEnv {
+  readonly MSG_AUTH_REQUIRED?: string;
+  readonly MSG_PLATFORM_AUTHORITY?: string;
+  readonly MSG_PLATFORM_AUDIENCE?: string;
+  readonly MSG_PLATFORM_BASE_URL?: string;
+  readonly MSG_PLATFORM_SERVICE_VERIFIER?: string;
   readonly MSG_POST_DISABLED?: string;
   readonly MSG_TEST_MODE?: string;
   readonly MSG_TEST_ROOM_LIMITS?: string;
@@ -19,6 +26,7 @@ interface RoomState {
   readonly inactivity_expires_at: number;
   readonly last_message_at: number;
   readonly management_hash: string | null;
+  readonly owner_guest_id: string | null;
   readonly message_count: number;
   readonly next_sequence: number;
   readonly status: "active" | "deleted";
@@ -39,12 +47,21 @@ type HibernatingSocket = WebSocket & {
   serializeAttachment(value: unknown): void;
 };
 
+interface SocketContext {
+  readonly guestId: string;
+  readonly resource: string;
+  readonly source: "owner" | "public" | "management";
+  readonly after: number;
+}
+
 const socketTag = "conversation-live";
 
 /** SQLite is the durable source of truth. HTTP is only the worker-to-room boundary. */
 export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
   private readonly config: ConversationRoomEnv;
   private readonly limits: RoomLimits;
+  private readonly socketCredentials = new Map<WebSocket, string>();
+  private readonly socketContexts = new Map<WebSocket, SocketContext>();
 
   constructor(ctx: DurableObjectState, env: ConversationRoomEnv, private readonly now: () => number = () => Date.now()) {
     super(ctx, env);
@@ -58,12 +75,15 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
       const url = new URL(request.url);
       if (request.method === "POST" && url.pathname === "/initialize") return await this.initialize(request);
       if (request.method === "POST" && url.pathname === "/operator-delete") return await this.operatorDelete();
-      if (request.method === "GET" && url.pathname === "/read") return await this.read(url);
+      if (request.method === "POST" && url.pathname === "/access/proof") return await this.accessProof(request);
+      if (request.method === "POST" && url.pathname === "/access/record") return await this.accessRecord(request);
+      if (request.method === "POST" && url.pathname === "/access/check") return await this.accessCheck(request);
+      if (request.method === "GET" && url.pathname === "/read") return await this.read(request);
       if (request.method === "POST" && url.pathname === "/messages") return await this.post(request);
       if (request.method === "GET" && url.pathname === "/manage") return await this.manage(request, false);
       if (request.method === "DELETE" && url.pathname === "/manage") return await this.manage(request, true);
-      if (request.method === "GET" && url.pathname === "/live") return await this.live(url);
-      if (request.method === "GET" && (url.pathname === "/export.md" || url.pathname === "/export.json")) return await this.export(url.pathname === "/export.json");
+      if (request.method === "GET" && url.pathname === "/live") return await this.live(request);
+      if (request.method === "GET" && (url.pathname === "/export.md" || url.pathname === "/export.json")) return await this.export(request, url.pathname === "/export.json");
       return this.error(ERROR_CODES.notFound, "The requested resource was not found.", 404);
     } catch (error) {
       if (error instanceof ProtocolError) return this.error(error.code, error.message, error.status);
@@ -93,13 +113,20 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
   }
 
   async webSocketMessage(socket: WebSocket): Promise<void> {
+    this.socketCredentials.delete(socket);
+    this.socketContexts.delete(socket);
     socket.close(1008, "This socket is read-only");
   }
 
-  async webSocketClose(): Promise<void> {}
+  async webSocketClose(socket?: WebSocket): Promise<void> {
+    if (socket) {
+      this.socketCredentials.delete(socket);
+      this.socketContexts.delete(socket);
+    }
+  }
 
   private async initialize(request: Request): Promise<Response> {
-    const input = await request.json() as { initial: MessageInput; management_hash: string };
+    const input = await request.json() as { initial: MessageInput; management_hash: string; owner_guest_id?: string };
     const now = this.now();
     const result = this.ctx.storage.transactionSync(() => {
       const prior = this.state();
@@ -108,9 +135,13 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
       const bytes = messageStorageBytes(input.initial, undefined, id);
       const inactivity = now + this.limits.inactivityTtlMs;
       this.ctx.storage.sql.exec(
-        "INSERT INTO room_state VALUES (1, ?, ?, ?, ?, ?, ?, 2, 1, ?, 'active', NULL, ?)",
-        CURRENT_ROOM_SCHEMA_VERSION, PROTOCOL_VERSION, now, now, inactivity, inactivity, bytes, input.management_hash,
+        "INSERT INTO room_state (singleton, schema_version, protocol_version, created_at, last_message_at, inactivity_expires_at, absolute_expires_at, next_sequence, message_count, total_bytes, status, tombstone_expires_at, management_hash, owner_guest_id) VALUES (1, ?, ?, ?, ?, ?, ?, 2, 1, ?, 'active', NULL, ?, ?)",
+        CURRENT_ROOM_SCHEMA_VERSION, PROTOCOL_VERSION, now, now, inactivity, inactivity, bytes, input.management_hash, input.owner_guest_id ?? null,
       );
+      if (input.owner_guest_id) {
+        this.insertAcl(input.owner_guest_id, "owner", ["msg:read", "msg:write"], now);
+        this.insertAcl(input.owner_guest_id, "public", ["msg:read", "msg:write"], now);
+      }
       this.insertMessage({ ...input.initial, byte_count: bytes, created_at: now, id, sequence: 1 });
       return { created: true, message: this.messageBySequence(1), state: this.requireState() };
     });
@@ -118,7 +149,9 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
     return this.json({ ...this.toMessage(result.message), created: result.created, created_at: iso(result.state.created_at), expires_at: iso(result.state.inactivity_expires_at) });
   }
 
-  private async read(url: URL): Promise<Response> {
+  private async read(request: Request): Promise<Response> {
+    const url = new URL(request.url);
+    await this.requireAccessFromRequest(request, "read");
     const state = await this.requireActive(this.now());
     const after = Number(url.searchParams.get("after") ?? 0);
     const messages = rows<StoredMessage>(this.ctx.storage.sql.exec("SELECT * FROM messages WHERE sequence > ? ORDER BY sequence ASC", after)).map((message) => this.toMessage(message));
@@ -126,6 +159,7 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
   }
 
   private async post(request: Request): Promise<Response> {
+    await this.requireAccessFromRequest(request, "write");
     if (this.config.MSG_POST_DISABLED === "1") {
       throw new ProtocolError(ERROR_CODES.serviceUnavailable, "New messages are temporarily unavailable.", 503);
     }
@@ -159,11 +193,12 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
       throw new ProtocolError(ERROR_CODES.gone, "The conversation has expired.", 410);
     }
     await this.schedule(result.state);
-    if (!result.replayed) this.broadcast({ protocol_version: PROTOCOL_VERSION, type: "message.created", sequence: result.message.sequence, latest_message: result.state.next_sequence - 1, expires_at: iso(result.state.inactivity_expires_at) });
+    if (!result.replayed) await this.broadcast({ protocol_version: PROTOCOL_VERSION, type: "message.created", sequence: result.message.sequence, latest_message: result.state.next_sequence - 1, expires_at: iso(result.state.inactivity_expires_at) });
     return this.json({ protocol_version: PROTOCOL_VERSION, message: this.toMessage(result.message), expires_at: iso(result.state.inactivity_expires_at), replayed: result.replayed });
   }
 
   private async manage(request: Request, deleteRoom: boolean): Promise<Response> {
+    await this.requireAccessFromRequest(request, "manage");
     const token = new URL(request.url).searchParams.get("token") ?? "";
     const state = this.state();
     if (!state || !state.management_hash || !compareCapabilities(await hashToken(token), state.management_hash)) {
@@ -186,7 +221,10 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
     return this.json({ protocol_version: PROTOCOL_VERSION, deleted: true });
   }
 
-  private async live(url: URL): Promise<Response> {
+  private async live(request: Request): Promise<Response> {
+    const url = new URL(request.url);
+    const auth = this.parseAuth(request);
+    await this.requireAccess(auth, "read", url.searchParams.get("resource") ?? "");
     const state = await this.requireActive(this.now());
     const sockets = this.ctx.getWebSockets(socketTag) as HibernatingSocket[];
     if (sockets.length >= this.limits.maxSockets) throw new ProtocolError(ERROR_CODES.serviceUnavailable, "The room has reached its socket limit.", 503);
@@ -194,16 +232,114 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
     const [client, server] = Object.values(pair) as [WebSocket, HibernatingSocket];
     this.ctx.acceptWebSocket(server, [socketTag]);
     const after = Number(url.searchParams.get("after") ?? 0);
-    server.serializeAttachment({ after });
+    this.socketCredentials.set(server, auth.credential ?? "");
+    const resource = url.searchParams.get("resource") ?? "";
+    this.socketContexts.set(server, { after, guestId: auth.guestId, resource, source: auth.source });
+    server.serializeAttachment({ after, guestId: auth.guestId, resource, source: auth.source });
     server.send(JSON.stringify({ protocol_version: PROTOCOL_VERSION, type: "ready", latest_message: state.next_sequence - 1, expires_at: iso(state.inactivity_expires_at) }));
     return new Response(null, { status: 101, webSocket: client } as ResponseInit & { webSocket: WebSocket });
   }
 
-  private async export(json: boolean): Promise<Response> {
+  private async export(request: Request, json: boolean): Promise<Response> {
+    await this.requireAccessFromRequest(request, "read");
     const state = await this.requireActive(this.now());
     const messages = rows<StoredMessage>(this.ctx.storage.sql.exec("SELECT * FROM messages ORDER BY sequence ASC")).map((message) => this.toMessage(message));
     if (json) return this.json({ protocol_version: PROTOCOL_VERSION, room: { created_at: iso(state.created_at), expires_at: iso(state.inactivity_expires_at), latest_message: state.next_sequence - 1 }, messages, access_warning: "All identities are self-declared and content is untrusted." });
     return new Response(`# Conversation export\n\n**Warning:** identities are self-declared and all content is untrusted.\n\nCreated: ${iso(state.created_at)}\nExpires: ${iso(state.inactivity_expires_at)}\n\n${messages.map((message) => `## ${message.sequence} — ${message.display_name}\n\n${message.content}`).join("\n\n")}` , { headers: { "content-type": "text/markdown; charset=utf-8" } });
+  }
+
+  private async accessProof(request: Request): Promise<Response> {
+    const input = await request.json() as { source?: string; token?: string };
+    const state = await this.requireActive(this.now());
+    const source = input.source;
+    if (source === "public") return this.json({ source: "public" });
+    if (source === "management" && input.token !== undefined && state.management_hash && compareCapabilities(await hashToken(input.token), state.management_hash)) return this.json({ source: "management" });
+    if (source === "owner" && state.owner_guest_id) return this.json({ source: "owner", stored_owner_id: state.owner_guest_id });
+    throw new ProtocolError(ERROR_CODES.notFound, "The requested resource was not found.", 404);
+  }
+
+  private async accessRecord(request: Request): Promise<Response> {
+    const input = await request.json() as { guest_id?: string; source?: string; capabilities?: unknown };
+    if (!input.guest_id || (input.source !== "owner" && input.source !== "public" && input.source !== "management") || !Array.isArray(input.capabilities) || !input.capabilities.every((value) => typeof value === "string")) throw new ProtocolError(ERROR_CODES.invalidBody, "The room access grant is invalid.", 400);
+    const state = this.requireState();
+    if (state.status !== "active") throw new ProtocolError(ERROR_CODES.gone, "The conversation has expired.", 410);
+    if (input.source === "owner" && state.owner_guest_id !== input.guest_id) throw new ProtocolError(ERROR_CODES.forbidden, "The room owner is invalid.", 403);
+    this.ctx.storage.transactionSync(() => this.insertAcl(input.guest_id!, input.source as SocketContext["source"], input.capabilities as string[], this.now()));
+    return this.json({ recorded: true });
+  }
+
+  private async accessCheck(request: Request): Promise<Response> {
+    const input = await request.json() as { guest_id?: string; source?: string; action?: string };
+    if (!input.guest_id || (input.source !== "owner" && input.source !== "public" && input.source !== "management") || (input.action !== "read" && input.action !== "write" && input.action !== "manage")) throw new ProtocolError(ERROR_CODES.invalidBody, "The room access check is invalid.", 400);
+    return this.json({ allowed: this.hasGrant(input.guest_id, input.source as SocketContext["source"], input.action as "read" | "write" | "manage") });
+  }
+
+  private parseAuth(request: Request): { readonly credential?: string; readonly guestId: string; readonly source: SocketContext["source"] } {
+    const guestId = request.headers.get("x-msg-guest-id") ?? "";
+    const source = request.headers.get("x-msg-source");
+    if (!guestId || (source !== "owner" && source !== "public" && source !== "management")) {
+      if (this.config.MSG_AUTH_REQUIRED === "1") throw new ProtocolError(ERROR_CODES.forbidden, "The room authorization is missing.", 403);
+      return { guestId: "legacy", source: "public" };
+    }
+    const authorization = request.headers.get("authorization");
+    const credential = authorization?.startsWith("Bearer ") ? authorization.slice("Bearer ".length) : undefined;
+    if (this.config.MSG_AUTH_REQUIRED === "1" && !credential) throw new ProtocolError(ERROR_CODES.forbidden, "The room authorization is missing.", 403);
+    return { ...(credential ? { credential } : {}), guestId, source };
+  }
+
+  private async requireAccessFromRequest(request: Request, action: "read" | "write" | "manage"): Promise<void> {
+    if (this.config.MSG_AUTH_REQUIRED !== "1") return;
+    const auth = this.parseAuth(request);
+    await this.requireAccess(auth, action, new URL(request.url).searchParams.get("resource") ?? "");
+  }
+
+  private async requireAccess(auth: { readonly credential?: string; readonly guestId: string; readonly source: SocketContext["source"] }, action: "read" | "write" | "manage", resource: string): Promise<void> {
+    if (this.config.MSG_AUTH_REQUIRED !== "1") return;
+    if (!auth.credential || !resource) throw new ProtocolError(ERROR_CODES.forbidden, "The room authorization is missing.", 403);
+    if (!(await this.verifyCredential(auth, auth.credential, resource, action))) throw new ProtocolError(ERROR_CODES.forbidden, "The room authorization is no longer valid.", 403);
+  }
+
+  private async verifyCredential(auth: { readonly credential?: string; readonly guestId: string; readonly source: SocketContext["source"] }, credential: string, resource: string, action: "read" | "write" | "manage"): Promise<boolean> {
+    const baseUrl = this.config.MSG_PLATFORM_BASE_URL;
+    const authority = this.config.MSG_PLATFORM_AUTHORITY;
+    const audience = this.config.MSG_PLATFORM_AUDIENCE;
+    const verifier = this.config.MSG_PLATFORM_SERVICE_VERIFIER;
+    if (!baseUrl || !authority || !audience || !verifier) return false;
+    const authentication = await createPlatformClient({ baseUrl, authority, audience, serviceVerifier: verifier }).authenticate(credential);
+    if (authentication.status !== "authenticated" || authentication.principal.kind !== "guest") return false;
+    const principal = authentication.principal;
+    const capability = action === "read" ? "msg:read" : action === "write" ? "msg:write" : "msg:manage";
+    return principal.subjectId === auth.guestId && principal.resourceIds.includes(resource) && principal.capabilities.includes(capability) && this.hasGrant(auth.guestId, auth.source, action);
+  }
+
+  private attachmentContext(socket: HibernatingSocket): SocketContext | undefined {
+    const value = socket.deserializeAttachment();
+    if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+    const candidate = value as Record<string, unknown>;
+    if (typeof candidate.guestId !== "string" || typeof candidate.resource !== "string" || (candidate.source !== "owner" && candidate.source !== "public" && candidate.source !== "management") || typeof candidate.after !== "number") return undefined;
+    return { guestId: candidate.guestId, resource: candidate.resource, source: candidate.source, after: candidate.after };
+  }
+
+  private async verifySocket(context: SocketContext, credential: string): Promise<boolean> {
+    // The Durable Object name is the room resource identifier. The raw bearer
+    // stays in the volatile map and is never serialized as socket attachment.
+    return this.verifyCredential({ ...context, credential }, credential, context.resource, "read");
+  }
+
+  private insertAcl(guestId: string, source: SocketContext["source"], capabilities: readonly string[], createdAt: number): void {
+    const prior = rows<{ capabilities: string }>(this.ctx.storage.sql.exec("SELECT capabilities FROM room_acl WHERE guest_id = ? AND source = ?", guestId, source))[0];
+    const existing = prior ? parseCapabilities(prior.capabilities) : [];
+    const merged = [...new Set([...existing, ...capabilities])];
+    this.ctx.storage.sql.exec("INSERT INTO room_acl (guest_id, source, capabilities, active, created_at) VALUES (?, ?, ?, 1, ?) ON CONFLICT(guest_id, source) DO UPDATE SET capabilities = excluded.capabilities, active = 1", guestId, source, JSON.stringify(merged), createdAt);
+  }
+
+  private hasGrant(guestId: string, source: SocketContext["source"], action: "read" | "write" | "manage"): boolean {
+    const required = action === "read" ? "msg:read" : action === "write" ? "msg:write" : "msg:manage";
+    const sources = source === "public" ? ["public", "owner"] : [source];
+    return sources.some((candidate) => {
+      const row = rows<{ capabilities: string; active: number }>(this.ctx.storage.sql.exec("SELECT capabilities, active FROM room_acl WHERE guest_id = ? AND source = ?", guestId, candidate))[0];
+      return row?.active === 1 && parseCapabilities(row.capabilities).includes(required);
+    });
   }
 
   private deleteToTombstone(now: number): boolean {
@@ -211,6 +347,7 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
       const state = this.requireState();
       if (state.status === "deleted") return false;
       this.ctx.storage.sql.exec("DELETE FROM messages");
+      this.ctx.storage.sql.exec("DELETE FROM room_acl");
       this.ctx.storage.sql.exec("UPDATE room_state SET status = 'deleted', tombstone_expires_at = ?, management_hash = NULL, message_count = 0, total_bytes = 0 WHERE singleton = 1", now + this.limits.tombstoneTtlMs);
       return true;
     });
@@ -227,10 +364,10 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
   private messageByIdempotencyKey(key: string): StoredMessage | undefined { return rows<StoredMessage>(this.ctx.storage.sql.exec("SELECT * FROM messages WHERE idempotency_key = ?", key))[0]; }
   private messageByClientMessageId(key: string): StoredMessage | undefined { return rows<StoredMessage>(this.ctx.storage.sql.exec("SELECT * FROM messages WHERE client_message_id = ?", key))[0]; }
   private toMessage(message: StoredMessage) { return { id: message.id, sequence: message.sequence, content: message.content, author: message.author, display_name: message.display_name, identity_verified: false as const, ...(message.client ? { client: message.client } : {}), semantic_type: message.semantic_type, ...(message.reply_to ? { reply_to: message.reply_to } : {}), created_at: iso(message.created_at), ...(message.client_message_id ? { client_message_id: message.client_message_id } : {}), byte_count: message.byte_count }; }
-  private async expire(now: number, reason: string): Promise<void> { if (!this.deleteToTombstone(now)) return; const state = this.requireState(); this.broadcast({ protocol_version: PROTOCOL_VERSION, type: "conversation.expired" }); this.closeSockets(1001, reason); await this.schedule(state); }
+  private async expire(now: number, reason: string): Promise<void> { if (!this.deleteToTombstone(now)) return; const state = this.requireState(); await this.broadcast({ protocol_version: PROTOCOL_VERSION, type: "conversation.expired" }); this.closeSockets(1001, reason); await this.schedule(state); }
   private async schedule(state: RoomState): Promise<void> { const at = state.status === "deleted" ? state.tombstone_expires_at : state.inactivity_expires_at; if (at === null || at === undefined) await this.ctx.storage.deleteAlarm(); else await this.ctx.storage.setAlarm(at); }
-  private broadcast(frame: unknown): void { const payload = JSON.stringify(frame); for (const socket of this.ctx.getWebSockets(socketTag) as HibernatingSocket[]) socket.send(payload); }
-  private closeSockets(code: number, reason: string): void { for (const socket of this.ctx.getWebSockets(socketTag) as HibernatingSocket[]) socket.close(code, reason); }
+  private async broadcast(frame: unknown): Promise<void> { const payload = JSON.stringify(frame); for (const socket of this.ctx.getWebSockets(socketTag) as HibernatingSocket[]) { if (this.config.MSG_AUTH_REQUIRED !== "1") { socket.send(payload); continue; } const context = this.socketContexts.get(socket) ?? this.attachmentContext(socket); const credential = this.socketCredentials.get(socket); if (!context || !credential || !(await this.verifySocket(context, credential))) { socket.close(1008, "The live authorization is no longer valid"); continue; } socket.send(payload); } }
+  private closeSockets(code: number, reason: string): void { for (const socket of this.ctx.getWebSockets(socketTag) as HibernatingSocket[]) { this.socketCredentials.delete(socket); this.socketContexts.delete(socket); socket.close(code, reason); } }
   private json(value: unknown): Response { return new Response(JSON.stringify(value), { headers: { "content-type": "application/json; charset=utf-8" } }); }
   private error(code: string, message: string, status: number): Response { return new Response(JSON.stringify({ error: { code, message } }), { headers: { "content-type": "application/json; charset=utf-8" }, status }); }
 }
@@ -258,3 +395,4 @@ function resolveRoomLimits(env: ConversationRoomEnv): RoomLimits {
   return limits;
 }
 async function hashToken(token: string): Promise<string> { const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(token)); let value = ""; for (const byte of new Uint8Array(digest)) value += String.fromCharCode(byte); return btoa(value).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/u, ""); }
+function parseCapabilities(value: string): string[] { try { const parsed: unknown = JSON.parse(value); return Array.isArray(parsed) && parsed.every((item) => typeof item === "string") ? parsed : []; } catch { return []; } }

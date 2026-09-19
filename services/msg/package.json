@@ -17,6 +17,10 @@
     "synthetic": "bun worker/scripts/production-synthetic.ts",
     "deployment-allocation": "bun scripts/deployment-allocation.ts"
   },
+  "dependencies": {
+    "@0000/contracts": "workspace:*",
+    "@0000/platform-client": "workspace:*"
+  },
   "devDependencies": {
     "@types/ws": "8.18.1",
     "mermaid": "11.17.2",

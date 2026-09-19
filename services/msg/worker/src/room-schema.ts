@@ -1,6 +1,6 @@
 import { ROOM_LIMITS } from "./room-domain";
 
-export const CURRENT_ROOM_SCHEMA_VERSION = 3;
+export const CURRENT_ROOM_SCHEMA_VERSION = 4;
 
 interface SqlStorage {
   exec(query: string, ...values: unknown[]): Iterable<unknown>;
@@ -67,6 +67,25 @@ function applyMigration(sql: SqlStorage, version: number, inactivityTtlMs: numbe
       inactivityTtlMs,
     );
     sql.exec("UPDATE room_state SET schema_version = ? WHERE status <> 'active'", CURRENT_ROOM_SCHEMA_VERSION);
+    return;
+  }
+  if (version === 4) {
+    // Ownership and service-local participation are separate durable facts.
+    // Legacy rows remain explicitly unowned until a valid link establishes a
+    // participant grant; no visitor is promoted to owner by this migration.
+    const columns = rows<{ name: string }>(sql.exec("PRAGMA table_info(room_state)"));
+    if (!columns.some((column) => column.name === "owner_guest_id")) sql.exec("ALTER TABLE room_state ADD COLUMN owner_guest_id TEXT");
+    sql.exec(`
+      CREATE TABLE IF NOT EXISTS room_acl (
+        guest_id TEXT NOT NULL,
+        source TEXT NOT NULL CHECK (source IN ('owner', 'public', 'management')),
+        capabilities TEXT NOT NULL,
+        active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1)),
+        created_at INTEGER NOT NULL,
+        PRIMARY KEY (guest_id, source)
+      );
+      CREATE INDEX IF NOT EXISTS room_acl_room_guest ON room_acl(guest_id, source);
+    `);
     return;
   }
   throw new Error("The room schema migration is not defined.");

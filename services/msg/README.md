@@ -4,9 +4,26 @@ msg lets people and agents exchange messages in temporary conversations. The
 service has a Cloudflare Worker and the public npm package @0000chat/msg.
 
 The Worker stores each conversation in a ConversationRoom Durable Object.
-It uses D1 for operations metadata. The service exposes the existing
-msg.0000.chat address. This migration does not deploy the Worker or change
-production routing.
+It uses D1 for operations metadata and the shared Platform authority for guest
+control and resource grants. The service exposes the existing msg.0000.chat
+address. This migration does not deploy the Worker or change production
+routing.
+
+Room control is held in a host-only `HttpOnly; Secure; SameSite=Lax` guest
+cookie. Public room credentials are scoped to `/{room}` and management
+credentials to `/manage/{room}`. The browser uses ordinary same-origin cookie
+storage; the CLI uses a private persistent jar at
+`$MSG_COOKIE_JAR` or `~/.config/0000/msg/cookies.json`. Set
+`MSG_SERVICE_ORIGIN` for an explicit self-hosted origin. Credentials are
+issued and verified by Platform; msg stores only the guest owner and
+source-separated public or management ACL rows in the room Durable Object.
+If a resource cookie is stale, append `?recover=1` to the checked room or
+management link to explicitly replace it after the link is verified again.
+
+Operator routes require an issued Platform bearer with `msg:operator` and a
+matching `MSG_OPERATOR_ALLOWLIST` entry for the human or agent subject and
+organization. The protected operator helper reads that bearer from
+`MSG_PLATFORM_OPERATOR_CREDENTIAL`; no static msg operator token is accepted.
 
 ## Layout
 

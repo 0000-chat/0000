@@ -8,11 +8,17 @@ interface __BaseEnv_Env {
 	MSG_RATE_LIMIT_POSTS: RateLimit;
 	MSG_RATE_LIMIT_LIVE: RateLimit;
 	ASSETS: Fetcher;
+	MSG_AUTH_REQUIRED: "1";
 	MSG_CREATE_DISABLED: "0";
 	MSG_POST_DISABLED: "0";
 	MSG_PUBLIC_ORIGIN: "https://msg.0000.chat";
+	MSG_PLATFORM_BASE_URL: "https://platform.0000.chat";
+	MSG_PLATFORM_AUTHORITY: "platform-t01-authority";
+	MSG_PLATFORM_AUDIENCE: "https://msg.0000.chat";
+	MSG_OPERATOR_ALLOWLIST: "[]";
 	MSG_DATA_ENCRYPTION_KEY_V1: string;
-	MSG_OPERATOR_TOKEN: string;
+	MSG_PLATFORM_SERVICE_VERIFIER: string;
+	MSG_PLATFORM_GUEST_GRANT_ISSUER: string;
 	ConversationRoom: DurableObjectNamespace<import("./src/worker-entry").ConversationRoom>;
 }
 declare namespace Cloudflare {
@@ -27,7 +33,7 @@ type StringifyValues<EnvType extends Record<string, unknown>> = {
 	[Binding in keyof EnvType]: EnvType[Binding] extends string ? EnvType[Binding] : string;
 };
 declare namespace NodeJS {
-	interface ProcessEnv extends StringifyValues<Pick<Cloudflare.Env, "MSG_CREATE_DISABLED" | "MSG_POST_DISABLED" | "MSG_PUBLIC_ORIGIN" | "MSG_DATA_ENCRYPTION_KEY_V1" | "MSG_OPERATOR_TOKEN">> {}
+	interface ProcessEnv extends StringifyValues<Pick<Cloudflare.Env, "MSG_AUTH_REQUIRED" | "MSG_CREATE_DISABLED" | "MSG_POST_DISABLED" | "MSG_PUBLIC_ORIGIN" | "MSG_PLATFORM_BASE_URL" | "MSG_PLATFORM_AUTHORITY" | "MSG_PLATFORM_AUDIENCE" | "MSG_OPERATOR_ALLOWLIST" | "MSG_DATA_ENCRYPTION_KEY_V1" | "MSG_PLATFORM_SERVICE_VERIFIER" | "MSG_PLATFORM_GUEST_GRANT_ISSUER">> {}
 }
 declare module "*.svg" {
 	const value: string;

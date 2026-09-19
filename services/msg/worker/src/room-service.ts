@@ -1,6 +1,6 @@
 import { ERROR_CODES, ProtocolError } from "./errors";
 import { hashCapability, parseMessageInput, randomCapability, validateIdempotencyKey } from "./room-domain";
-import { buildShareMessage, foregroundWait, PROTOCOL_VERSION, stripLegacyAbsoluteExpiry, type CreateRoomInput, type CreateRoomResponse, type ExportRoomInput, type LiveRoomInput, type ManageRoomInput, type ManageRoomResponse, type PostMessageInput, type PostMessageResponse, type ReadRoomInput, type ReadRoomResponse, type RoomService } from "./protocol";
+import { buildShareMessage, foregroundWait, PROTOCOL_VERSION, stripLegacyAbsoluteExpiry, type CreateRoomInput, type CreateRoomResponse, type ExportRoomInput, type LiveRoomInput, type ManageRoomInput, type ManageRoomResponse, type PostMessageInput, type PostMessageResponse, type ReadRoomInput, type ReadRoomResponse, type RoomAccessContext, type RoomAccessSource, type RoomService } from "./protocol";
 
 export interface RoomStub { fetch(request: Request): Promise<Response>; }
 export interface RoomNamespace { getByName(name: string): RoomStub; }
@@ -24,6 +24,7 @@ export class DurableRoomService implements RoomService {
     const response = await this.room(room).fetch(jsonRequest("/initialize", {
       initial,
       management_hash: await hashCapability(management),
+      ...(input.ownerGuestId ? { owner_guest_id: input.ownerGuestId } : {}),
     }));
     const value = stripLegacyAbsoluteExpiry(await responseJson(response));
     const conversation_url = `${this.origin}/${room}`;
@@ -41,7 +42,7 @@ export class DurableRoomService implements RoomService {
   }
 
   async read(input: ReadRoomInput): Promise<ReadRoomResponse> {
-    const value = stripLegacyAbsoluteExpiry(await responseJson(await this.room(input.room).fetch(new Request(`https://room/read?after=${input.after}`))));
+    const value = stripLegacyAbsoluteExpiry(await responseJson(await this.room(input.room).fetch(new Request(`https://room/read?after=${input.after}&resource=${encodeURIComponent(input.room)}`, { headers: authHeaders(input.auth) }))));
     const conversation_url = `${this.origin}/${input.room}`;
     const latest = value.latest_message as number;
     return {
@@ -53,15 +54,15 @@ export class DurableRoomService implements RoomService {
   }
 
   async post(input: PostMessageInput): Promise<PostMessageResponse> {
-    const value = stripLegacyAbsoluteExpiry(await responseJson(await this.room(input.room).fetch(jsonRequest("/messages", {
+    const value = stripLegacyAbsoluteExpiry(await responseJson(await this.room(input.room).fetch(jsonRequest(`/messages?resource=${encodeURIComponent(input.room)}`, {
       input: parseMessageInput(input.body), ...(input.idempotencyKey !== undefined ? { idempotency_key: validateIdempotencyKey(input.idempotencyKey) } : {}),
-    }))));
+    }, input.auth))));
     const message = value.message as { sequence: number };
     return { ...value, wait: foregroundWait(this.origin, input.room, message.sequence) } as unknown as PostMessageResponse;
   }
 
   async manage(input: ManageRoomInput): Promise<ManageRoomResponse> {
-    return responseJson(await this.room(input.room).fetch(new Request(`https://room/manage?token=${encodeURIComponent(input.token)}`, { method: input.method }))) as unknown as ManageRoomResponse;
+    return responseJson(await this.room(input.room).fetch(new Request(`https://room/manage?token=${encodeURIComponent(input.token)}&resource=${encodeURIComponent(input.room)}`, { method: input.method, headers: authHeaders(input.auth) }))) as unknown as ManageRoomResponse;
   }
 
   async operatorDelete(room: string): Promise<void> {
@@ -69,18 +70,43 @@ export class DurableRoomService implements RoomService {
   }
 
   async live(input: LiveRoomInput): Promise<Response> {
-    return responsePassthrough(await this.room(input.room).fetch(new Request(`https://room/live?after=${input.after}`, { headers: { upgrade: "websocket" } })));
+    return responsePassthrough(await this.room(input.room).fetch(new Request(`https://room/live?after=${input.after}&resource=${encodeURIComponent(input.room)}`, { headers: { upgrade: "websocket", ...authHeaders(input.auth) } })));
   }
 
   async exportRoom(input: ExportRoomInput): Promise<Response> {
-    return responsePassthrough(await this.room(input.room).fetch(new Request(`https://room/export.${input.format === "json" ? "json" : "md"}`)));
+    return responsePassthrough(await this.room(input.room).fetch(new Request(`https://room/export.${input.format === "json" ? "json" : "md"}?resource=${encodeURIComponent(input.room)}`, { headers: authHeaders(input.auth) })));
+  }
+
+  async proveLink(input: { readonly room: string; readonly source: RoomAccessSource; readonly token?: string }): Promise<{ readonly source: RoomAccessSource; readonly storedOwnerId?: string } | null> {
+    const response = await this.room(input.room).fetch(jsonRequest("/access/proof", { source: input.source, ...(input.token === undefined ? {} : { token: input.token }) }));
+    if (!response.ok) return null;
+    const value = await response.json() as { source?: RoomAccessSource; stored_owner_id?: string };
+    return value.source ? { source: value.source, ...(value.stored_owner_id ? { storedOwnerId: value.stored_owner_id } : {}) } : null;
+  }
+
+  async recordGrant(input: { readonly room: string; readonly guestId: string; readonly source: RoomAccessSource; readonly capabilities: readonly string[] }): Promise<void> {
+    await responseJson(await this.room(input.room).fetch(jsonRequest("/access/record", { guest_id: input.guestId, source: input.source, capabilities: input.capabilities })));
+  }
+
+  async checkGrant(input: { readonly room: string; readonly guestId: string; readonly source: RoomAccessSource; readonly action: "read" | "write" | "manage" }): Promise<boolean> {
+    const value = await responseJson(await this.room(input.room).fetch(jsonRequest("/access/check", { guest_id: input.guestId, source: input.source, action: input.action })));
+    return value.allowed === true;
   }
 
   private room(capability: string): RoomStub { return this.rooms.getByName(capability); }
 }
 
-function jsonRequest(path: string, value: unknown): Request {
-  return new Request(`https://room${path}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(value) });
+function jsonRequest(path: string, value: unknown, auth?: RoomAccessContext): Request {
+  return new Request(`https://room${path}`, { method: "POST", headers: { "content-type": "application/json", ...authHeaders(auth) }, body: JSON.stringify(value) });
+}
+
+function authHeaders(auth?: RoomAccessContext): Record<string, string> {
+  if (!auth) return {};
+  return {
+    ...(auth.credential ? { authorization: `Bearer ${auth.credential}` } : {}),
+    "x-msg-guest-id": auth.guestId,
+    "x-msg-source": auth.source,
+  };
 }
 
 async function responseJson(response: Response): Promise<Record<string, unknown>> {
