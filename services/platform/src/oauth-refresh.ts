@@ -437,11 +437,11 @@ async function terminateRefreshFamily(
   reason: string,
   terminalState: "revoked" | "quarantined" = "revoked",
   replayTokenId: string | null = null,
-): Promise<void> {
+): Promise<boolean> {
   const now = Date.now();
   const tokenTerminalState =
     terminalState === "quarantined" ? "quarantined" : "revoked";
-  await database.batch([
+  const results = await database.batch([
     database
       .prepare(
         `UPDATE platform_oauth_refresh_family
@@ -498,6 +498,7 @@ async function terminateRefreshFamily(
       )
       .bind(now, familyId),
   ]);
+  return results.some((entry) => entry.meta.changes > 0);
 }
 
 async function parseReturnedTokens(
@@ -1139,6 +1140,7 @@ export async function completeOAuthRefresh(
   response: Response,
   preparation: Extract<OAuthRefreshPreparation, { kind: "refresh" }>,
   clientId: string,
+  onCommitted?: (installationId: string) => void,
 ): Promise<Response> {
   if (response.status !== 200) {
     await quarantineAfterFailure(
@@ -1407,6 +1409,7 @@ export async function completeOAuthRefresh(
     );
     return jsonAuthorityUnavailable("refresh mapping was not durable");
   }
+  onCommitted?.(predecessor.installation_id);
   if (
     !(await currentFamilyAuthority(database, preparation.familyId, successorId))
   ) {
@@ -1429,6 +1432,7 @@ export async function completeOAuthRefresh(
 export async function completeInitialOAuthRefresh(
   database: OAuthDatabase,
   response: Response,
+  onCommitted?: (installationId: string) => void,
 ): Promise<Response | undefined> {
   if (response.status !== 200) return;
   const returned = await parseReturnedTokens(response);
@@ -1808,6 +1812,7 @@ export async function completeInitialOAuthRefresh(
       "OAuth refresh installation was not durable",
     );
   }
+  onCommitted?.(context.id);
   if (!(await currentFamilyAuthority(database, familyId, rootId))) {
     await quarantineAfterFailure(
       database,
@@ -1970,6 +1975,7 @@ export async function revokeOAuthInstallation(
   database: OAuthDatabase,
   installationId: string,
   reason: string,
+  onCommitted?: (installationId: string) => void,
 ): Promise<boolean> {
   const family = await database
     .prepare(
@@ -1977,8 +1983,10 @@ export async function revokeOAuthInstallation(
     )
     .bind(installationId)
     .first<{ id: string }>();
-  if (family) {
-    await terminateRefreshFamily(database, family.id, reason);
+  let committed = false;
+  if (family && (await terminateRefreshFamily(database, family.id, reason))) {
+    committed = true;
+    onCommitted?.(installationId);
   }
   const now = Date.now();
   const result = await database.batch([
@@ -2018,6 +2026,9 @@ export async function revokeOAuthInstallation(
       .prepare(`DELETE FROM oauthConsent WHERE referenceId = ?`)
       .bind(installationId),
   ]);
+  if (result.some((entry) => entry.meta.changes > 0) && !committed) {
+    onCommitted?.(installationId);
+  }
   return result.some((entry) => entry.meta.changes > 0);
 }
 

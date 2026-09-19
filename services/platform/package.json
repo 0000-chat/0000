@@ -6,10 +6,15 @@
   "description": "Shared 0000 identity authority and experimental Worker/D1 authentication probe.",
   "scripts": {
     "check": "sh scripts/check",
-    "dev": "wrangler dev --local",
+    "dev": "bun scripts/wrangler-config.ts dev --local",
     "generate:migration": "bun scripts/generate-migration.ts",
-    "test": "vitest run --config vitest.worker.config.ts && bun run test:restart",
+    "test": "vitest run --config vitest.worker.config.ts && bun run test:config && bun run test:rate-limits && bun run test:native-boundaries && bun run test:restart",
+    "test:config": "bun test scripts/wrangler-config.test.ts",
+    "test:rate-limits": "bun scripts/test-native-rate-limits.mjs",
+    "test:native-boundaries": "bun scripts/test-platform-native-boundaries.mjs",
     "test:restart": "bun scripts/test-restart.mjs",
+    "wrangler": "bun scripts/wrangler-config.ts",
+    "wrangler:types": "bun scripts/wrangler-config.ts types worker-configuration.d.ts --include-runtime=true",
     "provision:service": "bun scripts/provision-service.ts",
     "provision:oauth-client": "bun scripts/provision-oauth-client.ts",
     "typecheck": "tsc --noEmit -p tsconfig.json"

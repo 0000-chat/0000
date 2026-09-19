@@ -1,4 +1,9 @@
-import { createAuth, PLATFORM_SESSION_FRESH_AGE_SECONDS } from "./auth";
+import {
+  createAuth,
+  PLATFORM_SESSION_FRESH_AGE_SECONDS,
+  PlatformDatabaseUnavailableError,
+} from "./auth";
+import { isAPIError } from "better-auth/api";
 import {
   createAgent,
   createOrNarrowAgentGrant,
@@ -124,9 +129,195 @@ import {
   GuestGrantConflict,
   type GuestIssuer,
 } from "./guest-state";
+import { emitPlatformDiagnostic } from "./diagnostics";
+import {
+  classifyPlatformProtectedRoute,
+  executePlatformProtectedRequest,
+  type PlatformSafeguardEnv,
+} from "./server-safeguards";
 
 function json(status: number, body: unknown): Response {
   return Response.json(body, { status });
+}
+
+type PlatformAuthOptions = NonNullable<Parameters<typeof createAuth>[1]>;
+
+interface AuthDatabaseFailureSignal {
+  failed: boolean;
+  preserveProtocol: boolean;
+}
+
+function newAuthDatabaseFailureSignal(
+  preserveProtocol = false,
+): AuthDatabaseFailureSignal {
+  return { failed: false, preserveProtocol };
+}
+
+function requestHasAuthSessionCookie(request: Request): boolean {
+  const cookie = request.headers.get("cookie") ?? "";
+  return /(?:^|;\s*)(?:better-auth\.session_token|__Secure-better-auth\.session_token)=/u.test(
+    cookie,
+  );
+}
+
+function requestAuth(
+  env: Cloudflare.Env,
+  options: PlatformAuthOptions = {},
+  signal = newAuthDatabaseFailureSignal(),
+): {
+  auth: ReturnType<typeof createAuth>;
+  signal: AuthDatabaseFailureSignal;
+} {
+  return {
+    auth: createAuth(env, {
+      ...options,
+      onDatabaseFailure: (oauthLink) => {
+        signal.failed = true;
+        signal.preserveProtocol ||= oauthLink;
+      },
+      onSessionCreated: (request, userId) => {
+        emitPlatformDiagnostic("platform.authentication.outcome", "success", {
+          request,
+          principalId: userId,
+        });
+      },
+    }),
+    signal,
+  };
+}
+
+function authDatabaseFailureResponse(
+  response: Response,
+  signal: AuthDatabaseFailureSignal,
+): Response {
+  if (!signal.failed) return response;
+  if (signal.preserveProtocol && response.status >= 500) return response;
+
+  // Better Auth deliberately turns a failed account write into its normal
+  // OAuth error redirect (for example, `unable_to_create_user`). Preserve
+  // that protocol response. A database failure that escapes as a server
+  // response, or that Better Auth classified as its generic internal error,
+  // still becomes Platform's fixed unavailable response.
+  if (response.status >= 500)
+    return json(503, { status: "authority_unavailable" });
+  if (response.status >= 300 && response.status < 400) {
+    const location = response.headers.get("location");
+    if (location) {
+      try {
+        const error = new URL(
+          location,
+          "http://platform.invalid",
+        ).searchParams.get("error");
+        if (error === "internal_server_error") {
+          return json(503, { status: "authority_unavailable" });
+        }
+      } catch {
+        // Preserve the library's protocol response when its Location is not
+        // parseable; no caller-controlled value is logged or reflected.
+      }
+    }
+  }
+  return response;
+}
+
+async function runRequestAuthHandler(
+  auth: ReturnType<typeof createAuth>,
+  request: Request,
+  signal: AuthDatabaseFailureSignal,
+): Promise<Response> {
+  try {
+    return authDatabaseFailureResponse(await auth.handler(request), signal);
+  } catch (error) {
+    if (signal.preserveProtocol) return new Response(null, { status: 500 });
+    if (signal.failed) return json(503, { status: "authority_unavailable" });
+    throw error;
+  }
+}
+
+async function requestAuthHandler(
+  request: Request,
+  env: Cloudflare.Env,
+): Promise<Response> {
+  const { auth, signal } = requestAuth(
+    env,
+    {},
+    newAuthDatabaseFailureSignal(requestHasAuthSessionCookie(request)),
+  );
+  return runRequestAuthHandler(auth, request, signal);
+}
+
+const SAFE_AUTH_ERROR_FIELDS = [
+  "code",
+  "error",
+  "error_description",
+  "status",
+] as const;
+const SAFE_AUTH_ERROR_HEADER_NAMES = [
+  "cache-control",
+  "content-type",
+  "location",
+  "set-cookie",
+] as const;
+
+function safeAuthErrorResponse(error: unknown): Response | null {
+  if (!isAPIError(error)) return null;
+  const statusCode = error.statusCode;
+  if (
+    typeof statusCode !== "number" ||
+    !Number.isInteger(statusCode) ||
+    statusCode < 300 ||
+    statusCode > 599
+  ) {
+    return null;
+  }
+  const headers = new Headers();
+  const errorHeaders = error.headers ? new Headers(error.headers) : null;
+  for (const name of SAFE_AUTH_ERROR_HEADER_NAMES) {
+    const value = errorHeaders?.get(name);
+    if (typeof value === "string") headers.set(name, value);
+  }
+  if (statusCode >= 300 && statusCode < 400 && headers.has("location")) {
+    return new Response(null, { status: statusCode, headers });
+  }
+  const errorBody = error.body;
+  const body = isObject(errorBody)
+    ? Object.fromEntries(
+        SAFE_AUTH_ERROR_FIELDS.flatMap((field) => {
+          const value = errorBody[field];
+          return typeof value === "string" && value.length <= 256
+            ? [[field, value]]
+            : [];
+        }),
+      )
+    : null;
+  return body && Object.keys(body).length > 0
+    ? Response.json(body, { status: statusCode, headers })
+    : new Response(null, { status: statusCode, headers });
+}
+
+function authenticationFailureResponse(
+  pathname: string,
+  error: unknown,
+): Response {
+  if (error instanceof PlatformDatabaseUnavailableError) {
+    return json(503, { status: "authority_unavailable" });
+  }
+  if (
+    isAPIError(error) &&
+    isObject(error.body) &&
+    error.body.code === "database_unavailable"
+  ) {
+    return json(503, { status: "authority_unavailable" });
+  }
+  const preserved = safeAuthErrorResponse(error);
+  if (preserved) return preserved;
+  // Better Auth's callback router returns a bare 500 for unexpected provider
+  // failures. Preserve that protocol shape while keeping other authority
+  // failures on Platform's fixed unavailable response.
+  if (pathname.startsWith("/api/auth/callback/")) {
+    return new Response(null, { status: 500 });
+  }
+  return json(503, { status: "authority_unavailable" });
 }
 
 function hasTrustedOrigin(request: Request, env: Cloudflare.Env): boolean {
@@ -532,14 +723,19 @@ async function oauthPlatformRoute(
         }),
       },
     );
-    const response = await createAuth(env, {
+    const internalAuth = requestAuth(env, {
       oauthPlatform: true,
       oauthGrantTypes: client?.refreshEnabled
         ? ["authorization_code", "refresh_token"]
         : ["authorization_code"],
       oauthScopes: scopes,
       oauthPostLogin: oauthPostLoginHooks(database, flow.id),
-    }).handler(internal);
+    });
+    const response = await runRequestAuthHandler(
+      internalAuth.auth,
+      internal,
+      internalAuth.signal,
+    );
     if (response.status !== 200) return response;
     try {
       const result: unknown = await response.clone().json();
@@ -713,7 +909,14 @@ async function unlinkSocialAccount(
     )
     .bind(body.accountId, current.user.id, current.user.id, body.accountId)
     .run();
-  if (unlinked.meta.changes === 1) return json(200, { status: true });
+  if (unlinked.meta.changes === 1) {
+    emitPlatformDiagnostic("platform.provider.unlinked", "success", {
+      request,
+      principalId: current.user.id,
+      resourceId: body.accountId,
+    });
+    return json(200, { status: true });
+  }
 
   const ownedAccount = await database
     .prepare("SELECT id FROM account WHERE id = ? AND userId = ?")
@@ -1056,18 +1259,28 @@ async function servicePrincipalManagementRoute(
           "An organization owner or admin can create service principals.",
       });
     }
-    const principal = await createServicePrincipal(env.IDENTITY_DB, {
-      actorUserId: authorization.current.user.id,
-      organizationId: body.organizationId,
-      name: body.name.trim(),
-    });
-    return principal
-      ? json(201, principal)
-      : json(409, {
-          error: "service_principal_changed",
-          message:
-            "Service principal authority changed. Refresh and try again.",
-        });
+    const principal = await createServicePrincipal(
+      env.IDENTITY_DB,
+      {
+        actorUserId: authorization.current.user.id,
+        organizationId: body.organizationId,
+        name: body.name.trim(),
+      },
+      (subjectId) =>
+        emitPlatformDiagnostic("platform.agent.created", "success", {
+          request,
+          principalId: authorization.current.user.id,
+          organizationId: body.organizationId as string,
+          resourceId: subjectId,
+        }),
+    );
+    if (!principal) {
+      return json(409, {
+        error: "service_principal_changed",
+        message: "Service principal authority changed. Refresh and try again.",
+      });
+    }
+    return json(201, principal);
   }
 
   if (pathname === `${base}/update` && request.method === "POST") {
@@ -1102,9 +1315,14 @@ async function servicePrincipalManagementRoute(
         name: body.name.trim(),
       },
     );
-    return updated
-      ? json(200, { updated: true, organizationId: body.organizationId })
-      : json(404, { error: "service_principal_not_found" });
+    if (!updated) return json(404, { error: "service_principal_not_found" });
+    emitPlatformDiagnostic("platform.agent.updated", "success", {
+      request,
+      principalId: authorization.current.user.id,
+      organizationId: body.organizationId,
+      resourceId: body.subjectId,
+    });
+    return json(200, { updated: true, organizationId: body.organizationId });
   }
 
   if (pathname === `${base}/lifecycle` && request.method === "POST") {
@@ -1139,12 +1357,17 @@ async function servicePrincipalManagementRoute(
         enabled: body.action === "restore",
       },
     );
-    return changed
-      ? json(200, {
-          enabled: body.action === "restore",
-          organizationId: body.organizationId,
-        })
-      : json(404, { error: "service_principal_not_found" });
+    if (!changed) return json(404, { error: "service_principal_not_found" });
+    emitPlatformDiagnostic("platform.agent.updated", "success", {
+      request,
+      principalId: authorization.current.user.id,
+      organizationId: body.organizationId,
+      resourceId: body.subjectId,
+    });
+    return json(200, {
+      enabled: body.action === "restore",
+      organizationId: body.organizationId,
+    });
   }
 
   if (pathname === `${base}/grants` && request.method === "GET") {
@@ -1215,13 +1438,24 @@ async function servicePrincipalManagementRoute(
     const service = await findActiveServiceById(database, body.serviceId);
     if (!service)
       return json(503, { error: "service_registration_unavailable" });
-    const result = await createOrNarrowServicePrincipalGrant(database, {
-      actorUserId: authorization.current.user.id,
-      organizationId: body.organizationId,
-      subjectId: body.subjectId,
-      service,
-      capabilities: body.capabilities,
-    });
+    const result = await createOrNarrowServicePrincipalGrant(
+      database,
+      {
+        actorUserId: authorization.current.user.id,
+        organizationId: body.organizationId,
+        subjectId: body.subjectId,
+        service,
+        capabilities: body.capabilities,
+      },
+      ({ grantId }) =>
+        emitPlatformDiagnostic("platform.agent.grant_changed", "success", {
+          request,
+          principalId: authorization.current.user.id,
+          organizationId: body.organizationId as string,
+          resourceId: grantId,
+          serviceId: body.serviceId as string,
+        }),
+    );
     if (result.status === "created" || result.status === "narrowed") {
       const { agentId, ...grant } = result.grant;
       return json(result.status === "created" ? 201 : 200, {
@@ -1272,10 +1506,16 @@ async function servicePrincipalManagementRoute(
         subjectId: body.subjectId,
         grantId: body.grantId,
       },
+      (grantId) =>
+        emitPlatformDiagnostic("platform.agent.grant_changed", "success", {
+          request,
+          principalId: authorization.current.user.id,
+          organizationId: body.organizationId as string,
+          resourceId: grantId,
+        }),
     );
-    return revoked
-      ? json(200, { revoked: true, organizationId: body.organizationId })
-      : json(404, { error: "grant_not_found" });
+    if (!revoked) return json(404, { error: "grant_not_found" });
+    return json(200, { revoked: true, organizationId: body.organizationId });
   }
 
   if (pathname === `${base}/credentials` && request.method === "GET") {
@@ -1392,6 +1632,13 @@ async function servicePrincipalManagementRoute(
         name: body.name,
         expiresAt,
       });
+      emitPlatformDiagnostic("platform.agent.credential_created", "success", {
+        request,
+        principalId: authorization.current.user.id,
+        organizationId: body.organizationId,
+        resourceId: issued.credentialId,
+        serviceId: service.serviceId,
+      });
       return json(201, {
         ...issued,
         kind: "service",
@@ -1471,15 +1718,30 @@ async function servicePrincipalManagementRoute(
     const service = await findActiveServiceById(database, grant.serviceId);
     if (!service) return json(404, { error: "credential_not_found" });
     try {
-      const rotated = await rotateServicePrincipalCredential(env.IDENTITY_DB, {
-        actorUserId: authorization.current.user.id,
-        service,
-        organizationId: body.organizationId,
-        subjectId: body.subjectId,
-        grantId: grant.id,
-        credentialId: body.credentialId,
-        expiresAt,
-      });
+      const rotated = await rotateServicePrincipalCredential(
+        env.IDENTITY_DB,
+        {
+          actorUserId: authorization.current.user.id,
+          service,
+          organizationId: body.organizationId,
+          subjectId: body.subjectId,
+          grantId: grant.id,
+          credentialId: body.credentialId,
+          expiresAt,
+        },
+        (credentialId) =>
+          emitPlatformDiagnostic(
+            "platform.agent.credential_rotated",
+            "success",
+            {
+              request,
+              principalId: authorization.current.user.id,
+              organizationId: body.organizationId as string,
+              resourceId: credentialId,
+              serviceId: service.serviceId,
+            },
+          ),
+      );
       return json(201, {
         ...rotated,
         kind: "service",
@@ -1529,10 +1791,16 @@ async function servicePrincipalManagementRoute(
         subjectId: body.subjectId,
         credentialId: body.credentialId,
       },
+      (credentialId) =>
+        emitPlatformDiagnostic("platform.agent.credential_revoked", "success", {
+          request,
+          principalId: authorization.current.user.id,
+          organizationId: body.organizationId as string,
+          resourceId: credentialId,
+        }),
     );
-    return revoked
-      ? json(200, { revoked: true, organizationId: body.organizationId })
-      : json(404, { error: "credential_not_found" });
+    if (!revoked) return json(404, { error: "credential_not_found" });
+    return json(200, { revoked: true, organizationId: body.organizationId });
   }
 
   return json(404, { error: "not_found" });
@@ -1625,7 +1893,17 @@ async function accountManagementRoute(
       allowed = manager !== null;
     }
     if (!allowed) return json(403, { error: "installation_forbidden" });
-    await revokeOAuthInstallation(database, installation.id, "account_revoked");
+    await revokeOAuthInstallation(
+      database,
+      installation.id,
+      "account_revoked",
+      (installationId) =>
+        emitPlatformDiagnostic(
+          "platform.oauth.installation_revoked",
+          "success",
+          { request, resourceId: installationId },
+        ),
+    );
     return json(200, { revoked: true, installationId: installation.id });
   }
 
@@ -1729,17 +2007,28 @@ async function accountManagementRoute(
         message: "An organization owner or admin can create agents.",
       });
     }
-    const agent = await createAgent(env.IDENTITY_DB, {
-      actorUserId: authorization.current.user.id,
-      organizationId: body.organizationId,
-      name: body.name.trim(),
-    });
-    return agent
-      ? json(201, agent)
-      : json(409, {
-          error: "agent_changed",
-          message: "Agent authority changed. Refresh and try again.",
-        });
+    const agent = await createAgent(
+      env.IDENTITY_DB,
+      {
+        actorUserId: authorization.current.user.id,
+        organizationId: body.organizationId,
+        name: body.name.trim(),
+      },
+      (agentId) =>
+        emitPlatformDiagnostic("platform.agent.created", "success", {
+          request,
+          principalId: authorization.current.user.id,
+          organizationId: body.organizationId as string,
+          resourceId: agentId,
+        }),
+    );
+    if (!agent) {
+      return json(409, {
+        error: "agent_changed",
+        message: "Agent authority changed. Refresh and try again.",
+      });
+    }
+    return json(201, agent);
   }
 
   if (pathname === "/api/account/agents/update" && request.method === "POST") {
@@ -1773,9 +2062,14 @@ async function accountManagementRoute(
         name: body.name.trim(),
       },
     );
-    return updated
-      ? json(200, { updated: true, organizationId: body.organizationId })
-      : json(404, { error: "agent_not_found" });
+    if (!updated) return json(404, { error: "agent_not_found" });
+    emitPlatformDiagnostic("platform.agent.updated", "success", {
+      request,
+      principalId: authorization.current.user.id,
+      organizationId: body.organizationId,
+      resourceId: body.agentId,
+    });
+    return json(200, { updated: true, organizationId: body.organizationId });
   }
 
   if (
@@ -1812,12 +2106,17 @@ async function accountManagementRoute(
         enabled: body.action === "restore",
       },
     );
-    return changed
-      ? json(200, {
-          enabled: body.action === "restore",
-          organizationId: body.organizationId,
-        })
-      : json(404, { error: "agent_not_found" });
+    if (!changed) return json(404, { error: "agent_not_found" });
+    emitPlatformDiagnostic("platform.agent.updated", "success", {
+      request,
+      principalId: authorization.current.user.id,
+      organizationId: body.organizationId,
+      resourceId: body.agentId,
+    });
+    return json(200, {
+      enabled: body.action === "restore",
+      organizationId: body.organizationId,
+    });
   }
 
   if (pathname === "/api/account/agents/grants" && request.method === "GET") {
@@ -1894,6 +2193,14 @@ async function accountManagementRoute(
         service,
         capabilities: body.capabilities,
       },
+      ({ grantId }) =>
+        emitPlatformDiagnostic("platform.agent.grant_changed", "success", {
+          request,
+          principalId: authorization.current.user.id,
+          organizationId: body.organizationId as string,
+          resourceId: grantId,
+          serviceId: body.serviceId as string,
+        }),
     );
     if (result.status === "created" || result.status === "narrowed") {
       return json(result.status === "created" ? 201 : 200, {
@@ -1949,10 +2256,16 @@ async function accountManagementRoute(
         agentId: body.agentId,
         grantId: body.grantId,
       },
+      (grantId) =>
+        emitPlatformDiagnostic("platform.agent.grant_changed", "success", {
+          request,
+          principalId: authorization.current.user.id,
+          organizationId: body.organizationId as string,
+          resourceId: grantId,
+        }),
     );
-    return revoked
-      ? json(200, { revoked: true, organizationId: body.organizationId })
-      : json(404, { error: "grant_not_found" });
+    if (!revoked) return json(404, { error: "grant_not_found" });
+    return json(200, { revoked: true, organizationId: body.organizationId });
   }
 
   if (
@@ -2072,6 +2385,13 @@ async function accountManagementRoute(
         name: body.name,
         expiresAt,
       });
+      emitPlatformDiagnostic("platform.agent.credential_created", "success", {
+        request,
+        principalId: authorization.current.user.id,
+        organizationId: body.organizationId,
+        resourceId: issued.credentialId,
+        serviceId: service.serviceId,
+      });
       return json(201, {
         ...issued,
         audience: service.audience,
@@ -2151,15 +2471,30 @@ async function accountManagementRoute(
     const service = await findActiveServiceById(database, grant.serviceId);
     if (!service) return json(404, { error: "credential_not_found" });
     try {
-      const rotated = await rotateAgentCredential(env.IDENTITY_DB, {
-        actorUserId: authorization.current.user.id,
-        service,
-        organizationId: body.organizationId,
-        agentId: body.agentId,
-        grantId: grant.id,
-        credentialId: body.credentialId,
-        expiresAt,
-      });
+      const rotated = await rotateAgentCredential(
+        env.IDENTITY_DB,
+        {
+          actorUserId: authorization.current.user.id,
+          service,
+          organizationId: body.organizationId,
+          agentId: body.agentId,
+          grantId: grant.id,
+          credentialId: body.credentialId,
+          expiresAt,
+        },
+        (credentialId) =>
+          emitPlatformDiagnostic(
+            "platform.agent.credential_rotated",
+            "success",
+            {
+              request,
+              principalId: authorization.current.user.id,
+              organizationId: body.organizationId as string,
+              resourceId: credentialId,
+              serviceId: service.serviceId,
+            },
+          ),
+      );
       return json(201, {
         ...rotated,
         audience: service.audience,
@@ -2211,10 +2546,16 @@ async function accountManagementRoute(
         agentId: body.agentId,
         credentialId: body.credentialId,
       },
+      (credentialId) =>
+        emitPlatformDiagnostic("platform.agent.credential_revoked", "success", {
+          request,
+          principalId: authorization.current.user.id,
+          organizationId: body.organizationId as string,
+          resourceId: credentialId,
+        }),
     );
-    return revoked
-      ? json(200, { revoked: true, organizationId: body.organizationId })
-      : json(404, { error: "credential_not_found" });
+    if (!revoked) return json(404, { error: "credential_not_found" });
+    return json(200, { revoked: true, organizationId: body.organizationId });
   }
 
   if (
@@ -2238,6 +2579,13 @@ async function accountManagementRoute(
       env.IDENTITY_DB,
       { id: current.user.id, name: current.user.name },
       body.name.trim(),
+      ({ organizationId, membershipId }) =>
+        emitPlatformDiagnostic("platform.organization.created", "success", {
+          request,
+          organizationId,
+          resourceId: membershipId,
+          principalId: current.user.id,
+        }),
     );
     return created
       ? json(201, created)
@@ -2280,12 +2628,19 @@ async function accountManagementRoute(
       body.organizationId,
       body.name.trim(),
     );
-    return updated
-      ? json(200, { updated: true })
-      : json(409, {
-          error: "organization_changed",
-          message: "Organization access changed. Refresh and try again.",
-        });
+    if (!updated) {
+      return json(409, {
+        error: "organization_changed",
+        message: "Organization access changed. Refresh and try again.",
+      });
+    }
+    emitPlatformDiagnostic("platform.organization.updated", "success", {
+      request,
+      principalId: authorization.current.user.id,
+      organizationId: body.organizationId,
+      resourceId: body.organizationId,
+    });
+    return json(200, { updated: true });
   }
 
   if (
@@ -2333,20 +2688,26 @@ async function accountManagementRoute(
         role: body.role,
       },
     );
-    return invitation
-      ? json(201, {
-          ...invitation,
-          organizationId: body.organizationId,
-          link: new URL(
-            `/account?invitation=${encodeURIComponent(invitation.id)}`,
-            env.PLATFORM_BASE_URL,
-          ).href,
-        })
-      : json(409, {
-          error: "invitation_conflict",
-          message:
-            "This person is already a member or has a current invitation.",
-        });
+    if (!invitation) {
+      return json(409, {
+        error: "invitation_conflict",
+        message: "This person is already a member or has a current invitation.",
+      });
+    }
+    emitPlatformDiagnostic("platform.organization.updated", "success", {
+      request,
+      principalId: authorization.current.user.id,
+      organizationId: body.organizationId,
+      resourceId: invitation.id,
+    });
+    return json(201, {
+      ...invitation,
+      organizationId: body.organizationId,
+      link: new URL(
+        `/account?invitation=${encodeURIComponent(invitation.id)}`,
+        env.PLATFORM_BASE_URL,
+      ).href,
+    });
   }
 
   if (
@@ -2410,12 +2771,19 @@ async function accountManagementRoute(
         invitationId: body.invitationId,
       },
     );
-    return cancelled
-      ? json(200, { cancelled: true })
-      : json(409, {
-          error: "invitation_changed",
-          message: "This invitation changed. Refresh the page and try again.",
-        });
+    if (!cancelled) {
+      return json(409, {
+        error: "invitation_changed",
+        message: "This invitation changed. Refresh the page and try again.",
+      });
+    }
+    emitPlatformDiagnostic("platform.organization.updated", "success", {
+      request,
+      principalId: authorization.current.user.id,
+      organizationId: body.organizationId,
+      resourceId: body.invitationId,
+    });
+    return json(200, { cancelled: true });
   }
 
   if (
@@ -2439,8 +2807,21 @@ async function accountManagementRoute(
       env.IDENTITY_DB,
       current.user.id,
       body.invitationId,
+      ({ organizationId, membershipId }) =>
+        emitPlatformDiagnostic(
+          "platform.organization.member_added",
+          "success",
+          {
+            request,
+            principalId: current.user.id,
+            organizationId,
+            resourceId: membershipId,
+          },
+        ),
     );
-    if (result.status === "accepted") return json(200, result);
+    if (result.status === "accepted") {
+      return json(200, result);
+    }
     const errors = {
       not_found: [
         404,
@@ -2542,7 +2923,19 @@ async function accountManagementRoute(
         role: body.role,
       },
     );
-    if (updated) return json(200, { updated: true });
+    if (updated) {
+      emitPlatformDiagnostic(
+        "platform.organization.member_updated",
+        "success",
+        {
+          request,
+          principalId: authorization.current.user.id,
+          organizationId: body.organizationId,
+          resourceId: body.membershipId,
+        },
+      );
+      return json(200, { updated: true });
+    }
     const targetOwner = target.role === "owner";
     if (targetOwner) {
       const owners = await env.IDENTITY_DB.prepare(
@@ -2623,7 +3016,19 @@ async function accountManagementRoute(
         membershipId: body.membershipId,
       },
     );
-    if (removed) return json(200, { removed: true });
+    if (removed) {
+      emitPlatformDiagnostic(
+        "platform.organization.member_removed",
+        "success",
+        {
+          request,
+          principalId: authorization.current.user.id,
+          organizationId: body.organizationId,
+          resourceId: body.membershipId,
+        },
+      );
+      return json(200, { removed: true });
+    }
     if (target.role === "owner") {
       const owners = await env.IDENTITY_DB.prepare(
         "SELECT COUNT(*) AS count FROM member WHERE organizationId = ? AND role = 'owner'",
@@ -2662,12 +3067,19 @@ async function accountManagementRoute(
       authorization.current.user.id,
       body.organizationId,
     );
-    return left
-      ? json(200, { left: true })
-      : json(409, {
-          error: "final_owner_required",
-          message: "This organization must keep at least one owner.",
-        });
+    if (!left) {
+      return json(409, {
+        error: "final_owner_required",
+        message: "This organization must keep at least one owner.",
+      });
+    }
+    emitPlatformDiagnostic("platform.organization.member_left", "success", {
+      request,
+      principalId: authorization.current.user.id,
+      organizationId: body.organizationId,
+      resourceId: body.organizationId,
+    });
+    return json(200, { left: true });
   }
 
   if (pathname === "/api/account/operator" && request.method === "GET") {
@@ -2727,13 +3139,24 @@ async function accountManagementRoute(
         body.targetId,
         body.action === "suspend",
       );
-      return changed
-        ? json(200, { changed: true })
-        : json(409, {
-            error: "organization_changed",
-            message:
-              "Organization status already changed. Refresh the operator list.",
-          });
+      if (!changed) {
+        return json(409, {
+          error: "organization_changed",
+          message:
+            "Organization status already changed. Refresh the operator list.",
+        });
+      }
+      emitPlatformDiagnostic(
+        "platform.organization.lifecycle_changed",
+        "success",
+        {
+          request,
+          principalId: current.user.id,
+          organizationId: body.targetId,
+          resourceId: body.targetId,
+        },
+      );
+      return json(200, { changed: true });
     }
     if (
       body.kind === "user" &&
@@ -2745,13 +3168,22 @@ async function accountManagementRoute(
         body.targetId,
         body.action === "disable",
       );
-      return changed
-        ? json(200, { changed: true })
-        : json(409, {
-            error: "account_changed",
-            message:
-              "Account status already changed. Refresh the operator list.",
-          });
+      if (!changed) {
+        return json(409, {
+          error: "account_changed",
+          message: "Account status already changed. Refresh the operator list.",
+        });
+      }
+      emitPlatformDiagnostic(
+        "platform.organization.lifecycle_changed",
+        "success",
+        {
+          request,
+          principalId: current.user.id,
+          resourceId: body.targetId,
+        },
+      );
+      return json(200, { changed: true });
     }
     return json(400, {
       error: "invalid_request",
@@ -3121,7 +3553,7 @@ async function findGuestIssuer(
   return service ? { service, issuerHash } : null;
 }
 
-export async function authenticateCredential(
+async function authenticateCredentialCore(
   request: Request,
   env: Cloudflare.Env,
 ): Promise<Response> {
@@ -3782,6 +4214,57 @@ export async function authenticateCredential(
   return json(503, { status: "authority_unavailable" });
 }
 
+async function completeCredentialVerificationDiagnostic(
+  request: Request,
+  response: Response,
+): Promise<void> {
+  let identifiers: {
+    principalId?: string;
+    organizationId?: string;
+    resourceId?: string;
+  } = {};
+  if (response.status >= 200 && response.status < 300) {
+    try {
+      const body: unknown = await response.clone().json();
+      if (isObject(body) && isObject(body.principal)) {
+        const principal = body.principal;
+        const identifier = (key: string): string | undefined =>
+          typeof principal[key] === "string" && principal[key].length <= 256
+            ? principal[key]
+            : undefined;
+        identifiers = {
+          principalId: identifier("subjectId"),
+          organizationId: identifier("organizationId"),
+          resourceId: identifier("credentialId"),
+        };
+      }
+    } catch {
+      // Verification diagnostics never change the protocol response.
+    }
+  }
+  const outcome =
+    response.status === 401 || response.status === 403
+      ? "denied"
+      : response.status >= 500
+        ? "unavailable"
+        : response.status >= 400
+          ? "error"
+          : "success";
+  emitPlatformDiagnostic("platform.authentication.outcome", outcome, {
+    request,
+    ...identifiers,
+  });
+}
+
+export async function authenticateCredential(
+  request: Request,
+  env: Cloudflare.Env,
+): Promise<Response> {
+  const response = await authenticateCredentialCore(request, env);
+  await completeCredentialVerificationDiagnostic(request, response);
+  return response;
+}
+
 function guestMutationResponse(
   result: Awaited<ReturnType<typeof issueGuestGrant>>,
   successStatus: number,
@@ -3801,6 +4284,44 @@ function guestMutationResponse(
   return json(409, { status: "conflict" });
 }
 
+async function completePlatformResponse(
+  request: Request,
+  response: Response,
+): Promise<Response> {
+  const pathname = normalizedPathname(new URL(request.url).pathname);
+  if (!pathname.startsWith("/api/auth/")) return response;
+  const errorRedirect = (() => {
+    if (response.status < 300 || response.status >= 400) return false;
+    const location = response.headers.get("location");
+    if (!location) return false;
+    try {
+      return new URL(location, "http://platform.invalid").searchParams.has(
+        "error",
+      );
+    } catch {
+      return false;
+    }
+  })();
+  const outcome =
+    response.status === 429
+      ? "rate_limited"
+      : response.status === 401 || response.status === 403
+        ? "denied"
+        : response.status >= 500
+          ? "unavailable"
+          : response.status >= 400 || errorRedirect
+            ? "error"
+            : null;
+  if (outcome) {
+    emitPlatformDiagnostic("platform.authentication.outcome", outcome, {
+      request,
+    });
+  }
+  return response;
+}
+
+const platformSafeguardedRequests = new WeakSet<Request>();
+
 async function createGuestRoute(
   request: Request,
   env: Cloudflare.Env,
@@ -3812,6 +4333,12 @@ async function createGuestRoute(
   if (!issuer) return json(503, { status: "authority_unavailable" });
   const created = await createGuestIdentity(env.IDENTITY_DB, issuer);
   if (!created) return json(503, { status: "authority_unavailable" });
+  emitPlatformDiagnostic("platform.guest.bootstrap_created", "success", {
+    request,
+    principalId: created.guestId,
+    serviceId: issuer.service.serviceId,
+    resourceId: created.guestId,
+  });
   return json(201, {
     status: "success",
     guestId: created.guestId,
@@ -3887,6 +4414,14 @@ async function attestGuestGrantRoute(
       capabilities: body.capabilities as string[],
       assertion,
     });
+    if (result.status === "success") {
+      emitPlatformDiagnostic("platform.guest.grant_renewed", "success", {
+        request,
+        principalId: result.value.principal.subjectId,
+        serviceId: issuer.service.serviceId,
+        resourceId: result.value.grantId,
+      });
+    }
     return guestMutationResponse(result, 201);
   } catch (error) {
     if (error instanceof GuestAuthorityUnavailable) {
@@ -3928,6 +4463,14 @@ async function renewGuestGrantRoute(
       capabilities: body.capabilities as string[],
       assertion,
     });
+    if (result.status === "success") {
+      emitPlatformDiagnostic("platform.guest.grant_renewed", "success", {
+        request,
+        principalId: result.value.principal.subjectId,
+        serviceId: issuer.service.serviceId,
+        resourceId: result.value.grantId,
+      });
+    }
     return guestMutationResponse(result, 201);
   } catch (error) {
     if (error instanceof GuestGrantConflict) {
@@ -3958,9 +4501,13 @@ async function revokeGuestGrantRoute(
       issuer,
       grantId,
     });
-    return revoked
-      ? json(200, { status: "success", revoked: true })
-      : json(403, { status: "grant_denied" });
+    if (!revoked) return json(403, { status: "grant_denied" });
+    emitPlatformDiagnostic("platform.guest.grant_revoked", "success", {
+      request,
+      serviceId: issuer.service.serviceId,
+      resourceId: grantId,
+    });
+    return json(200, { status: "success", revoked: true });
   } catch (error) {
     if (error instanceof GuestAuthorityUnavailable) {
       return json(503, { status: "authority_unavailable" });
@@ -4084,6 +4631,12 @@ async function platformRoute(
         name: body.name,
         expiresAt,
       });
+      emitPlatformDiagnostic("platform.credential.created", "success", {
+        request,
+        principalId: authority.userId,
+        organizationId: authority.organizationId,
+        resourceId: issued.credentialId,
+      });
       return json(201, {
         ...issued,
         audience: service.audience,
@@ -4168,14 +4721,24 @@ async function platformRoute(
     const service = old && serviceFromRow(old);
     if (!service) return json(404, { error: "credential_not_found" });
     try {
-      const rotated = await rotateHumanCredential(env.IDENTITY_DB, {
-        service,
-        userId: current.user.id,
-        organizationId: authority.organizationId,
-        membershipId: authority.membershipId,
-        credentialId: body.credentialId,
-        expiresAt,
-      });
+      const rotated = await rotateHumanCredential(
+        env.IDENTITY_DB,
+        {
+          service,
+          userId: current.user.id,
+          organizationId: authority.organizationId,
+          membershipId: authority.membershipId,
+          credentialId: body.credentialId,
+          expiresAt,
+        },
+        (credentialId) =>
+          emitPlatformDiagnostic("platform.credential.rotated", "success", {
+            request,
+            principalId: authority.userId,
+            organizationId: authority.organizationId,
+            resourceId: credentialId,
+          }),
+      );
       return json(201, {
         ...rotated,
         audience: service.audience,
@@ -4223,9 +4786,19 @@ async function platformRoute(
         credentialId: body.credentialId,
       },
     );
-    return revoked
-      ? json(200, { revoked: true, organizationId: authority.organizationId })
-      : json(404, { error: "credential_not_found" });
+    if (revoked) {
+      emitPlatformDiagnostic("platform.credential.revoked", "success", {
+        request,
+        principalId: current.user.id,
+        organizationId: authority.organizationId,
+        resourceId: body.credentialId,
+      });
+      return json(200, {
+        revoked: true,
+        organizationId: authority.organizationId,
+      });
+    }
+    return json(404, { error: "credential_not_found" });
   }
   if (
     url.pathname === "/internal/v1/authenticate" &&
@@ -4271,7 +4844,7 @@ async function platformRoute(
   return null;
 }
 
-export default {
+const platformWorker = {
   async fetch(request: Request, env: Cloudflare.Env): Promise<Response> {
     const url = new URL(request.url);
     const pathname = normalizedPathname(url.pathname);
@@ -4290,16 +4863,37 @@ export default {
         headers: { "cache-control": "no-store" },
       });
     }
+    const protectedGroup = classifyPlatformProtectedRoute(request, pathname);
+    if (protectedGroup && !platformSafeguardedRequests.has(request)) {
+      platformSafeguardedRequests.add(request);
+      try {
+        return await executePlatformProtectedRequest(
+          request,
+          env as PlatformSafeguardEnv,
+          protectedGroup,
+          async (controlledRequest) => {
+            platformSafeguardedRequests.add(controlledRequest);
+            try {
+              return await platformWorker.fetch(controlledRequest, env);
+            } finally {
+              platformSafeguardedRequests.delete(controlledRequest);
+            }
+          },
+        );
+      } finally {
+        platformSafeguardedRequests.delete(request);
+      }
+    }
     try {
       const account = await accountRoute(request, env);
-      if (account) return account;
+      if (account) return completePlatformResponse(request, account);
       const oauthRoute = await oauthPlatformRoute(request, env, pathname);
-      if (oauthRoute) return oauthRoute;
+      if (oauthRoute) return completePlatformResponse(request, oauthRoute);
       const response = await platformRoute(request, env);
-      if (response) return response;
+      if (response) return completePlatformResponse(request, response);
       if (pathname.startsWith("/api/auth/")) {
         const denied = await validateAuthRequest(request, env);
-        if (denied) return denied;
+        if (denied) return completePlatformResponse(request, denied);
         const oauthState = await oauthRequestState(request, env, pathname);
         const body =
           pathname === "/api/auth/oauth2/token" && request.method === "POST"
@@ -4372,6 +4966,9 @@ export default {
             pathname === "/api/auth/oauth2/consent" && request.method === "POST"
               ? await normalizeOAuthConsentRequest(request)
               : { request, browserForm: false };
+          const authDatabaseFailure = newAuthDatabaseFailureSignal(
+            requestHasAuthSessionCookie(request),
+          );
           const authOptions = {
             oauthPlatform: true,
             oauthGrantTypes: oauthState.refreshEnabled
@@ -4383,7 +4980,7 @@ export default {
               oauthState.flowId,
             ),
           } as const;
-          let auth = createAuth(env, authOptions);
+          let auth = requestAuth(env, authOptions, authDatabaseFailure).auth;
           let refreshPreparation: OAuthRefreshPreparation = {
             kind: "not_refresh",
           };
@@ -4403,10 +5000,14 @@ export default {
             }
           }
           if (refreshPreparation.kind === "refresh") {
-            auth = createAuth(env, {
-              ...authOptions,
-              oauthRefreshInstallationId: refreshPreparation.installationId,
-            });
+            auth = requestAuth(
+              env,
+              {
+                ...authOptions,
+                oauthRefreshInstallationId: refreshPreparation.installationId,
+              },
+              authDatabaseFailure,
+            ).auth;
           }
           let authResponse: Response;
           try {
@@ -4418,30 +5019,77 @@ export default {
                 refreshPreparation,
                 "provider_refresh_failed",
               );
+              return json(503, {
+                status: "authority_unavailable",
+                error: "temporarily_unavailable",
+              });
+            }
+            if (authDatabaseFailure.preserveProtocol) throw error;
+            if (authDatabaseFailure.failed) {
               return json(503, { status: "authority_unavailable" });
             }
             throw error;
           }
+          if (
+            authDatabaseFailure.failed &&
+            refreshPreparation.kind === "refresh"
+          ) {
+            await abandonOAuthRefresh(
+              env.IDENTITY_DB.withSession("first-primary"),
+              refreshPreparation,
+              "provider_refresh_failed",
+            );
+            return json(503, {
+              status: "authority_unavailable",
+              error: "temporarily_unavailable",
+            });
+          }
+          authResponse = authDatabaseFailureResponse(
+            authResponse,
+            authDatabaseFailure,
+          );
           if (pathname === "/api/auth/oauth2/token") {
             const database = env.IDENTITY_DB.withSession("first-primary");
             if (refreshPreparation.kind === "refresh") {
-              return completeOAuthRefresh(
-                database,
-                authResponse,
-                refreshPreparation,
-                body?.client_id as string,
+              return completePlatformResponse(
+                request,
+                await completeOAuthRefresh(
+                  database,
+                  authResponse,
+                  refreshPreparation,
+                  body?.client_id as string,
+                  (installationId) =>
+                    emitPlatformDiagnostic(
+                      "platform.oauth.installation_refreshed",
+                      "success",
+                      { request, resourceId: installationId },
+                    ),
+                ),
               );
             }
             const initialRefresh = await completeInitialOAuthRefresh(
               database,
               authResponse,
+              (installationId) =>
+                emitPlatformDiagnostic(
+                  "platform.oauth.installation_activated",
+                  "success",
+                  { request, resourceId: installationId },
+                ),
             );
-            if (initialRefresh) return initialRefresh;
+            if (initialRefresh)
+              return completePlatformResponse(request, initialRefresh);
             const bound = await completeInitialOAuthAccess(
               database,
               authResponse,
+              (installationId) =>
+                emitPlatformDiagnostic(
+                  "platform.oauth.installation_activated",
+                  "success",
+                  { request, resourceId: installationId },
+                ),
             );
-            if (bound) return bound;
+            if (bound) return completePlatformResponse(request, bound);
           }
           if (pathname === "/api/auth/oauth2/consent" && oauthState.flowId) {
             const flow = await loadOAuthFlow(
@@ -4485,19 +5133,30 @@ export default {
             }
           }
           if (pathname === "/api/auth/oauth2/introspect") {
-            return oauthIntrospectionResponse(
-              env.IDENTITY_DB.withSession("first-primary"),
+            return completePlatformResponse(
               request,
-              authResponse,
+              await oauthIntrospectionResponse(
+                env.IDENTITY_DB.withSession("first-primary"),
+                request,
+                authResponse,
+              ),
             );
           }
-          return authResponse;
+          return completePlatformResponse(request, authResponse);
         }
-        return createAuth(env).handler(request);
+        return completePlatformResponse(
+          request,
+          await requestAuthHandler(request, env),
+        );
       }
-    } catch {
-      return json(503, { status: "authority_unavailable" });
+    } catch (error) {
+      emitPlatformDiagnostic("platform.authentication.outcome", "unavailable", {
+        request,
+      });
+      return authenticationFailureResponse(pathname, error);
     }
     return new Response("Not Found", { status: 404 });
   },
 };
+
+export default platformWorker;

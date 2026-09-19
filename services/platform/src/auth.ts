@@ -19,6 +19,7 @@ import {
   pendingSocialBindingFromSource,
   recoverPendingSocialAccount,
 } from "./social-signup-recovery";
+import { emitPlatformDiagnostic } from "./diagnostics";
 
 export const PLATFORM_SESSION_FRESH_AGE_SECONDS = 24 * 60 * 60;
 
@@ -124,6 +125,100 @@ function scopedOAuthAdapter(
   };
 }
 
+export class PlatformDatabaseUnavailableError extends Error {
+  readonly code = "database_unavailable" as const;
+
+  constructor() {
+    super("Platform authority database unavailable.");
+    this.name = "PlatformDatabaseUnavailableError";
+  }
+}
+
+function safeDatabaseFailure(): PlatformDatabaseUnavailableError {
+  return new PlatformDatabaseUnavailableError();
+}
+
+function rethrowSafeDatabaseFailure(error: unknown): never {
+  if (error instanceof APIError) throw error;
+  throw safeDatabaseFailure();
+}
+
+function safeAdapterCall<T extends (...args: any[]) => any>(
+  call: T,
+  onDatabaseFailure?: (oauthLink: boolean) => void,
+): T {
+  return (async (...args: any[]) => {
+    try {
+      return await call(...args);
+    } catch (error) {
+      if (!(error instanceof APIError)) {
+        const oauthState = await getOAuthState().catch(() => null);
+        onDatabaseFailure?.(Boolean(oauthState?.link));
+      }
+      rethrowSafeDatabaseFailure(error);
+    }
+  }) as T;
+}
+
+function safeTransactionAdapter(
+  adapter: DBTransactionAdapter,
+  onDatabaseFailure?: (oauthLink: boolean) => void,
+): DBTransactionAdapter {
+  return {
+    ...adapter,
+    create: safeAdapterCall(adapter.create, onDatabaseFailure),
+    findOne: safeAdapterCall(adapter.findOne, onDatabaseFailure),
+    findMany: safeAdapterCall(adapter.findMany, onDatabaseFailure),
+    count: safeAdapterCall(adapter.count, onDatabaseFailure),
+    update: safeAdapterCall(adapter.update, onDatabaseFailure),
+    updateMany: safeAdapterCall(adapter.updateMany, onDatabaseFailure),
+    delete: safeAdapterCall(adapter.delete, onDatabaseFailure),
+    deleteMany: safeAdapterCall(adapter.deleteMany, onDatabaseFailure),
+    consumeOne: safeAdapterCall(adapter.consumeOne, onDatabaseFailure),
+    incrementOne: safeAdapterCall(adapter.incrementOne, onDatabaseFailure),
+  };
+}
+
+function safeDatabaseAdapter(
+  adapter: DBAdapter,
+  onDatabaseFailure?: (oauthLink: boolean) => void,
+): DBAdapter {
+  return {
+    ...adapter,
+    create: safeAdapterCall(adapter.create, onDatabaseFailure),
+    findOne: safeAdapterCall(adapter.findOne, onDatabaseFailure),
+    findMany: safeAdapterCall(adapter.findMany, onDatabaseFailure),
+    count: safeAdapterCall(adapter.count, onDatabaseFailure),
+    update: safeAdapterCall(adapter.update, onDatabaseFailure),
+    updateMany: safeAdapterCall(adapter.updateMany, onDatabaseFailure),
+    delete: safeAdapterCall(adapter.delete, onDatabaseFailure),
+    deleteMany: safeAdapterCall(adapter.deleteMany, onDatabaseFailure),
+    consumeOne: safeAdapterCall(adapter.consumeOne, onDatabaseFailure),
+    incrementOne: safeAdapterCall(adapter.incrementOne, onDatabaseFailure),
+    ...(adapter.createSchema
+      ? {
+          createSchema: safeAdapterCall(
+            adapter.createSchema,
+            onDatabaseFailure,
+          ),
+        }
+      : {}),
+    transaction: async (callback) => {
+      try {
+        return await adapter.transaction((transaction) =>
+          callback(safeTransactionAdapter(transaction, onDatabaseFailure)),
+        );
+      } catch (error) {
+        if (!(error instanceof APIError)) {
+          const oauthState = await getOAuthState().catch(() => null);
+          onDatabaseFailure?.(Boolean(oauthState?.link));
+        }
+        rethrowSafeDatabaseFailure(error);
+      }
+    },
+  };
+}
+
 function requiresSignupInvitation(env: Cloudflare.Env): boolean {
   const deploymentMode: string = env.PLATFORM_DEPLOYMENT_MODE;
   const signupPolicy: string = env.PLATFORM_SIGNUP_POLICY;
@@ -182,6 +277,8 @@ export function createAuth(
     oauthGrantTypes?: PlatformOAuthGrantTypes;
     oauthScopes?: PlatformOAuthScopes;
     oauthRefreshInstallationId?: string;
+    onDatabaseFailure?: (oauthLink: boolean) => void;
+    onSessionCreated?: (request: Request | undefined, userId: string) => void;
   } = {},
 ) {
   const schema = authSchema;
@@ -192,13 +289,18 @@ export function createAuth(
     camelCase: true,
     transaction: false,
   });
-  const database = oauthRefreshInstallationId
+  const databaseFactoryWithScope = oauthRefreshInstallationId
     ? (authOptions: Parameters<typeof databaseFactory>[0]) =>
         scopedOAuthAdapter(
           databaseFactory(authOptions),
           oauthRefreshInstallationId,
         )
     : databaseFactory;
+  const database = (authOptions: Parameters<typeof databaseFactory>[0]) =>
+    safeDatabaseAdapter(
+      databaseFactoryWithScope(authOptions),
+      options.onDatabaseFailure,
+    );
   let pendingSocialBinding: ReturnType<typeof pendingSocialBindingFromSource> =
     null;
   const recoverSocialProfile = async (
@@ -250,6 +352,24 @@ export function createAuth(
       },
     },
     session: { freshAge: PLATFORM_SESSION_FRESH_AGE_SECONDS },
+    logger: {
+      level: "error",
+      // Better Auth passes raw provider, SQL and credential details as logger
+      // arguments. Keep the supported logger hook, but publish only a fixed
+      // allowlisted diagnostic event through Platform's single sink.
+      log: () => {
+        emitPlatformDiagnostic("platform.library.diagnostic", "error");
+      },
+    },
+    onAPIError: {
+      // APIError responses continue through Better Auth's normal protocol
+      // conversion; unexpected errors propagate to Platform's fixed outer
+      // unavailable response instead of the library logging their contents.
+      throw: true,
+      onError: () => {
+        emitPlatformDiagnostic("platform.library.diagnostic", "error");
+      },
+    },
     database,
     databaseHooks: {
       user: {
@@ -292,6 +412,43 @@ export function createAuth(
                 message: "This Platform account is disabled.",
               });
             }
+          },
+          after: async (session, context) => {
+            options.onSessionCreated?.(context?.request, session.userId);
+            emitPlatformDiagnostic("platform.session.signed_in", "success", {
+              request: context?.request,
+              principalId: session.userId,
+              resourceId: session.id,
+            });
+          },
+        },
+        delete: {
+          after: async (session, context) => {
+            emitPlatformDiagnostic("platform.session.signed_out", "success", {
+              request: context?.request,
+              principalId: session.userId,
+              resourceId: session.id,
+            });
+          },
+        },
+      },
+      account: {
+        create: {
+          after: async (account, context) => {
+            emitPlatformDiagnostic("platform.provider.linked", "success", {
+              request: context?.request,
+              principalId: account.userId,
+              resourceId: account.id,
+            });
+          },
+        },
+        delete: {
+          after: async (account, context) => {
+            emitPlatformDiagnostic("platform.provider.unlinked", "success", {
+              request: context?.request,
+              principalId: account.userId,
+              resourceId: account.id,
+            });
           },
         },
       },

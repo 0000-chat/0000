@@ -13,6 +13,7 @@ import {
 } from "../src/oauth-installation.ts";
 import { opaqueSecret } from "../src/platform-state.ts";
 import { registerTestService } from "../worker/test/fixtures/provision.ts";
+import { PLATFORM_TEST_MINIFLARE_RATE_LIMITS } from "./test-rate-limits.ts";
 
 const platformRoot = fileURLToPath(new URL("../", import.meta.url));
 const workerEntry = fileURLToPath(new URL("../src/worker.ts", import.meta.url));
@@ -131,12 +132,15 @@ function createRuntime(script, persistenceDirectory) {
       PLATFORM_AUTHORITY_ID: authority,
       PLATFORM_BASE_URL: platformBaseUrl,
       PLATFORM_CREDENTIAL_MAX_LIFETIME_DAYS: "90",
+      PLATFORM_SERVER_DEADLINE_MS: "8000",
+      PLATFORM_RATE_LIMIT_POLICY: "",
       PLATFORM_DEPLOYMENT_MODE: "self-hosted",
       PLATFORM_SIGNUP_POLICY: "open",
     },
     compatibilityDate,
     compatibilityFlags: ["nodejs_compat"],
     d1Databases: { IDENTITY_DB: "platform-t07-restart-identity" },
+    ratelimits: PLATFORM_TEST_MINIFLARE_RATE_LIMITS,
     host: "127.0.0.1",
     modules: true,
     name: "platform-t07-runtime-restart",

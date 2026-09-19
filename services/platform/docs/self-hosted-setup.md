@@ -424,8 +424,10 @@ This guide does not close these acceptance gates:
   and [T11 Matrix caller evidence](../T11_MATRIX_CALLER_REPORT.md) provide
   prerequisites. Full Communicator human, machine, OAuth, and browser adoption
   remains pending.
-- Platform endpoint limits, deadlines, and audit behavior remain the T12 gate.
-  This guide does not publish a command for that unfinished server work.
+- Platform's endpoint limits, finite protected-request deadline, and
+  credential-safe diagnostics have local Worker/D1 and native evidence in the
+  [T12 server safeguards report](../T12_SERVER_SAFEGUARDS_REPORT.md). The
+  actual Communicator consumer boundary remains a separate acceptance gate.
 - Production deployment, external client acceptance in issues 35 and 36,
   Database issue 48, and full T15 acceptance remain open.
 
@@ -450,5 +452,6 @@ mode-600 temporary files and were not printed.
   the commands above.
 
 The provider sign-in, production deployment, Communicator T11 adoption, and
-Platform T12 server safeguards were not run. This document is setup evidence,
-not full T15 acceptance.
+the actual Communicator consumer boundary were not run by this setup guide.
+Platform T12 local safeguard evidence is recorded separately; this document is
+setup evidence, not full T15 acceptance.

@@ -2,6 +2,7 @@ import { SELF, env } from "cloudflare:test";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createPlatformClient } from "@0000/platform-client";
 import { createAuth } from "../../src/auth";
+import { platformRequestCorrelation } from "../../src/diagnostics";
 import platformWorker from "../../src/worker";
 import {
   oauthProviderTokenHash,
@@ -380,6 +381,44 @@ function afterFirstBatchDatabase(
       return Reflect.get(target, property, receiver);
     },
   }) as unknown as D1DatabaseSession;
+}
+
+function revokeFailureEnv(): Cloudflare.Env {
+  let batchCount = 0;
+  const wrappedDatabase = new Proxy(testEnv.IDENTITY_DB, {
+    get(target, property, receiver) {
+      if (property === "withSession") {
+        return (constraint: unknown) => {
+          const session = target.withSession(constraint as never);
+          return new Proxy(session, {
+            get(sessionTarget, sessionProperty, sessionReceiver) {
+              if (sessionProperty === "batch") {
+                return async (statements: D1PreparedStatement[]) => {
+                  batchCount += 1;
+                  if (batchCount === 2) {
+                    throw new Error("t12 revoke second durable phase");
+                  }
+                  return sessionTarget.batch(statements);
+                };
+              }
+              return Reflect.get(
+                sessionTarget,
+                sessionProperty,
+                sessionReceiver,
+              );
+            },
+          }) as unknown as D1DatabaseSession;
+        };
+      }
+      return Reflect.get(target, property, receiver);
+    },
+  });
+  return new Proxy(testEnv, {
+    get(target, property, receiver) {
+      if (property === "IDENTITY_DB") return wrappedDatabase;
+      return Reflect.get(target, property, receiver);
+    },
+  }) as Cloudflare.Env;
 }
 
 function workerRefreshRaceEnv(
@@ -2949,6 +2988,90 @@ describe("T07 production OAuth refresh lineage", () => {
       }),
     });
     expect(denied.status).toBe(400);
+  });
+
+  it("records revoke after the durable family phase when the later phase fails", async () => {
+    const suffix = crypto.randomUUID().slice(0, 8);
+    const service = await registerService(testEnv.IDENTITY_DB, {
+      serviceId: `t07-revoke-phase-service-${suffix}`,
+      audience: `https://t07-revoke-phase-${suffix}.0000.test`,
+      capabilities: ["resource:read"],
+    });
+    const user = await signIn();
+    const organization = await organizationId(user.cookies);
+    const client = await provisionTrustedOAuthClient(
+      testEnv.IDENTITY_DB,
+      testEnv.BETTER_AUTH_SECRET,
+      {
+        serviceId: service.serviceId,
+        clientId: `t07-revoke-phase-client-${suffix}`,
+        redirectUri: `https://t07-revoke-phase-client-${suffix}.example.test/callback`,
+        capabilities: ["resource:read"],
+        authMethod: "none",
+        refreshEnabled: true,
+      },
+    );
+    const issued = await issueHarnessFlow({
+      cookies: user.cookies,
+      userId: user.userId,
+      organizationId: organization,
+      client,
+      audience: service.audience,
+      offline: true,
+    });
+    const request = new Request(
+      "http://localhost/api/account/oauth-installations/revoke",
+      {
+        method: "POST",
+        headers: {
+          cookie: user.cookies,
+          origin: testEnv.PLATFORM_BASE_URL,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ installationId: issued.installationId }),
+      },
+    );
+    const events: Array<Record<string, unknown>> = [];
+    const log = vi.spyOn(console, "log").mockImplementation((value) => {
+      try {
+        const event = JSON.parse(String(value)) as Record<string, unknown>;
+        if (event.event === "platform.oauth.installation_revoked") {
+          events.push(event);
+        }
+      } catch {
+        // Ignore unrelated diagnostic output in this focused lifecycle probe.
+      }
+    });
+    try {
+      const response = await platformWorker.fetch(request, revokeFailureEnv());
+      expect(response.status).toBe(503);
+      const durable = await testEnv.IDENTITY_DB.prepare(
+        `SELECT i.active, f.state AS family_state, t.state AS token_state
+         FROM platform_oauth_installation AS i
+         JOIN platform_oauth_refresh_family AS f ON f.installation_id = i.id
+         JOIN platform_oauth_refresh_token AS t ON t.family_id = f.id
+         WHERE i.id = ? AND t.sequence = 0`,
+      )
+        .bind(issued.installationId)
+        .first<{
+          active: number;
+          family_state: string;
+          token_state: string;
+        }>();
+      expect(durable).toEqual({
+        active: 0,
+        family_state: "revoked",
+        token_state: "revoked",
+      });
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({
+        outcome: "success",
+        resourceId: issued.installationId,
+        correlationId: platformRequestCorrelation(request),
+      });
+    } finally {
+      log.mockRestore();
+    }
   });
 
   it("rejects authority loss between the joined read and consume CAS", async () => {

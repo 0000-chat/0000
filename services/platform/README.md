@@ -25,9 +25,11 @@ permission. Msg binds each grant to its local permission source.
 The [shared client](../../packages/platform-client/README.md) transport follow-up
 is integrated at `82e6181`: verification and guest operations have a configurable
 deadline covering fetch and body parsing, reject redirects, and preserve
-failure categories. Twelve client tests and the twenty-seven-test Platform
-suite plus restart pass independently; native and adversarial reviews found no
-confirmed defect. T12's server-side rate limits and audit remain outstanding.
+failure categories. The [T12 server safeguards report](T12_SERVER_SAFEGUARDS_REPORT.md)
+records Platform's native endpoint limits, finite protected-request deadline and
+credential-safe diagnostics. Local native cross-worker and independent-key
+checks, the Worker/D1 suite and restart probes pass; the actual Communicator
+consumer boundary and full T12 acceptance remain separate gates.
 T03 aggregate checks passed at `c51d285`; T04 checks passed at `dc30cd4`.
 [T14_RECONNECT_REPORT.md](T14_RECONNECT_REPORT.md) records the independently
 reviewed reconnect fixture, integrated and verified at `166e54d`.
@@ -70,7 +72,7 @@ Platform-to-msg boundary assertions. Native and bounded Grok reviews close the
 refresh and installation-isolation findings. [The runtime report](T07_RUNTIME_ACCEPTANCE_REPORT.md)
 describes the restart/browser evidence. Provider HTTP remains simulated; these
 checks do not establish external-client adoption. Communicator human/browser
-integration, server safeguards and setup remain open.
+integration and full T12 acceptance remain open.
 The full MVP is not implemented or accepted, and these reports do not establish
 production readiness.
 
