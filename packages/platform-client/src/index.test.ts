@@ -446,7 +446,7 @@ describe("Platform guest control client", () => {
     ).toBe("authority_unavailable");
   });
 
-  it("fails closed on actual redirects without sending guest control to the target", async () => {
+  it("fails closed on actual redirects without sending credentials or guest control to the target", async () => {
     let targetRequests = 0;
     let targetAuthorization: string | null = null;
     const server = Bun.serve({
@@ -470,13 +470,18 @@ describe("Platform guest control client", () => {
         audience: "https://service.0000.test",
         serviceVerifier: "service-verifier-only",
       }).authenticate("end-user-credential");
-      const guest = await createPlatformGuestClient({
+      const guestClient = createPlatformGuestClient({
         ...guestOptions,
         baseUrl,
-      }).createGuest();
+      });
+      const guest = await guestClient.createGuest();
+      const resolvedGuest = await guestClient.resolveGuestControl(
+        "bootstrap-secret",
+      );
 
       expect(authenticated).toEqual({ status: "authority_unavailable" });
       expect(guest).toEqual({ status: "authority_unavailable" });
+      expect(resolvedGuest).toEqual({ status: "authority_unavailable" });
       expect(targetRequests).toBe(0);
       expect(targetAuthorization).toBeNull();
     } finally {
