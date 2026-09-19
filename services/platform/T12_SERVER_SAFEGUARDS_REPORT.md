@@ -97,9 +97,8 @@ The delayed guest proxy starts the D1 batch before waiting and dispatches the
 original batch after the timeout; it is not a deployed Worker post-response
 lifetime proof. The native boundary measures body and D1 work, not provider
 HTTP execution separately. The accepted msg checkpoint is now reconciled with
-this branch's isolated fixture proof and full msg check. The real Communicator
-consumer fixture still needs to use this binding/deadline contract, and the
-actual Platform-to-msg boundary remains pending before full T12 acceptance.
+this branch's isolated fixture proof and full msg check. The actual
+Communicator composition and final combined T12 acceptance remain pending.
 
 The three actual msg Platform integration scenarios now run in separately
 owned Bun test children. This isolates the pre-existing same-process
