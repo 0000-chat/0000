@@ -92,7 +92,7 @@ T03 is reviewed and verified at `c51d285`. T04 worker commits `24507b2`, `109e44
 
 ### T05. Add organization-owned agents across service audiences
 
-**Readiness:** Not ready; depends on T03 and T04.
+**Readiness:** Dispatched from verified aggregate `80fc62d` to isolated `codex/platform-t05`; parent brief and frozen dependency installation complete. Implementation, independent review and aggregate verification remain pending.
 
 **Blocked by (contract):** T03 supplies current administrator/membership controls; T04 supplies credential and verifier flows; T01's agreed machine-principal/grant contract is prerequisite.
 
@@ -218,7 +218,7 @@ T03 is reviewed and verified at `c51d285`. T04 worker commits `24507b2`, `109e44
 
 ### T14. Prove reconnect authorization without building offline sync
 
-**Readiness:** Not ready; depends on T02 and T04.
+**Readiness:** Dispatched from verified aggregate `80fc62d` to isolated `codex/platform-t14`; scoped to new reconnect fixture/test/report files so it is independent of T05. Parent inspected the executable boundary and baseline; review and aggregate verification remain pending.
 
 **Blocked by (contract):** T02 supplies human session and reauthentication; T04 verifies current state. This slice implements or proves Platform renewal where needed.
 
