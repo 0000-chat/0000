@@ -423,6 +423,81 @@ describe("Platform browser OAuth client", () => {
     expect(calls[1]?.authorization).toBe("Bearer service-verifier-only");
   });
 
+  it("bounds the cookie from the post-verification clock and derives CSRF origin from the redirect", async () => {
+    const store = new MemoryBrowserTransactionStore();
+    const clockStart = Date.now();
+    let clock = clockStart;
+    const fetch = mock(async (input: RequestInfo | URL) => {
+      const path = new URL(String(input)).pathname;
+      if (path.endsWith("/token")) {
+        return Response.json({
+          access_token: "opaque-human-access",
+          token_type: "Bearer",
+          expires_in: 10,
+        });
+      }
+      clock += 5_000;
+      return Response.json({
+        status: "authenticated",
+        principal: {
+          ...validPrincipal,
+          expiresAt: new Date(clock + 20_000).toISOString(),
+        },
+      });
+    }) as unknown as typeof globalThis.fetch;
+    const options = browserOptions(store, fetch, () => clock);
+    const client = createPlatformBrowserClient(options);
+    const started = await client.start();
+    expect(started.status).toBe("started");
+    if (started.status !== "started") return;
+    const authorization = new URL(started.authorizationUrl);
+    const callback = await client.callback(
+      new Request(
+        `https://browser.test/oauth/callback?${new URLSearchParams({
+          code: "authorization-code",
+          state: authorization.searchParams.get("state")!,
+        })}`,
+        { headers: { cookie: cookiePair(started.setCookie) } },
+      ),
+    );
+    expect(callback.status).toBe("authenticated");
+    if (callback.status === "authenticated") {
+      expect(callback.expiresAt).toBe(clockStart + 10_000);
+      expect(callback.setCookie).not.toContain("Max-Age=");
+      expect(callback.setCookie).toContain(
+        `Expires=${new Date(callback.expiresAt - 2_000).toUTCString()}`,
+      );
+    }
+
+    const noExplicitOrigin = createPlatformBrowserClient({
+      ...options,
+      transactionStore: new MemoryBrowserTransactionStore(),
+    });
+    expect(
+      noExplicitOrigin.isSameOriginUnsafeRequest(
+        new Request("https://browser.test/mutate", {
+          method: "POST",
+          headers: { origin: "https://browser.test" },
+        }),
+      ),
+    ).toBe(true);
+    expect(
+      noExplicitOrigin.isSameOriginUnsafeRequest(
+        new Request("https://browser.test/mutate", {
+          method: "POST",
+          headers: { origin: "https://platform.test" },
+        }),
+      ),
+    ).toBe(false);
+    expect(() =>
+      createPlatformBrowserClient({
+        ...options,
+        returnOrigin: "https://other.test",
+        transactionStore: new MemoryBrowserTransactionStore(),
+      }),
+    ).toThrow("return origin");
+  });
+
   it("preserves a transaction for the wrong browser and lets only one concurrent callback win", async () => {
     const store = new MemoryBrowserTransactionStore();
     const nowValue = Date.now();

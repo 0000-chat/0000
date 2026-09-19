@@ -80,8 +80,10 @@ verification. Parent acceptance at `cb89383` passes thirteen Worker/D1 files and
 fifty-two tests, formatting/typecheck, persistence and refresh restart, and the
 actual Platform-to-msg boundary (142 assertions). Independent Standards/Spec
 reviews and a bounded Grok runtime-kind review are clear. Communicator adoption,
-first-party human browser transport, deployment provisioning and full T11
-consumer acceptance remain open.
+deployment provisioning and full T11 consumer acceptance remain open. The
+[T11 browser report](T11_BROWSER_REPORT.md) records the first-party human
+browser purpose, shared SDK, real Worker/D1 consumer fixture and Chromium
+proof; it does not claim Communicator adoption or deployed provisioning.
 
 [T11_MATRIX_CALLER_REPORT.md](T11_MATRIX_CALLER_REPORT.md) records the bounded
 Matrix gateway caller prerequisite: protected finite ingestion and claim

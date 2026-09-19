@@ -10,9 +10,11 @@ at aggregate `cb89383` on the existing organization-owned machine lifecycle, rec
 [T11_SERVICE_PRINCIPAL_REPORT.md](T11_SERVICE_PRINCIPAL_REPORT.md). Its
 immutable machine kind, fixed-kind management routes, current verification,
 and shared-client evidence pass thirteen Worker/D1 files and fifty-two tests,
-persistence/refresh restart and the actual Platform-to-msg boundary. Communicator
-adoption, first-party human browser transport, deployment provisioning and full
-T11 consumer acceptance remain open.
+persistence/refresh restart and the actual Platform-to-msg boundary. The
+[T11 browser report](T11_BROWSER_REPORT.md) records the separate first-party
+human browser purpose and shared transport proof through a real Worker/D1
+consumer fixture and Chromium. Communicator adoption, deployment provisioning
+and full T11 consumer acceptance remain open.
 
 The Matrix gateway caller prerequisite now uses protected finite ingestion and
 claim credentials with separate transport secrets. A 401 stops automatic
@@ -366,6 +368,12 @@ items distinguish completed local evidence from remaining acceptance work:
   outcomes, current-authority write guards and production Worker response
   wrapping for code exchange and refresh. A scaffold or provider hook alone
   is not the acceptance evidence; see the T06/T07 reports.
+- The first-party human browser prerequisite now has immutable purpose and
+  human-principal binding, host-only cookie transport, an atomic D1 consumer
+  transaction adapter and a real Chromium/local-HTTP proof. See
+  [T11_BROWSER_REPORT.md](T11_BROWSER_REPORT.md). Its provider is simulated,
+  the consumer is an explicitly labelled fixture, and Communicator adoption,
+  deployment provisioning and full T11 acceptance remain separate gates.
 - A real Miniflare runtime restart preserves a bounded guest grant and resource
   fixture in persistent D1. Human login/session and social linking work across
   local Worker requests with simulated provider HTTP. T03's local Worker/D1

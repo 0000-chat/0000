@@ -547,6 +547,15 @@ function cookieHeader(
   return `${name}=${encodeURIComponent(value)}; Max-Age=${safeAge}; Expires=${expires}; Path=/; Secure; HttpOnly; SameSite=Lax`;
 }
 
+function credentialCookieHeader(
+  name: string,
+  value: string,
+  expiresAt: number,
+): string {
+  const expires = new Date(expiresAt).toUTCString();
+  return `${name}=${encodeURIComponent(value)}; Expires=${expires}; Path=/; Secure; HttpOnly; SameSite=Lax`;
+}
+
 function clearCookieHeader(name: string): string {
   return `${name}=; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Path=/; Secure; HttpOnly; SameSite=Lax`;
 }
@@ -603,6 +612,16 @@ function safeReturnPath(value: unknown, origin: string): string | null {
   }
 }
 
+function browserReturnOrigin(options: PlatformBrowserClientOptions): string {
+  const consumerOrigin = new URL(options.redirectUri).origin;
+  if (options.returnOrigin === undefined) return consumerOrigin;
+  const configuredOrigin = new URL(options.returnOrigin).origin;
+  if (configuredOrigin !== consumerOrigin) {
+    throw new Error("Browser OAuth return origin must match the redirect origin");
+  }
+  return consumerOrigin;
+}
+
 function validateBrowserOptions(options: PlatformBrowserClientOptions): void {
   const base = new URL(options.baseUrl);
   if (!options.authority || !options.audience || !options.clientId || !options.clientSecret) {
@@ -647,7 +666,7 @@ function validateBrowserOptions(options: PlatformBrowserClientOptions): void {
       (options.transactionTtlMs ?? DEFAULT_BROWSER_TRANSACTION_TTL_MS) > MAX_BROWSER_TRANSACTION_TTL_MS) {
     throw new RangeError("transactionTtlMs is outside the bounded browser-login range");
   }
-  if (options.returnOrigin) new URL(options.returnOrigin);
+  browserReturnOrigin(options);
   void base;
 }
 
@@ -730,7 +749,7 @@ export async function startBrowserAuthorization(
 ): Promise<BrowserAuthorizationStartResult> {
   validateBrowserOptions(options);
   const now = options.now?.() ?? Date.now();
-  const returnOrigin = options.returnOrigin ?? options.baseUrl;
+  const returnOrigin = browserReturnOrigin(options);
   const returnTo = safeReturnPath(input.returnTo, returnOrigin);
   if (!returnTo) return { status: "invalid_request" };
   const state = randomBrowserSecret();
@@ -845,7 +864,7 @@ export async function completeBrowserAuthorization(
     sameStringArray(transaction.scopes, options.scopes) &&
     transaction.stateHash === stateHash &&
     transaction.codeChallenge === await hashBrowserMaterial(transaction.codeVerifier) &&
-    safeReturnPath(transaction.returnTo, options.returnOrigin ?? options.baseUrl) !== null;
+    safeReturnPath(transaction.returnTo, browserReturnOrigin(options)) !== null;
   if (!transactionIsCurrent) {
     return callbackFailure("invalid_login", "invalid_state", undefined, clearBinding);
   }
@@ -900,7 +919,8 @@ export async function completeBrowserAuthorization(
     );
   }
   const token = exchange.value.access_token;
-  const tokenExpiresAt = tokenExpiry(exchange.value, now);
+  const exchangeNow = options.now?.() ?? Date.now();
+  const tokenExpiresAt = tokenExpiry(exchange.value, exchangeNow);
   if (tokenExpiresAt === null) return callbackFailure("invalid_login", "invalid_response", transaction.returnTo, clearBinding);
   const platform = createPlatformClient({
     baseUrl: options.baseUrl,
@@ -923,25 +943,29 @@ export async function completeBrowserAuthorization(
   ) {
     return callbackFailure("invalid_login", "invalid_response", transaction.returnTo, clearBinding);
   }
+  const finalNow = options.now?.() ?? Date.now();
   const authorityExpiry = Date.parse(verified.principal.expiresAt);
   const expiresAt = Math.min(tokenExpiresAt, authorityExpiry);
-  const cookieMaxAge = Math.floor((expiresAt - now) / 1000);
+  // HTTP cookie dates have one-second granularity and Chromium reports an
+  // Expires date at the end of its serialized second. Leave a bounded
+  // two-second margin so the browser cookie can never outlive the credential.
+  const cookieExpiresAt = expiresAt - 2_000;
   if (
     !Number.isSafeInteger(authorityExpiry) ||
-    authorityExpiry <= now ||
-    expiresAt <= now ||
-    cookieMaxAge < 1
+    authorityExpiry <= finalNow ||
+    expiresAt <= finalNow ||
+    !Number.isSafeInteger(expiresAt) ||
+    cookieExpiresAt <= finalNow
   ) {
     return callbackFailure("invalid_login", "invalid_response", transaction.returnTo, clearBinding);
   }
   return {
     status: "authenticated",
     returnTo: transaction.returnTo,
-    setCookie: cookieHeader(
+    setCookie: credentialCookieHeader(
       options.credentialCookieName ?? "__Host-0000-access",
       token,
-      cookieMaxAge,
-      now,
+      cookieExpiresAt,
     ),
     clearBrowserBindingCookie: clearBinding,
     expiresAt,
@@ -964,7 +988,7 @@ export function createPlatformBrowserClient(
     selectCredential: (request) => selectBrowserCredential(request, credentialCookieName),
     clearCredentialCookie: () => clearBrowserCredentialCookie(credentialCookieName),
     clearBrowserBindingCookie: () => clearCookieHeader(bindingCookieName),
-    isSameOriginUnsafeRequest: (request) => isSameOriginUnsafeBrowserRequest(request, options.returnOrigin ?? options.baseUrl),
+    isSameOriginUnsafeRequest: (request) => isSameOriginUnsafeBrowserRequest(request, browserReturnOrigin(options)),
   };
 }
 
