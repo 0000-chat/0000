@@ -304,8 +304,12 @@ alone:
   fixture in persistent D1. Human login/session and social linking work across
   local Worker requests with simulated provider HTTP. T03's local Worker/D1
   tests exercise final-owner and invitation races and pass on the reviewed
-  aggregate at `c51d285`. Human-session process restart, concurrent signup and OAuth
-  rotation races remain unproven.
+  aggregate at `c51d285`. An isolated human recovery probe at `e32e821`
+  demonstrates actual provider-mocked signup/session/key persistence across a
+  fresh runtime; parent independently reran it, but it is not yet integrated.
+  The same probe reproduces interrupted signup leaving an unlinked user whose
+  valid retry fails. A proof-bound recovery follow-up is required before MVP
+  readiness. Concurrent signup and OAuth rotation remain separate gates.
 - The versioned principal, verification route, service registration fixture,
   service-verifier bootstrap and guest-grant exchange are candidate T01
   contracts. T04 now exercises local trusted service registration, human

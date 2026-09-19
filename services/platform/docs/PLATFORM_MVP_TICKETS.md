@@ -50,7 +50,7 @@ T03 is reviewed and verified at `c51d285`. T04 worker commits `24507b2`, `109e44
 
 ### T02. Deliver social sign-in, default organization, profile and logout
 
-**Readiness:** T02 is reviewed, integrated and independently verified on `codex/platform-mvp` at `7152bcd`. It unblocks dependency preparation; the issue stays open until repository closure policy is met. The full MVP is not accepted.
+**Readiness:** Initial T02 is reviewed, integrated and independently verified on `codex/platform-mvp` at `7152bcd`. A separate interrupted-signup probe at `e32e821` now reproduces an unlinked-user retry failure; targeted recovery is dispatched on `codex/platform-signup-recovery` from `9a80311` and is required before MVP readiness. The issue stays open; full MVP is not accepted.
 
 **Blocked by (contract):** T01's accepted human principal, session and D1 behavior.
 
@@ -64,7 +64,7 @@ T03 is reviewed and verified at `c51d285`. T04 worker commits `24507b2`, `109e44
 
 ### T03. Administer organizations and memberships
 
-**Readiness:** Dispatched to isolated `codex/platform-t03` from verified aggregate `098f4ae`, after the parent-owned authority/atomicity brief passed preparation. Implementation and acceptance remain pending.
+**Readiness:** Reviewed, integrated and independently verified at aggregate `c51d285`, with acceptance checkpoint `b2e5802`. The organization authority boundary is available for dependent work; this does not close later recovery, OAuth or consumer gates.
 
 **Blocked by (contract):** T02's signed-in human and organization-owner semantics.
 
@@ -92,7 +92,7 @@ T03 is reviewed and verified at `c51d285`. T04 worker commits `24507b2`, `109e44
 
 ### T05. Add organization-owned agents across service audiences
 
-**Readiness:** Dispatched from verified aggregate `80fc62d` to isolated `codex/platform-t05`; parent brief and frozen dependency installation complete. Implementation, independent review and aggregate verification remain pending.
+**Readiness:** Delivered at isolated `0ed62d2`; native reviews identified concurrent narrowing authority restoration and missing resource/rollback/departure proofs. Fixes are underway on `codex/platform-t05`; external review and aggregate acceptance remain pending.
 
 **Blocked by (contract):** T03 supplies current administrator/membership controls; T04 supplies credential and verifier flows; T01's agreed machine-principal/grant contract is prerequisite.
 
