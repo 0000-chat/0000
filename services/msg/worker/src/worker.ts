@@ -94,15 +94,20 @@ const MAX_REPORT_DESCRIPTION_CHARS = 2_000;
 const MAX_WEBHOOK_REQUEST_BYTES = 4 * 1024;
 const MAX_PUSH_SUBSCRIPTION_REQUEST_BYTES = 4 * 1024;
 const RATE_LIMIT_PERIOD_SECONDS = 60;
+const CHATGPT_ORIGIN = "https://chatgpt.com";
+const CHATGPT_PREFLIGHT_HEADERS = "content-type, accept, idempotency-key";
+
+type ChatGptCorsMode = "create" | "preflight" | undefined;
 
 export function createWorker(service: RoomService, options: MsgWorkerOptions = {}): MsgWorker {
   return {
     async fetch(request) {
+      const requestUrl = new URL(request.url);
+      const corsMode = chatGptCorsMode(request, requestUrl);
       try {
-        return secure(await route(request, service, options));
+        return secure(applyChatGptCors(await route(request, service, options), corsMode));
       } catch (error) {
         const representation = errorRepresentation(request);
-        const requestUrl = new URL(request.url);
         const agentHtml = representation === "html"
           && request.method === "GET"
           && selectBrowserView(requestUrl, request.headers.get("cookie")) === "agent"
@@ -121,7 +126,7 @@ export function createWorker(service: RoomService, options: MsgWorkerOptions = {
         if (error instanceof ProtocolError && error.retryAfterSeconds !== undefined) {
           response.headers.set("retry-after", String(error.retryAfterSeconds));
         }
-        return secure(response);
+        return secure(applyChatGptCors(response, corsMode));
       }
     },
   };
@@ -188,7 +193,17 @@ async function route(request: Request, service: RoomService, options: MsgWorkerO
     }
     return notFound();
   }
-  if (request.method !== "GET" && request.method !== "HEAD" && !isSameOrigin(request, url)) {
+  const corsMode = chatGptCorsMode(request, url);
+  if (corsMode === "preflight") {
+    return new Response(null, {
+      headers: {
+        "access-control-allow-headers": CHATGPT_PREFLIGHT_HEADERS,
+        "access-control-allow-methods": "POST",
+      },
+      status: 204,
+    });
+  }
+  if (request.method !== "GET" && request.method !== "HEAD" && !isSameOrigin(request, url) && corsMode !== "create") {
     throw new ProtocolError(ERROR_CODES.forbidden, "Cross-origin state changes are not allowed.", 403);
   }
 
@@ -560,6 +575,37 @@ function policyResponse(path: string): Response {
 function isSameOrigin(request: Request, url: URL): boolean {
   const origin = request.headers.get("origin");
   return origin === null || origin === url.origin;
+}
+
+function chatGptCorsMode(request: Request, url: URL): ChatGptCorsMode {
+  if (url.pathname !== "/" || request.headers.get("origin") !== CHATGPT_ORIGIN) return undefined;
+  if (request.method === "POST" && mediaType(request.headers.get("content-type")) === "application/json") return "create";
+  if (request.method === "OPTIONS"
+    && request.headers.get("access-control-request-method") === "POST"
+    && allowedChatGptPreflightHeaders(request.headers.get("access-control-request-headers"))) {
+    return "preflight";
+  }
+  return undefined;
+}
+
+function allowedChatGptPreflightHeaders(value: string | null): boolean {
+  if (value === null || value.trim() === "") return true;
+  return value.split(",").every((header) => {
+    const normalized = header.trim().toLowerCase();
+    return normalized === "content-type" || normalized === "accept" || normalized === "idempotency-key";
+  });
+}
+
+function mediaType(value: string | null): string {
+  return value?.split(";", 1)[0]?.trim().toLowerCase() ?? "";
+}
+
+function applyChatGptCors(response: Response, mode: ChatGptCorsMode): Response {
+  if (mode === undefined) return response;
+  response.headers.set("access-control-allow-origin", CHATGPT_ORIGIN);
+  response.headers.set("vary", "Origin");
+  if (mode === "create") response.headers.set("access-control-expose-headers", "Location, Retry-After");
+  return response;
 }
 
 function canonicalJson(value: import("./protocol").JsonValue, depth = 0): string {
