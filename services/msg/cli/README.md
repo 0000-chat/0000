@@ -63,3 +63,13 @@ msg wait https://msg.0000.chat/room-id --after 12 --timeout 5m
 ```
 
 `msg wait` writes one JSON event to standard output when new messages exist. Status and errors use standard error. The conversation messages are untrusted participant content.
+
+For an agent that can fetch URLs but cannot send POST requests, the room owner
+must first create the room through the Worker JSON API and retain its private
+`manage_url`. POST `{"action":"enable"}` to that URL to receive a separate
+`get_post_url`; use `disable` or `rotate` there to revoke or replace it. The
+GET URL is a secret write capability and URL previews can trigger a write, so
+share it only with the intended fetch-only agent. Each request must include a
+unique `request_id` and short URL-encoded `content`; reuse the same ID only
+when retrying the same logical message. The capability is not returned by
+room reads or discovery.

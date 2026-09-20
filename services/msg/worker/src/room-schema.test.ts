@@ -59,6 +59,34 @@ test("leaves an existing current schema unchanged", () => {
   expect(database.query("SELECT version FROM room_schema").get()).toEqual({ version: CURRENT_ROOM_SCHEMA_VERSION });
 });
 
+test("adds GET posting fields to populated v7 notification state without losing delivery data", () => {
+  const database = new Database(":memory:");
+  const roomStorage = storage(database);
+  migrateRoomSchema(roomStorage);
+  const base = 4_000_000_000_000;
+  database.exec("ALTER TABLE room_state DROP COLUMN get_post_hash; ALTER TABLE room_state DROP COLUMN get_post_enabled;");
+  database.query("UPDATE room_schema SET version = 7").run();
+  database.query("INSERT INTO room_state (singleton, schema_version, protocol_version, created_at, last_message_at, inactivity_expires_at, absolute_expires_at, next_sequence, message_count, total_bytes, status, tombstone_expires_at, management_hash, notification_id) VALUES (1, 7, 1, ?, ?, ?, ?, 2, 1, 5, 'active', NULL, 'management-hash', ?)")
+    .run(base, base, base + ROOM_LIMITS.inactivityTtlMs, base + ROOM_LIMITS.inactivityTtlMs, "notification-v7");
+  database.query("INSERT INTO webhook_endpoints (id, url, secret, created_at, status, failure_started_at, last_success_at, last_failure_at, recovered_at, disabled_at) VALUES (?, ?, ?, ?, 'active', NULL, NULL, NULL, NULL, NULL)")
+    .run("endpoint-v7", "https://receiver.example.com/events", "private-secret", base);
+  database.query("INSERT INTO webhook_deliveries (id, endpoint_id, event_id, message_id, message_sequence, created_at, due_at, retry_expires_at, attempted_at, completed_at, lease_expires_at, cancelled_at, status, attempt_count, failure_category, manual_redelivery_requested_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, 'pending', 0, NULL, NULL)")
+    .run("delivery-v7", "endpoint-v7", "event-v7", "message-v7", 2, base, base + 250, base + 24 * 60 * 60 * 1_000);
+  database.query("INSERT INTO push_subscriptions (id, source_browser_id, endpoint, p256dh, auth, created_at) VALUES (?, ?, ?, ?, ?, ?)")
+    .run("push-subscription-v7", "browser-v7", "https://push.example.com/v7", "p256dh", "auth", base);
+  database.query("INSERT INTO push_deliveries (id, subscription_id, event_id, message_id, message_sequence, created_at, due_at, retry_expires_at, attempted_at, completed_at, lease_expires_at, status, attempt_count, failure_category) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, 'pending', 0, NULL)")
+    .run("push-delivery-v7", "push-subscription-v7", "event-v7", "message-v7", 2, base, base + 100, base + 24 * 60 * 60 * 1_000);
+
+  migrateRoomSchema(roomStorage);
+
+  expect(database.query("SELECT version FROM room_schema").get()).toEqual({ version: CURRENT_ROOM_SCHEMA_VERSION });
+  expect(database.query("SELECT schema_version, notification_id, get_post_hash, get_post_enabled FROM room_state").get())
+    .toEqual({ schema_version: CURRENT_ROOM_SCHEMA_VERSION, notification_id: "notification-v7", get_post_hash: null, get_post_enabled: 0 });
+  expect(database.query("SELECT id, status FROM webhook_deliveries").get()).toEqual({ id: "delivery-v7", status: "pending" });
+  expect(database.query("SELECT id, source_browser_id FROM push_subscriptions").get()).toEqual({ id: "push-subscription-v7", source_browser_id: "browser-v7" });
+  expect(database.query("SELECT id, status FROM push_deliveries").get()).toEqual({ id: "push-delivery-v7", status: "pending" });
+});
+
 test("fails closed when durable storage has a future schema", () => {
   const database = new Database(":memory:");
   const roomStorage = storage(database);

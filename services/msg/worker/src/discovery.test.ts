@@ -57,6 +57,9 @@ Accept: application/json
   expect(AGENT_INSTRUCTIONS).toContain("The matching CLI commands are npx --yes @0000chat/msg@latest webhooks <conversation_url> list, create <https_url>, remove <endpoint_id>, disable <endpoint_id>, enable <endpoint_id>, rotate <endpoint_id>, and redeliver <endpoint_id> <event_id>.");
   expect(AGENT_INSTRUCTIONS).toContain("shown only in that response");
   expect(AGENT_INSTRUCTIONS).toContain("HMAC-SHA256");
+  expect(AGENT_INSTRUCTIONS).toContain("fetch-only agent");
+  expect(AGENT_INSTRUCTIONS).toContain("URL previews can trigger its first write");
+  expect(AGENT_INSTRUCTIONS).toContain("request_id");
 });
 
 test("renders root discovery in every supported representation", async () => {
@@ -161,11 +164,14 @@ test("documents responses for every OpenAPI operation", () => {
   expect(OPENAPI_DOCUMENT.paths["/"].post.responses["201"]).toBeDefined();
   expect(OPENAPI_DOCUMENT.paths["/"].post.responses["400"]).toBeDefined();
   expect(OPENAPI_DOCUMENT.paths["/{room}"].get.responses["200"]).toBeDefined();
+  expect(OPENAPI_DOCUMENT.paths["/{room}/post"].get.responses["200"]).toBeDefined();
+  expect(OPENAPI_DOCUMENT.paths["/{room}/post"].get.parameters.find((parameter) => parameter.name === "request_id")).toMatchObject({ required: true });
   expect(OPENAPI_DOCUMENT.paths["/manage/{room}/{token}"].delete.responses["200"]).toBeDefined();
+  expect(OPENAPI_DOCUMENT.paths["/manage/{room}/{token}"].post.responses["200"]).toBeDefined();
   expect(OPENAPI_DOCUMENT.paths["/"].post.requestBody).toBeDefined();
   expect(OPENAPI_DOCUMENT.paths["/{room}"].post.requestBody).toBeDefined();
   expect(OPENAPI_DOCUMENT.paths["/{room}/live"].get.responses["400"]).toBeDefined();
   expect(OPENAPI_DOCUMENT.paths["/{room}/agent"].get.responses["200"]).toBeDefined();
   expect(OPENAPI_DOCUMENT.paths["/{room}"].get.responses["304"].description).toContain("normalized after cursor");
-  expect(Object.keys(OPENAPI_DOCUMENT.paths).sort()).toEqual(["/", "/healthz", "/manage/{room}/{token}", "/{room}", "/{room}/agent", "/{room}/export.json", "/{room}/export.md", "/{room}/live", "/{room}/webhooks", "/{room}/webhooks/{id}", "/{room}/webhooks/{id}/deliveries/{event_id}/redeliver", "/{room}/webhooks/{id}/disable", "/{room}/webhooks/{id}/enable", "/{room}/webhooks/{id}/rotate-secret"]);
+  expect(Object.keys(OPENAPI_DOCUMENT.paths).sort()).toEqual(["/", "/healthz", "/manage/{room}/{token}", "/{room}", "/{room}/agent", "/{room}/export.json", "/{room}/export.md", "/{room}/live", "/{room}/post", "/{room}/webhooks", "/{room}/webhooks/{id}", "/{room}/webhooks/{id}/deliveries/{event_id}/redeliver", "/{room}/webhooks/{id}/disable", "/{room}/webhooks/{id}/enable", "/{room}/webhooks/{id}/rotate-secret"]);
 });

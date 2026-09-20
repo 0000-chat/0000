@@ -86,6 +86,80 @@ test("rejects room writes while the post kill switch is enabled", async () => {
   expect(response.status).toBe(503);
 });
 
+test("keeps GET posting off by default and manages a separate delegated capability", async () => {
+  const { room: durable } = await room();
+  const management = "management-token";
+  const delegated = "delegated-token";
+  await durable.fetch(request("/initialize", { management_hash: await hashCapability(management), initial: { content: "first", author: "a", display_name: "a", semantic_type: "message" } }));
+
+  const beforeEnable = await durable.fetch(request("/get-post", { token: delegated, request_id: "r1", input: { content: "blocked", author: "b", display_name: "b", semantic_type: "message" } }));
+  const enabled = await durable.fetch(new Request(`https://room/manage?token=${management}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "enable", get_post_token: delegated }) }));
+  const posted = await durable.fetch(request("/get-post", { token: delegated, request_id: "r1", input: { content: "second", author: "b", display_name: "b", semantic_type: "message" } }));
+  const replay = await durable.fetch(request("/get-post", { token: delegated, request_id: "r1", input: { content: "second", author: "b", display_name: "b", semantic_type: "message" } }));
+
+  expect(beforeEnable.status).toBe(404);
+  expect(enabled.status).toBe(200);
+  expect(await enabled.json()).toMatchObject({ get_post_enabled: true });
+  expect(await posted.json()).toMatchObject({ accepted: true, replayed: false, request_id: "r1", sequence: 2 });
+  expect(await replay.json()).toMatchObject({ accepted: true, replayed: true, request_id: "r1", sequence: 2 });
+  expect(await (await durable.fetch(new Request("https://room/read?after=0"))).text()).toContain("second");
+});
+
+test("revokes and rotates GET posting capabilities before the next write transaction", async () => {
+  const { room: durable } = await room();
+  const management = "management-token";
+  await durable.fetch(request("/initialize", { management_hash: await hashCapability(management), initial: { content: "first", author: "a", display_name: "a", semantic_type: "message" } }));
+  const manage = (action: string, token?: string) => new Request(`https://room/manage?token=${management}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action, ...(token ? { get_post_token: token } : {}) }) });
+  await durable.fetch(manage("enable", "old-token"));
+  await durable.fetch(manage("rotate", "new-token"));
+
+  const old = await durable.fetch(request("/get-post", { token: "old-token", request_id: "old", input: { content: "old", author: "b", display_name: "b", semantic_type: "message" } }));
+  const current = await durable.fetch(request("/get-post", { token: "new-token", request_id: "new", input: { content: "new", author: "b", display_name: "b", semantic_type: "message" } }));
+  await durable.fetch(manage("disable"));
+  const disabled = await durable.fetch(request("/get-post", { token: "new-token", request_id: "disabled", input: { content: "disabled", author: "b", display_name: "b", semantic_type: "message" } }));
+
+  expect(old.status).toBe(404);
+  expect(current.status).toBe(200);
+  expect(disabled.status).toBe(404);
+  expect((await (await durable.fetch(new Request("https://room/read?after=0"))).json()).latest_message).toBe(2);
+});
+
+test("prefixes delegated GET retries to avoid accidental POST key collisions", async () => {
+  const { room: durable } = await room();
+  const management = "management-token";
+  const input = { content: "same logical message", author: "b", display_name: "b", semantic_type: "message" };
+  await durable.fetch(request("/initialize", { management_hash: await hashCapability(management), initial: { content: "first", author: "a", display_name: "a", semantic_type: "message" } }));
+  await durable.fetch(new Request(`https://room/manage?token=${management}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "enable", get_post_token: "delegated-token" }) }));
+  const post = await durable.fetch(request("/messages", { idempotency_key: "shared-request", input }));
+  const getPost = await durable.fetch(request("/get-post", { token: "delegated-token", request_id: "shared-request", input }));
+  const getRetry = await durable.fetch(request("/get-post", { token: "delegated-token", request_id: "shared-request", input }));
+  const conflict = await durable.fetch(request("/get-post", { token: "delegated-token", request_id: "shared-request", input: { ...input, content: "different" } }));
+
+  expect(post.status).toBe(200);
+  expect(await getPost.json()).toMatchObject({ accepted: true, replayed: false, sequence: 3, request_id: "shared-request" });
+  expect(await getRetry.json()).toMatchObject({ accepted: true, replayed: true, sequence: 3, request_id: "shared-request" });
+  expect(conflict.status).toBe(409);
+  expect((await (await durable.fetch(new Request("https://room/read?after=0"))).json()).latest_message).toBe(3);
+});
+
+test("queues webhook and push deliveries for delegated GET messages", async () => {
+  const database = new Database(":memory:");
+  const { room: durable } = await room(database);
+  const management = "management-token";
+  await durable.fetch(request("/initialize", { management_hash: await hashCapability(management), initial: { content: "first", author: "a", display_name: "a", semantic_type: "message" } }));
+  await durable.fetch(request("/webhooks", { url: "https://receiver.example.com/get-post" }));
+  database.query("INSERT INTO push_subscriptions (id, source_browser_id, endpoint, p256dh, auth, created_at) VALUES (?, ?, ?, ?, ?, ?)")
+    .run("push-1", "browser-1", "https://push.example.com/subscription", "p256dh", "auth", Date.now());
+  await durable.fetch(new Request(`https://room/manage?token=${management}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "enable", get_post_token: "delegated-token" }) }));
+  await durable.fetch(request("/get-post", { token: "delegated-token", request_id: "notify-1", input: { content: "fetch-only", author: "b", display_name: "b", semantic_type: "message" } }));
+
+  const message = database.query("SELECT id, source_browser_id FROM messages WHERE sequence = 2").get() as { id: string; source_browser_id: string | null };
+  expect(message.source_browser_id).toBeNull();
+  expect(database.query("SELECT COUNT(*) AS count FROM webhook_deliveries WHERE message_id = ?").get(message.id)).toEqual({ count: 1 });
+  expect(database.query("SELECT COUNT(*) AS count FROM push_deliveries WHERE message_id = ?").get(message.id)).toEqual({ count: 1 });
+  database.close();
+});
+
 test("allows forced deletion only through the internal Durable Object route", async () => {
   const { context, room: durable } = await room();
   await durable.fetch(request("/initialize", { management_hash: "hash", initial: { content: "first", author: "a", display_name: "a", semantic_type: "message" } }));
