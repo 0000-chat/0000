@@ -26,3 +26,9 @@ runner never records credentials, cookies, OAuth state/code URLs, SQL values, or
 message bodies. `fixture.mjs` is kept beside Platform because it uses the
 Platform runner's temporary bootstrap boundary while supplying only the
 Communicator-owned local directory and projection fixture data.
+
+Run the focused lifecycle probes with:
+
+```sh
+node --test services/platform/scripts/platform-browser-composition/fault-probes.test.mjs
+```

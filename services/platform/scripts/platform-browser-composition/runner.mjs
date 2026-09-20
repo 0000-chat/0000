@@ -31,6 +31,12 @@ import {
   projectionBatch,
   projectionInitialization,
 } from "./fixture.mjs";
+import { fetchBodyWithDeadline, fetchJsonWithDeadline } from "./http.mjs";
+import {
+  assertCloseCode,
+  runBoundedCleanup,
+  terminateProcessGroup,
+} from "./lifecycle.mjs";
 
 const harnessRoot = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(harnessRoot, "../../../../");
@@ -41,6 +47,7 @@ const communicatorMigrations = join(communicatorApp, "migrations");
 const wrapperPath = join(harnessRoot, "communicator-wrapper.mjs");
 const workerEntry = join(platformRoot, "src/worker.ts");
 const operationTimeoutMs = 30_000;
+const httpTimeoutMs = 5_000;
 const startupTimeoutMs = 120_000;
 const cleanupTimeoutMs = 8_000;
 const compatibilityDate = "2026-09-18";
@@ -72,10 +79,19 @@ const state = {
   communicator: null,
   browser: null,
   activeChildren: new Set(),
+  shutdownController: new AbortController(),
+  shuttingDown: false,
+  cleanupFailures: [],
 };
 
 function stage(name) {
+  assertActive();
   state.stage = name;
+}
+
+function assertActive() {
+  if (state.shuttingDown || state.shutdownController.signal.aborted)
+    throw new Error("harness_interrupted");
 }
 
 function record(event, fields = {}) {
@@ -88,10 +104,28 @@ function safeFailure(error) {
   return error instanceof Error ? error.name : "unknown";
 }
 
-async function within(label, operation, timeoutMs = operationTimeoutMs) {
+async function within(
+  label,
+  operation,
+  timeoutMs = operationTimeoutMs,
+  { allowShutdown = false } = {},
+) {
   let timer;
+  let abortShutdown;
+  const shutdownPromise = allowShutdown
+    ? null
+    : new Promise((_, reject) => {
+        abortShutdown = () => reject(new Error("harness_interrupted"));
+        if (state.shutdownController.signal.aborted) abortShutdown();
+        else
+          state.shutdownController.signal.addEventListener(
+            "abort",
+            abortShutdown,
+            { once: true },
+          );
+      });
   try {
-    return await Promise.race([
+    const operations = [
       operation,
       new Promise((_, reject) => {
         timer = setTimeout(
@@ -99,9 +133,16 @@ async function within(label, operation, timeoutMs = operationTimeoutMs) {
           timeoutMs,
         );
       }),
-    ]);
+    ];
+    if (shutdownPromise) operations.push(shutdownPromise);
+    return await Promise.race(operations);
   } finally {
     clearTimeout(timer);
+    if (abortShutdown)
+      state.shutdownController.signal.removeEventListener(
+        "abort",
+        abortShutdown,
+      );
   }
 }
 
@@ -110,8 +151,10 @@ async function sleep(milliseconds) {
 }
 
 async function waitFor(label, predicate, timeoutMs = operationTimeoutMs) {
+  assertActive();
   const started = Date.now();
   while (Date.now() - started < timeoutMs) {
+    assertActive();
     if (await predicate()) return;
     await sleep(100);
   }
@@ -203,7 +246,9 @@ async function writeNodeResponse(response, nodeResponse) {
     response.headers.getSetCookie?.() ??
     [response.headers.get("set-cookie") ?? ""].filter(Boolean);
   if (cookies.length > 0) outputHeaders["set-cookie"] = cookies;
-  const body = Buffer.from(await response.arrayBuffer());
+  const body = Buffer.from(
+    await within("node_response_body", response.arrayBuffer()),
+  );
   outputHeaders["content-length"] = String(body.byteLength);
   nodeResponse.writeHead(response.status, outputHeaders);
   nodeResponse.end(body);
@@ -280,6 +325,7 @@ async function listenPlatformBridge(platformOrigin) {
           server.close((error) => (error ? reject(error) : resolveClose())),
         ),
         cleanupTimeoutMs,
+        { allowShutdown: true },
       );
     },
   };
@@ -310,18 +356,26 @@ async function listenPlatformProxy(upstreamOrigin) {
         return;
       }
       const body = await readNodeBody(request);
-      const upstream = await fetch(`${upstreamOrigin}${request.url ?? "/"}`, {
-        method: request.method,
-        headers: forwardHeaders(request, new URL(proxyOrigin).host),
-        body,
-        redirect: "manual",
-      });
+      const { response: upstream, body: upstreamBody } =
+        await fetchBodyWithDeadline(
+          `${upstreamOrigin}${request.url ?? "/"}`,
+          {
+            method: request.method,
+            headers: forwardHeaders(request, new URL(proxyOrigin).host),
+            body,
+            redirect: "manual",
+          },
+          {
+            shutdownSignal: state.shutdownController.signal,
+            timeoutMs: httpTimeoutMs,
+          },
+        );
       const headers = new Headers(upstream.headers);
       const location = headers.get("location");
       if (location)
         headers.set("location", location.replace(upstreamOrigin, proxyOrigin));
       await writeNodeResponse(
-        new Response(await upstream.arrayBuffer(), {
+        new Response(upstreamBody, {
           status: upstream.status,
           headers,
         }),
@@ -357,6 +411,7 @@ async function listenPlatformProxy(upstreamOrigin) {
           server.close((error) => (error ? reject(error) : resolveClose())),
         ),
         cleanupTimeoutMs,
+        { allowShutdown: true },
       );
     },
   };
@@ -404,42 +459,6 @@ async function buildPlatformWorker() {
   return entry.text();
 }
 
-function processGroupExists(pid) {
-  try {
-    process.kill(-pid, 0);
-    return true;
-  } catch (error) {
-    return error?.code === "EPERM";
-  }
-}
-
-async function terminateProcessGroup(child) {
-  const pid = child?.pid;
-  if (!pid) return;
-  if (processGroupExists(pid)) {
-    try {
-      process.kill(-pid, "SIGTERM");
-    } catch {}
-  }
-  const terminated = await waitFor(
-    "child_group_exit",
-    () => !processGroupExists(pid),
-    cleanupTimeoutMs,
-  )
-    .then(() => true)
-    .catch(() => false);
-  if (!terminated && processGroupExists(pid)) {
-    try {
-      process.kill(-pid, "SIGKILL");
-    } catch {}
-    await waitFor(
-      "child_group_kill",
-      () => !processGroupExists(pid),
-      cleanupTimeoutMs,
-    ).catch(() => {});
-  }
-}
-
 async function applyMigrations(database, directory) {
   const migrations = await readD1Migrations(directory);
   for (const migration of migrations) {
@@ -455,12 +474,16 @@ async function applyMigrations(database, directory) {
 }
 
 async function createPlatformRuntime(tempRoot, proxyOrigin) {
+  assertActive();
   const bridge = await listenPlatformBridge(proxyOrigin);
-  const proxy = await listenPlatformProxy(bridge.origin);
-  bridge.setOrigin(proxy.origin);
   state.platformBridge = bridge;
+  assertActive();
+  const proxy = await listenPlatformProxy(bridge.origin);
   state.platformProxy = proxy;
+  assertActive();
+  bridge.setOrigin(proxy.origin);
   const script = await buildPlatformWorker();
+  assertActive();
   const secret = opaqueSecret("composition_platform_secret_");
   const platformState = join(tempRoot, "platform-state");
   const platform = new Miniflare(
@@ -491,14 +514,18 @@ async function createPlatformRuntime(tempRoot, proxyOrigin) {
   );
   state.platform = platform;
   await within("platform_ready", platform.ready);
+  assertActive();
   const database = await platform.getD1Database("IDENTITY_DB");
   await applyMigrations(database, join(platformRoot, "migrations"));
+  assertActive();
   await registerTestService(database, service);
+  assertActive();
   bridge.setPlatform(platform);
   return { platform, database, proxyOrigin: proxy.origin, secret };
 }
 
 async function runCommand(args, options) {
+  assertActive();
   const logHandle = await open(options.logPath, "w", 0o600);
   let child;
   try {
@@ -524,10 +551,11 @@ async function runCommand(args, options) {
       }),
       options.timeoutMs ?? startupTimeoutMs,
     );
-    await terminateProcessGroup(child);
+    await stopProcess(child);
+    assertActive();
     if (result.code !== 0) throw new Error("child_command_failed");
   } catch (error) {
-    await terminateProcessGroup(child);
+    await stopProcess(child).catch(() => {});
     throw error;
   } finally {
     state.activeChildren.delete(child);
@@ -536,11 +564,14 @@ async function runCommand(args, options) {
 }
 
 async function stopProcess(child) {
-  await terminateProcessGroup(child);
+  const result = await terminateProcessGroup(child);
+  if (!result.groupGone) throw new Error("child_group_cleanup_failed");
   if (child) state.activeChildren.delete(child);
+  return result;
 }
 
 async function buildCommunicatorAssets(tempRoot) {
+  assertActive();
   const buildRoot = join(tempRoot, "communicator-build");
   const buildLog = join(tempRoot, "communicator-build.log");
   await runCommand(["vite", "build", "--outDir", buildRoot], {
@@ -548,6 +579,7 @@ async function buildCommunicatorAssets(tempRoot) {
     env: { VITE_DEPLOYMENT_ENV: "local", VITE_DATA_MODE: "live" },
     logPath: buildLog,
   });
+  assertActive();
   const files = [];
   async function visit(directory) {
     for (const entry of await readdir(directory, { withFileTypes: true })) {
@@ -566,14 +598,17 @@ async function buildCommunicatorAssets(tempRoot) {
 }
 
 async function createCommunicatorRuntime(tempRoot, values, platformRuntime) {
+  assertActive();
   const port = values.port;
   const baseUrl = `http://localhost:${port}`;
   const buildRoot = await buildCommunicatorAssets(tempRoot);
+  assertActive();
   const configRoot = join(tempRoot, "communicator-config");
   const stateRoot = join(tempRoot, "communicator-state");
   await import("node:fs/promises").then(({ mkdir }) =>
     mkdir(configRoot, { recursive: true, mode: 0o700 }),
   );
+  assertActive();
   const configPath = join(configRoot, "wrangler.jsonc");
   const config = {
     name: `composition-communicator-${process.pid}`,
@@ -637,6 +672,7 @@ async function createCommunicatorRuntime(tempRoot, values, platformRuntime) {
     },
   };
   await writePrivate(configPath, `${JSON.stringify(config, null, 2)}\n`);
+  assertActive();
   const devVars = [
     ["COMMUNICATOR_ENV", "local"],
     ["COMMUNICATOR_DATA_MODE", "live"],
@@ -663,6 +699,7 @@ async function createCommunicatorRuntime(tempRoot, values, platformRuntime) {
   await import("node:fs/promises").then(({ mkdir }) =>
     mkdir(logs, { recursive: true, mode: 0o700 }),
   );
+  assertActive();
   const migrationLog = join(logs, "migrations.log");
   await runCommand(
     [
@@ -680,6 +717,7 @@ async function createCommunicatorRuntime(tempRoot, values, platformRuntime) {
     ],
     { cwd: communicatorApp, logPath: migrationLog },
   );
+  assertActive();
   const baseSqlPath = join(configRoot, "base-directory.sql");
   await writePrivate(baseSqlPath, baseDirectorySql());
   await runCommand(
@@ -699,12 +737,24 @@ async function createCommunicatorRuntime(tempRoot, values, platformRuntime) {
     ],
     { cwd: communicatorApp, logPath: join(logs, "base-directory.log") },
   );
+  assertActive();
   const childLogPath = join(logs, "worker.log");
   const logFile = await open(childLogPath, "w", 0o600);
+  const runtime = {
+    baseUrl,
+    port,
+    child: null,
+    buildRoot,
+    configRoot,
+    stateRoot,
+    logFile,
+  };
+  state.communicator = runtime;
   let child;
   let childError = null;
   let childExited = false;
   try {
+    assertActive();
     child = spawn(
       "pnpm",
       [
@@ -730,6 +780,7 @@ async function createCommunicatorRuntime(tempRoot, values, platformRuntime) {
         stdio: ["ignore", logFile.fd, logFile.fd],
       },
     );
+    runtime.child = child;
     state.activeChildren.add(child);
     child.once("error", (error) => {
       childError = error;
@@ -743,24 +794,23 @@ async function createCommunicatorRuntime(tempRoot, values, platformRuntime) {
         if (childError) throw new Error("communicator_spawn_failed");
         if (childExited) throw new Error("communicator_exited_before_health");
         try {
-          const response = await fetch(`${baseUrl}/api/v1/health`);
+          const { response } = await fetchBodyWithDeadline(
+            `${baseUrl}/api/v1/health`,
+            {},
+            {
+              shutdownSignal: state.shutdownController.signal,
+              timeoutMs: httpTimeoutMs,
+            },
+          );
           return response.status === 200;
-        } catch {
+        } catch (error) {
+          if (state.shutdownController.signal.aborted) throw error;
           return false;
         }
       },
       startupTimeoutMs,
     );
-    const runtime = {
-      baseUrl,
-      port,
-      child,
-      buildRoot,
-      configRoot,
-      stateRoot,
-      logFile,
-    };
-    state.communicator = runtime;
+    assertActive();
     return runtime;
   } catch (error) {
     await stopProcess(child).catch(() => {});
@@ -795,17 +845,28 @@ async function seedBinding(communicator, sql, label) {
 }
 
 async function postJson(url, body, headers = {}) {
-  const response = await fetch(url, {
-    method: "POST",
-    headers: { "content-type": "application/json", ...headers },
-    body: JSON.stringify(body),
-    redirect: "manual",
-  });
-  return { response, body: await response.json().catch(() => ({})) };
+  return fetchJsonWithDeadline(
+    url,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json", ...headers },
+      body: JSON.stringify(body),
+      redirect: "manual",
+    },
+    {
+      shutdownSignal: state.shutdownController.signal,
+      timeoutMs: httpTimeoutMs,
+    },
+  );
 }
 
 async function safeJson(response) {
-  return response.json().catch(() => ({}));
+  try {
+    return await within("playwright_response_body", response.json());
+  } catch (error) {
+    if (state.shutdownController.signal.aborted) throw error;
+    return {};
+  }
 }
 
 function cookieMetadata(cookie) {
@@ -964,16 +1025,22 @@ async function inspectCommunicatorSession(page, expected) {
 }
 
 async function projectionCall(baseUrl, token, path, input, details = false) {
-  const response = await fetch(`${baseUrl}/__composition/projection/${path}`, {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      "x-composition-harness-token": token,
+  const { response, body } = await fetchJsonWithDeadline(
+    `${baseUrl}/__composition/projection/${path}`,
+    {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-composition-harness-token": token,
+      },
+      body: JSON.stringify({ tenant_id: FIXTURE.tenantId, input }),
     },
-    body: JSON.stringify({ tenant_id: FIXTURE.tenantId, input }),
-  });
+    {
+      shutdownSignal: state.shutdownController.signal,
+      timeoutMs: httpTimeoutMs,
+    },
+  );
   if (!details) return response.status;
-  const body = await safeJson(response);
   return {
     status: response.status,
     failureKind:
@@ -1014,21 +1081,31 @@ async function realtimeObservation(
   page,
   ticketBody,
   slotName = "__compositionRealtime",
+  expectedIdentityId = FIXTURE.identityId,
 ) {
   const result = await page.evaluate(
-    ({ slotName, websocketUrl }) =>
+    ({ expectedIdentityId, slotName, websocketUrl }) =>
       new Promise((resolve, reject) => {
         const socket = new WebSocket(websocketUrl, "communicator.realtime.v1");
         window[slotName] = socket;
         const closeCodeSlot = `${slotName}CloseCode`;
+        const closeSeenSlot = `${slotName}CloseSeen`;
+        const metricsSlot = `${slotName}Metrics`;
         window[closeCodeSlot] = null;
+        window[closeSeenSlot] = false;
         const state = {
           connected: false,
           allowedChangeCount: 0,
           deniedChangeVisible: false,
           resetReason: null,
           subprotocol: "",
+          projectionChangeCount: 0,
+          postRevocationDeliveryCount: 0,
+          trackPostRevocation: false,
+          identityFrameCount: 0,
+          identityMatched: true,
         };
+        window[metricsSlot] = state;
         let settled = false;
         const timer = setTimeout(
           () => reject(new Error("realtime_observation_timeout")),
@@ -1047,6 +1124,14 @@ async function realtimeObservation(
           if (body.type === "connected") state.connected = true;
           if (body.type === "projection.changes") {
             const changes = Array.isArray(body.changes) ? body.changes : [];
+            state.projectionChangeCount += changes.length;
+            if (state.trackPostRevocation)
+              state.postRevocationDeliveryCount += changes.length;
+            if (typeof body.identity_id === "string") {
+              state.identityFrameCount += 1;
+              if (body.identity_id !== expectedIdentityId)
+                state.identityMatched = false;
+            }
             state.allowedChangeCount += changes.filter(
               (change) =>
                 change?.connection_id === "connection_composition_allowed",
@@ -1059,9 +1144,15 @@ async function realtimeObservation(
             )
               state.deniedChangeVisible = true;
           }
-          if (body.type === "reset_required")
+          if (body.type === "reset_required") {
+            if (typeof body.identity_id === "string") {
+              state.identityFrameCount += 1;
+              if (body.identity_id !== expectedIdentityId)
+                state.identityMatched = false;
+            }
             state.resetReason =
               typeof body.reason === "string" ? body.reason : "unknown";
+          }
           if (
             state.connected &&
             state.allowedChangeCount >= 1 &&
@@ -1077,11 +1168,16 @@ async function realtimeObservation(
           () => settled || reject(new Error("realtime_socket_error")),
         );
         socket.addEventListener("close", (event) => {
+          window[closeSeenSlot] = true;
           window[closeCodeSlot] = event.code;
           if (!settled) reject(new Error(`realtime_closed_${event.code}`));
         });
       }),
-    { slotName, websocketUrl: ticketBody.websocket_url },
+    {
+      expectedIdentityId,
+      slotName,
+      websocketUrl: ticketBody.websocket_url,
+    },
   );
   return result;
 }
@@ -1092,6 +1188,7 @@ async function runBrowserComposition(
   client,
   phase = "full",
 ) {
+  assertActive();
   const playwrightCandidates = [
     process.env.T11_PLAYWRIGHT_MODULE,
     join(communicatorApp, "node_modules/@playwright/test/index.mjs"),
@@ -1107,7 +1204,9 @@ async function runBrowserComposition(
   if (!playwrightModule) throw new Error("playwright_module_missing");
   const browser = await playwrightModule.chromium.launch({ headless: true });
   state.browser = browser;
+  assertActive();
   const context = await browser.newContext({ ignoreHTTPSErrors: true });
+  assertActive();
   const page = await context.newPage();
   page.setDefaultTimeout(operationTimeoutMs);
   page.setDefaultNavigationTimeout(operationTimeoutMs);
@@ -1121,8 +1220,35 @@ async function runBrowserComposition(
     failedRequests += 1;
   });
   page.on("websocket", (socket) => {
-    const state = { url: socket.url(), closed: false };
+    const state = {
+      url: socket.url(),
+      closed: false,
+      projectionChangeCount: 0,
+      postRevocationProjectionChangeCount: 0,
+      identityMatched: true,
+      trackPostRevocation: false,
+    };
     playwrightSocketStates.push(state);
+    socket.on("framereceived", ({ payload }) => {
+      let body;
+      try {
+        body = JSON.parse(
+          typeof payload === "string" ? payload : payload.toString(),
+        );
+      } catch {
+        return;
+      }
+      if (
+        typeof body?.identity_id === "string" &&
+        body.identity_id !== FIXTURE.identityId
+      )
+        state.identityMatched = false;
+      if (body?.type !== "projection.changes") return;
+      const changes = Array.isArray(body.changes) ? body.changes : [];
+      state.projectionChangeCount += changes.length;
+      if (state.trackPostRevocation)
+        state.postRevocationProjectionChangeCount += changes.length;
+    });
     socket.on("close", () => {
       state.closed = true;
     });
@@ -1261,14 +1387,30 @@ async function runBrowserComposition(
   assert.equal(ticketResponse.status(), 201);
   assert.equal(typeof ticket.websocket_url, "string");
   stage("realtime_observation");
-  const realtime = await realtimeObservation(page, ticket);
-  assert.deepEqual(realtime, {
-    connected: true,
-    allowedChangeCount: 1,
-    deniedChangeVisible: false,
-    resetReason: "history_unavailable",
-    subprotocol: "communicator.realtime.v1",
-  });
+  const realtime = await realtimeObservation(
+    page,
+    ticket,
+    "__compositionRealtime",
+    FIXTURE.identityId,
+  );
+  assert.deepEqual(
+    {
+      connected: realtime.connected,
+      allowedChangeCount: realtime.allowedChangeCount,
+      deniedChangeVisible: realtime.deniedChangeVisible,
+      resetReason: realtime.resetReason,
+      subprotocol: realtime.subprotocol,
+    },
+    {
+      connected: true,
+      allowedChangeCount: 1,
+      deniedChangeVisible: false,
+      resetReason: "history_unavailable",
+      subprotocol: "communicator.realtime.v1",
+    },
+  );
+  assert.equal(realtime.identityMatched, true);
+  assert.ok(realtime.identityFrameCount >= 1);
   record("realtime_actual_platform_authority", {
     ticketStatus: ticketResponse.status(),
     connected: realtime.connected,
@@ -1288,14 +1430,26 @@ async function runBrowserComposition(
     page,
     revocationTicket,
     "__compositionRevocationRealtime",
+    FIXTURE.identityId,
   );
-  assert.deepEqual(revocationRealtime, {
-    connected: true,
-    allowedChangeCount: 1,
-    deniedChangeVisible: false,
-    resetReason: "history_unavailable",
-    subprotocol: "communicator.realtime.v1",
-  });
+  assert.deepEqual(
+    {
+      connected: revocationRealtime.connected,
+      allowedChangeCount: revocationRealtime.allowedChangeCount,
+      deniedChangeVisible: revocationRealtime.deniedChangeVisible,
+      resetReason: revocationRealtime.resetReason,
+      subprotocol: revocationRealtime.subprotocol,
+    },
+    {
+      connected: true,
+      allowedChangeCount: 1,
+      deniedChangeVisible: false,
+      resetReason: "history_unavailable",
+      subprotocol: "communicator.realtime.v1",
+    },
+  );
+  assert.equal(revocationRealtime.identityMatched, true);
+  assert.ok(revocationRealtime.identityFrameCount >= 1);
   const revocationSocketState = await page.evaluate(() => ({
     present: Boolean(window.__compositionRevocationRealtime),
     readyState: window.__compositionRevocationRealtime?.readyState ?? null,
@@ -1306,10 +1460,33 @@ async function runBrowserComposition(
     connected: revocationRealtime.connected,
     readyState: revocationSocketState.readyState,
   });
-  const revocationSocketRecord = playwrightSocketStates
-    .slice(socketCountBeforeRevocationObservation)
-    .at(-1);
+  const revocationSocketRecords = playwrightSocketStates.filter(
+    (candidate) => candidate.url === revocationTicket.websocket_url,
+  );
+  assert.equal(revocationSocketRecords.length, 1);
+  const [revocationSocketRecord] = revocationSocketRecords;
   assert.ok(revocationSocketRecord);
+  assert.equal(
+    playwrightSocketStates.length - socketCountBeforeRevocationObservation,
+    1,
+  );
+  await waitFor(
+    "realtime_revocation_socket_frame",
+    () => revocationSocketRecord.projectionChangeCount >= 1,
+    operationTimeoutMs,
+  );
+  const revocationMetricsBefore = await page.evaluate(() => {
+    const metrics = window.__compositionRevocationRealtimeMetrics;
+    return metrics
+      ? {
+          identityMatched: metrics.identityMatched,
+          projectionChangeCount: metrics.projectionChangeCount,
+          postRevocationDeliveryCount: metrics.postRevocationDeliveryCount,
+        }
+      : null;
+  });
+  assert.ok(revocationMetricsBefore);
+  assert.equal(revocationMetricsBefore.identityMatched, true);
 
   stage("revocation_ui");
   let mutationCount = 0;
@@ -1383,6 +1560,12 @@ async function runBrowserComposition(
   assert.equal(revokedSession.status(), 401);
   assert.equal(revokedTicketResponse.status(), 401);
   stage("revocation_projection_apply");
+  revocationSocketRecord.trackPostRevocation = true;
+  await page.evaluate(() => {
+    const metrics = window.__compositionRevocationRealtimeMetrics;
+    if (!metrics) throw new Error("realtime_metrics_missing");
+    metrics.trackPostRevocation = true;
+  });
   const afterRevocationApply = await projectionCall(
     communicator.baseUrl,
     client.harnessToken,
@@ -1401,6 +1584,15 @@ async function runBrowserComposition(
   const socketState = await page.evaluate(() => ({
     present: Boolean(window.__compositionRevocationRealtime),
     readyState: window.__compositionRevocationRealtime?.readyState ?? null,
+    metrics: window.__compositionRevocationRealtimeMetrics
+      ? {
+          projectionChangeCount:
+            window.__compositionRevocationRealtimeMetrics.projectionChangeCount,
+          postRevocationDeliveryCount:
+            window.__compositionRevocationRealtimeMetrics
+              .postRevocationDeliveryCount,
+        }
+      : null,
   }));
   record("realtime_socket_state", {
     ...socketState,
@@ -1411,6 +1603,14 @@ async function runBrowserComposition(
     () => revocationSocketRecord.closed,
     operationTimeoutMs,
   );
+  await waitFor(
+    "realtime_revocation_browser_close",
+    async () =>
+      page.evaluate(
+        () => window.__compositionRevocationRealtimeCloseSeen === true,
+      ),
+    operationTimeoutMs,
+  );
   const socketStateAfterClose = await page.evaluate(() => ({
     present: Boolean(window.__compositionRevocationRealtime),
     readyState: window.__compositionRevocationRealtime?.readyState ?? null,
@@ -1418,7 +1618,32 @@ async function runBrowserComposition(
   const revocationCloseCode = await page.evaluate(
     () => window.__compositionRevocationRealtimeCloseCode ?? null,
   );
-  if (revocationCloseCode !== null) assert.equal(revocationCloseCode, 1008);
+  const revocationCloseSeen = await page.evaluate(
+    () => window.__compositionRevocationRealtimeCloseSeen === true,
+  );
+  const revocationMetricsAfter = await page.evaluate(() => {
+    const metrics = window.__compositionRevocationRealtimeMetrics;
+    return metrics
+      ? {
+          identityMatched: metrics.identityMatched,
+          projectionChangeCount: metrics.projectionChangeCount,
+          postRevocationDeliveryCount: metrics.postRevocationDeliveryCount,
+        }
+      : null;
+  });
+  assertCloseCode(
+    { closeSeen: revocationCloseSeen, closeCode: revocationCloseCode },
+    1008,
+  );
+  assert.ok(revocationMetricsAfter);
+  assert.equal(revocationMetricsAfter.identityMatched, true);
+  assert.equal(
+    revocationMetricsAfter.projectionChangeCount,
+    revocationMetricsBefore.projectionChangeCount,
+  );
+  assert.equal(revocationMetricsAfter.postRevocationDeliveryCount, 0);
+  assert.equal(revocationSocketRecord.identityMatched, true);
+  assert.equal(revocationSocketRecord.postRevocationProjectionChangeCount, 0);
   record("actual_platform_revocation", {
     uiUnauthorized: true,
     draftPreserved: true,
@@ -1426,8 +1651,15 @@ async function runBrowserComposition(
     protectedSessionStatus: revokedSession.status(),
     protectedTicketStatus: revokedTicketResponse.status(),
     realtimeTransportClosed: revocationSocketRecord.closed,
+    realtimeCloseEventObserved: revocationCloseSeen,
     realtimeCloseCode: revocationCloseCode,
     realtimeBrowserReadyState: socketStateAfterClose.readyState,
+    projectionChangeCountBeforeRevocation:
+      revocationMetricsBefore.projectionChangeCount,
+    projectionChangeCountAfterRevocation:
+      revocationMetricsAfter.projectionChangeCount,
+    postRevocationDeliveryCount:
+      revocationMetricsAfter.postRevocationDeliveryCount,
   });
 
   stage("matching_reauth");
@@ -1585,44 +1817,64 @@ async function runBrowserComposition(
   await context.close();
 }
 
-async function boundedCleanup(label, operation) {
-  await within(
-    label,
-    Promise.resolve().then(operation),
-    cleanupTimeoutMs,
-  ).catch(() => {});
-}
-
 let cleanupPromise = null;
 
 async function cleanup() {
+  state.shuttingDown = true;
+  state.shutdownController.abort();
   if (cleanupPromise) return cleanupPromise;
   cleanupPromise = (async () => {
+    const cleanupResource = async (label, operation) => {
+      try {
+        const result = await runBoundedCleanup(
+          label,
+          operation,
+          cleanupTimeoutMs,
+        );
+        return { ok: true, result };
+      } catch {
+        state.cleanupFailures.push(label);
+        return { ok: false, result: null };
+      }
+    };
+
     if (state.browser)
-      await boundedCleanup("browser_close", () => state.browser.close());
+      await cleanupResource("browser_close", () => state.browser.close());
     const children = new Set(
       [...state.activeChildren, state.communicator?.child].filter(Boolean),
     );
+    const childResults = [];
     for (const child of children)
-      await boundedCleanup("child_stop", () => stopProcess(child));
+      childResults.push(
+        await cleanupResource("child_stop", () => stopProcess(child)),
+      );
     if (state.communicator?.logFile)
-      await boundedCleanup("communicator_log_close", () =>
+      await cleanupResource("communicator_log_close", () =>
         state.communicator.logFile.close(),
       );
     if (state.platform)
-      await boundedCleanup("platform_dispose", () => state.platform.dispose());
+      await cleanupResource("platform_dispose", () => state.platform.dispose());
     if (state.platformProxy)
-      await boundedCleanup("platform_proxy_close", () =>
+      await cleanupResource("platform_proxy_close", () =>
         state.platformProxy.close(),
       );
     if (state.platformBridge)
-      await boundedCleanup("platform_bridge_close", () =>
+      await cleanupResource("platform_bridge_close", () =>
         state.platformBridge.close(),
       );
-    if (state.tempRoot)
-      await boundedCleanup("temp_cleanup", () =>
-        rm(state.tempRoot, { recursive: true, force: true }),
-      );
+    const stateCleanup = state.tempRoot
+      ? await cleanupResource("temp_cleanup", () =>
+          rm(state.tempRoot, { recursive: true, force: true }),
+        )
+      : { ok: true };
+    return {
+      ok: state.cleanupFailures.length === 0,
+      childGroupsGone: childResults.every(
+        ({ ok, result }) => ok && result?.groupGone !== false,
+      ),
+      stateRemoved: stateCleanup.ok,
+      failures: [...state.cleanupFailures],
+    };
   })();
   return cleanupPromise;
 }
@@ -1681,6 +1933,7 @@ async function main() {
       refreshEnabled: false,
     },
   );
+  assertActive();
   stage("communicator_runtime");
   const communicator = await createCommunicatorRuntime(
     state.tempRoot,
@@ -1710,7 +1963,6 @@ async function main() {
     process.env.COMPOSITION_PHASE ?? "full",
   );
   record("complete", { safeLogPath });
-  await writePrivate(safeLogPath, `${safeLog.join("\n")}\n`);
 }
 
 for (const [signal, exitCode] of [
@@ -1719,7 +1971,7 @@ for (const [signal, exitCode] of [
 ]) {
   process.once(signal, () => {
     process.exitCode = exitCode;
-    void cleanup();
+    void cleanup().catch(() => {});
   });
 }
 
@@ -1729,12 +1981,39 @@ try {
   state.failed = true;
   state.failure = error;
   record("failure", { kind: safeFailure(error), stage: state.stage });
+  if (process.exitCode === undefined || process.exitCode === 0)
+    process.exitCode = 1;
+} finally {
+  let cleanupResult;
+  try {
+    cleanupResult = await cleanup();
+  } catch {
+    state.cleanupFailures.push("cleanup_unhandled");
+    cleanupResult = {
+      ok: false,
+      childGroupsGone: false,
+      stateRemoved: false,
+      failures: [...state.cleanupFailures],
+    };
+  }
+  if (!cleanupResult.ok) {
+    state.failed = true;
+    record("cleanup_failure", {
+      childGroupsGone: cleanupResult.childGroupsGone,
+      stateRemoved: cleanupResult.stateRemoved,
+      failureCount: cleanupResult.failures.length,
+    });
+    if (process.exitCode === undefined || process.exitCode === 0)
+      process.exitCode = 1;
+  } else {
+    record("cleanup", {
+      ok: true,
+      childGroupsGone: cleanupResult.childGroupsGone,
+      stateRemoved: cleanupResult.stateRemoved,
+    });
+  }
   if (state.safeLogPath)
     await writePrivate(state.safeLogPath, `${safeLog.join("\n")}\n`).catch(
       () => {},
     );
-  if (process.exitCode === undefined || process.exitCode === 0)
-    process.exitCode = 1;
-} finally {
-  await cleanup();
 }
