@@ -129,6 +129,16 @@ test("renders the human Notifications panel and wires its served controller", as
   expect(page.html).toContain('id="webhook-list"');
   expect(page.html).toContain("Each new message is sent in full");
   expect(page.html).toContain("Save this signing secret now");
+  expect(page.html).toContain('id="coordination-progress-form"');
+  expect(page.html).toContain('id="coordination-filter-form"');
+  expect(page.html).toContain('id="coordination-filter-owner-label"');
+  expect(page.html).toContain('id="coordination-filter-status"');
+  expect(page.html).toContain('id="coordination-progress-request"');
+  expect(page.html).toContain('id="coordination-progress-artifact"');
+  expect(page.html).toContain('id="coordination-proposal-new"');
+  expect(page.html).toContain('id="coordination-progress-new"');
+  expect(page.html).toContain("A done report needs an artifact or an explicit unverified explanation");
+  expect(page.html).toContain("Completion does not approve or consent");
   expect(page.html).toContain("Redelivering a failed event makes one explicit attempt");
   expect(home.html).not.toContain("notifications-panel");
   expect(home.html).not.toContain("data-push-public-key");

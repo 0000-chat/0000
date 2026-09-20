@@ -433,14 +433,20 @@ async function route(request: Request, service: RoomService, options: MsgWorkerO
     if (!service.listCoordinationRequests) return notFound();
     await enforceRateLimit(request, options.rateLimits?.reads);
     const selectors = parseCoordinationListSelectors(url);
-    return jsonResponse(await service.listCoordinationRequests({ room: coordinationRequestCollection[1]!, after: selectors.after, limit: selectors.limit, ...(selectors.through === undefined ? {} : { through: selectors.through }) }));
+    const result = await service.listCoordinationRequests({ room: coordinationRequestCollection[1]!, after: selectors.after, limit: selectors.limit, ...(selectors.owner_label === undefined ? {} : { owner_label: selectors.owner_label }), ...(selectors.status === undefined ? {} : { status: selectors.status }), ...(selectors.through === undefined ? {} : { through: selectors.through }) });
+    const etag = coordinationListEtag("requests", result, selectors);
+    if (request.headers.get("if-none-match") === etag) return new Response(null, { headers: { etag, "retry-after": "5" }, status: 304 });
+    const response = jsonResponse(result);
+    response.headers.set("etag", etag);
+    response.headers.set("retry-after", "5");
+    return response;
   }
   const coordinationRequestDetail = /^\/([^/]+)\/coordination\/requests\/([^/]+)$/u.exec(url.pathname);
   if (coordinationRequestDetail && request.method === "GET") {
     if (!service.readCoordinationRequest) return notFound();
     await enforceRateLimit(request, options.rateLimits?.reads);
     const selectors = parseCoordinationListSelectors(url);
-    return jsonResponse(await service.readCoordinationRequest({ requestId: decodePathSegment(coordinationRequestDetail[2]!), room: coordinationRequestDetail[1]!, after: selectors.after, limit: selectors.limit, ...(selectors.through === undefined ? {} : { through: selectors.through }) }));
+    return jsonResponse(await service.readCoordinationRequest({ requestId: decodePathSegment(coordinationRequestDetail[2]!), room: coordinationRequestDetail[1]!, after: selectors.after, limit: selectors.limit, ...(selectors.owner_label === undefined ? {} : { owner_label: selectors.owner_label }), ...(selectors.status === undefined ? {} : { status: selectors.status }), ...(selectors.through === undefined ? {} : { through: selectors.through }) }));
   }
   const coordinationPublishMatch = /^\/manage\/([^/]+)\/([^/]+)\/coordination\/publish$/u.exec(url.pathname);
   if (coordinationPublishMatch && request.method === "POST") {
@@ -673,6 +679,11 @@ function parseReadSelectors(url: URL): ReadSelectors {
     ...(limit === undefined ? {} : { limit }),
     ...(through === undefined ? {} : { through }),
   };
+}
+
+function coordinationListEtag(kind: "requests", result: unknown, selectors: { readonly after: number; readonly limit: number; readonly owner_label?: string; readonly status?: string; readonly through?: number }): string {
+  const value = result && typeof result === "object" && !Array.isArray(result) ? result as { coordination_cursor?: unknown; published_revision?: unknown; through?: unknown } : {};
+  return `W/"coordination-${kind}-${String(value.coordination_cursor ?? "")}-${String(value.published_revision ?? "")}-after-${selectors.after}-limit-${selectors.limit}-through-${String(selectors.through ?? value.through ?? "")}-owner-${encodeURIComponent(selectors.owner_label ?? "")}-status-${selectors.status ?? ""}"`;
 }
 
 async function enforceRateLimit(request: Request, binding: MsgRateLimit | undefined): Promise<void> {

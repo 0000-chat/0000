@@ -255,6 +255,8 @@ function coordinationListUrl(path: string, input: CoordinationListInput): string
   const url = new URL(`https://room${path}`);
   if (input.after !== undefined) url.searchParams.set("after", String(input.after));
   if (input.limit !== undefined) url.searchParams.set("limit", String(input.limit));
+  if (input.owner_label !== undefined) url.searchParams.set("owner_label", input.owner_label);
+  if (input.status !== undefined) url.searchParams.set("status", input.status);
   if (input.through !== undefined) url.searchParams.set("through", String(input.through));
   return url.toString();
 }

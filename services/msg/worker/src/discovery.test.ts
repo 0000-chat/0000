@@ -189,7 +189,12 @@ test("documents responses for every OpenAPI operation", () => {
   expect(OPENAPI_DOCUMENT.paths["/{room}"].get.responses["304"].description).toContain("normalized after cursor");
   expect(OPENAPI_DOCUMENT.paths["/{room}/coordination"].get).toBeDefined();
   expect(OPENAPI_DOCUMENT.paths["/{room}/coordination/proposals"].post.requestBody.content["application/json"].schema.additionalProperties).toBe(false);
-  expect(OPENAPI_DOCUMENT.paths["/{room}/coordination/proposals"].post.requestBody.content["application/json"].schema.properties.kind.const).toBe("request.create");
+  const coordinationSchema = OPENAPI_DOCUMENT.paths["/{room}/coordination/proposals"].post.requestBody.content["application/json"].schema;
+  expect(coordinationSchema.properties.kind.enum).toEqual(["request.create", "request.progress"]);
+  expect(coordinationSchema.properties.body.oneOf).toHaveLength(2);
+  expect(coordinationSchema.properties.body.oneOf[1].properties.status.enum).toEqual(["open", "in_progress", "blocked", "done", "withdrawn"]);
+  expect(OPENAPI_DOCUMENT.paths["/{room}/coordination/requests"].get.parameters.map((parameter) => parameter.name)).toEqual(["room", "after", "limit", "through", "owner_label", "status"]);
+  expect(OPENAPI_DOCUMENT.paths["/{room}/coordination/requests"].get.description).toContain("not an authenticated inbox");
   expect(OPENAPI_DOCUMENT.paths["/manage/{room}/{token}/coordination/publish"].post.description).toContain("Never expose this URL");
   expect(Object.keys(OPENAPI_DOCUMENT.paths).sort()).toEqual(["/", "/healthz", "/manage/{room}/{token}", "/manage/{room}/{token}/coordination/publish", "/{room}", "/{room}/agent", "/{room}/coordination", "/{room}/coordination/proposals", "/{room}/coordination/proposals/{id}", "/{room}/coordination/proposals/{id}/revisions", "/{room}/coordination/proposals/{id}/revisions/{revision}", "/{room}/coordination/requests", "/{room}/coordination/requests/{request_id}", "/{room}/export.json", "/{room}/export.md", "/{room}/live", "/{room}/messages/{id}", "/{room}/post", "/{room}/webhooks", "/{room}/webhooks/{id}", "/{room}/webhooks/{id}/deliveries/{event_id}/redeliver", "/{room}/webhooks/{id}/disable", "/{room}/webhooks/{id}/enable", "/{room}/webhooks/{id}/rotate-secret"]);
 });

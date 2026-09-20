@@ -1,11 +1,13 @@
 import { validateConversationUrl } from "./wait.js";
 
-const USAGE = "Usage: msg coordination <conversation-url> overview | proposals [--after N] [--limit N] [--through N] | proposal <proposal-id> [--revision N] | requests [--after N] [--limit N] [--through N] | request <request-id> | propose | revise <proposal-id> | publish <management-coordination-url>";
+const USAGE = "Usage: msg coordination <conversation-url> overview | proposals [--after N] [--limit N] [--through N] | proposal <proposal-id> [--revision N] | requests [--after N] [--limit N] [--through N] [--owner-label LABEL] [--status STATUS] | request <request-id> [--after N] [--limit N] [--through N] | propose | revise <proposal-id> | publish <management-coordination-url>";
+
+const COORDINATION_STATUSES = new Set(["open", "in_progress", "blocked", "done", "withdrawn"]);
 
 export type CoordinationCommand =
   | { readonly conversationUrl: string; readonly operation: "overview" }
-  | { readonly after?: number; readonly conversationUrl: string; readonly limit?: number; readonly operation: "proposals" | "requests"; readonly through?: number }
-  | { readonly conversationUrl: string; readonly operation: "proposal" | "request"; readonly id: string; readonly revision?: number }
+  | { readonly after?: number; readonly conversationUrl: string; readonly limit?: number; readonly operation: "proposals" | "requests"; readonly ownerLabel?: string; readonly status?: string; readonly through?: number }
+  | { readonly after?: number; readonly conversationUrl: string; readonly id: string; readonly limit?: number; readonly operation: "proposal" | "request"; readonly revision?: number; readonly through?: number }
   | { readonly conversationUrl: string; readonly operation: "propose" }
   | { readonly conversationUrl: string; readonly operation: "revise"; readonly id: string }
   | { readonly managementUrl: string; readonly operation: "publish" };
@@ -33,25 +35,42 @@ export function parseCoordinationCommand(args: readonly string[]): CoordinationC
     if (operation === "revise" && args.length === 4 && args[3]) return { conversationUrl, id: args[3], operation };
   }
   if (operation === "proposals" || operation === "requests") {
-    const selectors: { after?: number; limit?: number; through?: number } = {};
+    const selectors: { after?: number; limit?: number; ownerLabel?: string; status?: string; through?: number } = {};
     const seen = new Set<string>();
     for (let index = 3; index < args.length; index += 2) {
       const flag = args[index];
       const raw = args[index + 1];
-      if ((flag !== "--after" && flag !== "--limit" && flag !== "--through") || raw === undefined || seen.has(flag)) throw new Error(USAGE);
+      if ((flag !== "--after" && flag !== "--limit" && flag !== "--through" && flag !== "--owner-label" && flag !== "--status") || raw === undefined || seen.has(flag)) throw new Error(USAGE);
       seen.add(flag);
       if (flag === "--limit") selectors.limit = parseLimit(raw);
       else if (flag === "--after") selectors.after = parseNonnegativeInteger(raw);
+      else if (flag === "--owner-label") selectors.ownerLabel = parseLabel(raw);
+      else if (flag === "--status") selectors.status = parseStatus(raw);
       else selectors.through = parseNonnegativeInteger(raw);
     }
+    if (operation === "proposals" && (selectors.ownerLabel !== undefined || selectors.status !== undefined)) throw new Error(USAGE);
     return { conversationUrl, operation, ...selectors };
   }
   if (operation === "proposal" || operation === "request") {
     if (args.length < 4 || !args[3]) throw new Error(USAGE);
     let revision: number | undefined;
-    if (args.length === 6 && args[4] === "--revision") revision = parsePositiveInteger(args[5] ?? "");
-    else if (args.length !== 4) throw new Error(USAGE);
-    return { conversationUrl, id: args[3], operation, ...(revision === undefined ? {} : { revision }) };
+    const selectors: { after?: number; limit?: number; through?: number } = {};
+    if (operation === "proposal") {
+      if (args.length === 6 && args[4] === "--revision") revision = parsePositiveInteger(args[5] ?? "");
+      else if (args.length !== 4) throw new Error(USAGE);
+      return { conversationUrl, id: args[3], operation, ...(revision === undefined ? {} : { revision }) };
+    }
+    const seen = new Set<string>();
+    for (let index = 4; index < args.length; index += 2) {
+      const flag = args[index];
+      const raw = args[index + 1];
+      if ((flag !== "--after" && flag !== "--limit" && flag !== "--through") || raw === undefined || seen.has(flag)) throw new Error(USAGE);
+      seen.add(flag);
+      if (flag === "--after") selectors.after = parseNonnegativeInteger(raw);
+      else if (flag === "--limit") selectors.limit = parseLimit(raw);
+      else selectors.through = parseNonnegativeInteger(raw);
+    }
+    return { conversationUrl, id: args[3], operation, ...selectors };
   }
   throw new Error(USAGE);
 }
@@ -81,6 +100,13 @@ function coordinationEndpoint(options: CoordinationOptions): URL {
   if (options.operation === "revise") url.pathname += "/revisions";
   if (options.operation === "proposal" && options.revision !== undefined) url.pathname += `/revisions/${options.revision}`;
   if (options.operation === "proposals" || options.operation === "requests") {
+    if (options.after !== undefined) url.searchParams.set("after", String(options.after));
+    if (options.limit !== undefined) url.searchParams.set("limit", String(options.limit));
+    if (options.operation === "requests" && options.ownerLabel !== undefined) url.searchParams.set("owner_label", options.ownerLabel);
+    if (options.operation === "requests" && options.status !== undefined) url.searchParams.set("status", options.status);
+    if (options.through !== undefined) url.searchParams.set("through", String(options.through));
+  }
+  if (options.operation === "request") {
     if (options.after !== undefined) url.searchParams.set("after", String(options.after));
     if (options.limit !== undefined) url.searchParams.set("limit", String(options.limit));
     if (options.through !== undefined) url.searchParams.set("through", String(options.through));
@@ -155,6 +181,16 @@ function parseLimit(value: string): number {
   const result = parsePositiveInteger(value);
   if (result > 100) throw new Error(USAGE);
   return result;
+}
+
+function parseLabel(value: string): string {
+  if (value.length === 0 || Array.from(value).length > 80 || new TextEncoder().encode(value).byteLength > 320) throw new Error(USAGE);
+  return value;
+}
+
+function parseStatus(value: string): string {
+  if (!COORDINATION_STATUSES.has(value)) throw new Error(USAGE);
+  return value;
 }
 
 function throwIfAborted(signal: AbortSignal | undefined): void {

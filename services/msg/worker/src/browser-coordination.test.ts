@@ -36,10 +36,320 @@ test("served browser wiring contains the real coordination runtime and private r
   expect(source).toContain("__msgCoordinationHelpers");
   expect(source).toContain("bootCoordinationBrowser");
   expect(source).toContain("coordination-proposal-attempt");
+  expect(source).toContain("coordination-progress-form");
+  expect(source).toContain("coordination-progress-attempt");
+  expect(source).toContain("request.progress");
+  expect(source).toContain("canonical request is unchanged until publication");
   expect(source).toContain("Review exact revision");
   expect(source).toContain("Source evidence");
   expect(source).toContain("Save this private owner access URL");
   expect(() => new Function(source ?? "")).not.toThrow();
+});
+
+test("submits a real progress report with an operation-specific frozen retry", async () => {
+  class Element {
+    value = "";
+    textContent: string | null = "";
+    disabled = false;
+    hidden = false;
+    className = "";
+    dataset: Record<string, string> = {};
+    href = "";
+    target = "";
+    rel = "";
+    type = "";
+    listeners = new Map<string, (event: { preventDefault(): void }) => void>();
+    children: Element[] = [];
+    onclick: (() => void) | null = null;
+    append(...nodes: Element[]) { this.children.push(...nodes); }
+    replaceChildren(...nodes: Element[]) { this.children = [...nodes]; }
+    select() {}
+    addEventListener(type: string, listener: (event: { preventDefault(): void }) => void) { this.listeners.set(type, listener); }
+    async submit() { await this.listeners.get("submit")?.({ preventDefault() {} }); }
+  }
+  const names = ["coordination-panel", "coordination-overview", "coordination-review", "coordination-status", "coordination-actor", "coordination-title", "coordination-purpose", "coordination-owner", "coordination-requested-output", "coordination-unknowns", "coordination-completion-criteria", "coordination-decision-impact", "coordination-sources", "coordination-proposal-form", "coordination-owner-form", "coordination-owner-url", "coordination-proposal-submit", "coordination-owner-save", "coordination-filter-form", "coordination-filter-owner-label", "coordination-filter-status", "coordination-progress-form", "coordination-progress-actor", "coordination-progress-request", "coordination-progress-status", "coordination-progress-blockers", "coordination-progress-artifact", "coordination-progress-location", "coordination-progress-verification", "coordination-progress-evidence-blockers", "coordination-progress-unverified", "coordination-progress-reopen-reason", "coordination-progress-sources", "coordination-progress-submit"];
+  const elements = new Map(names.map((name) => [name, new Element()]));
+  elements.get("coordination-progress-actor")!.value = "reporter";
+  elements.get("coordination-progress-request")!.value = "request-1";
+  elements.get("coordination-progress-status")!.value = "done";
+  elements.get("coordination-progress-blockers")!.value = "";
+  elements.get("coordination-progress-artifact")!.value = "https://example.com/artifact";
+  elements.get("coordination-progress-location")!.value = "Summary!A1";
+  elements.get("coordination-progress-verification")!.value = "Reported checked against the source.";
+  elements.get("coordination-progress-sources")!.value = "message-2";
+  const storage = memoryStorage();
+  const documentObject = {
+    body: { dataset: { room: "room-a" } },
+    createElement: () => new Element(),
+    querySelector<T extends Element>(selector: string) { return elements.get(selector.slice(1)) as T | undefined ?? null; },
+    querySelectorAll: () => [] as Element[],
+  };
+  const previous = { document: (globalThis as unknown as { document?: unknown }).document, location: (globalThis as unknown as { location?: unknown }).location, sessionStorage: (globalThis as unknown as { sessionStorage?: unknown }).sessionStorage, helpers: (globalThis as unknown as { __msgCoordinationHelpers?: unknown }).__msgCoordinationHelpers, fetch: globalThis.fetch };
+  const calls: { url: string; body?: string }[] = [];
+  let progressCall = 0;
+  (globalThis as unknown as { document: unknown }).document = documentObject;
+  (globalThis as unknown as { location: unknown }).location = { origin: "https://msg.0000.chat" };
+  (globalThis as unknown as { sessionStorage: typeof storage }).sessionStorage = storage;
+  (globalThis as unknown as { __msgCoordinationHelpers: ReturnType<typeof createCoordinationBrowserHelpers> }).__msgCoordinationHelpers = createCoordinationBrowserHelpers();
+  globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input); calls.push({ url, body: typeof init?.body === "string" ? init.body : undefined });
+    if (url.endsWith("/coordination")) return new Response(JSON.stringify({ pending_proposal_count: 0, pending_proposals: [], published_request_count: 1, published_requests: [{ request_id: "request-1", title: "Published request", status: "open" }], published_revision: 7, proposals_url: "/coordination/proposals", requests_url: "/coordination/requests" }), { status: 200 });
+    if (url.includes("/coordination/requests?")) return new Response(JSON.stringify({ requests: [{ request_id: "request-1", title: "Published request", status: "open", published_revision: 1 }], published_revision: 7, through: 1, next_after: 1, has_more: false }), { status: 200 });
+    progressCall += 1;
+    if (progressCall === 1) throw new Error("network interrupted");
+    return new Response(JSON.stringify({ proposal: { proposal_id: "progress-proposal", revision: 1 } }), { status: 201 });
+  };
+  try {
+    bootCoordinationBrowser();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    elements.get("coordination-filter-owner-label")!.value = "owner-a";
+    elements.get("coordination-filter-status")!.value = "open";
+    await elements.get("coordination-filter-form")!.submit();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(calls.some(({ url }) => url.includes("/coordination/requests?") && url.includes("owner_label=owner-a") && url.includes("status=open"))).toBe(true);
+    await elements.get("coordination-progress-form")!.submit();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const firstPayload = JSON.parse(calls.at(-1)?.body ?? "{}");
+    expect(firstPayload).toMatchObject({ actor_label: "reporter", base_revision: 7, kind: "request.progress", body: { request_id: "request-1", status: "done", evidence: [{ artifact_url: "https://example.com/artifact", location: "Summary!A1" }] } });
+    expect(elements.get("coordination-status")!.textContent).toContain("network interrupted");
+    await elements.get("coordination-progress-form")!.submit();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const progressCalls = calls.filter(({ url }) => url.endsWith("/coordination/proposals"));
+    const secondPayload = JSON.parse(progressCalls.at(-1)?.body ?? "{}");
+    expect(secondPayload).toEqual(firstPayload);
+    expect(elements.get("coordination-status")!.textContent).toContain("canonical request is unchanged");
+    expect(storage.values.get("0000:coordination-progress-attempt:v1:room-a")).toBe("");
+  } finally {
+    (globalThis as unknown as { document?: unknown }).document = previous.document;
+    (globalThis as unknown as { location?: unknown }).location = previous.location;
+    (globalThis as unknown as { sessionStorage?: unknown }).sessionStorage = previous.sessionStorage;
+    (globalThis as unknown as { __msgCoordinationHelpers?: unknown }).__msgCoordinationHelpers = previous.helpers;
+    globalThis.fetch = previous.fetch;
+  }
+});
+
+test("executes the served client asset through the progress form and review endpoint", async () => {
+  const source = await browserAsset("client.js")?.text();
+  class Element {
+    value = "";
+    textContent: string | null = "";
+    disabled = false;
+    hidden = false;
+    className = "";
+    dataset: Record<string, string> = {};
+    href = "";
+    target = "";
+    rel = "";
+    type = "";
+    children: Element[] = [];
+    onclick: (() => void) | null = null;
+    listeners = new Map<string, (event: { preventDefault(): void }) => void>();
+    addEventListener(type: string, listener: (event: { preventDefault(): void }) => void) { this.listeners.set(type, listener); }
+    append(...nodes: Element[]) { this.children.push(...nodes); }
+    replaceChildren(...nodes: Element[]) { this.children = [...nodes]; }
+    querySelector<T extends Element>(): T | null { return null; }
+    querySelectorAll(): Element[] { return []; }
+    setAttribute() {}
+    select() {}
+    showModal() {}
+    close() {}
+    async submit() { await this.listeners.get("submit")?.({ preventDefault() {} }); }
+  }
+  const names = ["coordination-panel", "coordination-overview", "coordination-review", "coordination-status", "coordination-progress-form", "coordination-progress-actor", "coordination-progress-request", "coordination-progress-status", "coordination-progress-blockers", "coordination-progress-artifact", "coordination-progress-location", "coordination-progress-verification", "coordination-progress-evidence-blockers", "coordination-progress-unverified", "coordination-progress-reopen-reason", "coordination-progress-sources", "coordination-progress-submit", "coordination-proposal-form", "coordination-owner-form", "coordination-owner-url", "coordination-proposal-submit", "coordination-owner-save", "coordination-actor", "coordination-title", "coordination-purpose", "coordination-owner", "coordination-requested-output", "coordination-unknowns", "coordination-completion-criteria", "coordination-decision-impact", "coordination-sources"];
+  const elements = new Map(names.map((name) => [name, new Element()]));
+  const storage = memoryStorage();
+  let roomReads = 0;
+  const documentObject = {
+    body: { dataset: { get room() { roomReads += 1; return roomReads === 1 ? undefined : "room-a"; } } },
+    documentElement: { dataset: {} as Record<string, string> },
+    createElement: () => new Element(),
+    querySelector<T extends Element>(selector: string) { return elements.get(selector.slice(1)) as T | undefined ?? null; },
+    querySelectorAll: () => [] as Element[],
+  };
+  const globals = globalThis as unknown as Record<string, unknown>;
+  const saved = Object.fromEntries(["addEventListener", "document", "fetch", "location", "localStorage", "matchMedia", "navigator", "sessionStorage"].map((key) => [key, globals[key]]));
+  const calls: { url: string; body?: string }[] = [];
+  globals.document = documentObject;
+  globals.location = { origin: "https://msg.0000.chat", pathname: "/room-a", href: "https://msg.0000.chat/room-a", protocol: "https:" };
+  globals.navigator = { onLine: true };
+  globals.matchMedia = () => ({ matches: false, addEventListener() {} });
+  globals.localStorage = { getItem: () => null, setItem: () => {} };
+  globals.sessionStorage = storage;
+  globals.addEventListener = () => {};
+  globals.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input); calls.push({ url, body: typeof init?.body === "string" ? init.body : undefined });
+    if (url.endsWith("/coordination")) return new Response(JSON.stringify({ pending_proposal_count: 1, pending_proposals: [{ proposal_id: "progress-review", revision: 1, kind: "request.progress", title: "Progress report: done", status: "pending", detail_url: "/coordination/proposals/progress-review" }], published_request_count: 1, published_requests: [{ request_id: "request-1", title: "Published request", status: "open" }], published_revision: 2, proposals_url: "/coordination/proposals", requests_url: "/coordination/requests" }), { status: 200 });
+    if (url.includes("/coordination/proposals/progress-review/revisions/1")) return new Response(JSON.stringify({ proposal: { proposal_id: "progress-review", revision: 1, base_revision: 2, kind: "request.progress", status: "pending", body: { blockers: [], evidence: [{ artifact_url: "https://example.com/review", location: "Summary!A1", reported_verification: "Reported checked", remaining_blockers: [] }], request_id: "request-1", status: "done" }, source_messages: [{ id: "message-2", display_name: "Source", citation_url: "/messages/message-2" }] } }), { status: 200 });
+    if (url.endsWith("/coordination/proposals")) return new Response(JSON.stringify({ proposal: { proposal_id: "progress-1", revision: 1 } }), { status: 201 });
+    return new Response(JSON.stringify({ latest_message: 0, messages: [], expires_at: null }), { status: 200 });
+  };
+  try {
+    new Function(source ?? "")();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const reviewButton = elements.get("coordination-overview")!.children.flatMap((child) => child.children).find((child) => child.textContent === "Review exact revision");
+    reviewButton?.onclick?.();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(elements.get("coordination-review")!.children.some((child) => child.textContent?.includes("https://example.com/review"))).toBe(true);
+    expect(elements.get("coordination-review")!.children.some((child) => child.href === "/messages/message-2")).toBe(true);
+    elements.get("coordination-progress-actor")!.value = "served reporter";
+    elements.get("coordination-progress-request")!.value = "request-1";
+    elements.get("coordination-progress-status")!.value = "done";
+    elements.get("coordination-progress-artifact")!.value = "https://example.com/served-artifact";
+    elements.get("coordination-progress-verification")!.value = "Reported checked in the served flow.";
+    elements.get("coordination-progress-sources")!.value = "message-2";
+    await elements.get("coordination-progress-form")!.submit();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const progressCall = calls.find((call) => call.url.endsWith("/coordination/proposals"));
+    expect(roomReads).toBeGreaterThan(1);
+    expect(progressCall?.body && JSON.parse(progressCall.body)).toMatchObject({ kind: "request.progress", actor_label: "served reporter", body: { request_id: "request-1", status: "done", evidence: [{ artifact_url: "https://example.com/served-artifact" }] } });
+    expect(elements.get("coordination-status")!.textContent).toContain("canonical request is unchanged");
+  } finally {
+    Object.assign(globals, saved);
+  }
+});
+
+test("restores a frozen progress revision target across an ambiguous reload", async () => {
+  class Element {
+    value = "";
+    textContent: string | null = "";
+    disabled = false;
+    hidden = false;
+    className = "";
+    dataset: Record<string, string> = {};
+    href = "";
+    target = "";
+    rel = "";
+    type = "";
+    children: Element[] = [];
+    onclick: (() => void) | null = null;
+    listeners = new Map<string, (event: { preventDefault(): void }) => void>();
+    addEventListener(type: string, listener: (event: { preventDefault(): void }) => void) { this.listeners.set(type, listener); }
+    append(...nodes: Element[]) { this.children.push(...nodes); }
+    replaceChildren(...nodes: Element[]) { this.children = [...nodes]; }
+    select() {}
+    async submit() { await this.listeners.get("submit")?.({ preventDefault() {} }); }
+  }
+  const names = ["coordination-panel", "coordination-overview", "coordination-review", "coordination-status", "coordination-progress-form", "coordination-progress-actor", "coordination-progress-request", "coordination-progress-status", "coordination-progress-blockers", "coordination-progress-artifact", "coordination-progress-location", "coordination-progress-verification", "coordination-progress-evidence-blockers", "coordination-progress-unverified", "coordination-progress-reopen-reason", "coordination-progress-sources", "coordination-progress-submit"];
+  const elements = new Map(names.map((name) => [name, new Element()]));
+  const frozenPayload = { actor_label: "reporter", base_revision: 4, body: { blockers: ["Waiting"], evidence: [], request_id: "request-1", status: "blocked" }, client_retry_id: "revision-retry", kind: "request.progress", source_message_ids: ["message-1"] };
+  const storage = memoryStorage({ "0000:coordination-progress-attempt:v1:room-a": JSON.stringify({ client_retry_id: "revision-retry", payload: frozenPayload, revision_proposal_id: "proposal-progress", revision_kind: "request.progress" }) });
+  const documentObject = {
+    body: { dataset: { room: "room-a" } },
+    createElement: () => new Element(),
+    querySelector<T extends Element>(selector: string) { return elements.get(selector.slice(1)) as T | undefined ?? null; },
+    querySelectorAll: () => [] as Element[],
+  };
+  const previous = { document: (globalThis as unknown as { document?: unknown }).document, location: (globalThis as unknown as { location?: unknown }).location, sessionStorage: (globalThis as unknown as { sessionStorage?: unknown }).sessionStorage, helpers: (globalThis as unknown as { __msgCoordinationHelpers?: unknown }).__msgCoordinationHelpers, fetch: globalThis.fetch };
+  const calls: string[] = [];
+  let revisionAttempt = 0;
+  (globalThis as unknown as { document: unknown }).document = documentObject;
+  (globalThis as unknown as { location: unknown }).location = { origin: "https://msg.0000.chat" };
+  (globalThis as unknown as { sessionStorage: typeof storage }).sessionStorage = storage;
+  (globalThis as unknown as { __msgCoordinationHelpers: ReturnType<typeof createCoordinationBrowserHelpers> }).__msgCoordinationHelpers = createCoordinationBrowserHelpers();
+  globalThis.fetch = async (input: RequestInfo | URL) => {
+    const url = String(input); calls.push(url);
+    if (url.includes("/proposals/proposal-progress/revisions")) {
+      revisionAttempt += 1;
+      if (revisionAttempt === 1) throw new Error("ambiguous network result");
+      return new Response(JSON.stringify({ proposal: { proposal_id: "proposal-progress", revision: 2 } }), { status: 201 });
+    }
+    return new Response(JSON.stringify({ pending_proposal_count: 1, pending_proposals: [], published_request_count: 1, published_requests: [{ request_id: "request-1", title: "Request", status: "blocked" }], published_revision: 4 }), { status: 200 });
+  };
+  try {
+    bootCoordinationBrowser();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await elements.get("coordination-progress-form")!.submit();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    bootCoordinationBrowser();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await elements.get("coordination-progress-form")!.submit();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(calls.filter((url) => url.includes("/proposals/proposal-progress/revisions"))).toHaveLength(2);
+    expect(calls.filter((url) => url.includes("/coordination/proposals") && !url.includes("/revisions"))).toHaveLength(0);
+  } finally {
+    (globalThis as unknown as { document?: unknown }).document = previous.document;
+    (globalThis as unknown as { location?: unknown }).location = previous.location;
+    (globalThis as unknown as { sessionStorage?: unknown }).sessionStorage = previous.sessionStorage;
+    (globalThis as unknown as { __msgCoordinationHelpers?: unknown }).__msgCoordinationHelpers = previous.helpers;
+    globalThis.fetch = previous.fetch;
+  }
+});
+
+test("keeps a definite 413 retry frozen until an explicit edited progress submission", async () => {
+  class Element {
+    value = "";
+    textContent: string | null = "";
+    disabled = false;
+    hidden = true;
+    className = "";
+    dataset: Record<string, string> = {};
+    href = "";
+    target = "";
+    rel = "";
+    type = "";
+    children: Element[] = [];
+    onclick: (() => void) | null = null;
+    listeners = new Map<string, (event: { preventDefault(): void }) => void>();
+    addEventListener(type: string, listener: (event: { preventDefault(): void }) => void) { this.listeners.set(type, listener); }
+    append(...nodes: Element[]) { this.children.push(...nodes); }
+    replaceChildren(...nodes: Element[]) { this.children = [...nodes]; }
+    select() {}
+    async submit() { await this.listeners.get("submit")?.({ preventDefault() {} }); }
+  }
+  const names = ["coordination-panel", "coordination-overview", "coordination-review", "coordination-status", "coordination-progress-form", "coordination-progress-actor", "coordination-progress-request", "coordination-progress-status", "coordination-progress-blockers", "coordination-progress-artifact", "coordination-progress-location", "coordination-progress-verification", "coordination-progress-evidence-blockers", "coordination-progress-unverified", "coordination-progress-reopen-reason", "coordination-progress-sources", "coordination-progress-submit", "coordination-progress-new"];
+  const elements = new Map(names.map((name) => [name, new Element()]));
+  elements.get("coordination-progress-actor")!.value = "reporter";
+  elements.get("coordination-progress-request")!.value = "request-1";
+  elements.get("coordination-progress-status")!.value = "in_progress";
+  elements.get("coordination-progress-sources")!.value = "message-1";
+  const storage = memoryStorage();
+  const documentObject = {
+    body: { dataset: { room: "room-a" } },
+    createElement: () => new Element(),
+    querySelector<T extends Element>(selector: string) { return elements.get(selector.slice(1)) as T | undefined ?? null; },
+    querySelectorAll: () => [] as Element[],
+  };
+  const previous = { document: (globalThis as unknown as { document?: unknown }).document, location: (globalThis as unknown as { location?: unknown }).location, sessionStorage: (globalThis as unknown as { sessionStorage?: unknown }).sessionStorage, helpers: (globalThis as unknown as { __msgCoordinationHelpers?: unknown }).__msgCoordinationHelpers, fetch: globalThis.fetch };
+  const calls: { url: string; body?: string }[] = [];
+  let progressCall = 0;
+  (globalThis as unknown as { document: unknown }).document = documentObject;
+  (globalThis as unknown as { location: unknown }).location = { origin: "https://msg.0000.chat" };
+  (globalThis as unknown as { sessionStorage: typeof storage }).sessionStorage = storage;
+  (globalThis as unknown as { __msgCoordinationHelpers: ReturnType<typeof createCoordinationBrowserHelpers> }).__msgCoordinationHelpers = createCoordinationBrowserHelpers();
+  globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input); calls.push({ url, body: typeof init?.body === "string" ? init.body : undefined });
+    if (url.endsWith("/coordination")) return new Response(JSON.stringify({ pending_proposal_count: 0, pending_proposals: [], published_request_count: 1, published_requests: [{ request_id: "request-1", title: "Request", status: "open" }], published_revision: 1 }), { status: 200 });
+    progressCall += 1;
+    if (progressCall < 3) return new Response(JSON.stringify({ error: { message: "The coordination payload is too large." } }), { status: 413 });
+    return new Response(JSON.stringify({ proposal: { proposal_id: "progress-new", revision: 1 } }), { status: 201 });
+  };
+  try {
+    bootCoordinationBrowser();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await elements.get("coordination-progress-form")!.submit();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const firstPayload = JSON.parse(calls.at(-1)?.body ?? "{}");
+    expect(elements.get("coordination-progress-new")!.hidden).toBe(false);
+    expect(elements.get("coordination-status")!.textContent).toContain("payload is too large");
+    await elements.get("coordination-progress-form")!.submit();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const retryPayload = JSON.parse(calls.at(-1)?.body ?? "{}");
+    expect(retryPayload).toEqual(firstPayload);
+    elements.get("coordination-progress-status")!.value = "blocked";
+    elements.get("coordination-progress-new")!.listeners.get("click")?.({ preventDefault() {} });
+    await elements.get("coordination-progress-form")!.submit();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const editedPayload = JSON.parse(calls.filter(({ url }) => url.endsWith("/coordination/proposals")).at(-1)?.body ?? "{}");
+    expect(editedPayload).toMatchObject({ kind: "request.progress", body: { status: "blocked" } });
+    expect(editedPayload.client_retry_id).not.toBe(firstPayload.client_retry_id);
+    expect(storage.values.get("0000:coordination-progress-attempt:v1:room-a")).toBe("");
+  } finally {
+    (globalThis as unknown as { document?: unknown }).document = previous.document;
+    (globalThis as unknown as { location?: unknown }).location = previous.location;
+    (globalThis as unknown as { sessionStorage?: unknown }).sessionStorage = previous.sessionStorage;
+    (globalThis as unknown as { __msgCoordinationHelpers?: unknown }).__msgCoordinationHelpers = previous.helpers;
+    globalThis.fetch = previous.fetch;
+  }
 });
 
 test("keeps the same frozen proposal retry across network and malformed-receipt failures", async () => {

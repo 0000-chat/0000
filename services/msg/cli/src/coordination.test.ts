@@ -9,9 +9,27 @@ const managementUrl = "https://msg.0000.chat/manage/room-1/private-owner/coordin
 test("parses bounded coordination reads and private publication commands", () => {
   expect(parseCoordinationCommand(["coordination", roomUrl, "overview"])).toEqual({ conversationUrl: roomUrl, operation: "overview" });
   expect(parseCoordinationCommand(["coordination", roomUrl, "proposals", "--after", "2", "--limit", "5", "--through", "7"])).toEqual({ after: 2, conversationUrl: roomUrl, limit: 5, operation: "proposals", through: 7 });
+  expect(parseCoordinationCommand(["coordination", roomUrl, "requests", "--after", "2", "--limit", "5", "--owner-label", "owner-a", "--status", "blocked", "--through", "7"])).toEqual({ after: 2, conversationUrl: roomUrl, limit: 5, operation: "requests", ownerLabel: "owner-a", status: "blocked", through: 7 });
   expect(parseCoordinationCommand(["coordination", roomUrl, "proposal", "proposal-1", "--revision", "2"])).toEqual({ conversationUrl: roomUrl, id: "proposal-1", operation: "proposal", revision: 2 });
   expect(parseCoordinationCommand(["coordination", "publish", managementUrl])).toEqual({ managementUrl, operation: "publish" });
   expect(() => parseCoordinationCommand(["coordination", roomUrl, "proposals", "--limit", "101"])).toThrow("Usage: msg coordination");
+  expect(() => parseCoordinationCommand(["coordination", roomUrl, "requests", "--status", "reported"])).toThrow("Usage: msg coordination");
+});
+
+test("sends exact owner and canonical status selectors for bounded request reads", async () => {
+  const calls: string[] = [];
+  const stdout: string[] = [];
+  const result = await runCli(["coordination", roomUrl, "requests", "--after", "2", "--limit", "1", "--owner-label", "owner a", "--status", "done", "--through", "7"], {
+    fetch: async (input) => { calls.push(String(input)); return Response.json({ requests: [], has_more: false, next_after: 2, through: 7 }); },
+    stderr: () => undefined,
+    stdout: (text: string) => stdout.push(text),
+    websocket: () => { throw new Error("WebSocket must not connect."); },
+  });
+  expect(result).toBe(0);
+  const url = new URL(calls[0] ?? "https://invalid.example");
+  expect(url.pathname).toBe("/room-1/coordination/requests");
+  expect([...url.searchParams.entries()]).toEqual([["after", "2"], ["limit", "1"], ["owner_label", "owner a"], ["status", "done"], ["through", "7"]]);
+  expect(JSON.parse(stdout.join(""))).toMatchObject({ requests: [], through: 7 });
 });
 
 test("uses public reads and JSON stdin for mutation routes without printing the management URL", async () => {

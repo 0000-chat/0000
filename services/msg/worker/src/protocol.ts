@@ -1,3 +1,5 @@
+import type { CoordinationEvidence, CoordinationKind, CoordinationProgressBody, CoordinationRequestBody as DomainCoordinationRequestBody, CoordinationStatus } from "./coordination-domain";
+
 export const PROTOCOL_VERSION = 1 as const;
 
 export type JsonPrimitive = boolean | null | number | string;
@@ -214,15 +216,18 @@ export interface ReadMessageResponse {
   readonly protocol_version: typeof PROTOCOL_VERSION;
 }
 
-export interface CoordinationRequestBody {
-  readonly completion_criteria: readonly string[];
-  readonly decision_impact: string;
-  readonly owner_label: string;
-  readonly purpose: string;
-  readonly requested_output: string;
-  readonly title: string;
-  readonly unknowns: readonly string[];
-}
+export type CoordinationRequestBody = DomainCoordinationRequestBody;
+export type CoordinationEvidenceItem = CoordinationEvidence & { readonly reported_by: string };
+export type CoordinationProgress = Omit<CoordinationProgressBody, "evidence"> & {
+  readonly authority_class: "management";
+  readonly base_revision: number;
+  readonly published_at: string;
+  readonly proposal_id: string;
+  readonly proposal_revision: number;
+  readonly reported_by: string;
+  readonly source_message_ids: readonly string[];
+  readonly evidence: readonly CoordinationEvidenceItem[];
+};
 
 export interface CoordinationSourceMessage {
   readonly author: string;
@@ -237,10 +242,10 @@ export interface CoordinationProposal {
   readonly actor_label: string;
   readonly authority_class: "management" | "participant";
   readonly base_revision: number;
-  readonly body: CoordinationRequestBody;
+  readonly body: CoordinationRequestBody | CoordinationProgressBody;
   readonly created_at: string;
   readonly detail_url: string;
-  readonly kind: string;
+  readonly kind: CoordinationKind;
   readonly proposal_id: string;
   readonly request_id: string | null;
   readonly revision: number;
@@ -265,12 +270,16 @@ export interface CoordinationProposalSummary {
 
 export interface CoordinationRequest {
   readonly body: CoordinationRequestBody;
+  readonly blockers: readonly string[];
   readonly created_at: string;
   readonly detail_url: string;
+  readonly evidence: readonly CoordinationEvidenceItem[];
   readonly published_revision: number;
   readonly request_id: string;
-  readonly status: "open";
+  readonly status: CoordinationStatus;
   readonly updated_at: string;
+  readonly progress?: CoordinationProgress;
+  readonly unverified_explanation?: string;
 }
 
 export interface CoordinationRequestSummary {
@@ -278,7 +287,7 @@ export interface CoordinationRequestSummary {
   readonly owner_label: string;
   readonly published_revision: number;
   readonly request_id: string;
-  readonly status: "open";
+  readonly status: CoordinationStatus;
   readonly title: string;
   readonly updated_at: string;
 }
@@ -354,7 +363,9 @@ export interface CoordinationProposalInput {
 export interface CoordinationListInput {
   readonly after?: number;
   readonly limit?: number;
+  readonly owner_label?: string;
   readonly room: string;
+  readonly status?: CoordinationStatus;
   readonly through?: number;
 }
 
@@ -366,8 +377,10 @@ export interface CoordinationProposalDetailInput {
 export interface CoordinationRequestDetailInput {
   readonly after?: number;
   readonly limit?: number;
+  readonly owner_label?: string;
   readonly requestId: string;
   readonly room: string;
+  readonly status?: CoordinationStatus;
   readonly through?: number;
 }
 

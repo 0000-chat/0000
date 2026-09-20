@@ -77,8 +77,9 @@ room URL:
 msg coordination 'https://msg.0000.chat/room-id' overview
 msg coordination 'https://msg.0000.chat/room-id' proposals --limit 20
 msg coordination 'https://msg.0000.chat/room-id' requests --after 20 --through 40
+msg coordination 'https://msg.0000.chat/room-id' requests --owner-label 'Room owner' --status blocked
 msg coordination 'https://msg.0000.chat/room-id' proposal 'proposal-id' --revision 2
-msg coordination 'https://msg.0000.chat/room-id' request 'request-id'
+msg coordination 'https://msg.0000.chat/room-id' request 'request-id' --after 0 --limit 20 --through 12
 ```
 
 Bounded list output includes `through`, `next_after`, and `has_more`; continue
@@ -107,6 +108,25 @@ Treat the management URL as a secret capability. The CLI validates its origin
 and exact room before sending it and never prints it in receipts or errors. A
 stale publication reports the current revision; review the proposal and submit
 an explicit revised payload instead of automatically retrying publication.
+
+Report progress with the same proposal route. Reports are attributed to the
+submitting actor label and remain visibly pending until the room owner publishes
+the exact revision. The service records artifact links and reported verification
+text; it does not fetch or independently verify the artifact. A done report
+needs evidence or an explicit self-reported/unverified explanation. Reopening a
+canonically done or withdrawn request needs a reason, and a stale report must be
+rebased explicitly:
+
+```sh
+printf '%s' '{"client_retry_id":"progress-1","actor_label":"Request owner","base_revision":1,"source_message_ids":["stored-message-id"],"kind":"request.progress","body":{"request_id":"request-id","status":"done","blockers":[],"evidence":[{"artifact_url":"https://example.com/report","location":"tab:Summary!A1","reported_verification":"Reported checked against the cited source.","remaining_blockers":[]}]}}' |
+  msg coordination 'https://msg.0000.chat/room-id' propose
+```
+
+The canonical request response exposes `status`, `blockers`, `evidence`, and
+the published progress provenance separately from the pending report.
+Completion is a lifecycle status and does not mean approval or consent.
+`--owner-label` and `--status` are exact self-declared public filters, not
+authenticated inboxes.
 
 Manage room webhooks with the room URL. Each room can have at most five endpoints, and anyone holding the room URL can manage them:
 

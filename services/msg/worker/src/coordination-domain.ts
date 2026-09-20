@@ -13,6 +13,11 @@ export const COORDINATION_MAX_SOURCE_ID_CHARS = 512;
 export const COORDINATION_MAX_SOURCE_ID_BYTES = 2 * 1024;
 export const MAX_COORDINATION_PAGE_BYTES = 128 * 1024;
 export const COORDINATION_KIND = "request.create" as const;
+export const COORDINATION_PROGRESS_KIND = "request.progress" as const;
+export const COORDINATION_KINDS = [COORDINATION_KIND, COORDINATION_PROGRESS_KIND] as const;
+
+export type CoordinationKind = (typeof COORDINATION_KINDS)[number];
+export type CoordinationStatus = "open" | "in_progress" | "blocked" | "done" | "withdrawn";
 
 export type CoordinationAuthority = "management" | "participant";
 
@@ -26,12 +31,30 @@ export interface CoordinationRequestBody {
   readonly unknowns: readonly string[];
 }
 
+export interface CoordinationEvidence {
+  readonly artifact_url: string;
+  readonly location?: string;
+  readonly reported_verification: string;
+  readonly remaining_blockers: readonly string[];
+}
+
+export interface CoordinationProgressBody {
+  readonly blockers: readonly string[];
+  readonly evidence: readonly CoordinationEvidence[];
+  readonly request_id: string;
+  readonly status: CoordinationStatus;
+  readonly reopen_reason?: string;
+  readonly unverified_explanation?: string;
+}
+
+export type CoordinationProposalBody = CoordinationRequestBody | CoordinationProgressBody;
+
 export interface CoordinationProposalInput {
   readonly actor_label: string;
   readonly base_revision: number;
-  readonly body: CoordinationRequestBody;
+  readonly body: CoordinationProposalBody;
   readonly client_retry_id: string;
-  readonly kind: typeof COORDINATION_KIND;
+  readonly kind: CoordinationKind;
   readonly source_message_ids: readonly string[];
 }
 
@@ -46,6 +69,8 @@ export interface CoordinationPublishInput {
 export interface CoordinationListSelectors {
   readonly after: number;
   readonly limit: number;
+  readonly owner_label?: string;
+  readonly status?: CoordinationStatus;
   readonly through?: number;
 }
 
@@ -57,14 +82,14 @@ export function parseCoordinationProposal(value: unknown): CoordinationProposalI
   const baseRevision = nonnegativeInteger(record.base_revision, "base_revision");
   const sourceMessageIds = parseSourceIds(record.source_message_ids);
   const kind = record.kind;
-  if (kind !== COORDINATION_KIND) throw invalid("The coordination proposal kind is not supported.");
-  const body = parseRequestBody(record.body);
+  if (kind !== COORDINATION_KIND && kind !== COORDINATION_PROGRESS_KIND) throw invalid("The coordination proposal kind is not supported.");
+  const body = kind === COORDINATION_KIND ? parseRequestBody(record.body) : parseProgressBody(record.body);
   return {
     actor_label: bounded(actorLabel, "actor_label", COORDINATION_MAX_LABEL_CHARS, COORDINATION_MAX_LABEL_BYTES),
     base_revision: baseRevision,
     body,
     client_retry_id: validateRequestId(clientRetryId),
-    kind: COORDINATION_KIND,
+    kind,
     source_message_ids: sourceMessageIds,
   };
 }
@@ -96,7 +121,11 @@ export function parseCoordinationListSelectors(url: URL): CoordinationListSelect
   const throughValue = url.searchParams.get("through");
   const through = throughValue === null ? undefined : parseCursor(throughValue, "through");
   if (through !== undefined && after > through) throw invalid("The after cursor must not be greater than through.");
-  return { after, limit, ...(through === undefined ? {} : { through }) };
+  const ownerValue = url.searchParams.get("owner_label") ?? url.searchParams.get("owner-label");
+  const ownerLabel = ownerValue === null ? undefined : bounded(ownerValue, "owner_label", COORDINATION_MAX_LABEL_CHARS, COORDINATION_MAX_LABEL_BYTES);
+  const statusValue = url.searchParams.get("status");
+  const status = statusValue === null ? undefined : parseStatus(statusValue);
+  return { after, limit, ...(ownerLabel === undefined ? {} : { owner_label: ownerLabel }), ...(status === undefined ? {} : { status }), ...(through === undefined ? {} : { through }) };
 }
 
 export function coordinationMutationFingerprint(input: unknown): string {
@@ -130,6 +159,56 @@ function parseRequestBody(value: unknown): CoordinationRequestBody {
   };
 }
 
+function parseProgressBody(value: unknown): CoordinationProgressBody {
+  const record = object(value, "The coordination progress body must be a JSON object.");
+  const allowed = new Set(["request_id", "status", "blockers", "evidence", "unverified_explanation", "reopen_reason"]);
+  for (const key of Object.keys(record)) if (!allowed.has(key)) throw invalid("The coordination progress body contains an unsupported field.");
+  const requestId = validateRequestId(requiredString(record.request_id, "request_id"));
+  const status = parseStatus(requiredString(record.status, "status"));
+  const blockers = stringArray(record.blockers, "blockers");
+  const evidence = parseEvidence(record.evidence);
+  const unverifiedExplanation = optionalBounded(record.unverified_explanation, "unverified_explanation", COORDINATION_MAX_FIELD_CHARS, COORDINATION_MAX_FIELD_BYTES);
+  const reopenReason = optionalBounded(record.reopen_reason, "reopen_reason", COORDINATION_MAX_FIELD_CHARS, COORDINATION_MAX_FIELD_BYTES);
+  if (status === "done" && evidence.length === 0 && unverifiedExplanation === undefined) {
+    throw invalid("A done progress report requires evidence or an explicit unverified explanation.");
+  }
+  return {
+    blockers,
+    evidence,
+    request_id: requestId,
+    status,
+    ...(reopenReason === undefined ? {} : { reopen_reason: reopenReason }),
+    ...(unverifiedExplanation === undefined ? {} : { unverified_explanation: unverifiedExplanation }),
+  };
+}
+
+function parseEvidence(value: unknown): CoordinationEvidence[] {
+  if (!Array.isArray(value) || value.length > COORDINATION_MAX_ARRAY_ITEMS) throw invalid("The evidence field must be a bounded array of objects.");
+  return value.map((item) => {
+    const record = object(item, "Each evidence item must be a JSON object.");
+    const allowed = new Set(["artifact_url", "location", "reported_verification", "remaining_blockers"]);
+    for (const key of Object.keys(record)) if (!allowed.has(key)) throw invalid("The evidence item contains an unsupported field.");
+    const artifactUrl = requiredString(record.artifact_url, "artifact_url");
+    let parsed: URL;
+    try { parsed = new URL(artifactUrl); } catch { throw invalid("The evidence artifact_url must be an absolute HTTP(S) URL."); }
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") throw invalid("The evidence artifact_url must be an absolute HTTP(S) URL.");
+    const location = optionalBounded(record.location, "location", COORDINATION_MAX_FIELD_CHARS, COORDINATION_MAX_FIELD_BYTES);
+    const reportedVerification = bounded(requiredString(record.reported_verification, "reported_verification"), "reported_verification", COORDINATION_MAX_FIELD_CHARS, COORDINATION_MAX_FIELD_BYTES);
+    const remainingBlockers = stringArray(record.remaining_blockers, "remaining_blockers");
+    return {
+      artifact_url: artifactUrl,
+      ...(location === undefined ? {} : { location }),
+      reported_verification: reportedVerification,
+      remaining_blockers: remainingBlockers,
+    };
+  });
+}
+
+function parseStatus(value: string): CoordinationStatus {
+  if (value !== "open" && value !== "in_progress" && value !== "blocked" && value !== "done" && value !== "withdrawn") throw invalid("The coordination status is not supported.");
+  return value;
+}
+
 function parseSourceIds(value: unknown): string[] {
   if (value === undefined) return [];
   if (!Array.isArray(value) || value.length > COORDINATION_MAX_SOURCE_IDS) throw invalid("source_message_ids must be a bounded array.");
@@ -161,6 +240,11 @@ function optionalString(value: unknown): string | undefined {
   if (value === undefined) return undefined;
   if (typeof value !== "string") throw invalid("Coordination text fields must be strings.");
   return value;
+}
+
+function optionalBounded(value: unknown, field: string, maxChars: number, maxBytes: number): string | undefined {
+  if (value === undefined) return undefined;
+  return bounded(optionalString(value)!, field, maxChars, maxBytes);
 }
 
 function stringField(value: unknown, field: string): string {
