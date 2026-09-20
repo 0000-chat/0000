@@ -49,3 +49,34 @@ test("builds an agent representation with separated untrusted messages", () => {
 test("preserves the consent marker on the wait command", () => {
   expect(buildAgentRepresentation(room).wait.requires_user_consent).toBe(true);
 });
+
+test("exposes recommendation and accepted decision summaries with exact detail links", () => {
+  const document = buildAgentRepresentation({
+    ...room,
+    coordination_overview: {
+      conversation_url: room.conversation_url,
+      coordination_cursor: 8,
+      decision_count: 2,
+      decision_summaries: [
+        { decision_id: "decision-recommended", detail_url: "/coordination/decisions/decision-recommended", latest_proposal_revision: 3, proposal_text: "Try the reviewed release.", published_revision: 4, required_approver_labels: ["alice"], state: "recommended", title: "Recommended release" },
+        { accepted_record_id: "accepted-1", decision_id: "decision-accepted", detail_url: "/coordination/decisions/decision-accepted", latest_proposal_revision: 1, proposal_text: "Ship the reviewed release.", published_revision: 8, required_approver_labels: ["alice", "bob"], state: "accepted", title: "Accepted release" },
+      ],
+      empty: false,
+      expires_at: room.expires_at,
+      latest_message: room.latest_message,
+      pending_proposal_count: 0,
+      pending_proposals: [],
+      protocol_version: 1,
+      published_request_count: 0,
+      published_requests: [],
+      proposals_url: `${room.conversation_url}/coordination/proposals`,
+      published_revision: 8,
+      requests_url: `${room.conversation_url}/coordination/requests`,
+    },
+  });
+  const text = renderAgentText(document);
+  expect(text).toContain("Recommended release · recommendation · proposal revision 3 · publication revision 4");
+  expect(text).toContain("Accepted release · owner-recorded accepted decision · proposal revision 1 · publication revision 8");
+  expect(text).toContain("/coordination/decisions/decision-accepted");
+  expect(document.coordination_overview?.decision_summaries).toHaveLength(2);
+});

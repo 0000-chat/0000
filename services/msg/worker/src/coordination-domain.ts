@@ -15,7 +15,9 @@ export const MAX_COORDINATION_PAGE_BYTES = 128 * 1024;
 export const COORDINATION_KIND = "request.create" as const;
 export const COORDINATION_PROGRESS_KIND = "request.progress" as const;
 export const COORDINATION_PANEL_KIND = "panel.replace" as const;
-export const COORDINATION_KINDS = [COORDINATION_KIND, COORDINATION_PROGRESS_KIND, COORDINATION_PANEL_KIND] as const;
+export const DECISION_PROPOSAL_KIND = "decision.proposal" as const;
+export const DECISION_POSITION_KIND = "decision.position" as const;
+export const COORDINATION_KINDS = [COORDINATION_KIND, COORDINATION_PROGRESS_KIND, COORDINATION_PANEL_KIND, DECISION_PROPOSAL_KIND, DECISION_POSITION_KIND] as const;
 
 export type CoordinationKind = (typeof COORDINATION_KINDS)[number];
 export type CoordinationStatus = "open" | "in_progress" | "blocked" | "done" | "withdrawn";
@@ -66,7 +68,20 @@ export interface CoordinationPanelBody {
   readonly purpose: string | null;
 }
 
-export type CoordinationProposalBody = CoordinationRequestBody | CoordinationProgressBody | CoordinationPanelBody;
+export interface DecisionProposalBody {
+  readonly proposal_text: string;
+  readonly required_approver_labels: readonly string[];
+  readonly title: string;
+}
+
+export interface DecisionPositionBody {
+  readonly decision_proposal_id: string;
+  readonly decision_revision: number;
+  readonly participant_label: string;
+  readonly statement: string;
+}
+
+export type CoordinationProposalBody = CoordinationRequestBody | CoordinationProgressBody | CoordinationPanelBody | DecisionProposalBody | DecisionPositionBody;
 
 export interface CoordinationProposalInput {
   readonly actor_label: string;
@@ -80,9 +95,23 @@ export interface CoordinationProposalInput {
 export interface CoordinationPublishInput {
   readonly base_revision: number;
   readonly client_retry_id: string;
+  readonly decision_publication?: CoordinationDecisionPublication;
   readonly owner_label: string;
   readonly proposal_id: string;
   readonly revision: number;
+}
+
+export type CoordinationDecisionPublication =
+  | { readonly mode: "recommendation" }
+  | {
+    readonly approvals: readonly CoordinationDecisionApproval[];
+    readonly mode: "acceptance";
+    readonly owner_attestation: true;
+  };
+
+export interface CoordinationDecisionApproval {
+  readonly participant_label: string;
+  readonly source_message_id: string;
 }
 
 export interface CoordinationListSelectors {
@@ -100,9 +129,17 @@ export function parseCoordinationProposal(value: unknown): CoordinationProposalI
   const actorLabel = requiredString(record.actor_label, "actor_label");
   const baseRevision = nonnegativeInteger(record.base_revision, "base_revision");
   const sourceMessageIds = parseSourceIds(record.source_message_ids);
-  const kind = record.kind;
-  if (kind !== COORDINATION_KIND && kind !== COORDINATION_PROGRESS_KIND && kind !== COORDINATION_PANEL_KIND) throw invalid("The coordination proposal kind is not supported.");
-  const body = kind === COORDINATION_KIND ? parseRequestBody(record.body) : kind === COORDINATION_PROGRESS_KIND ? parseProgressBody(record.body) : parsePanelBody(record.body);
+  const kind = record.kind as CoordinationKind;
+  if (!COORDINATION_KINDS.includes(kind)) throw invalid("The coordination proposal kind is not supported.");
+  const body = kind === COORDINATION_KIND
+    ? parseRequestBody(record.body)
+    : kind === COORDINATION_PROGRESS_KIND
+      ? parseProgressBody(record.body)
+      : kind === COORDINATION_PANEL_KIND
+        ? parsePanelBody(record.body)
+        : kind === DECISION_PROPOSAL_KIND
+          ? parseDecisionProposalBody(record.body)
+          : parseDecisionPositionBody(record.body);
   return {
     actor_label: bounded(actorLabel, "actor_label", COORDINATION_MAX_LABEL_CHARS, COORDINATION_MAX_LABEL_BYTES),
     base_revision: baseRevision,
@@ -119,15 +156,17 @@ export function parseCoordinationRevision(value: unknown): CoordinationProposalI
 
 export function parseCoordinationPublish(value: unknown): CoordinationPublishInput {
   const record = object(value, "The coordination publication must be a JSON object.");
-  allowlist(record, ["client_retry_id", "owner_label", "proposal_id", "revision", "base_revision"]);
+  allowlist(record, ["client_retry_id", "owner_label", "proposal_id", "revision", "base_revision", "decision_publication"]);
   const clientRetryId = requiredString(record.client_retry_id, "client_retry_id");
   const ownerLabel = requiredString(record.owner_label, "owner_label");
   const proposalId = stringField(record.proposal_id, "proposal_id");
   const revision = positiveInteger(record.revision, "revision");
   const baseRevision = nonnegativeInteger(record.base_revision, "base_revision");
+  const decisionPublication = record.decision_publication === undefined ? undefined : parseDecisionPublication(record.decision_publication);
   return {
     base_revision: baseRevision,
     client_retry_id: validateRequestId(clientRetryId),
+    ...(decisionPublication === undefined ? {} : { decision_publication: decisionPublication }),
     owner_label: bounded(ownerLabel, "owner_label", COORDINATION_MAX_LABEL_CHARS, COORDINATION_MAX_LABEL_BYTES),
     proposal_id: bounded(proposalId, "proposal_id", 128, 512),
     revision,
@@ -225,6 +264,62 @@ function parsePanelBody(value: unknown): CoordinationPanelBody {
     return { description, owner_label: ownerLabel };
   });
   return { artifacts, next_actions: nextActions, phase, purpose };
+}
+
+function parseDecisionProposalBody(value: unknown): DecisionProposalBody {
+  const record = object(value, "The decision proposal body must be a JSON object.");
+  allowlist(record, ["title", "proposal_text", "required_approver_labels"]);
+  const title = bounded(requiredString(record.title, "title"), "title", COORDINATION_MAX_FIELD_CHARS, COORDINATION_MAX_FIELD_BYTES);
+  const proposalText = bounded(requiredString(record.proposal_text, "proposal_text"), "proposal_text", COORDINATION_MAX_FIELD_CHARS, COORDINATION_MAX_FIELD_BYTES);
+  const labels = decisionLabels(record.required_approver_labels);
+  return { proposal_text: proposalText, required_approver_labels: labels, title };
+}
+
+function parseDecisionPositionBody(value: unknown): DecisionPositionBody {
+  const record = object(value, "The decision position body must be a JSON object.");
+  allowlist(record, ["decision_proposal_id", "decision_revision", "participant_label", "statement"]);
+  const decisionProposalId = bounded(stringField(record.decision_proposal_id, "decision_proposal_id"), "decision_proposal_id", 128, 512);
+  const decisionRevision = positiveInteger(record.decision_revision, "decision_revision");
+  const participantLabel = decisionLabel(record.participant_label, "participant_label");
+  const statement = bounded(requiredString(record.statement, "statement"), "statement", COORDINATION_MAX_FIELD_CHARS, COORDINATION_MAX_FIELD_BYTES);
+  return { decision_proposal_id: decisionProposalId, decision_revision: decisionRevision, participant_label: participantLabel, statement };
+}
+
+function parseDecisionPublication(value: unknown): CoordinationDecisionPublication {
+  const record = object(value, "The decision publication must be a JSON object.");
+  const mode = record.mode;
+  if (mode === "recommendation") {
+    allowlist(record, ["mode"]);
+    return { mode };
+  }
+  if (mode !== "acceptance") throw invalid("The decision publication mode is not supported.");
+  allowlist(record, ["mode", "owner_attestation", "approvals"]);
+  if (record.owner_attestation !== true) throw invalid("Decision acceptance requires a literal owner_attestation: true.");
+  if (!Array.isArray(record.approvals) || record.approvals.length > COORDINATION_MAX_ARRAY_ITEMS) throw invalid("Decision approvals must be a bounded array of objects.");
+  const approvals = record.approvals.map((item) => {
+    const approval = object(item, "Each decision approval must be a JSON object.");
+    allowlist(approval, ["participant_label", "source_message_id"]);
+    return {
+      participant_label: decisionLabel(approval.participant_label, "participant_label"),
+      source_message_id: bounded(stringField(approval.source_message_id, "source_message_id"), "source_message_id", COORDINATION_MAX_SOURCE_ID_CHARS, COORDINATION_MAX_SOURCE_ID_BYTES),
+    };
+  });
+  if (new Set(approvals.map((approval) => approval.participant_label)).size !== approvals.length) throw invalid("Decision approvals must not contain duplicate participant labels.");
+  if (new Set(approvals.map((approval) => approval.source_message_id)).size !== approvals.length) throw invalid("Decision approvals must not reuse a source message.");
+  return { approvals, mode, owner_attestation: true };
+}
+
+function decisionLabels(value: unknown): string[] {
+  if (!Array.isArray(value) || value.length === 0 || value.length > COORDINATION_MAX_ARRAY_ITEMS) throw invalid("required_approver_labels must be a bounded nonempty array.");
+  const labels = value.map((item) => decisionLabel(item, "required_approver_labels"));
+  if (new Set(labels).size !== labels.length) throw invalid("required_approver_labels must not contain duplicates.");
+  return labels;
+}
+
+function decisionLabel(value: unknown, field: string): string {
+  const label = bounded(stringField(value, field), field, COORDINATION_MAX_LABEL_CHARS, COORDINATION_MAX_LABEL_BYTES).trim();
+  if (label.length === 0) throw invalid(`The ${field} field must not be blank.`);
+  return label;
 }
 
 function parseEvidence(value: unknown): CoordinationEvidence[] {

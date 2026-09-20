@@ -14,9 +14,26 @@ test("parses bounded coordination reads and private publication commands", () =>
   expect(parseCoordinationCommand(["coordination", roomUrl, "proposals", "--after", "2", "--limit", "5", "--through", "7"])).toEqual({ after: 2, conversationUrl: roomUrl, limit: 5, operation: "proposals", through: 7 });
   expect(parseCoordinationCommand(["coordination", roomUrl, "requests", "--after", "2", "--limit", "5", "--owner-label", "owner-a", "--status", "blocked", "--through", "7"])).toEqual({ after: 2, conversationUrl: roomUrl, limit: 5, operation: "requests", ownerLabel: "owner-a", status: "blocked", through: 7 });
   expect(parseCoordinationCommand(["coordination", roomUrl, "proposal", "proposal-1", "--revision", "2"])).toEqual({ conversationUrl: roomUrl, id: "proposal-1", operation: "proposal", revision: 2 });
+  expect(parseCoordinationCommand(["coordination", roomUrl, "decisions", "--after", "2", "--limit", "5", "--through", "7"])).toEqual({ after: 2, conversationUrl: roomUrl, limit: 5, operation: "decisions", through: 7 });
+  expect(parseCoordinationCommand(["coordination", roomUrl, "decision", "decision-1", "--after", "2", "--limit", "5", "--through", "7"])).toEqual({ after: 2, conversationUrl: roomUrl, id: "decision-1", limit: 5, operation: "decision", through: 7 });
+  expect(parseCoordinationCommand(["coordination", roomUrl, "decision-record", "decision-1", "accepted-1"])).toEqual({ conversationUrl: roomUrl, decisionId: "decision-1", operation: "decision-record", recordId: "accepted-1" });
   expect(parseCoordinationCommand(["coordination", "publish", managementUrl])).toEqual({ managementUrl, operation: "publish" });
   expect(() => parseCoordinationCommand(["coordination", roomUrl, "proposals", "--limit", "101"])).toThrow("Usage: msg coordination");
   expect(() => parseCoordinationCommand(["coordination", roomUrl, "requests", "--status", "reported"])).toThrow("Usage: msg coordination");
+});
+
+test("reads decision history and immutable accepted records through public routes", async () => {
+  const calls: string[] = [];
+  const stdout: string[] = [];
+  const fetch = async (input: RequestInfo | URL) => { calls.push(String(input)); return Response.json({ decision: { state: "accepted" }, accepted_record: { accepted_record_id: "accepted-1" }, approvals: [], decisions: [], published_revision: 4, through: 7 }); };
+  expect(await runCli(["coordination", roomUrl, "decisions", "--after", "2", "--limit", "5", "--through", "7"], { fetch, stderr: () => undefined, stdout: (text: string) => stdout.push(text), websocket: () => { throw new Error("WebSocket must not connect."); } })).toBe(0);
+  expect(await runCli(["coordination", roomUrl, "decision", "decision-1", "--after", "2", "--limit", "5", "--through", "7"], { fetch, stderr: () => undefined, stdout: (text: string) => stdout.push(text), websocket: () => { throw new Error("WebSocket must not connect."); } })).toBe(0);
+  expect(await runCli(["coordination", roomUrl, "decision-record", "decision-1", "accepted-1"], { fetch, stderr: () => undefined, stdout: (text: string) => stdout.push(text), websocket: () => { throw new Error("WebSocket must not connect."); } })).toBe(0);
+  expect(calls).toEqual([
+    `${roomUrl}/coordination/decisions?after=2&limit=5&through=7`,
+    `${roomUrl}/coordination/decisions/decision-1?after=2&limit=5&through=7`,
+    `${roomUrl}/coordination/decisions/decision-1/records/accepted-1`,
+  ]);
 });
 
 test("reads panel and panel history through the public room paths", async () => {
@@ -112,4 +129,26 @@ test("accepts a panel publication receipt without inventing a request ID", async
   });
   expect(result).toBe(0);
   expect(JSON.parse(stdout.join(""))).toMatchObject({ published_revision: 2, panel: { proposal_id: "panel-proposal" } });
+});
+
+test("validates decision proposal and publication receipts without fake request or panel IDs", async () => {
+  const stdout: string[] = [];
+  const proposalResult = await runCli(["coordination", roomUrl, "propose"], {
+    fetch: async () => Response.json({ replayed: false, proposal: { kind: "decision.proposal", proposal_id: "decision-1", request_id: null, revision: 1 } }),
+    readStdin: async () => JSON.stringify({ actor_label: "agent", base_revision: 0, body: { proposal_text: "Ship", required_approver_labels: ["alice"], title: "Ship" }, client_retry_id: "decision-1", kind: "decision.proposal", source_message_ids: ["source-1"] }),
+    stderr: () => undefined,
+    stdout: (text: string) => stdout.push(text),
+    websocket: () => { throw new Error("WebSocket must not connect."); },
+  });
+  const publishResult = await runCli(["coordination", "publish", managementUrl], {
+    fetch: async () => Response.json({ accepted_record: { accepted_record_id: "accepted-1" }, decision: { decision_id: "decision-1", state: "accepted" }, published_revision: 2, proposal: { proposal_id: "decision-1", revision: 1 }, replayed: false }),
+    readStdin: async () => JSON.stringify({ base_revision: 0, client_retry_id: "decision-publish", decision_publication: { approvals: [{ participant_label: "alice", source_message_id: "source-1" }], mode: "acceptance", owner_attestation: true }, owner_label: "owner", proposal_id: "decision-1", revision: 1 }),
+    stderr: () => undefined,
+    stdout: (text: string) => stdout.push(text),
+    websocket: () => { throw new Error("WebSocket must not connect."); },
+  });
+  expect(proposalResult).toBe(0);
+  expect(publishResult).toBe(0);
+  expect(JSON.parse(stdout[0] ?? "{}")).toMatchObject({ proposal: { kind: "decision.proposal", request_id: null } });
+  expect(JSON.parse(stdout[1] ?? "{}")).toMatchObject({ accepted_record: { accepted_record_id: "accepted-1" } });
 });

@@ -73,4 +73,35 @@ describe("agent browser pages", () => {
     expect(html).toContain("I'm human");
     expect(html).not.toContain("/_msg/asset/client.js");
   });
+
+  test("renders recommendation and accepted decision summaries as distinct unverified states", () => {
+    const html = renderAgentRoomPage({
+      ...room,
+      coordination_overview: {
+        conversation_url: room.conversation_url,
+        coordination_cursor: 8,
+        decision_count: 2,
+        decision_summaries: [
+          { decision_id: "decision-recommended", detail_url: "/coordination/decisions/decision-recommended", latest_proposal_revision: 3, proposal_text: "Try the reviewed release.", published_revision: 4, required_approver_labels: ["alice"], state: "recommended", title: "Recommended release" },
+          { accepted_record_id: "accepted-1", decision_id: "decision-accepted", detail_url: "/coordination/decisions/decision-accepted", latest_proposal_revision: 1, proposal_text: "Ship the reviewed release.", published_revision: 8, required_approver_labels: ["alice", "bob"], state: "accepted", title: "Accepted release" },
+        ],
+        empty: false,
+        expires_at: room.expires_at,
+        latest_message: room.latest_message,
+        pending_proposal_count: 0,
+        pending_proposals: [],
+        protocol_version: 1,
+        published_request_count: 0,
+        published_requests: [],
+        proposals_url: `${room.conversation_url}/coordination/proposals`,
+        published_revision: 8,
+        requests_url: `${room.conversation_url}/coordination/requests`,
+      },
+    }, new URL(room.conversation_url));
+    expect(html).toContain("Recommended release");
+    expect(html).toContain("recommendation");
+    expect(html).toContain("owner-recorded accepted decision");
+    expect(html).toContain("/coordination/decisions/decision-accepted");
+    expect(html).toContain("required labels");
+  });
 });

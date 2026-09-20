@@ -55,6 +55,11 @@ test("renders the pinned compact panel and labelled replacement form", () => {
   expect(html).toContain('id="coordination-panel-next-actions"');
   expect(html).toContain("panel.replace");
   expect(html).toContain("absolute HTTP(S) URL");
+  expect(html).toContain('id="coordination-decision-proposal-form"');
+  expect(html).toContain('id="coordination-position-form"');
+  expect(html).toContain('id="coordination-decision-approval-form"');
+  expect(html).toContain('id="coordination-decision-approval-message-form"');
+  expect(html).toContain("Record owner-attested acceptance");
 });
 
 test("executes the served panel flow with frozen retry, exact hydration, pinned previews, and publication", async () => {
@@ -555,5 +560,203 @@ test("keeps the same frozen proposal retry across network and malformed-receipt 
     (globalThis as unknown as { sessionStorage?: unknown }).sessionStorage = previous.sessionStorage;
     (globalThis as unknown as { __msgCoordinationHelpers?: unknown }).__msgCoordinationHelpers = previous.helpers;
     globalThis.fetch = previous.fetch;
+  }
+});
+
+test("executes the served labelled decision flow with frozen retries, positions, owner evidence, and explicit ordinary messaging", async () => {
+  const source = await browserAsset("client.js")?.text();
+  class Element {
+    value = "";
+    checked = false;
+    textContent: string | null = "";
+    disabled = false;
+    hidden = false;
+    className = "";
+    dataset: Record<string, string> = {};
+    href = "";
+    target = "";
+    rel = "";
+    type = "";
+    children: Element[] = [];
+    onclick: (() => void) | null = null;
+    listeners = new Map<string, (event: { preventDefault(): void }) => void>();
+    addEventListener(type: string, listener: (event: { preventDefault(): void }) => void) { this.listeners.set(type, listener); }
+    append(...nodes: Element[]) { this.children.push(...nodes); }
+    replaceChildren(...nodes: Element[]) { this.children = [...nodes]; }
+    querySelector<T extends Element>(): T | null { return null; }
+    querySelectorAll(): Element[] { return []; }
+    select() {}
+    showModal() {}
+    close() {}
+    async submit() { await this.listeners.get("submit")?.({ preventDefault() {} }); }
+  }
+  const names = [
+    "coordination-panel", "coordination-overview", "coordination-review", "coordination-status", "coordination-refresh", "coordination-filter-form", "coordination-filter-owner-label", "coordination-filter-status",
+    "coordination-owner-form", "coordination-owner-url", "coordination-owner-save", "coordination-owner",
+    "coordination-proposal-form", "coordination-progress-form", "coordination-proposal-submit", "coordination-progress-submit",
+    "coordination-decision-proposal-form", "coordination-decision-actor", "coordination-decision-title", "coordination-decision-text", "coordination-decision-required-labels", "coordination-decision-sources", "coordination-decision-proposal-submit", "coordination-decision-proposal-new",
+    "coordination-position-form", "coordination-position-reporter", "coordination-position-decision-id", "coordination-position-revision", "coordination-position-participant", "coordination-position-statement", "coordination-position-sources", "coordination-position-submit", "coordination-position-new",
+    "coordination-decision-approval-form", "coordination-decision-approval-owner-label", "coordination-decision-approval-attestation", "coordination-decision-approval-labels", "coordination-decision-approval-inspect", "coordination-decision-approval-evidence-review", "coordination-decision-approval-submit", "coordination-decision-approval-new",
+    "coordination-decision-approval-message-form", "coordination-decision-approval-message-author", "coordination-decision-approval-message-content", "coordination-decision-approval-message-submit", "coordination-decision-approval-message-new",
+  ];
+  const elements = new Map(names.map((name) => [name, new Element()]));
+  elements.get("coordination-decision-actor")!.value = "participant";
+  elements.get("coordination-decision-title")!.value = "Choose deployment target";
+  elements.get("coordination-decision-text")!.value = "Deploy the reviewed target after exact evidence is checked.";
+  elements.get("coordination-decision-required-labels")!.value = "alice\nbob";
+  elements.get("coordination-decision-sources")!.value = "proposal-source";
+  elements.get("coordination-position-reporter")!.value = "reporter";
+  elements.get("coordination-position-participant")!.value = "alice";
+  elements.get("coordination-position-statement")!.value = "Alice reports that the target is ready.";
+  elements.get("coordination-position-sources")!.value = "position-source";
+  elements.get("coordination-decision-approval-message-author")!.value = "owner";
+  elements.get("coordination-decision-approval-message-content")!.value = "Explicit approval note after review.";
+  const storage = memoryStorage({ "0000:coordination-management-url:v1:room-a": "https://msg.0000.chat/manage/room-a/owner-token" });
+  const proposal = { actor_label: "participant", base_revision: 0, body: { proposal_text: "Deploy the reviewed target after exact evidence is checked.", required_approver_labels: ["alice", "bob"], title: "Choose deployment target" }, kind: "decision.proposal", proposal_id: "decision-1", revision: 1, source_messages: [{ id: "proposal-source", author: "participant", display_name: "Participant", citation_url: "/messages/proposal-source" }], status: "pending" };
+  const publishedProposal = { ...proposal, status: "published" };
+  const calls: { url: string; body?: string; idempotencyKey?: string }[] = [];
+  let proposalAttempts = 0;
+  let publicationAttempts = 0;
+  let accepted = false;
+  let ordinaryMessages = 0;
+  let ordinaryAttempts = 0;
+  const overviewPayload = () => ({
+    accepted_decision_count: accepted ? 1 : 0,
+    coordination_cursor: accepted ? 4 : publicationAttempts > 0 ? 2 : 1,
+    decision_count: publicationAttempts > 0 ? 1 : 0,
+    decision_summaries: publicationAttempts > 0 ? [{ accepted_record_id: accepted ? "accepted-1" : undefined, decision_id: "decision-1", detail_url: "/room-a/coordination/decisions/decision-1", latest_proposal_revision: 1, proposal_text: proposal.body.proposal_text, published_revision: accepted ? 2 : 1, required_approver_labels: ["alice", "bob"], state: accepted ? "accepted" : "recommended", title: proposal.body.title }] : [],
+    decisions_url: "/room-a/coordination/decisions?limit=20",
+    empty: false,
+    pending_proposal_count: accepted ? 0 : 1,
+    pending_proposals: accepted ? [] : [{ proposal_id: "decision-1", revision: 1, kind: "decision.proposal", title: proposal.body.title, status: "pending", detail_url: "/room-a/coordination/proposals/decision-1" }],
+    published_request_count: 0,
+    published_requests: [],
+    published_revision: accepted ? 2 : publicationAttempts > 0 ? 1 : 0,
+    proposals_url: "/room-a/coordination/proposals",
+    request_status_counts: { open: 0, in_progress: 0, blocked: 0, done: 0, withdrawn: 0 },
+    requests_url: "/room-a/coordination/requests?limit=20",
+  });
+  const decisionDetail = () => ({
+    coordination_cursor: accepted ? 4 : 2,
+    decision: { accepted_record_id: accepted ? "accepted-1" : undefined, decision_id: "decision-1", detail_url: "/room-a/coordination/decisions/decision-1", latest_proposal_revision: 1, proposal_text: proposal.body.proposal_text, published_revision: accepted ? 2 : 1, required_approver_labels: ["alice", "bob"], state: accepted ? "accepted" : "recommended", title: proposal.body.title },
+    history: [{ body: proposal.body, kind: "decision.proposal", proposal: publishedProposal, proposal_id: "decision-1", proposal_revision: 1 }],
+    latest_message: 2,
+    positions: [{ decision_proposal_id: "decision-1", decision_revision: 1, participant_label: "alice", position_id: "position-1", source_messages: [{ id: "position-source", citation_url: "/messages/position-source" }], statement: "Alice reports that the target is ready." }],
+    published_revision: accepted ? 2 : 1,
+  });
+  class TestSocket {
+    static readonly instances: TestSocket[] = [];
+    readyState = 1;
+    onclose: (() => void) | null = null;
+    onerror: (() => void) | null = null;
+    onmessage: ((event: { data: string }) => void) | null = null;
+    onopen: (() => void) | null = null;
+    constructor(readonly url: unknown) { TestSocket.instances.push(this); }
+    close() { this.readyState = 3; this.onclose = null; this.onerror = null; this.onopen = null; }
+  }
+  const documentObject = {
+    body: { dataset: { room: "room-a" } },
+    documentElement: { dataset: {} as Record<string, string> },
+    createElement: () => new Element(),
+    querySelector<T extends Element>(selector: string) { return elements.get(selector.slice(1)) as T | undefined ?? null; },
+    querySelectorAll: () => [] as Element[],
+  };
+  const globals = globalThis as unknown as Record<string, unknown>;
+  const saved = Object.fromEntries(["WebSocket", "addEventListener", "document", "fetch", "location", "localStorage", "matchMedia", "navigator", "sessionStorage"].map((key) => [key, globals[key]]));
+  const tick = async () => { await new Promise((resolve) => setTimeout(resolve, 0)); await new Promise((resolve) => setTimeout(resolve, 0)); };
+  globals.document = documentObject;
+  globals.location = { origin: "https://msg.0000.chat", pathname: "/room-a", href: "https://msg.0000.chat/room-a", protocol: "https:" };
+  globals.navigator = { onLine: true };
+  globals.matchMedia = () => ({ matches: false, addEventListener() {} });
+  globals.localStorage = { getItem: () => null, setItem: () => {} };
+  globals.sessionStorage = storage;
+  globals.addEventListener = () => {};
+  globals.WebSocket = TestSocket;
+  globals.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input), body = typeof init?.body === "string" ? init.body : undefined;
+    calls.push({ url, body, idempotencyKey: new Headers(init?.headers).get("idempotency-key") ?? undefined });
+    if (url.endsWith("/coordination")) return new Response(JSON.stringify(overviewPayload()), { status: 200 });
+    if (url.includes("/coordination/proposals/decision-1/revisions/1")) return new Response(JSON.stringify({ proposal }), { status: 200 });
+    if (url.includes("/coordination/decisions/decision-1/records/accepted-1")) return new Response(JSON.stringify({ accepted_record: { accepted_record_id: "accepted-1", decision_revision: 1, owner_attestation: true, owner_label: "owner" }, approvals: [{ accepted_record_id: "accepted-1", approval_record_id: "approval-alice", citation_url: "/messages/alice-source", participant_label: "alice", source_author: "alice", source_message_id: "alice-source" }, { accepted_record_id: "accepted-1", approval_record_id: "approval-bob", citation_url: "/messages/bob-source", participant_label: "bob", source_author: "bob", source_message_id: "bob-source" }] }), { status: 200 });
+    if (url.includes("/coordination/decisions/decision-1?")) return new Response(JSON.stringify(decisionDetail()), { status: 200 });
+    if (url.endsWith("/coordination/proposals")) {
+      const parsed = JSON.parse(body ?? "{}");
+      if (parsed.kind === "decision.proposal") {
+        proposalAttempts += 1;
+        if (proposalAttempts === 1) throw new Error("decision proposal network interrupted");
+        return new Response(JSON.stringify({ proposal: { proposal_id: "decision-1", revision: 1 } }), { status: 201 });
+      }
+      if (parsed.kind === "decision.position") return new Response(JSON.stringify({ position: { position_id: "position-1" }, proposal: { proposal_id: "position-1", revision: 1 } }), { status: 201 });
+    }
+    if (url.includes("/manage/room-a/owner-token/coordination/publish")) {
+      const parsed = JSON.parse(body ?? "{}");
+      if (parsed.operation !== undefined) return new Response(JSON.stringify({ error: { message: "unknown operation field" } }), { status: 400 });
+      publicationAttempts += 1;
+      if (parsed.decision_publication?.mode === "acceptance") { accepted = true; return new Response(JSON.stringify({ accepted_record: { accepted_record_id: "accepted-1" }, decision: { decision_id: "decision-1", state: "accepted" }, proposal: publishedProposal }), { status: 201 }); }
+      return new Response(JSON.stringify({ decision: { decision_id: "decision-1", state: "recommended" }, proposal: publishedProposal }), { status: 201 });
+    }
+    if (url.includes("/room-a/messages/")) return new Response(JSON.stringify({ message: { author: url.includes("alice-source") ? "alice" : "bob", content: url.includes("alice-source") ? "Alice exact approval text." : "Bob exact approval text.", display_name: url.includes("alice-source") ? "Alice" : "Bob", id: url.split("/").at(-1), sequence: 3 } }), { status: 200 });
+    if (url === "/room-a" && init?.method === "POST") { ordinaryAttempts += 1; if (ordinaryAttempts === 1) throw new Error("ordinary approval response lost"); if (ordinaryAttempts === 3) return new Response(JSON.stringify({ error: { message: "ordinary message rejected" } }), { status: 400 }); ordinaryMessages += 1; return new Response(JSON.stringify({ message: { id: `ordinary-approval-message-${ordinaryMessages}` } }), { status: 201 }); }
+    if (url === "/room-a") return new Response(JSON.stringify({ latest_message: 0, messages: [], expires_at: null }), { status: 200 });
+    return new Response(JSON.stringify({ latest_message: 0, messages: [], expires_at: null }), { status: 200 });
+  };
+  try {
+    new Function(source ?? "")();
+    await tick();
+    await elements.get("coordination-decision-proposal-form")!.submit();
+    await tick();
+    const firstProposalPayload = JSON.parse(calls.filter(({ url, body }) => url.endsWith("/coordination/proposals") && JSON.parse(body ?? "{}").kind === "decision.proposal").at(-1)?.body ?? "{}");
+    expect(elements.get("coordination-status")!.textContent).toContain("network interrupted");
+    await elements.get("coordination-decision-proposal-form")!.submit();
+    await tick();
+    const decisionProposalCalls = calls.filter(({ url, body }) => url.endsWith("/coordination/proposals") && JSON.parse(body ?? "{}").kind === "decision.proposal");
+    expect(decisionProposalCalls).toHaveLength(2);
+    expect(JSON.parse(decisionProposalCalls[1]!.body ?? "{}")).toEqual(firstProposalPayload);
+    const reviewButton = elements.get("coordination-overview")!.children.flatMap((child) => child.children).find((child) => child.textContent === "Review exact revision");
+    reviewButton?.onclick?.();
+    await tick();
+    elements.get("coordination-review")!.children.find((child) => child.textContent === "Publish labelled recommendation")?.onclick?.();
+    await tick(); await tick();
+    expect(calls.some(({ url, body }) => url.includes("/coordination/publish") && JSON.parse(body ?? "{}").decision_publication?.mode === "recommendation")).toBe(true);
+    elements.get("coordination-position-decision-id")!.value = "decision-1";
+    elements.get("coordination-position-revision")!.value = "1";
+    await elements.get("coordination-position-form")!.submit();
+    await tick();
+    expect(calls.some(({ url, body }) => url.endsWith("/coordination/proposals") && JSON.parse(body ?? "{}").kind === "decision.position")).toBe(true);
+    elements.get("coordination-decision-approval-owner-label")!.value = "owner";
+    elements.get("coordination-decision-approval-attestation")!.checked = true;
+    elements.get("coordination-decision-approval-labels")!.value = "alice | alice-source\nbob | bob-source";
+    elements.get("coordination-decision-approval-inspect")!.listeners.get("click")?.({ preventDefault() {} });
+    await tick();
+    expect(elements.get("coordination-decision-approval-evidence-review")!.children.some((child) => child.textContent?.includes("Alice exact approval text."))).toBe(true);
+    await elements.get("coordination-decision-approval-form")!.submit();
+    await tick(); await tick();
+    const acceptance = calls.find(({ url, body }) => url.includes("/coordination/publish") && JSON.parse(body ?? "{}").decision_publication?.mode === "acceptance");
+    expect(acceptance?.body && JSON.parse(acceptance.body)).toMatchObject({ decision_publication: { mode: "acceptance", owner_attestation: true, approvals: [{ participant_label: "alice", source_message_id: "alice-source" }, { participant_label: "bob", source_message_id: "bob-source" }] }, owner_label: "owner", proposal_id: "decision-1", revision: 1 });
+    expect(acceptance?.body && JSON.parse(acceptance.body)).not.toHaveProperty("operation");
+    expect(ordinaryMessages).toBe(0);
+    await elements.get("coordination-decision-approval-message-form")!.submit();
+    await tick();
+    await elements.get("coordination-decision-approval-message-form")!.submit();
+    await tick();
+    expect(ordinaryMessages).toBe(1);
+    const ordinaryAttemptsForMessage = calls.filter(({ url }) => url === "/room-a");
+    expect(ordinaryAttemptsForMessage).toHaveLength(3);
+    expect(ordinaryAttemptsForMessage[1]?.body).toBe(ordinaryAttemptsForMessage[2]?.body);
+    expect(ordinaryAttemptsForMessage[1]?.idempotencyKey).toBe(ordinaryAttemptsForMessage[2]?.idempotencyKey);
+    expect(JSON.parse(ordinaryAttemptsForMessage[2]?.body ?? "{}")).toMatchObject({ author: "owner", content: "Explicit approval note after review.", semantic_type: "decision" });
+    elements.get("coordination-decision-approval-message-content")!.value = "Rejected then edited.";
+    await elements.get("coordination-decision-approval-message-form")!.submit();
+    await tick();
+    expect(elements.get("coordination-decision-approval-message-new")!.hidden).toBe(false);
+    elements.get("coordination-decision-approval-message-content")!.value = "Edited ordinary approval message.";
+    elements.get("coordination-decision-approval-message-new")!.listeners.get("click")?.({ preventDefault() {} });
+    await elements.get("coordination-decision-approval-message-form")!.submit();
+    await tick();
+    expect(ordinaryMessages).toBe(2);
+    expect(elements.get("coordination-review")!.children.some((child) => child.textContent?.includes("Immutable accepted record"))).toBe(true);
+  } finally {
+    for (const socket of TestSocket.instances) socket.close();
+    Object.assign(globals, saved);
   }
 });

@@ -1,4 +1,4 @@
-import type { CoordinationEvidence, CoordinationKind, CoordinationPanelBody as DomainCoordinationPanelBody, CoordinationProgressBody, CoordinationRequestBody as DomainCoordinationRequestBody, CoordinationStatus } from "./coordination-domain";
+import type { CoordinationDecisionApproval, CoordinationDecisionPublication, CoordinationEvidence, CoordinationKind, CoordinationPanelBody as DomainCoordinationPanelBody, CoordinationProgressBody, CoordinationRequestBody as DomainCoordinationRequestBody, DecisionPositionBody, DecisionProposalBody, CoordinationStatus } from "./coordination-domain";
 
 export const PROTOCOL_VERSION = 1 as const;
 
@@ -159,6 +159,9 @@ export interface RoomService {
   readCoordinationPanel?(input: CoordinationPanelDetailInput): Promise<CoordinationPanelResponse>;
   listCoordinationPanelHistory?(input: CoordinationPanelHistoryInput): Promise<CoordinationPanelHistoryResponse>;
   publishCoordinationRequest?(input: CoordinationPublishInput): Promise<CoordinationPublishResponse>;
+  listCoordinationDecisions?(input: CoordinationDecisionListInput): Promise<CoordinationDecisionListResponse>;
+  readCoordinationDecision?(input: CoordinationDecisionDetailInput): Promise<CoordinationDecisionResponse>;
+  readCoordinationAcceptedRecord?(input: CoordinationAcceptedRecordInput): Promise<CoordinationAcceptedRecordResponse>;
 }
 
 export interface ReadRoomInput {
@@ -221,6 +224,9 @@ export interface ReadMessageResponse {
 
 export type CoordinationRequestBody = DomainCoordinationRequestBody;
 export type CoordinationPanelBody = DomainCoordinationPanelBody;
+export type CoordinationDecisionProposalBody = DecisionProposalBody;
+export type CoordinationDecisionPositionBody = DecisionPositionBody;
+export type CoordinationDecisionPublicationInput = CoordinationDecisionPublication;
 export type CoordinationEvidenceItem = CoordinationEvidence & { readonly reported_by: string };
 export type CoordinationProgress = Omit<CoordinationProgressBody, "evidence"> & {
   readonly authority_class: "management";
@@ -246,7 +252,7 @@ export interface CoordinationProposal {
   readonly actor_label: string;
   readonly authority_class: "management" | "participant";
   readonly base_revision: number;
-  readonly body: CoordinationRequestBody | CoordinationProgressBody | CoordinationPanelBody;
+  readonly body: CoordinationRequestBody | CoordinationProgressBody | CoordinationPanelBody | DecisionProposalBody | DecisionPositionBody;
   readonly created_at: string;
   readonly detail_url: string;
   readonly kind: CoordinationKind;
@@ -315,7 +321,11 @@ export interface CoordinationOverviewResponse {
   readonly pending_panel_proposal_count?: number;
   readonly pending_request_proposal_count?: number;
   readonly request_status_counts?: Readonly<Record<CoordinationStatus, number>>;
-  readonly decision_summaries?: readonly never[];
+  readonly decision_count?: number;
+  readonly accepted_decision_count?: number;
+  readonly recommended_decision_count?: number;
+  readonly decision_summaries?: readonly CoordinationDecisionSummary[];
+  readonly decisions_url?: string;
   readonly correction_summaries?: readonly never[];
   readonly panel_url?: string;
   readonly panel_history_url?: string;
@@ -434,6 +444,143 @@ export interface CoordinationProposalInput {
   readonly room: string;
 }
 
+export interface CoordinationDecisionSummary {
+  readonly accepted_record_id?: string;
+  readonly decision_id: string;
+  readonly detail_url: string;
+  readonly latest_proposal_revision: number;
+  readonly proposal_text: string;
+  readonly published_revision: number;
+  readonly required_approver_labels: readonly string[];
+  readonly state: "recommended" | "accepted";
+  readonly title: string;
+}
+
+export interface CoordinationDecisionApprovalEvidence extends CoordinationDecisionApproval {
+  readonly accepted_record_id: string;
+  readonly approval_record_id: string;
+  readonly citation_url: string;
+  readonly decision_id: string;
+  readonly decision_revision: number;
+  readonly source_author: string;
+  readonly source_created_at: string;
+  readonly source_display_name: string;
+  readonly source_sequence: number;
+}
+
+export interface CoordinationAcceptedRecord {
+  readonly accepted_record_id: string;
+  readonly decision_id: string;
+  readonly decision_revision: number;
+  readonly owner_attestation: true;
+  readonly owner_label: string;
+  readonly publication_cursor: number;
+  readonly publication_revision: number;
+  readonly published_at: string;
+  readonly proposal_snapshot: DecisionProposalBody;
+  readonly required_approver_labels: readonly string[];
+}
+
+export interface CoordinationDecisionPosition {
+  readonly decision_proposal_id: string;
+  readonly decision_revision: number;
+  readonly participant_label: string;
+  readonly position_id: string;
+  readonly published_at: string;
+  readonly published_revision: number;
+  readonly reporter_label: string;
+  readonly source_message_ids: readonly string[];
+  readonly source_messages: readonly CoordinationSourceMessage[];
+  readonly statement: string;
+}
+
+export interface CoordinationDecision {
+  readonly accepted_record_id?: string;
+  readonly decision_id: string;
+  readonly detail_url: string;
+  readonly latest_proposal_revision: number;
+  readonly positions?: readonly CoordinationDecisionPosition[];
+  readonly proposal_text: string;
+  readonly published_revision: number;
+  readonly required_approver_labels: readonly string[];
+  readonly state: "recommended" | "accepted";
+  readonly title: string;
+}
+
+export interface CoordinationDecisionListInput {
+  readonly after?: number;
+  readonly limit?: number;
+  readonly room: string;
+  readonly through?: number;
+}
+
+export interface CoordinationDecisionDetailInput extends CoordinationDecisionListInput {
+  readonly decisionId: string;
+}
+
+export interface CoordinationAcceptedRecordInput {
+  readonly acceptedRecordId: string;
+  readonly decisionId: string;
+  readonly room: string;
+}
+
+export interface CoordinationDecisionListResponse {
+  readonly coordination_cursor: number;
+  readonly decisions: readonly CoordinationDecision[];
+  readonly expires_at: string;
+  readonly has_more: boolean;
+  readonly latest_message: number;
+  readonly next_after: number;
+  readonly protocol_version: typeof PROTOCOL_VERSION;
+  readonly published_revision: number;
+  readonly through: number;
+}
+
+export interface CoordinationDecisionResponse {
+  readonly coordination_cursor: number;
+  readonly decision: CoordinationDecision;
+  readonly expires_at: string;
+  readonly history: readonly CoordinationDecisionHistoryEntry[];
+  readonly history_has_more?: boolean;
+  readonly history_next_after?: number;
+  readonly history_through?: number;
+  readonly latest_message: number;
+  readonly positions: readonly CoordinationDecisionPosition[];
+  readonly positions_has_more?: boolean;
+  readonly positions_next_after?: number;
+  readonly positions_through?: number;
+  readonly protocol_version: typeof PROTOCOL_VERSION;
+  readonly published_revision: number;
+}
+
+export interface CoordinationDecisionHistoryEntry {
+  readonly actor_label: string;
+  readonly authority_class: "management" | "participant";
+  readonly body: CoordinationProposal["body"] | DecisionPositionBody;
+  readonly cursor: number;
+  readonly event_id: string;
+  readonly kind: CoordinationKind;
+  readonly operation: string;
+  readonly position?: CoordinationDecisionPosition;
+  readonly proposal?: CoordinationProposal;
+  readonly proposal_id: string | null;
+  readonly proposal_revision: number | null;
+  readonly published_revision: number | null;
+  readonly source_message_ids: readonly string[];
+}
+
+
+export interface CoordinationAcceptedRecordResponse {
+  readonly accepted_record: CoordinationAcceptedRecord;
+  readonly approvals: readonly CoordinationDecisionApprovalEvidence[];
+  readonly coordination_cursor: number;
+  readonly decision_url: string;
+  readonly expires_at: string;
+  readonly latest_message: number;
+  readonly protocol_version: typeof PROTOCOL_VERSION;
+  readonly published_revision: number;
+}
+
 export interface CoordinationListInput {
   readonly after?: number;
   readonly limit?: number;
@@ -491,6 +638,10 @@ export interface CoordinationPublishResponse {
   readonly proposal: CoordinationProposal;
   readonly request?: CoordinationRequest;
   readonly panel_published_revision?: number;
+  readonly decision?: CoordinationDecision;
+  readonly position?: CoordinationDecisionPosition;
+  readonly accepted_record?: CoordinationAcceptedRecord;
+  readonly approvals?: readonly CoordinationDecisionApprovalEvidence[];
 }
 
 export interface PostMessageInput {

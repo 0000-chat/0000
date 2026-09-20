@@ -425,6 +425,38 @@ async function route(request: Request, service: RoomService, options: MsgWorkerO
     response.headers.set("retry-after", "5");
     return response;
   }
+  const coordinationDecisionCollection = /^\/([^/]+)\/coordination\/decisions$/u.exec(url.pathname);
+  if (coordinationDecisionCollection && request.method === "GET") {
+    if (!service.listCoordinationDecisions) return notFound();
+    await enforceRateLimit(request, options.rateLimits?.reads);
+    const selectors = parseCoordinationListSelectors(url);
+    const result = await service.listCoordinationDecisions({ room: coordinationDecisionCollection[1]!, after: selectors.after, limit: selectors.limit, ...(selectors.through === undefined ? {} : { through: selectors.through }) });
+    const etag = coordinationDecisionListEtag(result, selectors);
+    if (request.headers.get("if-none-match") === etag) return new Response(null, { headers: { etag, "retry-after": "5" }, status: 304 });
+    const response = jsonResponse(result);
+    response.headers.set("etag", etag);
+    response.headers.set("retry-after", "5");
+    return response;
+  }
+  const coordinationAcceptedRecordMatch = /^\/([^/]+)\/coordination\/decisions\/([^/]+)\/records\/([^/]+)$/u.exec(url.pathname);
+  if (coordinationAcceptedRecordMatch && request.method === "GET") {
+    if (!service.readCoordinationAcceptedRecord) return notFound();
+    await enforceRateLimit(request, options.rateLimits?.reads);
+    return jsonResponse(await service.readCoordinationAcceptedRecord({ acceptedRecordId: decodePathSegment(coordinationAcceptedRecordMatch[3]!), decisionId: decodePathSegment(coordinationAcceptedRecordMatch[2]!), room: coordinationAcceptedRecordMatch[1]! }));
+  }
+  const coordinationDecisionDetail = /^\/([^/]+)\/coordination\/decisions\/([^/]+)$/u.exec(url.pathname);
+  if (coordinationDecisionDetail && request.method === "GET") {
+    if (!service.readCoordinationDecision) return notFound();
+    await enforceRateLimit(request, options.rateLimits?.reads);
+    const selectors = parseCoordinationListSelectors(url);
+    const result = await service.readCoordinationDecision({ decisionId: decodePathSegment(coordinationDecisionDetail[2]!), room: coordinationDecisionDetail[1]!, after: selectors.after, limit: selectors.limit, ...(selectors.through === undefined ? {} : { through: selectors.through }) });
+    const etag = coordinationDecisionDetailEtag(result, selectors);
+    if (request.headers.get("if-none-match") === etag) return new Response(null, { headers: { etag, "retry-after": "5" }, status: 304 });
+    const response = jsonResponse(result);
+    response.headers.set("etag", etag);
+    response.headers.set("retry-after", "5");
+    return response;
+  }
   const coordinationProposalCollection = /^\/([^/]+)\/coordination\/proposals$/u.exec(url.pathname);
   if (coordinationProposalCollection && request.method === "GET") {
     if (!service.listCoordinationProposals) return notFound();
@@ -713,6 +745,17 @@ function parseReadSelectors(url: URL): ReadSelectors {
 function coordinationListEtag(kind: "requests", result: unknown, selectors: { readonly after: number; readonly limit: number; readonly owner_label?: string; readonly status?: string; readonly through?: number }): string {
   const value = result && typeof result === "object" && !Array.isArray(result) ? result as { coordination_cursor?: unknown; expires_at?: unknown; published_revision?: unknown; through?: unknown } : {};
   return `W/"coordination-${kind}-${String(value.coordination_cursor ?? "")}-${String(value.published_revision ?? "")}-after-${selectors.after}-limit-${selectors.limit}-through-${String(selectors.through ?? value.through ?? "")}-owner-${encodeURIComponent(selectors.owner_label ?? "")}-status-${selectors.status ?? ""}-expires-${String(value.expires_at ?? "")}"`;
+}
+
+function coordinationDecisionListEtag(result: unknown, selectors: { readonly after: number; readonly limit: number; readonly through?: number }): string {
+  const value = result && typeof result === "object" && !Array.isArray(result) ? result as { coordination_cursor?: unknown; expires_at?: unknown; published_revision?: unknown; through?: unknown } : {};
+  return `W/"coordination-decisions-${String(value.coordination_cursor ?? "")}-${String(value.published_revision ?? "")}-after-${selectors.after}-limit-${selectors.limit}-through-${String(selectors.through ?? value.through ?? "")}-expires-${String(value.expires_at ?? "")}"`;
+}
+
+function coordinationDecisionDetailEtag(result: unknown, selectors: { readonly after: number; readonly limit: number; readonly through?: number }): string {
+  const value = result && typeof result === "object" && !Array.isArray(result) ? result as { coordination_cursor?: unknown; expires_at?: unknown; published_revision?: unknown; history_through?: unknown; decision?: { decision_id?: unknown; latest_proposal_revision?: unknown; state?: unknown; accepted_record_id?: unknown } } : {};
+  const decision = value.decision ?? {};
+  return `W/"coordination-decision-${String(decision.decision_id ?? "")}-${String(decision.latest_proposal_revision ?? "")}-${String(decision.state ?? "")}-${String(decision.accepted_record_id ?? "")}-${String(value.coordination_cursor ?? "")}-${String(value.published_revision ?? "")}-after-${selectors.after}-limit-${selectors.limit}-through-${String(selectors.through ?? value.history_through ?? "")}-expires-${String(value.expires_at ?? "")}"`;
 }
 
 function parsePositiveCoordinationRevision(value: string): number {

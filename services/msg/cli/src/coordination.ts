@@ -1,6 +1,6 @@
 import { validateConversationUrl } from "./wait.js";
 
-const USAGE = "Usage: msg coordination <conversation-url> overview | panel [--revision N] | panel-history [--after N] [--limit N] [--through N] | proposals [--after N] [--limit N] [--through N] | proposal <proposal-id> [--revision N] | requests [--after N] [--limit N] [--through N] [--owner-label LABEL] [--status STATUS] | request <request-id> [--after N] [--limit N] [--through N] | propose | revise <proposal-id> | publish <management-coordination-url>";
+const USAGE = "Usage: msg coordination <conversation-url> overview | panel [--revision N] | panel-history [--after N] [--limit N] [--through N] | proposals [--after N] [--limit N] [--through N] | proposal <proposal-id> [--revision N] | requests [--after N] [--limit N] [--through N] [--owner-label LABEL] [--status STATUS] | request <request-id> [--after N] [--limit N] [--through N] | decisions [--after N] [--limit N] [--through N] | decision <decision-id> [--after N] [--limit N] [--through N] | decision-record <decision-id> <accepted-record-id> | propose | revise <proposal-id> | publish <management-coordination-url>";
 
 const COORDINATION_STATUSES = new Set(["open", "in_progress", "blocked", "done", "withdrawn"]);
 
@@ -10,6 +10,9 @@ export type CoordinationCommand =
   | { readonly after?: number; readonly conversationUrl: string; readonly limit?: number; readonly operation: "panel-history"; readonly through?: number }
   | { readonly after?: number; readonly conversationUrl: string; readonly limit?: number; readonly operation: "proposals" | "requests"; readonly ownerLabel?: string; readonly status?: string; readonly through?: number }
   | { readonly after?: number; readonly conversationUrl: string; readonly id: string; readonly limit?: number; readonly operation: "proposal" | "request"; readonly revision?: number; readonly through?: number }
+  | { readonly after?: number; readonly conversationUrl: string; readonly id: string; readonly limit?: number; readonly operation: "decision"; readonly through?: number }
+  | { readonly conversationUrl: string; readonly decisionId: string; readonly operation: "decision-record"; readonly recordId: string }
+  | { readonly after?: number; readonly conversationUrl: string; readonly limit?: number; readonly operation: "decisions"; readonly through?: number }
   | { readonly conversationUrl: string; readonly operation: "propose" }
   | { readonly conversationUrl: string; readonly operation: "revise"; readonly id: string }
   | { readonly managementUrl: string; readonly operation: "publish" };
@@ -55,7 +58,7 @@ export function parseCoordinationCommand(args: readonly string[]): CoordinationC
     }
     return { conversationUrl, operation, ...selectors };
   }
-  if (operation === "proposals" || operation === "requests") {
+  if (operation === "proposals" || operation === "requests" || operation === "decisions") {
     const selectors: { after?: number; limit?: number; ownerLabel?: string; status?: string; through?: number } = {};
     const seen = new Set<string>();
     for (let index = 3; index < args.length; index += 2) {
@@ -69,10 +72,11 @@ export function parseCoordinationCommand(args: readonly string[]): CoordinationC
       else if (flag === "--status") selectors.status = parseStatus(raw);
       else selectors.through = parseNonnegativeInteger(raw);
     }
-    if (operation === "proposals" && (selectors.ownerLabel !== undefined || selectors.status !== undefined)) throw new Error(USAGE);
+    if ((operation === "proposals" || operation === "decisions") && (selectors.ownerLabel !== undefined || selectors.status !== undefined)) throw new Error(USAGE);
     return { conversationUrl, operation, ...selectors };
   }
-  if (operation === "proposal" || operation === "request") {
+  if (operation === "decision-record" && args.length === 5 && args[3] && args[4]) return { conversationUrl, decisionId: args[3], operation, recordId: args[4] };
+  if (operation === "proposal" || operation === "request" || operation === "decision") {
     if (args.length < 4 || !args[3]) throw new Error(USAGE);
     let revision: number | undefined;
     const selectors: { after?: number; limit?: number; through?: number } = {};
@@ -119,11 +123,13 @@ function coordinationEndpoint(options: CoordinationOptions): URL {
   else if (options.operation === "proposal" || options.operation === "revise") url.pathname += `/coordination/proposals/${encodeURIComponent(options.id)}`;
   else if (options.operation === "requests") url.pathname += "/coordination/requests";
   else if (options.operation === "request") url.pathname += `/coordination/requests/${encodeURIComponent(options.id)}`;
+  else if (options.operation === "decisions") url.pathname += "/coordination/decisions";
+  else if (options.operation === "decision" || options.operation === "decision-record") url.pathname += `/coordination/decisions/${encodeURIComponent(options.operation === "decision" ? options.id : options.decisionId)}`;
   else throw new Error(USAGE);
   if (options.operation === "revise") url.pathname += "/revisions";
   if (options.operation === "proposal" && options.revision !== undefined) url.pathname += `/revisions/${options.revision}`;
   if (options.operation === "panel" && options.revision !== undefined) url.searchParams.set("revision", String(options.revision));
-  if (options.operation === "proposals" || options.operation === "requests" || options.operation === "panel-history") {
+  if (options.operation === "proposals" || options.operation === "requests" || options.operation === "decisions" || options.operation === "panel-history") {
     if (options.after !== undefined) url.searchParams.set("after", String(options.after));
     if (options.limit !== undefined) url.searchParams.set("limit", String(options.limit));
     if (options.operation === "requests" && options.ownerLabel !== undefined) url.searchParams.set("owner_label", options.ownerLabel);
@@ -135,6 +141,12 @@ function coordinationEndpoint(options: CoordinationOptions): URL {
     if (options.limit !== undefined) url.searchParams.set("limit", String(options.limit));
     if (options.through !== undefined) url.searchParams.set("through", String(options.through));
   }
+  if (options.operation === "decision") {
+    if (options.after !== undefined) url.searchParams.set("after", String(options.after));
+    if (options.limit !== undefined) url.searchParams.set("limit", String(options.limit));
+    if (options.through !== undefined) url.searchParams.set("through", String(options.through));
+  }
+  if (options.operation === "decision-record") url.pathname += `/records/${encodeURIComponent(options.recordId)}`;
   return url;
 }
 
@@ -232,13 +244,17 @@ function validateMutationReceipt(operation: "propose" | "revise" | "publish", va
     const proposal = value.proposal;
     const request = value.request;
     const panel = value.panel;
-    if (!isRecord(proposal) || !nonemptyString(proposal.proposal_id) || !positiveInteger(proposal.revision) || !positiveInteger(value.published_revision) || !((isRecord(request) && nonemptyString(request.request_id)) || (isRecord(panel) && nonemptyString(panel.proposal_id)))) {
+    const decision = value.decision;
+    const position = value.position;
+    const acceptedRecord = value.accepted_record;
+    const hasDecisionResult = isRecord(decision) && nonemptyString(decision.decision_id) && (isRecord(acceptedRecord) && nonemptyString(acceptedRecord.accepted_record_id) || isRecord(position) && nonemptyString(position.position_id) || typeof decision.state === "string");
+    if (!isRecord(proposal) || !nonemptyString(proposal.proposal_id) || !positiveInteger(proposal.revision) || !positiveInteger(value.published_revision) || !((isRecord(request) && nonemptyString(request.request_id)) || (isRecord(panel) && nonemptyString(panel.proposal_id)) || hasDecisionResult)) {
       throw new Error("The coordination publication response was incomplete.");
     }
     return value;
   }
   const proposal = value.proposal;
-  if (!isRecord(proposal) || !nonemptyString(proposal.proposal_id) || !nonemptyString(proposal.request_id) || !positiveInteger(proposal.revision)) {
+  if (!isRecord(proposal) || !nonemptyString(proposal.proposal_id) || !positiveInteger(proposal.revision) || !(nonemptyString(proposal.request_id) || typeof proposal.kind === "string" && proposal.kind.startsWith("decision."))) {
     throw new Error("The coordination proposal response was incomplete.");
   }
   return value;

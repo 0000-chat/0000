@@ -1,7 +1,7 @@
 import { ERROR_CODES, isStaleRevisionDetails, isStaleSequenceDetails, ProtocolError } from "./errors";
 import { parseCoordinationProposal, parseCoordinationPublish, parseCoordinationRevision } from "./coordination-domain";
 import { hashCapability, parseBasedOnSequence, parseMessageInput, randomCapability, validateIdempotencyKey, validateRequestId } from "./room-domain";
-import { buildShareMessage, foregroundWait, PROTOCOL_VERSION, stripLegacyAbsoluteExpiry, type CoordinationListInput, type CoordinationOverviewResponse, type CoordinationPanelDetailInput, type CoordinationPanelHistoryInput, type CoordinationPanelHistoryResponse, type CoordinationPanelResponse, type CoordinationProposalDetailInput, type CoordinationProposalInput, type CoordinationProposalResponse, type CoordinationProposalRevisionInput, type CoordinationProposalListResponse, type CoordinationPublishInput, type CoordinationPublishResponse, type CoordinationRequestDetailInput, type CoordinationRequestListResponse, type CoordinationRequestResponse, type CreateRoomInput, type CreateRoomResponse, type CreateWebhookInput, type CreateWebhookResponse, type EnrollPushInput, type ExportRoomInput, type GetPostMessageInput, type GetPostMessageResponse, type ListWebhooksInput, type ListWebhooksResponse, type LiveRoomInput, type ManageRoomInput, type ManageRoomResponse, type ManageWebhookInput, type ManageWebhookResponse, type PostMessageInput, type PostMessageResponse, type PushEnrollmentInput, type PushEnrollmentResponse, type ReadMessageInput, type ReadMessageResponse, type ReadRoomInput, type ReadRoomResponse, type RedeliverWebhookInput, type RedeliverWebhookResponse, type RemovePushEnrollmentResponse, type RemoveWebhookInput, type RemoveWebhookResponse, type RotateWebhookSecretResponse, type RoomService } from "./protocol";
+import { buildShareMessage, foregroundWait, PROTOCOL_VERSION, stripLegacyAbsoluteExpiry, type CoordinationAcceptedRecordInput, type CoordinationAcceptedRecordResponse, type CoordinationDecisionDetailInput, type CoordinationDecisionListInput, type CoordinationDecisionListResponse, type CoordinationDecisionResponse, type CoordinationListInput, type CoordinationOverviewResponse, type CoordinationPanelDetailInput, type CoordinationPanelHistoryInput, type CoordinationPanelHistoryResponse, type CoordinationPanelResponse, type CoordinationProposalDetailInput, type CoordinationProposalInput, type CoordinationProposalResponse, type CoordinationProposalRevisionInput, type CoordinationProposalListResponse, type CoordinationPublishInput, type CoordinationPublishResponse, type CoordinationRequestDetailInput, type CoordinationRequestListResponse, type CoordinationRequestResponse, type CreateRoomInput, type CreateRoomResponse, type CreateWebhookInput, type CreateWebhookResponse, type EnrollPushInput, type ExportRoomInput, type GetPostMessageInput, type GetPostMessageResponse, type ListWebhooksInput, type ListWebhooksResponse, type LiveRoomInput, type ManageRoomInput, type ManageRoomResponse, type ManageWebhookInput, type ManageWebhookResponse, type PostMessageInput, type PostMessageResponse, type PushEnrollmentInput, type PushEnrollmentResponse, type ReadMessageInput, type ReadMessageResponse, type ReadRoomInput, type ReadRoomResponse, type RedeliverWebhookInput, type RedeliverWebhookResponse, type RemovePushEnrollmentResponse, type RemoveWebhookInput, type RemoveWebhookResponse, type RotateWebhookSecretResponse, type RoomService } from "./protocol";
 
 export interface RoomStub { fetch(request: Request): Promise<Response>; }
 export interface RoomNamespace { getByName(name: string): RoomStub; }
@@ -175,6 +175,21 @@ export class DurableRoomService implements RoomService {
     return hydrateCoordination(value, this.origin, input.room) as CoordinationOverviewResponse;
   }
 
+  async listCoordinationDecisions(input: CoordinationDecisionListInput): Promise<CoordinationDecisionListResponse> {
+    const value = await responseJson(await this.room(input.room).fetch(new Request(coordinationListUrl("/coordination/decisions", input)))) as unknown as CoordinationDecisionListResponse;
+    return hydrateCoordination(value, this.origin, input.room) as CoordinationDecisionListResponse;
+  }
+
+  async readCoordinationDecision(input: CoordinationDecisionDetailInput): Promise<CoordinationDecisionResponse> {
+    const value = await responseJson(await this.room(input.room).fetch(new Request(coordinationListUrl(`/coordination/decisions/${encodeURIComponent(input.decisionId)}`, input)))) as unknown as CoordinationDecisionResponse;
+    return hydrateCoordination(value, this.origin, input.room) as CoordinationDecisionResponse;
+  }
+
+  async readCoordinationAcceptedRecord(input: CoordinationAcceptedRecordInput): Promise<CoordinationAcceptedRecordResponse> {
+    const value = await responseJson(await this.room(input.room).fetch(new Request(`https://room/coordination/decisions/${encodeURIComponent(input.decisionId)}/records/${encodeURIComponent(input.acceptedRecordId)}`))) as unknown as CoordinationAcceptedRecordResponse;
+    return hydrateCoordination(value, this.origin, input.room) as CoordinationAcceptedRecordResponse;
+  }
+
   async listCoordinationProposals(input: CoordinationListInput): Promise<CoordinationProposalListResponse> {
     const value = await responseJson(await this.room(input.room).fetch(new Request(coordinationListUrl("/coordination/proposals", input)))) as unknown as CoordinationProposalListResponse;
     return hydrateCoordination(value, this.origin, input.room) as CoordinationProposalListResponse;
@@ -278,16 +293,16 @@ function hydrateCoordination(value: unknown, origin: string, room: string): unkn
   const result = { ...(value as Record<string, unknown>) };
   const base = `${origin}/${encodeURIComponent(room)}`;
   if ("coordination_cursor" in result || "published_revision" in result) result.conversation_url = base;
-  for (const key of ["proposals_url", "requests_url", "panel_url", "panel_history_url"] as const) {
+  for (const key of ["proposals_url", "requests_url", "panel_url", "panel_history_url", "decisions_url", "decision_url"] as const) {
     if (typeof result[key] === "string" && result[key].startsWith("/")) result[key] = `${base}${result[key]}`;
   }
-  for (const key of ["proposal", "request", "panel", "coordination_overview"] as const) {
+  for (const key of ["proposal", "request", "panel", "decision", "accepted_record", "coordination_overview"] as const) {
     const item = result[key];
     if (item && typeof item === "object" && !Array.isArray(item)) result[key] = key === "coordination_overview"
       ? hydrateCoordination(item, origin, room)
       : hydrateCoordinationItem(item as Record<string, unknown>, base);
   }
-  for (const key of ["proposals", "pending_proposals", "requests", "published_requests", "revisions", "events"] as const) {
+  for (const key of ["proposals", "pending_proposals", "requests", "published_requests", "decisions", "decision_summaries", "positions", "approvals", "revisions", "events"] as const) {
     const items = result[key];
     if (Array.isArray(items)) result[key] = items.map((item) => item && typeof item === "object" && !Array.isArray(item) ? hydrateCoordinationItem(item as Record<string, unknown>, base) : item);
   }
@@ -304,6 +319,10 @@ function hydrateCoordinationItem(item: Record<string, unknown>, base: string): R
       if (typeof hydrated.citation_url === "string" && hydrated.citation_url.startsWith("/")) hydrated.citation_url = `${base}${hydrated.citation_url}`;
       return hydrated;
     });
+  }
+  if (typeof result.citation_url === "string" && result.citation_url.startsWith("/")) result.citation_url = `${base}${result.citation_url}`;
+  if (result.source_message && typeof result.source_message === "object" && !Array.isArray(result.source_message)) {
+    result.source_message = hydrateCoordinationItem(result.source_message as Record<string, unknown>, base);
   }
   return result;
 }

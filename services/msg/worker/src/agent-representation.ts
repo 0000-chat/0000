@@ -138,12 +138,22 @@ function renderCoordinationOverviewText(value: CoordinationOverviewResponse): st
         ...(panel.next_actions_truncated ? [`- ${panel.next_action_count! - panel.next_actions.length} more; inspect ${value.panel_url ?? "the panel detail"}.`] : []),
       ]),
     ];
+  const decisions = value.decision_summaries ?? [];
+  const decisionLines = decisions.length === 0
+    ? ["Decision summaries: none"]
+    : [
+      `Decision summaries (${value.decision_count ?? decisions.length} total; showing ${decisions.length}):`,
+      ...decisions.slice(0, 5).map((decision) => [
+        `- ${decision.title} · ${decision.state === "accepted" ? "owner-recorded accepted decision" : "recommendation"} · proposal revision ${decision.latest_proposal_revision} · publication revision ${decision.published_revision}`,
+        `  Required labels: ${decision.required_approver_labels.join(", ") || "none"}; inspect: ${decision.detail_url}`,
+      ].join("\n")),
+    ];
   return [
     `Coordination revision: ${value.published_revision}; event cursor: ${value.coordination_cursor}`,
     `Pending proposals: ${value.pending_proposal_count} (${value.pending_panel_proposal_count ?? 0} panel, ${value.pending_request_proposal_count ?? value.pending_proposal_count} request)`,
     `Published requests: ${value.published_request_count}; status counts open=${statusCounts.open ?? 0}, in_progress=${statusCounts.in_progress ?? 0}, blocked=${statusCounts.blocked ?? 0}, done=${statusCounts.done ?? 0}, withdrawn=${statusCounts.withdrawn ?? 0}`,
     ...panelLines,
-    "Decision summaries: none",
+    ...decisionLines,
     "Correction summaries: none",
     `Overview: ${value.conversation_url}${value.panel_url ? ` · panel detail: ${value.panel_url}` : ""}${value.panel_history_url ? ` · panel history: ${value.panel_history_url}` : ""}`,
   ].join("\n");

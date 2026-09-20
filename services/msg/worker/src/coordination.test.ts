@@ -31,18 +31,24 @@ class Context {
   waitUntil() {}
 }
 
-async function room() {
+async function room(environment: Record<string, string> = {}) {
   const { ConversationRoom } = await import("./conversation-room");
   const database = new Database(":memory:");
   let now = 10_000;
   const context = new Context(database);
-  return { context, database, room: new ConversationRoom(context as never, { MSG_TEST_MODE: "1", MSG_TEST_ROOM_LIMITS: "{}" }, () => now), setNow: (value: number) => { now = value; } };
+  return { context, database, room: new ConversationRoom(context as never, { MSG_TEST_MODE: "1", MSG_TEST_ROOM_LIMITS: "{}", ...environment }, () => now), setNow: (value: number) => { now = value; } };
 }
 
 function json(path: string, value: unknown, method = "POST"): Request {
   const init: RequestInit = { method, headers: { "content-type": "application/json" } };
   if (method !== "GET" && method !== "HEAD") init.body = JSON.stringify(value);
   return new Request(`https://room${path}`, init);
+}
+
+function workerJson(path: string, value: unknown, method = "POST"): Request {
+  const init: RequestInit = { method, headers: { accept: "application/json", "content-type": "application/json" } };
+  if (method !== "GET" && method !== "HEAD") init.body = JSON.stringify(value);
+  return new Request(`https://msg.0000.chat${path}`, init);
 }
 
 function proposal(retry: string, source: string, baseRevision = 0, title = "Collect evidence") {
@@ -93,6 +99,37 @@ function panelProposal(retry: string, source: string, baseRevision = 0, purpose:
     },
     client_retry_id: retry,
     kind: "panel.replace",
+    source_message_ids: [source],
+  };
+}
+
+function decisionProposal(retry: string, source: string, baseRevision = 0, title = "Choose a release") {
+  return {
+    actor_label: "decision-recommender",
+    base_revision: baseRevision,
+    body: {
+      proposal_text: "Ship the reviewed release after the evidence is checked.",
+      required_approver_labels: ["alice", "bob"],
+      title,
+    },
+    client_retry_id: retry,
+    kind: "decision.proposal",
+    source_message_ids: [source],
+  };
+}
+
+function decisionPosition(retry: string, decisionId: string, revision: number, source: string, participantLabel = "carol") {
+  return {
+    actor_label: "position-reporter",
+    base_revision: 0,
+    body: {
+      decision_proposal_id: decisionId,
+      decision_revision: revision,
+      participant_label: participantLabel,
+      statement: "I report this position for owner review; it is not an acceptance.",
+    },
+    client_retry_id: retry,
+    kind: "decision.position",
     source_message_ids: [source],
   };
 }
@@ -386,4 +423,282 @@ test("requires an explicit progress rebase after a competing report is published
   const rebasedValue = await rebased.json() as { proposal: { proposal_id: string; revision: number } };
   expect(rebased.status).toBe(201);
   expect((await durable.fetch(json("/coordination/publish?token=owner-token", { base_revision: 2, client_retry_id: "stale-progress-rebased-publish", owner_label: "owner", proposal_id: rebasedValue.proposal.proposal_id, revision: rebasedValue.proposal.revision }))).status).toBe(201);
+});
+
+test("publishes recommendation then exact-revision acceptance with distinct evidence and immutable record", async () => {
+  const { room: durable } = await room();
+  const initialized = await durable.fetch(json("/initialize", { management_hash: await hashCapability("owner-token"), initial: { content: "I approve the exact proposal revision.", author: "alice", display_name: "Alice", semantic_type: "message" } }));
+  const aliceMessageId = (await initialized.json() as { id: string }).id;
+  const bobResponse = await durable.fetch(json("/messages", { input: { content: "I approve this exact proposal revision too.", author: "bob", display_name: "Bob", semantic_type: "message" } }));
+  const bobMessageId = (await bobResponse.json() as { message: { id: string } }).message.id;
+  const decisionResponse = await durable.fetch(json("/coordination/proposals", decisionProposal("decision-proposal", aliceMessageId)));
+  const decision = await decisionResponse.json() as { proposal: { proposal_id: string; revision: number }; coordination_cursor: number };
+  expect(decisionResponse.status).toBe(201);
+  const recommendation = await durable.fetch(json("/coordination/publish?token=owner-token", {
+    base_revision: 0,
+    client_retry_id: "decision-recommendation",
+    decision_publication: { mode: "recommendation" },
+    owner_label: "room-owner",
+    proposal_id: decision.proposal.proposal_id,
+    revision: decision.proposal.revision,
+  }));
+  expect(recommendation.status).toBe(201);
+  expect(await recommendation.json()).toMatchObject({ decision: { state: "recommended", decision_id: decision.proposal.proposal_id }, proposal: { status: "published" } });
+
+  const unrelated = await durable.fetch(json("/coordination/proposals", proposal("unrelated-request", aliceMessageId, 1, "Unrelated request")));
+  const unrelatedValue = await unrelated.json() as { proposal: { proposal_id: string; revision: number } };
+  expect((await durable.fetch(json("/coordination/publish?token=owner-token", { base_revision: 1, client_retry_id: "unrelated-publish", owner_label: "room-owner", proposal_id: unrelatedValue.proposal.proposal_id, revision: 1 }))).status).toBe(201);
+  const before = await (await durable.fetch(new Request("https://room/read?after=0&limit=20"))).json() as { latest_message: number; coordination_cursor: number; published_revision: number };
+
+  const acceptanceInput = {
+    base_revision: 2,
+    client_retry_id: "decision-acceptance",
+    decision_publication: { approvals: [{ participant_label: "alice", source_message_id: aliceMessageId }, { participant_label: "bob", source_message_id: bobMessageId }], mode: "acceptance", owner_attestation: true },
+    owner_label: "room-owner",
+    proposal_id: decision.proposal.proposal_id,
+    revision: decision.proposal.revision,
+  };
+  const acceptance = await durable.fetch(json("/coordination/publish?token=owner-token", acceptanceInput));
+  expect(acceptance.status).toBe(201);
+  const accepted = await acceptance.json() as { accepted_record: { accepted_record_id: string; owner_attestation: true; decision_revision: number }; approvals: readonly { participant_label: string; source_message_id: string; source_message?: { content: string } }[]; decision: { state: string }; published_revision: number };
+  expect(accepted).toMatchObject({ decision: { state: "accepted" }, accepted_record: { decision_revision: 1, owner_attestation: true }, approvals: [{ participant_label: "alice" }, { participant_label: "bob" }] });
+  expect(accepted.approvals[0]?.source_message).toBeUndefined();
+  const after = await (await durable.fetch(new Request("https://room/read?after=0&limit=20"))).json() as typeof before;
+  expect(after.latest_message).toBe(before.latest_message);
+  expect(after.published_revision).toBe(before.published_revision + 1);
+  expect(after.coordination_cursor).toBeGreaterThan(before.coordination_cursor);
+
+  const record = await durable.fetch(new Request(`https://room/coordination/decisions/${decision.proposal.proposal_id}/records/${accepted.accepted_record.accepted_record_id}`));
+  expect(record.status).toBe(200);
+  expect(await record.json()).toMatchObject({ accepted_record: { accepted_record_id: accepted.accepted_record.accepted_record_id }, approvals: [{ approval_record_id: expect.any(String), accepted_record_id: accepted.accepted_record.accepted_record_id, decision_id: decision.proposal.proposal_id, decision_revision: 1, source_message_id: aliceMessageId, source_author: "alice", citation_url: `/messages/${aliceMessageId}` }, { approval_record_id: expect.any(String), accepted_record_id: accepted.accepted_record.accepted_record_id, decision_id: decision.proposal.proposal_id, decision_revision: 1, source_message_id: bobMessageId, source_author: "bob", citation_url: `/messages/${bobMessageId}` }] });
+  expect((await (await durable.fetch(new Request(`https://room/messages/${aliceMessageId}`))).json()) as { message: { content: string } }).toMatchObject({ message: { content: "I approve the exact proposal revision." } });
+  expect((await (await durable.fetch(new Request(`https://room/messages/${bobMessageId}`))).json()) as { message: { content: string } }).toMatchObject({ message: { content: "I approve this exact proposal revision too." } });
+  const currentList = await durable.fetch(new Request("https://room/coordination/decisions?limit=20"));
+  expect(await currentList.json()).toMatchObject({ decisions: [{ decision_id: decision.proposal.proposal_id, state: "accepted" }] });
+  const frozenList = await durable.fetch(new Request("https://room/coordination/decisions?limit=20&through=2"));
+  expect(await frozenList.json()).toMatchObject({ through: 2, decisions: [{ decision_id: decision.proposal.proposal_id, state: "recommended" }] });
+
+  const replay = await durable.fetch(json("/coordination/publish?token=owner-token", acceptanceInput));
+  expect(replay.status).toBe(200);
+  expect(await replay.json()).toMatchObject({ replayed: true, accepted_record: { accepted_record_id: accepted.accepted_record.accepted_record_id } });
+  const changedRetry = await durable.fetch(json("/coordination/publish?token=owner-token", { ...acceptanceInput, decision_publication: { ...acceptanceInput.decision_publication, owner_attestation: true, approvals: [{ participant_label: "alice", source_message_id: aliceMessageId }, { participant_label: "bob", source_message_id: bobMessageId }] }, owner_label: "changed-owner" }));
+  expect(changedRetry.status).toBe(409);
+  const wrongAuthReplay = await durable.fetch(json("/coordination/publish?token=wrong-token", acceptanceInput));
+  expect(wrongAuthReplay.status).toBe(404);
+});
+
+test("rejects insufficient or misattributed acceptance evidence and preserves reported positions separately", async () => {
+  const { room: durable } = await room();
+  const initialized = await durable.fetch(json("/initialize", { management_hash: await hashCapability("owner-token"), initial: { content: "Owner source", author: "owner", display_name: "Owner", semantic_type: "message" } }));
+  const ownerSource = (await initialized.json() as { id: string }).id;
+  const alice = await durable.fetch(json("/messages", { input: { content: "Alice position", author: "alice", display_name: "Alice", semantic_type: "message" } }));
+  const aliceSource = (await alice.json() as { message: { id: string } }).message.id;
+  const bob = await durable.fetch(json("/messages", { input: { content: "Bob position", author: "bob", display_name: "Bob", semantic_type: "message" } }));
+  const bobSource = (await bob.json() as { message: { id: string } }).message.id;
+  const created = await durable.fetch(json("/coordination/proposals", decisionProposal("insufficient-decision", ownerSource)));
+  const value = await created.json() as { proposal: { proposal_id: string; revision: number } };
+  const missingAttestation = await durable.fetch(json("/coordination/publish?token=owner-token", { base_revision: 0, client_retry_id: "missing-attestation", decision_publication: { approvals: [{ participant_label: "alice", source_message_id: aliceSource }, { participant_label: "bob", source_message_id: bobSource }], mode: "acceptance" }, owner_label: "owner", proposal_id: value.proposal.proposal_id, revision: 1 }));
+  expect(missingAttestation.status).toBe(400);
+  const incomplete = await durable.fetch(json("/coordination/publish?token=owner-token", { base_revision: 0, client_retry_id: "incomplete-approval", decision_publication: { approvals: [{ participant_label: "alice", source_message_id: aliceSource }], mode: "acceptance", owner_attestation: true }, owner_label: "owner", proposal_id: value.proposal.proposal_id, revision: 1 }));
+  expect(incomplete.status).toBe(409);
+  const wrongAuthor = await durable.fetch(json("/coordination/publish?token=owner-token", { base_revision: 0, client_retry_id: "wrong-author", decision_publication: { approvals: [{ participant_label: "alice", source_message_id: bobSource }, { participant_label: "bob", source_message_id: aliceSource }], mode: "acceptance", owner_attestation: true }, owner_label: "owner", proposal_id: value.proposal.proposal_id, revision: 1 }));
+  expect(wrongAuthor.status).toBe(409);
+  const foreign = await durable.fetch(json("/coordination/publish?token=owner-token", { base_revision: 0, client_retry_id: "foreign-evidence", decision_publication: { approvals: [{ participant_label: "alice", source_message_id: "foreign" }, { participant_label: "bob", source_message_id: bobSource }], mode: "acceptance", owner_attestation: true }, owner_label: "owner", proposal_id: value.proposal.proposal_id, revision: 1 }));
+  expect(foreign.status).toBe(404);
+
+  const recommendation = await durable.fetch(json("/coordination/publish?token=owner-token", { base_revision: 0, client_retry_id: "position-decision-recommendation", decision_publication: { mode: "recommendation" }, owner_label: "owner", proposal_id: value.proposal.proposal_id, revision: value.proposal.revision }));
+  expect(recommendation.status).toBe(201);
+  const position = await durable.fetch(json("/coordination/proposals", { ...decisionPosition("position-report", value.proposal.proposal_id, 1, ownerSource), base_revision: 1 }));
+  const positionValue = await position.json() as { proposal: { proposal_id: string; revision: number } };
+  const publishedPosition = await durable.fetch(json("/coordination/publish?token=owner-token", { base_revision: 1, client_retry_id: "position-publish", owner_label: "owner", proposal_id: positionValue.proposal.proposal_id, revision: positionValue.proposal.revision }));
+  expect(publishedPosition.status).toBe(201);
+  expect(await publishedPosition.json()).toMatchObject({ position: { participant_label: "carol", reporter_label: "position-reporter" } });
+  const detail = await durable.fetch(new Request(`https://room/coordination/decisions/${value.proposal.proposal_id}`));
+  expect(await detail.json()).toMatchObject({ decision: { state: "recommended" }, positions: [{ participant_label: "carol", statement: expect.stringContaining("not an acceptance") }] });
+});
+
+test("routes direct decision acceptance through the Worker service and rejects stale publication boundaries", async () => {
+  const { room: durable } = await room();
+  const service = new DurableRoomService({ getByName: () => ({ fetch: (request: Request) => durable.fetch(request) }) }, "https://msg.0000.chat");
+  const worker = createWorker(service);
+  const initialized = await durable.fetch(json("/initialize", { management_hash: await hashCapability("owner-token"), initial: { content: "Owner source", author: "owner", display_name: "Owner", semantic_type: "message" } }));
+  const ownerSource = (await initialized.json() as { id: string }).id;
+  const alice = await durable.fetch(json("/messages", { input: { content: "I approve the direct proposal.", author: "alice", display_name: "Alice", semantic_type: "message" } }));
+  const aliceSource = (await alice.json() as { message: { id: string } }).message.id;
+  const bob = await durable.fetch(json("/messages", { input: { content: "I approve the same direct proposal.", author: "bob", display_name: "Bob", semantic_type: "message" } }));
+  const bobSource = (await bob.json() as { message: { id: string } }).message.id;
+
+  const created = await worker.fetch(workerJson("/room/coordination/proposals", decisionProposal("worker-direct-proposal", ownerSource)));
+  expect(created.status).toBe(201);
+  const createdValue = await created.json() as { proposal: { proposal_id: string; revision: number } };
+  const accepted = await worker.fetch(workerJson("/manage/room/owner-token/coordination/publish", {
+    base_revision: 0,
+    client_retry_id: "worker-direct-acceptance",
+    decision_publication: { approvals: [{ participant_label: "alice", source_message_id: aliceSource }, { participant_label: "bob", source_message_id: bobSource }], mode: "acceptance", owner_attestation: true },
+    owner_label: "room-owner",
+    proposal_id: createdValue.proposal.proposal_id,
+    revision: createdValue.proposal.revision,
+  }));
+  expect(accepted.status).toBe(201);
+  const acceptedValue = await accepted.json() as { accepted_record: { accepted_record_id: string; decision_revision: number }; approvals: readonly { source_message?: unknown; citation_url: string }[]; decision: { state: string; detail_url: string } };
+  expect(acceptedValue).toMatchObject({ accepted_record: { decision_revision: 1 }, decision: { state: "accepted", detail_url: "https://msg.0000.chat/room/coordination/decisions/" + createdValue.proposal.proposal_id }, approvals: [{ citation_url: "https://msg.0000.chat/room/messages/" + aliceSource }, { citation_url: "https://msg.0000.chat/room/messages/" + bobSource }] });
+  expect(acceptedValue.approvals[0]?.source_message).toBeUndefined();
+
+  const list = await worker.fetch(new Request("https://msg.0000.chat/room/coordination/decisions?limit=20"));
+  expect(list.status).toBe(200);
+  expect(await list.json()).toMatchObject({ decisions: [{ decision_id: createdValue.proposal.proposal_id, state: "accepted" }] });
+  const detail = await worker.fetch(new Request(`https://msg.0000.chat/room/coordination/decisions/${createdValue.proposal.proposal_id}?limit=20`));
+  expect(detail.status).toBe(200);
+  expect(await detail.json()).toMatchObject({ decision: { state: "accepted" }, history: [{ operation: "decision.accepted" }] });
+  const record = await worker.fetch(new Request(`https://msg.0000.chat/room/coordination/decisions/${createdValue.proposal.proposal_id}/records/${acceptedValue.accepted_record.accepted_record_id}`));
+  expect(record.status).toBe(200);
+  expect(await record.json()).toMatchObject({ accepted_record: { accepted_record_id: acceptedValue.accepted_record.accepted_record_id }, approvals: [{ source_message_id: aliceSource }, { source_message_id: bobSource }], decision_url: `https://msg.0000.chat/room/coordination/decisions/${createdValue.proposal.proposal_id}` });
+  const source = await worker.fetch(new Request(`https://msg.0000.chat/room/messages/${aliceSource}`, { headers: { accept: "application/json" } }));
+  expect(source.status).toBe(200);
+  expect(await source.json()).toMatchObject({ message: { id: aliceSource, content: "I approve the direct proposal." } });
+
+  const newer = await worker.fetch(workerJson("/room/coordination/proposals", decisionProposal("worker-stale-latest", ownerSource)));
+  const newerValue = await newer.json() as { proposal: { proposal_id: string; revision: number } };
+  const revised = await worker.fetch(workerJson(`/room/coordination/proposals/${newerValue.proposal.proposal_id}/revisions`, decisionProposal("worker-stale-revision", ownerSource, 0, "Changed direct proposal")));
+  expect(revised.status).toBe(201);
+  const oldRevisionPublish = await worker.fetch(workerJson("/manage/room/owner-token/coordination/publish", { base_revision: 1, client_retry_id: "worker-old-revision", decision_publication: { mode: "recommendation" }, owner_label: "room-owner", proposal_id: newerValue.proposal.proposal_id, revision: newerValue.proposal.revision }));
+  expect(oldRevisionPublish.status).toBe(409);
+  expect(await oldRevisionPublish.json()).toMatchObject({ error: { code: "conflict" } });
+  const staleInput = await worker.fetch(workerJson("/manage/room/owner-token/coordination/publish", { base_revision: 0, client_retry_id: "worker-stale-input", decision_publication: { mode: "recommendation" }, owner_label: "room-owner", proposal_id: newerValue.proposal.proposal_id, revision: 2 }));
+  expect(staleInput.status).toBe(409);
+  expect(await staleInput.json()).toMatchObject({ error: { code: "stale_revision", current_revision: 1, submitted_base_revision: 0 } });
+});
+
+test("rejects a position whose stored base is older than the current publication", async () => {
+  const { room: durable } = await room();
+  const service = new DurableRoomService({ getByName: () => ({ fetch: (request: Request) => durable.fetch(request) }) }, "https://msg.0000.chat");
+  const worker = createWorker(service);
+  const initialized = await durable.fetch(json("/initialize", { management_hash: await hashCapability("owner-token"), initial: { content: "Owner source", author: "owner", display_name: "Owner", semantic_type: "message" } }));
+  const ownerSource = (await initialized.json() as { id: string }).id;
+  const created = await worker.fetch(workerJson("/room/coordination/proposals", decisionProposal("stale-position-decision", ownerSource)));
+  const decision = await created.json() as { proposal: { proposal_id: string; revision: number } };
+  const recommendation = await worker.fetch(workerJson("/manage/room/owner-token/coordination/publish", { base_revision: 0, client_retry_id: "stale-position-recommendation", decision_publication: { mode: "recommendation" }, owner_label: "room-owner", proposal_id: decision.proposal.proposal_id, revision: decision.proposal.revision }));
+  expect(recommendation.status).toBe(201);
+  const position = await worker.fetch(workerJson("/room/coordination/proposals", { ...decisionPosition("stale-position", decision.proposal.proposal_id, 1, ownerSource), base_revision: 1 }));
+  const positionValue = await position.json() as { proposal: { proposal_id: string; revision: number } };
+  const unrelated = await worker.fetch(workerJson("/room/coordination/proposals", proposal("stale-position-unrelated", ownerSource, 1, "Unrelated publication")));
+  const unrelatedValue = await unrelated.json() as { proposal: { proposal_id: string; revision: number } };
+  const unrelatedPublication = await worker.fetch(workerJson("/manage/room/owner-token/coordination/publish", { base_revision: 1, client_retry_id: "stale-position-unrelated-publish", owner_label: "room-owner", proposal_id: unrelatedValue.proposal.proposal_id, revision: unrelatedValue.proposal.revision }));
+  expect(unrelatedPublication.status).toBe(201);
+  const stalePosition = await worker.fetch(workerJson("/manage/room/owner-token/coordination/publish", { base_revision: 2, client_retry_id: "stale-position-publish", owner_label: "room-owner", proposal_id: positionValue.proposal.proposal_id, revision: positionValue.proposal.revision }));
+  expect(stalePosition.status).toBe(409);
+  expect(await stalePosition.json()).toMatchObject({ error: { code: "stale_revision", current_revision: 2, submitted_base_revision: 1 } });
+});
+
+test("rejects a decision publication atomically when coordination rows exceed the room quota", async () => {
+  const { room: durable } = await room({ MSG_TEST_ROOM_LIMITS: JSON.stringify({ maxRoomBytes: 5_000 }) });
+  const initialized = await durable.fetch(json("/initialize", { management_hash: await hashCapability("owner-token"), initial: { content: "Owner source", author: "owner", display_name: "Owner", semantic_type: "message" } }));
+  const ownerSource = (await initialized.json() as { id: string }).id;
+  const alice = await durable.fetch(json("/messages", { input: { content: "I approve the exact proposal.", author: "alice", display_name: "Alice", semantic_type: "message" } }));
+  const aliceSource = (await alice.json() as { message: { id: string } }).message.id;
+  const bob = await durable.fetch(json("/messages", { input: { content: "I approve the exact proposal too.", author: "bob", display_name: "Bob", semantic_type: "message" } }));
+  const bobSource = (await bob.json() as { message: { id: string } }).message.id;
+  const created = await durable.fetch(json("/coordination/proposals", decisionProposal("quota-decision", ownerSource)));
+  expect(created.status).toBe(201);
+  const decision = await created.json() as { proposal: { proposal_id: string; revision: number } };
+  const before = await (await durable.fetch(new Request("https://room/read?after=0&limit=20"))).json() as { coordination_cursor: number; latest_message: number; published_revision: number };
+  const input = { base_revision: 0, client_retry_id: "quota-acceptance", decision_publication: { approvals: [{ participant_label: "alice", source_message_id: aliceSource }, { participant_label: "bob", source_message_id: bobSource }], mode: "acceptance", owner_attestation: true }, owner_label: "room-owner", proposal_id: decision.proposal.proposal_id, revision: decision.proposal.revision };
+  const rejected = await durable.fetch(json("/coordination/publish?token=owner-token", input));
+  expect(rejected.status).toBe(429);
+  expect(await rejected.json()).toMatchObject({ error: { code: "rate_limited" } });
+  const after = await (await durable.fetch(new Request("https://room/read?after=0&limit=20"))).json() as typeof before;
+  expect(after).toMatchObject(before);
+  expect((await (await durable.fetch(new Request("https://room/coordination/decisions"))).json() as { decisions: readonly unknown[] }).decisions).toHaveLength(0);
+  const retryRejected = await durable.fetch(json("/coordination/publish?token=owner-token", input));
+  expect(retryRejected.status).toBe(429);
+  expect((await (await durable.fetch(new Request("https://room/coordination/decisions"))).json() as { decisions: readonly unknown[] }).decisions).toHaveLength(0);
+});
+
+test("removes decision, approval, and position rows with the room lifecycle", async () => {
+  const { room: durable, database } = await room();
+  const initialized = await durable.fetch(json("/initialize", { management_hash: await hashCapability("owner-token"), initial: { content: "Owner source", author: "owner", display_name: "Owner", semantic_type: "message" } }));
+  const ownerSource = (await initialized.json() as { id: string }).id;
+  const alice = await durable.fetch(json("/messages", { input: { content: "I approve the exact proposal.", author: "alice", display_name: "Alice", semantic_type: "message" } }));
+  const aliceSource = (await alice.json() as { message: { id: string } }).message.id;
+  const bob = await durable.fetch(json("/messages", { input: { content: "I approve the exact proposal too.", author: "bob", display_name: "Bob", semantic_type: "message" } }));
+  const bobSource = (await bob.json() as { message: { id: string } }).message.id;
+  const created = await durable.fetch(json("/coordination/proposals", decisionProposal("lifecycle-decision", ownerSource)));
+  const decision = await created.json() as { proposal: { proposal_id: string; revision: number } };
+  expect((await durable.fetch(json("/coordination/publish?token=owner-token", { base_revision: 0, client_retry_id: "lifecycle-recommendation", decision_publication: { mode: "recommendation" }, owner_label: "room-owner", proposal_id: decision.proposal.proposal_id, revision: decision.proposal.revision }))).status).toBe(201);
+  const position = await durable.fetch(json("/coordination/proposals", { ...decisionPosition("lifecycle-position", decision.proposal.proposal_id, 1, ownerSource), base_revision: 1 }));
+  const positionValue = await position.json() as { proposal: { proposal_id: string; revision: number } };
+  expect((await durable.fetch(json("/coordination/publish?token=owner-token", { base_revision: 1, client_retry_id: "lifecycle-position-publish", owner_label: "room-owner", proposal_id: positionValue.proposal.proposal_id, revision: positionValue.proposal.revision }))).status).toBe(201);
+  const accepted = await durable.fetch(json("/coordination/publish?token=owner-token", { base_revision: 2, client_retry_id: "lifecycle-acceptance", decision_publication: { approvals: [{ participant_label: "alice", source_message_id: aliceSource }, { participant_label: "bob", source_message_id: bobSource }], mode: "acceptance", owner_attestation: true }, owner_label: "room-owner", proposal_id: decision.proposal.proposal_id, revision: decision.proposal.revision }));
+  expect(accepted.status).toBe(201);
+  expect((database.query("SELECT COUNT(*) AS count FROM coordination_decision_approval_evidence").get() as { count: number }).count).toBe(2);
+  expect((database.query("SELECT COUNT(*) AS count FROM coordination_decision_accepted_records").get() as { count: number }).count).toBe(1);
+  expect((database.query("SELECT COUNT(*) AS count FROM coordination_decision_positions").get() as { count: number }).count).toBe(1);
+  const deleted = await durable.fetch(new Request("https://room/manage?token=owner-token", { method: "DELETE" }));
+  expect(deleted.status).toBe(200);
+  expect((await durable.fetch(new Request("https://room/coordination/decisions"))).status).toBe(410);
+  expect((database.query("SELECT COUNT(*) AS count FROM coordination_decision_approval_evidence").get() as { count: number }).count).toBe(0);
+  expect((database.query("SELECT COUNT(*) AS count FROM coordination_decision_accepted_records").get() as { count: number }).count).toBe(0);
+  expect((database.query("SELECT COUNT(*) AS count FROM coordination_decision_positions").get() as { count: number }).count).toBe(0);
+  expect((database.query("SELECT COUNT(*) AS count FROM coordination_decisions").get() as { count: number }).count).toBe(0);
+});
+
+test("keeps decision history and positions paginated at a frozen cursor", async () => {
+  const { room: durable } = await room();
+  const service = new DurableRoomService({ getByName: () => ({ fetch: (request: Request) => durable.fetch(request) }) }, "https://msg.0000.chat");
+  const worker = createWorker(service);
+  const initialized = await durable.fetch(json("/initialize", { management_hash: await hashCapability("owner-token"), initial: { content: "Owner source", author: "owner", display_name: "Owner", semantic_type: "message" } }));
+  const ownerSource = (await initialized.json() as { id: string }).id;
+  const alice = await durable.fetch(json("/messages", { input: { content: "I approve this revision.", author: "alice", display_name: "Alice", semantic_type: "message" } }));
+  const aliceSource = (await alice.json() as { message: { id: string } }).message.id;
+  const bob = await durable.fetch(json("/messages", { input: { content: "I approve this revision too.", author: "bob", display_name: "Bob", semantic_type: "message" } }));
+  const bobSource = (await bob.json() as { message: { id: string } }).message.id;
+  const created = await worker.fetch(workerJson("/room/coordination/proposals", decisionProposal("paged-decision", ownerSource)));
+  const createdValue = await created.json() as { proposal: { proposal_id: string; revision: number } };
+  const recommendation = await worker.fetch(workerJson("/manage/room/owner-token/coordination/publish", { base_revision: 0, client_retry_id: "paged-recommendation", decision_publication: { mode: "recommendation" }, owner_label: "room-owner", proposal_id: createdValue.proposal.proposal_id, revision: createdValue.proposal.revision }));
+  expect(recommendation.status).toBe(201);
+
+  const publishPosition = async (retry: string, baseRevision: number, participantLabel: string) => {
+    const proposed = await worker.fetch(workerJson("/room/coordination/proposals", { ...decisionPosition(retry + "-proposal", createdValue.proposal.proposal_id, 1, ownerSource, participantLabel), base_revision: baseRevision }));
+    expect(proposed.status).toBe(201);
+    const value = await proposed.json() as { proposal: { proposal_id: string; revision: number } };
+    const published = await worker.fetch(workerJson("/manage/room/owner-token/coordination/publish", { base_revision: baseRevision, client_retry_id: retry, owner_label: "room-owner", proposal_id: value.proposal.proposal_id, revision: value.proposal.revision }));
+    expect(published.status).toBe(201);
+    return value.proposal.proposal_id;
+  };
+  const firstPositionId = await publishPosition("paged-position-one", 1, "carol");
+  const secondPositionId = await publishPosition("paged-position-two", 2, "dana");
+
+  const frozen = await worker.fetch(new Request(`https://msg.0000.chat/room/coordination/decisions/${createdValue.proposal.proposal_id}?limit=1`));
+  expect(frozen.status).toBe(200);
+  const frozenValue = await frozen.json() as { history_through: number; decision: { state: string }; history: readonly { cursor: number }[]; positions: readonly { position_id: string }[]; history_next_after: number; positions_next_after: number };
+  expect(frozenValue).toMatchObject({ decision: { state: "recommended" }, history: [{ operation: "decision.recommended" }], positions: [{ position_id: firstPositionId }] });
+  expect(frozenValue.history_next_after).toBe(frozenValue.history[0]!.cursor);
+  expect(frozenValue.positions_next_after).toBeGreaterThan(0);
+
+  const accepted = await worker.fetch(workerJson("/manage/room/owner-token/coordination/publish", { base_revision: 3, client_retry_id: "paged-acceptance", decision_publication: { approvals: [{ participant_label: "alice", source_message_id: aliceSource }, { participant_label: "bob", source_message_id: bobSource }], mode: "acceptance", owner_attestation: true }, owner_label: "room-owner", proposal_id: createdValue.proposal.proposal_id, revision: createdValue.proposal.revision }));
+  expect(accepted.status).toBe(201);
+  const thirdPositionId = await publishPosition("paged-position-three", 4, "erin");
+  expect(thirdPositionId).not.toBe(firstPositionId);
+
+  const pageOne = await worker.fetch(new Request(`https://msg.0000.chat/room/coordination/decisions/${createdValue.proposal.proposal_id}?after=0&through=${frozenValue.history_through}&limit=1`));
+  const pageOneValue = await pageOne.json() as { decision: { state: string; accepted_record_id?: string }; history: readonly { cursor: number }[]; history_has_more: boolean; history_next_after: number; positions: readonly { position_id: string }[]; positions_has_more: boolean; positions_next_after: number };
+  expect(pageOneValue).toMatchObject({ decision: { state: "recommended" }, history_has_more: true, positions_has_more: true, history: [{ cursor: frozenValue.history[0]!.cursor }], positions: [{ position_id: firstPositionId }] });
+  const pageTwo = await worker.fetch(new Request(`https://msg.0000.chat/room/coordination/decisions/${createdValue.proposal.proposal_id}?after=${pageOneValue.history_next_after}&through=${frozenValue.history_through}&limit=1`));
+  const pageTwoValue = await pageTwo.json() as { history: readonly { cursor: number }[]; history_has_more: boolean; history_next_after: number; positions: readonly { position_id: string }[]; positions_has_more: boolean; positions_next_after: number };
+  expect(pageTwoValue).toMatchObject({ history_has_more: true, positions_has_more: true, history: [{ position: { position_id: firstPositionId } }], positions: [{ position_id: firstPositionId }] });
+  const pageThree = await worker.fetch(new Request(`https://msg.0000.chat/room/coordination/decisions/${createdValue.proposal.proposal_id}?after=${pageTwoValue.history_next_after}&through=${frozenValue.history_through}&limit=1`));
+  const pageThreeValue = await pageThree.json() as { history: readonly { cursor: number }[]; history_has_more: boolean; positions: readonly { position_id: string }[] };
+  expect(pageThreeValue).toMatchObject({ history_has_more: false, history: [{ position: { position_id: secondPositionId } }], positions: [{ position_id: secondPositionId }] });
+  expect(new Set([...pageOneValue.history, ...pageTwoValue.history, ...pageThreeValue.history].map((entry) => entry.cursor)).size).toBe(3);
+
+  const positionPageTwo = await worker.fetch(new Request(`https://msg.0000.chat/room/coordination/decisions/${createdValue.proposal.proposal_id}?after=${pageOneValue.positions_next_after}&through=${frozenValue.history_through}&limit=1`));
+  const positionPageTwoValue = await positionPageTwo.json() as { positions: readonly { position_id: string }[]; positions_has_more: boolean; positions_next_after: number };
+  expect(positionPageTwoValue).toMatchObject({ positions_has_more: false, positions: [{ position_id: secondPositionId }] });
+  const positionPageThree = await worker.fetch(new Request(`https://msg.0000.chat/room/coordination/decisions/${createdValue.proposal.proposal_id}?after=${positionPageTwoValue.positions_next_after}&through=${frozenValue.history_through}&limit=1`));
+  expect(await positionPageThree.json()).toMatchObject({ positions: [], positions_has_more: false });
+
+  const current = await worker.fetch(new Request(`https://msg.0000.chat/room/coordination/decisions/${createdValue.proposal.proposal_id}?limit=20`));
+  expect(await current.json()).toMatchObject({ decision: { state: "accepted" }, positions: [{ position_id: firstPositionId }, { position_id: secondPositionId }, { position_id: thirdPositionId }] });
+  const frozenList = await worker.fetch(new Request(`https://msg.0000.chat/room/coordination/decisions?through=${frozenValue.history_through}&limit=20`));
+  expect(await frozenList.json()).toMatchObject({ through: frozenValue.history_through, decisions: [{ decision_id: createdValue.proposal.proposal_id, state: "recommended" }] });
 });

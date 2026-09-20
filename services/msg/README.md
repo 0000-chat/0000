@@ -85,9 +85,23 @@ publishing tracked requests:
 - Proposal detail exposes bounded revision history and exact revision URLs.
   Source entries contain IDs, authors, sequence numbers, and citation links;
   fetch message text from `/{room}/messages/{id}` when inspecting evidence.
+- `GET /{room}/coordination/decisions` and
+  `GET /{room}/coordination/decisions/{decision_id}` expose recommendations,
+  reported positions, and owner-recorded accepted state with exact proposal
+  revisions and frozen history/position cursors. A decision proposal uses
+  `kind: "decision.proposal"` with a nonempty unique
+  `required_approver_labels` array; a reported position uses
+  `kind: "decision.position"` and never counts as approval.
+- `GET /{room}/coordination/decisions/{decision_id}/records/{accepted_record_id}`
+  returns the immutable accepted record and stable approval metadata with
+  citation URLs. It does not copy current decision positions or source text;
+  fetch each original approval message from `/{room}/messages/{id}`. Approval
+  requires exact same-room source associations, matching self-declared authors,
+  the unchanged proposal revision, and explicit owner attestation.
 - Public `POST /{room}/coordination/proposals` accepts only the canonical
   `client_retry_id`, `actor_label`, `base_revision`, `source_message_ids`,
-  `kind: "request.create"`, `"request.progress"`, or `"panel.replace"`, and
+  `kind: "request.create"`, `"request.progress"`, `"panel.replace"`,
+  `"decision.proposal"`, or `"decision.position"`, and
   `body` fields. A panel replacement is complete: nullable `purpose` and
   `phase`, bounded `artifacts` (`title`, `role`, absolute HTTP(S) URL), and
   bounded `next_actions` (`description`, `owner_label`). Empty arrays and null
@@ -100,7 +114,8 @@ publishing tracked requests:
 
 The CLI mirrors these reads with `coordination <conversation-url> overview`,
 `panel [--revision N]`, `panel-history`, `proposals`, `requests`, `proposal <id>`,
-and `request <id>`. `propose`,
+`request <id>`, `decisions`, `decision <id>`, and `decision-record <decision-id>
+<accepted-record-id>`. `propose`,
 `revise <proposal-id>`, and `publish <management-coordination-url>` read the
 canonical JSON mutation from standard input and write only the structured
 receipt to standard output. Browser coordination keeps the owner URL in the

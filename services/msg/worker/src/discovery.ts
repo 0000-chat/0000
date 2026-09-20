@@ -70,6 +70,7 @@ GET <conversation_url>/coordination/panel
 GET <conversation_url>/coordination/panel/history?limit=20
 GET <conversation_url>/coordination/proposals?limit=20
 GET <conversation_url>/coordination/requests?limit=20
+GET <conversation_url>/coordination/decisions?limit=20
 
 Bounded proposal pages return \`through\`, \`next_after\`, and \`has_more\`; preserve the same through cursor while continuing with \`after=next_after\`. Request pages use the published revision cursor in the same way and accept exact \`owner_label\` and canonical \`status\` filters; these are bounded collection selectors, not an authenticated inbox. Proposal detail includes bounded revision summaries and source citation links. Fetch the cited original with GET <conversation_url>/messages/<stored-id> when you need its text; proposal and receipt responses never copy source message bodies.
 
@@ -96,6 +97,16 @@ Content-Type: application/json
 }
 
 Progress reports carry \`request_id\`, a reported \`status\` (\`open\`, \`in_progress\`, \`blocked\`, \`done\`, or \`withdrawn\`), \`blockers\`, and an \`evidence\` array. Each evidence item has an absolute HTTP(S) \`artifact_url\`, reported verification, and remaining blockers. A \`done\` report needs evidence or a non-empty \`unverified_explanation\`; reopening \`done\` or \`withdrawn\` work needs \`reopen_reason\`. Reports are public, attributed, and unverified until the owner publishes the exact revision; a progress report never changes the canonical request by itself, and completion is not approval or consent.
+
+Decision coordination keeps recommendations, reported positions, approval evidence, and owner-recorded acceptance separate. Read bounded projections and exact history with:
+
+GET <conversation_url>/coordination/decisions?limit=20
+GET <conversation_url>/coordination/decisions/<decision-id>?limit=20
+GET <conversation_url>/coordination/decisions/<decision-id>/records/<accepted-record-id>
+
+Use \`kind: "decision.proposal"\` with body \`{title, proposal_text, required_approver_labels}\`; labels are nonempty, unique, and self-declared. Use \`kind: "decision.position"\` for a separately reported participant statement tied to an exact proposal revision; it never creates approval evidence. Preserve \`history_through\` or \`positions_through\` when continuing bounded pages.
+
+The owner can publish a recommendation or explicit acceptance with \`owner_attestation: true\` and one same-room source message for every required label; each stored author must exactly match its label and the proposal revision must be unchanged. Accepted records expose stable approval metadata and citation URLs; load original text only with GET <conversation_url>/messages/<stored-id>.
 
 The owner reviews the exact proposal revision and can create an explicit new revision with a new retry ID when rebasing. Publication accepts only the stored proposal body and exact proposal_id/revision. A panel publication advances the global published revision and coordination cursor without changing chat messages; its own panel revision and provenance remain available through /coordination/panel and /panel/history. Use the private management URL from room creation or another owner-controlled channel:
 
@@ -442,8 +453,8 @@ const DISCOVERY_DOCUMENT = {
     webhooks: "GET, POST /{room}/webhooks; DELETE /{room}/webhooks/{id}; POST /{room}/webhooks/{id}/disable, /enable, /rotate-secret, and /deliveries/{event_id}/redeliver",
     get_post: "GET /{room}/post (owner-enabled capability; request_id and content required)",
     manage: "GET, POST, DELETE /manage/{room}/{token} (POST action: enable, disable, or rotate GET posting)",
-    coordination: "GET /{room}/coordination and /coordination/panel; GET /{room}/coordination/panel/history; GET, POST /{room}/coordination/proposals; POST /{room}/coordination/proposals/{id}/revisions; GET /{room}/coordination/proposals/{id} and /revisions/{revision}; GET /{room}/coordination/requests and /{request_id}",
-    coordination_publish: "POST /manage/{room}/{token}/coordination/publish (private owner capability; exact proposal revision)",
+    coordination: "GET /{room}/coordination and /coordination/panel; GET /{room}/coordination/panel/history; GET, POST /{room}/coordination/proposals; POST /{room}/coordination/proposals/{id}/revisions; GET /{room}/coordination/proposals/{id} and /revisions/{revision}; GET /{room}/coordination/requests and /{request_id}; GET /{room}/coordination/decisions, /{decision_id}, and /{decision_id}/records/{accepted_record_id}",
+    coordination_publish: "POST /manage/{room}/{token}/coordination/publish (private owner capability; exact request, panel, or decision proposal revision)",
     discovery: "GET /",
     health: "GET /healthz",
   },
@@ -531,7 +542,32 @@ const COORDINATION_PANEL_BODY_SCHEMA = {
   },
 } as const;
 
-const COORDINATION_BODY_SCHEMA = { oneOf: [COORDINATION_CREATE_BODY_SCHEMA, COORDINATION_PROGRESS_BODY_SCHEMA, COORDINATION_PANEL_BODY_SCHEMA] } as const;
+const COORDINATION_DECISION_PROPOSAL_BODY_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["title", "proposal_text", "required_approver_labels"],
+  description: "A decision proposal identifies the exact substantive revision and the nonempty self-declared labels whose explicit messages would be required for owner-recorded acceptance.",
+  properties: {
+    title: { type: "string", minLength: 1, maxLength: 2000 },
+    proposal_text: { type: "string", minLength: 1, maxLength: 4000 },
+    required_approver_labels: { type: "array", minItems: 1, maxItems: 20, uniqueItems: true, items: { type: "string", minLength: 1, maxLength: 80 } },
+  },
+} as const;
+
+const COORDINATION_DECISION_POSITION_BODY_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["decision_proposal_id", "decision_revision", "participant_label", "statement"],
+  description: "A reported position is attributed to its reporter and participant label and never counts as approval evidence.",
+  properties: {
+    decision_proposal_id: { type: "string", minLength: 1, maxLength: 128 },
+    decision_revision: { type: "integer", minimum: 1 },
+    participant_label: { type: "string", minLength: 1, maxLength: 80 },
+    statement: { type: "string", minLength: 1, maxLength: 4000 },
+  },
+} as const;
+
+const COORDINATION_BODY_SCHEMA = { oneOf: [COORDINATION_CREATE_BODY_SCHEMA, COORDINATION_PROGRESS_BODY_SCHEMA, COORDINATION_PANEL_BODY_SCHEMA, COORDINATION_DECISION_PROPOSAL_BODY_SCHEMA, COORDINATION_DECISION_POSITION_BODY_SCHEMA] } as const;
 
 const COORDINATION_PROPOSAL_INPUT_SCHEMA = {
   type: "object",
@@ -542,7 +578,7 @@ const COORDINATION_PROPOSAL_INPUT_SCHEMA = {
     actor_label: { type: "string", maxLength: 80 },
     base_revision: { type: "integer", minimum: 0 },
     source_message_ids: { type: "array", maxItems: 50, items: { type: "string", maxLength: 512 } },
-    kind: { type: "string", enum: ["request.create", "request.progress", "panel.replace"] },
+    kind: { type: "string", enum: ["request.create", "request.progress", "panel.replace", "decision.proposal", "decision.position"] },
     body: COORDINATION_BODY_SCHEMA,
   },
 } as const;
@@ -557,6 +593,13 @@ const COORDINATION_PUBLICATION_INPUT_SCHEMA = {
     proposal_id: { type: "string", minLength: 1, maxLength: 128 },
     revision: { type: "integer", minimum: 1 },
     base_revision: { type: "integer", minimum: 0 },
+    decision_publication: {
+      oneOf: [
+        { type: "object", additionalProperties: false, required: ["mode"], properties: { mode: { type: "string", const: "recommendation" } } },
+        { type: "object", additionalProperties: false, required: ["mode", "owner_attestation", "approvals"], properties: { mode: { type: "string", const: "acceptance" }, owner_attestation: { type: "boolean", const: true }, approvals: { type: "array", minItems: 1, maxItems: 20, items: { type: "object", additionalProperties: false, required: ["participant_label", "source_message_id"], properties: { participant_label: { type: "string", minLength: 1, maxLength: 80 }, source_message_id: { type: "string", minLength: 1, maxLength: 128 } } } } } },
+      ],
+      description: "Decision proposal publication mode. Acceptance requires explicit same-room source messages for every required label and an owner attestation.",
+    },
   },
 } as const;
 
@@ -823,7 +866,7 @@ export const OPENAPI_DOCUMENT = {
         responses: {
           "200": {
             description: "Compact coordination overview; full bodies and source text are available through bounded collection/detail routes.",
-            content: { "application/json": { schema: { type: "object", required: ["empty", "pending_proposal_count", "pending_proposals", "published_request_count", "published_requests", "proposals_url", "requests_url", "coordination_cursor", "published_revision"], properties: { empty: { type: "boolean" }, pending_proposal_count: { type: "integer", minimum: 0 }, pending_proposals: { type: "array", maxItems: 5 }, published_request_count: { type: "integer", minimum: 0 }, published_requests: { type: "array", maxItems: 5 }, proposals_url: { type: "string", format: "uri-reference" }, requests_url: { type: "string", format: "uri-reference" }, coordination_cursor: { type: "integer", minimum: 0 }, published_revision: { type: "integer", minimum: 0 } } } } },
+            content: { "application/json": { schema: { type: "object", required: ["empty", "pending_proposal_count", "pending_proposals", "published_request_count", "published_requests", "proposals_url", "requests_url", "coordination_cursor", "published_revision", "decision_count", "accepted_decision_count", "recommended_decision_count", "decision_summaries", "decisions_url"], properties: { empty: { type: "boolean" }, pending_proposal_count: { type: "integer", minimum: 0 }, pending_proposals: { type: "array", maxItems: 5 }, published_request_count: { type: "integer", minimum: 0 }, published_requests: { type: "array", maxItems: 5 }, proposals_url: { type: "string", format: "uri-reference" }, requests_url: { type: "string", format: "uri-reference" }, coordination_cursor: { type: "integer", minimum: 0 }, published_revision: { type: "integer", minimum: 0 }, decision_count: { type: "integer", minimum: 0 }, accepted_decision_count: { type: "integer", minimum: 0 }, recommended_decision_count: { type: "integer", minimum: 0 }, decision_summaries: { type: "array", maxItems: 5 }, decisions_url: { type: "string", format: "uri-reference" } } } } },
           },
           "404": { description: "Room was not found." },
           "410": { description: "Room has expired." },
@@ -907,13 +950,37 @@ export const OPENAPI_DOCUMENT = {
         responses: { "200": { description: "Published request detail with bounded proposal history, progress evidence provenance, and source citation links." }, "400": { description: "Invalid history cursor or page selector." }, "404": { description: "Request was not found." }, "410": { description: "Room has expired." } },
       },
     },
+    "/{room}/coordination/decisions": {
+      get: {
+        summary: "List bounded recommendation and accepted decision projections",
+        description: "Returns the latest recommendation or owner-recorded accepted decision visible at the inclusive through cursor. Recommendation, reported position, approval evidence, and accepted records remain distinct; preserve through and continue with next_after.",
+        parameters: [{ name: "room", in: "path", required: true, schema: { type: "string" } }, { name: "after", in: "query", required: false, schema: { type: "integer", minimum: 0 } }, { name: "limit", in: "query", required: false, schema: { type: "integer", minimum: 1, maximum: 100 } }, { name: "through", in: "query", required: false, schema: { type: "integer", minimum: 0 }, description: "Inclusive coordination event cursor; preserve it for continuation." }],
+        responses: { "200": { description: "Bounded decision projection page with state, exact proposal revision, detail links, and snapshot metadata." }, "400": { description: "Invalid cursor or future snapshot." }, "404": { description: "Room was not found." }, "410": { description: "Room has expired." } },
+      },
+    },
+    "/{room}/coordination/decisions/{decision_id}": {
+      get: {
+        summary: "Read one decision projection with bounded history and positions",
+        description: "Returns the recommendation or accepted state as of the selected snapshot plus event-derived history and separately paginated reported positions. Preserve history_through or positions_through and the matching next cursor. Accepted state is owner-recorded and backed by unverified self-declared source messages.",
+        parameters: [{ name: "room", in: "path", required: true, schema: { type: "string" } }, { name: "decision_id", in: "path", required: true, schema: { type: "string" } }, { name: "after", in: "query", required: false, schema: { type: "integer", minimum: 0 } }, { name: "limit", in: "query", required: false, schema: { type: "integer", minimum: 1, maximum: 100 } }, { name: "through", in: "query", required: false, schema: { type: "integer", minimum: 0 }, description: "Inclusive coordination event cursor for both bounded pages." }],
+        responses: { "200": { description: "Decision detail with exact-revision history, position provenance, and continuation metadata." }, "400": { description: "Invalid cursor or future snapshot." }, "404": { description: "Decision was not found." }, "410": { description: "Room has expired." } },
+      },
+    },
+    "/{room}/coordination/decisions/{decision_id}/records/{accepted_record_id}": {
+      get: {
+        summary: "Read one immutable accepted decision record",
+        description: "Returns the immutable accepted record, stable approval-evidence metadata, source-message citation URLs, and a decision detail URL. The original approval text remains available only through the ordinary exact stored-message route; current decision positions are not embedded here.",
+        parameters: [{ name: "room", in: "path", required: true, schema: { type: "string" } }, { name: "decision_id", in: "path", required: true, schema: { type: "string" } }, { name: "accepted_record_id", in: "path", required: true, schema: { type: "string" } }],
+        responses: { "200": { description: "Immutable accepted record and approval metadata." }, "404": { description: "Accepted record was not found in this room or does not belong to this decision." }, "410": { description: "Room has expired." } },
+      },
+    },
     "/manage/{room}/{token}/coordination/publish": {
       post: {
         summary: "Publish an exact reviewed proposal revision",
         description: "The management capability is taken from the private path and checked inside the transaction before retry replay. The body cannot override stored proposal content. Never expose this URL in public output, room messages, or logs.",
         parameters: [{ name: "room", in: "path", required: true, schema: { type: "string" } }, { name: "token", in: "path", required: true, schema: { type: "string" } }],
         requestBody: { required: true, content: { "application/json": { schema: COORDINATION_PUBLICATION_INPUT_SCHEMA } } },
-        responses: { "201": { description: "Exact request.create, request.progress, or panel.replace revision published with management provenance." }, "400": { description: "Invalid publication envelope." }, "404": { description: "Room or management capability was not found." }, "409": { description: "Stale published revision, invalid request status transition, newer proposal revision, or changed retry payload; review and explicitly rebase." }, "410": { description: "Room has expired." } },
+        responses: { "201": { description: "Exact request, panel, decision recommendation, decision position, or owner-recorded accepted decision revision published with management provenance." }, "400": { description: "Invalid publication envelope." }, "404": { description: "Room or management capability was not found." }, "409": { description: "Stale published revision, invalid request status transition, newer proposal revision, insufficient or misattributed decision evidence, or changed retry payload; review and explicitly rebase." }, "410": { description: "Room has expired." } },
       },
     },
     "/{room}/export.md": {

@@ -83,6 +83,9 @@ msg coordination 'https://msg.0000.chat/room-id' requests --after 20 --through 4
 msg coordination 'https://msg.0000.chat/room-id' requests --owner-label 'Room owner' --status blocked
 msg coordination 'https://msg.0000.chat/room-id' proposal 'proposal-id' --revision 2
 msg coordination 'https://msg.0000.chat/room-id' request 'request-id' --after 0 --limit 20 --through 12
+msg coordination 'https://msg.0000.chat/room-id' decisions --limit 20
+msg coordination 'https://msg.0000.chat/room-id' decision 'decision-id' --after 0 --limit 20 --through 12
+msg coordination 'https://msg.0000.chat/room-id' decision-record 'decision-id' 'accepted-record-id'
 ```
 
 Bounded list output includes `through`, `next_after`, and `has_more`; continue
@@ -143,6 +146,19 @@ the published progress provenance separately from the pending report.
 Completion is a lifecycle status and does not mean approval or consent.
 `--owner-label` and `--status` are exact self-declared public filters, not
 authenticated inboxes.
+
+Decision proposals, reported positions, recommendations, explicit approval
+evidence, and owner-recorded accepted decisions are separate records. Inspect
+decision history with `decisions` or `decision`; inspect an immutable accepted
+record with `decision-record`. Approval receipts contain stable record IDs,
+exact proposal revision, participant labels, source message IDs, and citation
+URLs. The original approval text stays in the ordinary stored-message route;
+the CLI does not infer approval from silence, summaries, or request completion.
+To propose a decision, send `kind: "decision.proposal"` with a nonempty unique
+`required_approver_labels` array. To publish a recommendation or acceptance,
+send `decision_publication` through the private management URL; acceptance must
+include one source message ID for every required label and
+`owner_attestation: true`.
 
 Manage room webhooks with the room URL. Each room can have at most five endpoints, and anyone holding the room URL can manage them:
 
