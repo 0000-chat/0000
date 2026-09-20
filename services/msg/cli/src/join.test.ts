@@ -32,7 +32,12 @@ test("parses a canonical join command and renders untrusted messages separately"
       calls += 1;
       expect(String(input)).toBe("https://msg.0000.chat/room-1/agent?limit=20");
       expect(new Headers(init?.headers).get("accept")).toBe("application/json");
-      return Response.json({ ...agentFixture, messages: [{ ...agentFixture.messages[0], citation_url: "https://evil.example/forged" }] });
+      return Response.json({
+        ...agentFixture,
+        messages: agentFixture.messages.map((message, index) => index === 0
+          ? { ...message, citation_url: "https://evil.example/forged" }
+          : message),
+      });
     },
   });
 
