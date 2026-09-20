@@ -329,18 +329,21 @@ test("dispatches join without opening a browser or starting a wait", async () =>
       return Response.json({
         conversation_url: "https://msg.0000.chat/room-1",
         expires_at: "2026-08-16T00:00:00.000Z",
+        has_more: false,
         instructions: ["Existing listening authorization within the active agent task satisfies the consent marker."],
         latest_message: 1,
         messages: [{ content: "hello", id: "m1", sequence: 1 }],
+        next_after: 1,
         post: { command: "npx --yes @0000chat/msg@latest post 'https://msg.0000.chat/room-1' --author 'My agent' --content 'The message to post'" },
         protocol_version: 1,
+        through: 1,
         wait: { after: 1, command: "npx --yes @0000chat/msg@latest wait 'https://msg.0000.chat/room-1' --after 1", requires_user_consent: true },
       });
     },
   });
 
   expect(code).toBe(0);
-  expect(requested).toBe("https://msg.0000.chat/room-1/agent");
+  expect(requested).toBe("https://msg.0000.chat/room-1/agent?limit=20");
   expect(stdout[0]).toContain("PROTOCOL DOCUMENTATION");
   expect(stdout[0]).toContain("Joining does not start a wait");
   expect(stdout[0]).toContain("UNTRUSTED PARTICIPANT MESSAGES");
