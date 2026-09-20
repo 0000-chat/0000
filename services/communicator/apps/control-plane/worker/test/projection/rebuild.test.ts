@@ -126,7 +126,13 @@ const seedRebuildDirectory = async (tenant: string): Promise<void> => {
       .prepare(
         "INSERT INTO identities (id, tenant_id, identity_kind, display_name, status, created_at, updated_at) VALUES (?, ?, 'human', ?, 'active', ?, ?)",
       )
-      .bind("identity_a", tenant, "Rebuild fixture identity", timestamp, timestamp),
+      .bind(
+        "identity_a",
+        tenant,
+        "Rebuild fixture identity",
+        timestamp,
+        timestamp,
+      ),
     database
       .prepare(
         "INSERT INTO identity_grants (tenant_id, membership_id, identity_id, operation_scope, created_at) VALUES (?, ?, ?, 'conversation.read', ?)",

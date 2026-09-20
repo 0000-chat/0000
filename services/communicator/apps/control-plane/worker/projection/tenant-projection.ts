@@ -2245,7 +2245,9 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
               this.env.CONTROL_DB.withSession("first-primary"),
               context.tenant_id,
               context.membership_id,
-              context.subscriptions.map((subscription) => subscription.identity_id),
+              context.subscriptions.map(
+                (subscription) => subscription.identity_id,
+              ),
             );
 
       const resumeByIdentity = new Map(

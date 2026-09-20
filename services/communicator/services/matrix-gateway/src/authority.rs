@@ -221,7 +221,7 @@ impl AuthorityClaimClient {
         Self::build(base_url.as_ref(), service_credential, timeout, false)
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "loopback-test"))]
     pub fn new_for_test(
         base_url: impl AsRef<str>,
         service_credential: SecretString,

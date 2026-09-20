@@ -13,8 +13,19 @@ import WebSocketClient from "ws";
 import { registerGuestIssuer, registerService } from "../../../platform/src/service-registration";
 import { createAgent, createOrNarrowAgentGrant, issueAgentCredential } from "../../../platform/src/agent-state";
 import { ensureDefaultOrganization, hashOpaque, issueHumanCredential, opaqueSecret, type ServiceRegistration } from "../../../platform/src/platform-state";
+import {
+  buildPlatformMiniflareRateLimits,
+  buildPlatformTestRateLimitPolicy,
+} from "../../../platform/src/rate-limit-policy";
 import { MSG_OPERATOR, MSG_READ } from "./auth";
-import { buildWorkerBundleInChild, createMsgMiniflareTempDirectory, startMsgMiniflare, TEST_ROOM_LIMITS } from "../test-fixtures/msg-worker.miniflare-fixture";
+import {
+  buildWorkerBundleInChild,
+  createMsgMiniflareTempDirectory,
+  isMsgPlatformScenarioChild,
+  runMsgPlatformScenarioInChild,
+  startMsgMiniflare,
+  TEST_ROOM_LIMITS,
+} from "../test-fixtures/msg-worker.miniflare-fixture";
 import { PersistentCookieJar } from "../../cli/src/cookie-jar";
 import { joinConversation } from "../../cli/src/join";
 
@@ -22,6 +33,7 @@ const platformRoot = fileURLToPath(new URL("../../../platform/", import.meta.url
 const platformWorkerEntry = fileURLToPath(new URL("../../../platform/src/worker.ts", import.meta.url));
 const authority = "platform-t01-authority";
 const audience = "https://msg.0000.chat";
+const platformRateLimitPolicy = buildPlatformTestRateLimitPolicy();
 
 interface RuntimeBridge {
   readonly baseUrl: string;
@@ -53,6 +65,8 @@ async function createPlatformRuntime(script: string, persistenceDirectory: strin
       PLATFORM_BASE_URL: baseUrl,
       PLATFORM_CREDENTIAL_MAX_LIFETIME_DAYS: "90",
       PLATFORM_DEPLOYMENT_MODE: "self-hosted",
+      PLATFORM_RATE_LIMIT_POLICY: JSON.stringify(platformRateLimitPolicy),
+      PLATFORM_SERVER_DEADLINE_MS: "8000",
       PLATFORM_SIGNUP_POLICY: "open",
     },
     compatibilityDate: "2026-09-18",
@@ -61,6 +75,7 @@ async function createPlatformRuntime(script: string, persistenceDirectory: strin
     host: "127.0.0.1",
     modules: true,
     name: "platform-t09-runtime",
+    ratelimits: buildPlatformMiniflareRateLimits(platformRateLimitPolicy),
     resourcePersistencePath: persistenceDirectory,
     script,
   }));
@@ -216,6 +231,11 @@ function socketMessage(socket: WebSocketClient): Promise<string> {
 }
 
 test.serial("crosses the actual Platform Worker/D1 and msg Worker/DO boundary", { timeout: 45_000 }, async () => {
+  const scenarioFile = fileURLToPath(import.meta.url);
+  if (!isMsgPlatformScenarioChild("t09-platform", scenarioFile)) {
+    await runMsgPlatformScenarioInChild({ scenario: "t09-platform", scenarioFile, timeoutMs: 45_000 });
+    return;
+  }
   const t09StartedAt = performance.now();
   const markT09Phase = (phase: string) => console.info(`[t09-phase] ${phase} ${Math.round(performance.now() - t09StartedAt)}ms`);
   markT09Phase("start");

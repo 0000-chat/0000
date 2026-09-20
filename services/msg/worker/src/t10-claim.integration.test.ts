@@ -13,13 +13,25 @@ import WebSocketClient from "ws";
 
 import { registerGuestIssuer, registerService } from "../../../platform/src/service-registration";
 import { ensureDefaultOrganization, hashOpaque, issueHumanCredential, opaqueSecret, type ServiceRegistration } from "../../../platform/src/platform-state";
+import {
+  buildPlatformMiniflareRateLimits,
+  buildPlatformTestRateLimitPolicy,
+} from "../../../platform/src/rate-limit-policy";
 import { MSG_CLAIM, MSG_MANAGE, MSG_READ, MSG_WRITE } from "./auth";
-import { buildWorkerBundleInChild, createMsgMiniflareTempDirectory, startMsgMiniflare, TEST_ROOM_LIMITS } from "../test-fixtures/msg-worker.miniflare-fixture";
+import {
+  buildWorkerBundleInChild,
+  createMsgMiniflareTempDirectory,
+  isMsgPlatformScenarioChild,
+  runMsgPlatformScenarioInChild,
+  startMsgMiniflare,
+  TEST_ROOM_LIMITS,
+} from "../test-fixtures/msg-worker.miniflare-fixture";
 
 const platformRoot = fileURLToPath(new URL("../../../platform/", import.meta.url));
 const platformWorkerEntry = fileURLToPath(new URL("../../../platform/src/worker.ts", import.meta.url));
 const authority = "platform-t10-authority";
 const audience = "https://msg.0000.chat";
+const platformRateLimitPolicy = buildPlatformTestRateLimitPolicy();
 
 async function buildPlatformWorker(): Promise<string> {
   return buildWorkerBundleInChild(platformWorkerEntry);
@@ -42,6 +54,8 @@ async function createPlatformRuntime(script: string, persistenceDirectory: strin
       PLATFORM_BASE_URL: baseUrl,
       PLATFORM_CREDENTIAL_MAX_LIFETIME_DAYS: "90",
       PLATFORM_DEPLOYMENT_MODE: "self-hosted",
+      PLATFORM_RATE_LIMIT_POLICY: JSON.stringify(platformRateLimitPolicy),
+      PLATFORM_SERVER_DEADLINE_MS: "8000",
       PLATFORM_SIGNUP_POLICY: "open",
     },
     compatibilityDate: "2026-09-18",
@@ -50,6 +64,7 @@ async function createPlatformRuntime(script: string, persistenceDirectory: strin
     host: "127.0.0.1",
     modules: true,
     name: "platform-t10-runtime",
+    ratelimits: buildPlatformMiniflareRateLimits(platformRateLimitPolicy),
     resourcePersistencePath: persistenceDirectory,
     script,
   }));
@@ -249,6 +264,11 @@ function createLocalClaimFixture(options: { baseUrl: string; authority: string; 
 }
 
 test.serial("proves atomic guest-to-organization claim across Platform, DO restart, and concurrent contenders", { timeout: 60_000 }, async () => {
+  const scenarioFile = fileURLToPath(import.meta.url);
+  if (!isMsgPlatformScenarioChild("t10-claim", scenarioFile)) {
+    await runMsgPlatformScenarioInChild({ scenario: "t10-claim", scenarioFile, timeoutMs: 60_000 });
+    return;
+  }
   const platformPersistence = await mkdtemp(join(tmpdir(), "platform-t10-d1-"));
   const msgPersistence = await createMsgMiniflareTempDirectory("t10-claim-state");
   let platform: Miniflare | undefined;

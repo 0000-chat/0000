@@ -795,9 +795,7 @@ export function registerOAuthRoutes(
       : protectedResourceMetadata(context),
   );
   app.get("/oauth/authorize", (context) =>
-    localIssuerRetired()
-      ? retired(context)
-      : authorize(context, services),
+    localIssuerRetired() ? retired(context) : authorize(context, services),
   );
   app.get("/oauth/callback", (context) =>
     localIssuerRetired()
