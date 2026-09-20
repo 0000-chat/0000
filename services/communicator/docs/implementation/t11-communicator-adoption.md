@@ -32,7 +32,7 @@ edited in this worker.
 The following checks passed on the current source or its unchanged affected
 baseline:
 
-- Communicator `./scripts/check`: 382 files, exit 0; log
+- Communicator `./scripts/check`: 385 files, exit 0.
   `/tmp/platform-t11-rust-composition-service-check.log`.
 - Communicator Worker: 84 files and 903 tests, exit 0; log
   `/tmp/platform-parent-t11-worker-fixed.log`.
@@ -78,8 +78,8 @@ require HTTPS. Results:
   `Allowed` for the outbound claim.
 
 The completed checked-in runner recorded safe metadata and result
-classifications in `/tmp/platform-t11-rust-composition-health-fixed.log`; its
-SHA256 is `51af241d56102a3763a9175da6ead8c74299905304c583e984f9208d32ea63cc`.
+classifications in `/tmp/platform-t11-rust-composition-lifecycle-final.log`; its
+SHA256 is `fb7aa0d51060135ac8817eda34edd9d6fc6d4fe6672142b988c3daa1a2541d10`.
 It
 does not contain credential values, OAuth callback values, or claim bodies. The
 runner exits nonzero if either exact Cargo test is absent, times out, or does
@@ -106,7 +106,7 @@ The checked-in Rust test is an ignored integration test behind the explicit
 `loopback-test` Cargo feature; that feature only exposes the loopback
 constructors used by the fixture, while production constructors continue to
 require HTTPS. A completed default-cleanup runner log is
-`/tmp/platform-t11-rust-composition-health-fixed.log`: the runner exited 0, with two
+`/tmp/platform-t11-rust-composition-lifecycle-final.log`: the runner exited 0, with two
 assertions in the pre-revocation stage and six in the revocation/replacement
 stage. It recorded ingestion `Accepted`, claim `Allowed`, Platform revoke
 HTTP 200, direct revoked claim HTTP 401, old ingestion `Paused` with
@@ -145,8 +145,19 @@ checks use isolated temporary state and leave only the safe logs listed below:
 - `node --test scripts/platform-rust-composition/health.test.mjs` passed its
   one regression: a response that sends headers and stalls its body is aborted
   by the five-second health request deadline (the test uses a 100 ms bound).
-  The post-fix happy-path run above also exited 0 with `interruptedBy:null`,
-  `allStopped:true`, and `stateRemoved:true`.
+- `node --test scripts/platform-rust-composition/runner.test.mjs` passed both
+  lifecycle regressions: a missing background `pnpm` produced a bounded
+  `spawn pnpm ENOENT` result with all owned groups stopped, and an issuance
+  child that exited 0 after TERM was rejected because its stage was timed out.
+  The test ran two cases in 36.3 seconds.
+- The corresponding safe manual logs are
+  `/tmp/platform-t11-rust-composition-missing-pnpm.log` (SHA256
+  `f60c1a94ae44e67a49a82d1bdf2cdd8fdb02fbe542add31c5d4e432528a0a263`) and
+  `/tmp/platform-t11-rust-composition-setup-timeout-exit0.log` (SHA256
+  `acd9d18b966f4d54fe95ebe56ca8b5052a85ae75d761552848db1ca8b58f9939`).
+- The post-fix happy-path run above exited 0 with `interruptedBy:null`,
+  `allStopped:true`, and `stateRemoved:true` (`/tmp/platform-t11-rust-composition-lifecycle-final.log`,
+  SHA256 `fb7aa0d51060135ac8817eda34edd9d6fc6d4fe6672142b988c3daa1a2541d10`).
 
 ## Browser and realtime evidence boundary
 

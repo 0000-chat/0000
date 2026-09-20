@@ -65,6 +65,14 @@ The body deadline regression can be run without starting Workers:
 node --test scripts/platform-rust-composition/health.test.mjs
 ```
 
+The runner lifecycle regressions use isolated command wrappers and verify
+missing background executables and setup children that exit zero after a
+timeout:
+
+```sh
+node --test scripts/platform-rust-composition/runner.test.mjs
+```
+
 The test uses the explicit Rust `loopback-test` feature because the local
 Workers use HTTP. Production Rust constructors remain HTTPS-only. No remote
 Wrangler, deployment, or external provider write is performed.

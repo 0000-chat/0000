@@ -47,11 +47,21 @@ const ownedGroups = new Map();
 const groupStopPromises = new Map();
 const shutdownController = new AbortController();
 let interruptedBy = null;
+let backgroundSpawnError = null;
 let cleanupPromise;
 
 const append = async (line) => {
   await writeFile(internalLogPath, `${line}\n`, { flag: "a", mode: 0o600 });
 };
+
+function recordBackgroundSpawnError(label, error) {
+  backgroundSpawnError ??= new Error(
+    `${label} failed to start: ${error instanceof Error ? error.message : String(error)}`,
+  );
+  shutdownController.abort();
+  cleanupPromise ??= stopOwnedGroups();
+  void cleanupPromise.catch(() => {});
+}
 
 function freePort() {
   return new Promise((resolvePort, rejectPort) => {
@@ -81,6 +91,7 @@ function spawnLogged(
     cwd = communicatorRoot,
     logPath = internalLogPath,
     label = command,
+    background = false,
   } = {},
 ) {
   assertNotInterrupted();
@@ -94,7 +105,10 @@ function spawnLogged(
   if (detached && child.pid !== undefined) {
     ownedGroups.set(child.pid, { label, pid: child.pid });
   }
-  child.once("exit", () => closeSync(output));
+  child.once("close", () => closeSync(output));
+  if (background) {
+    child.once("error", (error) => recordBackgroundSpawnError(label, error));
+  }
   return child;
 }
 
@@ -106,6 +120,7 @@ function assertNotInterrupted() {
   if (interruptedBy !== null) {
     throw new Error(`runner interrupted by ${interruptedBy}`);
   }
+  if (backgroundSpawnError !== null) throw backgroundSpawnError;
 }
 
 async function groupExists(pgid) {
@@ -178,7 +193,7 @@ process.once("SIGINT", () => void requestShutdown("SIGINT"));
 process.once("SIGTERM", () => void requestShutdown("SIGTERM"));
 
 function runLogged(command, args, environment = {}, label = command) {
-  return new Promise((resolveRun, rejectRun) => {
+  return new Promise((resolveRun) => {
     const stageLogPath = join(runRoot, `${label}.log`);
     const child = spawnLogged(command, args, environment, {
       detached: true,
@@ -211,6 +226,18 @@ function runLogged(command, args, environment = {}, label = command) {
       finish({ code: code ?? 1, signal });
     });
   });
+}
+
+async function recordStageResult(label, stageResult) {
+  await append(
+    JSON.stringify({
+      stage: label,
+      code: stageResult.code,
+      signal: stageResult.signal,
+      timedOut: stageResult.timedOut,
+      spawnError: stageResult.spawnError ?? null,
+    }),
+  );
 }
 
 async function waitForJson(path, timeoutMs = startupTimeoutMs) {
@@ -348,6 +375,7 @@ async function runCargoStage(label, testName, environment) {
       observed: value.observed,
     }),
   );
+  assertNotInterrupted();
   return value;
 }
 
@@ -371,6 +399,7 @@ async function runRevocation(environment) {
     observed,
   };
   await append(JSON.stringify({ stage: "revoke-service", ...value }));
+  assertNotInterrupted();
   return value;
 }
 
@@ -408,6 +437,7 @@ try {
     {
       detached: true,
       label: "platform-worker",
+      background: true,
       cwd: resolve(communicatorRoot, "../platform"),
       logPath: join(runRoot, "platform.log"),
     },
@@ -424,7 +454,8 @@ try {
     },
     "issue-service",
   );
-  if (issueResult.code !== 0) {
+  await recordStageResult("issue-service", issueResult);
+  if (issueResult.code !== 0 || issueResult.timedOut) {
     throw new Error("Platform service issuance failed");
   }
   await waitForJson(issuedPath, 5000);
@@ -439,7 +470,8 @@ try {
     },
     "seed-communicator",
   );
-  if (seedResult.code !== 0) {
+  await recordStageResult("seed-communicator", seedResult);
+  if (seedResult.code !== 0 || seedResult.timedOut) {
     throw new Error("Communicator fixture seeding failed");
   }
 
@@ -486,6 +518,7 @@ try {
     {
       detached: true,
       label: "communicator-worker",
+      background: true,
       cwd: controlPlaneRoot,
       logPath: join(runRoot, "communicator.log"),
     },
