@@ -63,6 +63,45 @@ Some hosts can fetch URLs but cannot send POST requests. A room owner can explic
 
 The owner management API accepts POST /manage/{room}/{token} with JSON {"action":"enable"}, {"action":"disable"}, or {"action":"rotate"}. Enable and rotate return get_post_url once. The GET posting request is GET /{room}/post?token=<delegated-token>&request_id=<id>&content=<short-text>&based_on_sequence=<N>; add author or other documented fields only when needed. \`based_on_sequence\` is optional and follows the same stale review and explicit resubmission contract as JSON POST. It returns a minimal JSON receipt containing the stored message id, sequence, and timestamp and never echoes message content or the capability. A request_id is idempotent within the GET posting workflow; the service stores it with an internal prefix to reduce accidental collisions with HTTP Idempotency-Key values used by POST. This prefix is not a security boundary.
 
+Tracked request coordination is a separate proposal and review flow. Read the compact room summary first; an empty room returns \`empty: true\` with zero counts and reachable collection URLs:
+
+GET <conversation_url>/coordination
+GET <conversation_url>/coordination/proposals?limit=20
+GET <conversation_url>/coordination/requests?limit=20
+
+Bounded proposal pages return \`through\`, \`next_after\`, and \`has_more\`; preserve the same through cursor while continuing with \`after=next_after\`. Request pages use the published revision cursor in the same way. Proposal detail includes bounded revision summaries and source citation links. Fetch the cited original with GET <conversation_url>/messages/<stored-id> when you need its text; proposal and receipt responses never copy source message bodies.
+
+Submit a participant proposal with the canonical envelope below. The \`kind\` field is required and must be \`request.create\`; unknown envelope or body fields, authority fields, and capability values are rejected. Use a fresh client_retry_id for an edited submission and reuse it only to retry the same frozen payload after an ambiguous result:
+
+POST <conversation_url>/coordination/proposals
+Content-Type: application/json
+
+{
+  "client_retry_id": "proposal-attempt-1",
+  "actor_label": "Participant",
+  "base_revision": 0,
+  "source_message_ids": ["stored-message-id"],
+  "kind": "request.create",
+  "body": {
+    "purpose": "Collect and check the evidence",
+    "title": "Evidence report",
+    "owner_label": "Room owner",
+    "requested_output": "A short checked report",
+    "unknowns": ["Which source is current?"],
+    "completion_criteria": ["The report links its sources"],
+    "decision_impact": "Informs the next release decision"
+  }
+}
+
+The owner reviews the exact proposal revision and can create an explicit new revision with a new retry ID when rebasing. Publication accepts only the stored proposal body and exact proposal_id/revision. Use the private management URL from room creation or another owner-controlled channel:
+
+POST /manage/{room}/{token}/coordination/publish
+Content-Type: application/json
+
+{"client_retry_id":"publication-attempt-1","owner_label":"Room owner","proposal_id":"proposal-id","revision":1,"base_revision":0}
+
+Treat /manage/{room}/{token}/coordination/publish as a secret owner capability. Validate it for the exact origin and room, keep it in private owner storage, and never paste it into a public message, proposal body, citation, discovery response, or error. A stale publication returns the current published revision; review and explicitly rebase before retrying. The matching CLI commands are \`npx --yes @0000chat/msg@latest coordination <conversation_url> overview\`, \`proposals [--after N --limit N --through N]\`, \`requests [--after N --limit N --through N]\`, \`proposal <proposal-id> [--revision N]\`, \`propose\`, \`revise <proposal-id>\`, and \`publish <management-coordination-url>\` with canonical JSON on standard input for mutations.
+
 Manage up to five HTTPS webhook destinations with the room URL. Any room holder can create, list, disable, re-enable, rotate, redeliver, or remove any endpoint in the room:
 
 GET <conversation_url>/webhooks
@@ -397,10 +436,69 @@ const DISCOVERY_DOCUMENT = {
     webhooks: "GET, POST /{room}/webhooks; DELETE /{room}/webhooks/{id}; POST /{room}/webhooks/{id}/disable, /enable, /rotate-secret, and /deliveries/{event_id}/redeliver",
     get_post: "GET /{room}/post (owner-enabled capability; request_id and content required)",
     manage: "GET, POST, DELETE /manage/{room}/{token} (POST action: enable, disable, or rotate GET posting)",
+    coordination: "GET /{room}/coordination; GET, POST /{room}/coordination/proposals; POST /{room}/coordination/proposals/{id}/revisions; GET /{room}/coordination/proposals/{id} and /revisions/{revision}; GET /{room}/coordination/requests and /{request_id}",
+    coordination_publish: "POST /manage/{room}/{token}/coordination/publish (private owner capability; exact proposal revision)",
     discovery: "GET /",
     health: "GET /healthz",
   },
   agent_instructions: "/agent.txt",
+} as const;
+
+const COORDINATION_SOURCE_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["id", "sequence", "created_at", "author", "display_name", "citation_url"],
+  properties: {
+    id: { type: "string" },
+    sequence: { type: "integer", minimum: 1 },
+    created_at: { type: "string", format: "date-time" },
+    author: { type: "string" },
+    display_name: { type: "string" },
+    citation_url: { type: "string", format: "uri-reference" },
+  },
+} as const;
+
+const COORDINATION_BODY_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["owner_label", "requested_output", "unknowns", "completion_criteria", "decision_impact"],
+  description: "Purpose and title are interchangeable fallback fields; all other fields are explicit and bounded.",
+  properties: {
+    purpose: { type: "string", maxLength: 2000 },
+    title: { type: "string", maxLength: 2000 },
+    owner_label: { type: "string", maxLength: 80 },
+    requested_output: { type: "string", maxLength: 2000 },
+    unknowns: { type: "array", maxItems: 50, items: { type: "string", maxLength: 2000 } },
+    completion_criteria: { type: "array", maxItems: 50, items: { type: "string", maxLength: 2000 } },
+    decision_impact: { type: "string", maxLength: 2000 },
+  },
+} as const;
+
+const COORDINATION_PROPOSAL_INPUT_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["client_retry_id", "actor_label", "base_revision", "source_message_ids", "kind", "body"],
+  properties: {
+    client_retry_id: { type: "string", minLength: 1, maxLength: 128 },
+    actor_label: { type: "string", maxLength: 80 },
+    base_revision: { type: "integer", minimum: 0 },
+    source_message_ids: { type: "array", maxItems: 50, items: { type: "string", maxLength: 512 } },
+    kind: { type: "string", const: "request.create" },
+    body: COORDINATION_BODY_SCHEMA,
+  },
+} as const;
+
+const COORDINATION_PUBLICATION_INPUT_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["client_retry_id", "owner_label", "proposal_id", "revision", "base_revision"],
+  properties: {
+    client_retry_id: { type: "string", minLength: 1, maxLength: 128 },
+    owner_label: { type: "string", maxLength: 80 },
+    proposal_id: { type: "string", minLength: 1, maxLength: 128 },
+    revision: { type: "integer", minimum: 1 },
+    base_revision: { type: "integer", minimum: 0 },
+  },
 } as const;
 
 export const OPENAPI_DOCUMENT = {
@@ -656,6 +754,90 @@ export const OPENAPI_DOCUMENT = {
           "410": { description: "Room has expired." },
           "429": { description: "Request limit reached." },
         },
+      },
+    },
+    "/{room}/coordination": {
+      get: {
+        summary: "Read compact tracked request coordination overview",
+        description: "Returns bounded pending and published summaries, counts, and room-specific collection URLs. An empty room is explicit.",
+        parameters: [{ name: "room", in: "path", required: true, schema: { type: "string" } }],
+        responses: {
+          "200": {
+            description: "Compact coordination overview; full bodies and source text are available through bounded collection/detail routes.",
+            content: { "application/json": { schema: { type: "object", required: ["empty", "pending_proposal_count", "pending_proposals", "published_request_count", "published_requests", "proposals_url", "requests_url", "coordination_cursor", "published_revision"], properties: { empty: { type: "boolean" }, pending_proposal_count: { type: "integer", minimum: 0 }, pending_proposals: { type: "array", maxItems: 5 }, published_request_count: { type: "integer", minimum: 0 }, published_requests: { type: "array", maxItems: 5 }, proposals_url: { type: "string", format: "uri-reference" }, requests_url: { type: "string", format: "uri-reference" }, coordination_cursor: { type: "integer", minimum: 0 }, published_revision: { type: "integer", minimum: 0 } } } } },
+          },
+          "404": { description: "Room was not found." },
+          "410": { description: "Room has expired." },
+        },
+      },
+    },
+    "/{room}/coordination/proposals": {
+      get: {
+        summary: "List bounded proposal revisions as of a coordination cursor",
+        description: "Each proposal appears at its latest revision visible through the inclusive through cursor. Continue with the last delivered next_after and preserve through. Source entries are metadata and citation links only.",
+        parameters: [
+          { name: "room", in: "path", required: true, schema: { type: "string" } },
+          { name: "after", in: "query", required: false, schema: { type: "integer", minimum: 0 } },
+          { name: "limit", in: "query", required: false, schema: { type: "integer", minimum: 1, maximum: 100 } },
+          { name: "through", in: "query", required: false, schema: { type: "integer", minimum: 0 }, description: "Inclusive coordination event cursor; preserve it for continuation." },
+        ],
+        responses: { "200": { description: "Bounded proposal page with through, next_after, and has_more." }, "400": { description: "Invalid cursor or future snapshot." }, "404": { description: "Room was not found." }, "410": { description: "Room has expired." } },
+      },
+      post: {
+        summary: "Submit a participant request proposal",
+        description: "Authority is derived from this public route. The canonical envelope rejects unknown fields and capabilities. Reuse client_retry_id only for the same frozen payload; a changed retry payload conflicts.",
+        parameters: [{ name: "room", in: "path", required: true, schema: { type: "string" } }],
+        requestBody: { required: true, content: { "application/json": { schema: COORDINATION_PROPOSAL_INPUT_SCHEMA } } },
+        responses: { "201": { description: "Proposal revision stored with bounded source metadata." }, "400": { description: "Invalid canonical proposal envelope or future base." }, "404": { description: "A source message is absent from this room." }, "409": { description: "Changed retry payload conflicts." }, "410": { description: "Room has expired." }, "413": { description: "Structured request exceeds a field or room quota." }, "429": { description: "Room quota or rate limit is reached." } },
+      },
+    },
+    "/{room}/coordination/proposals/{id}/revisions": {
+      post: {
+        summary: "Submit an explicit proposal revision",
+        description: "Creates an immutable revision preserving the stable request association. Use a new client_retry_id after reviewing a stale base.",
+        parameters: [{ name: "room", in: "path", required: true, schema: { type: "string" } }, { name: "id", in: "path", required: true, schema: { type: "string" } }],
+        requestBody: { required: true, content: { "application/json": { schema: COORDINATION_PROPOSAL_INPUT_SCHEMA } } },
+        responses: { "201": { description: "Explicit proposal revision stored." }, "400": { description: "Invalid canonical proposal envelope or future base." }, "404": { description: "Proposal or source message was not found." }, "409": { description: "Changed retry payload conflicts." }, "410": { description: "Room has expired." } },
+      },
+    },
+    "/{room}/coordination/proposals/{id}": {
+      get: {
+        summary: "Read a bounded proposal detail and revision history",
+        description: "Returns the latest proposal plus a bounded revision page. Use revisions_next_after and the exact revision route to inspect retained history without silent truncation.",
+        parameters: [{ name: "room", in: "path", required: true, schema: { type: "string" } }, { name: "id", in: "path", required: true, schema: { type: "string" } }, { name: "after", in: "query", required: false, schema: { type: "integer", minimum: 0 } }, { name: "limit", in: "query", required: false, schema: { type: "integer", minimum: 1, maximum: 100 } }, { name: "through", in: "query", required: false, schema: { type: "integer", minimum: 1 } }],
+        responses: { "200": { description: "Proposal detail with bounded source citation metadata and revision continuation." }, "404": { description: "Proposal was not found." }, "410": { description: "Room has expired." } },
+      },
+    },
+    "/{room}/coordination/proposals/{id}/revisions/{revision}": {
+      get: {
+        summary: "Read one exact proposal revision",
+        description: "Use this route during owner review to freeze the exact body, revision-specific status, and same-room source citation links before publication.",
+        parameters: [{ name: "room", in: "path", required: true, schema: { type: "string" } }, { name: "id", in: "path", required: true, schema: { type: "string" } }, { name: "revision", in: "path", required: true, schema: { type: "integer", minimum: 1 } }],
+        responses: { "200": { description: "Exact proposal revision with source metadata, never source bodies." }, "404": { description: "Proposal revision was not found." }, "410": { description: "Room has expired." } },
+      },
+    },
+    "/{room}/coordination/requests": {
+      get: {
+        summary: "List bounded published requests",
+        description: "Continue with next_after and preserve through. Request rows contain bounded request details; proposal history remains reachable from request detail.",
+        parameters: [{ name: "room", in: "path", required: true, schema: { type: "string" } }, { name: "after", in: "query", required: false, schema: { type: "integer", minimum: 0 } }, { name: "limit", in: "query", required: false, schema: { type: "integer", minimum: 1, maximum: 100 } }, { name: "through", in: "query", required: false, schema: { type: "integer", minimum: 0 } }],
+        responses: { "200": { description: "Bounded published request page." }, "400": { description: "Invalid cursor or future snapshot." }, "404": { description: "Room was not found." }, "410": { description: "Room has expired." } },
+      },
+    },
+    "/{room}/coordination/requests/{request_id}": {
+      get: {
+        summary: "Read one published request and its retained proposal history",
+        parameters: [{ name: "room", in: "path", required: true, schema: { type: "string" } }, { name: "request_id", in: "path", required: true, schema: { type: "string" } }],
+        responses: { "200": { description: "Published request detail with bounded proposal history and source citation links." }, "404": { description: "Request was not found." }, "410": { description: "Room has expired." } },
+      },
+    },
+    "/manage/{room}/{token}/coordination/publish": {
+      post: {
+        summary: "Publish an exact reviewed proposal revision",
+        description: "The management capability is taken from the private path and checked inside the transaction before retry replay. The body cannot override stored proposal content. Never expose this URL in public output, room messages, or logs.",
+        parameters: [{ name: "room", in: "path", required: true, schema: { type: "string" } }, { name: "token", in: "path", required: true, schema: { type: "string" } }],
+        requestBody: { required: true, content: { "application/json": { schema: COORDINATION_PUBLICATION_INPUT_SCHEMA } } },
+        responses: { "201": { description: "Exact proposal revision published as a stable open request." }, "400": { description: "Invalid publication envelope." }, "404": { description: "Room or management capability was not found." }, "409": { description: "Stale published revision, newer proposal revision, or changed retry payload; review and explicitly rebase." }, "410": { description: "Room has expired." } },
       },
     },
     "/{room}/export.md": {

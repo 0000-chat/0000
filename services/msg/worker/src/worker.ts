@@ -3,7 +3,7 @@ import { buildAgentRepresentation, renderAgentText } from "./agent-representatio
 import { agentBrowserAsset, renderAgentHomePage, renderAgentRoomPage, renderAgentStatusPage } from "./agent-browser";
 import { browserAsset, browserIcon, MERMAID_ASSET_PATH, renderBrowserDocument } from "./browser";
 import { browserViewRedirect, selectBrowserView } from "./browser-view";
-import { ERROR_CODES, isStaleSequenceDetails, ProtocolError, type ErrorCode, type StaleSequenceDetails } from "./errors";
+import { ERROR_CODES, isStaleRevisionDetails, isStaleSequenceDetails, ProtocolError, type ErrorCode, type StaleRevisionDetails, type StaleSequenceDetails } from "./errors";
 import {
   foregroundWaitForConversation,
   messageCitationUrl,
@@ -19,6 +19,8 @@ import {
   type RoomService,
 } from "./protocol";
 import { byteLength, compareCapabilities, DEFAULT_READ_LIMIT, MAX_ROOM_REQUEST_BYTES, parseBasedOnSequence, roomEtag, validateBasedOnSequenceQuery, validateBoundedCursor, validateCursor, validateIdempotencyKey, validateReadLimit, validateRequestId, validateThrough } from "./room-domain";
+import { coordinationEtag } from "./room-domain";
+import { parseCoordinationListSelectors } from "./coordination-domain";
 import {
   negotiateCreateRepresentation,
   negotiateRepresentation,
@@ -118,7 +120,7 @@ export function createWorker(service: RoomService, options: MsgWorkerOptions = {
         const response =
           error instanceof ProtocolError
             ? agentHtml
-              ? htmlResponse(renderAgentStatusPage(error.status, error.code, renderedErrorMessage(error.message, error.details), requestUrl), error.status)
+              ? htmlResponse(renderAgentStatusPage(error.status, error.code, renderedErrorMessage(error.message, isStaleSequenceDetails(error.details) ? error.details : undefined, isStaleRevisionDetails(error.details) ? error.details : undefined), requestUrl), error.status)
               : errorResponse(error.code, error.message, error.status, representation, error.details)
             : errorResponse(
                 ERROR_CODES.internal,
@@ -384,6 +386,69 @@ async function route(request: Request, service: RoomService, options: MsgWorkerO
     return service.exportRoom({ format: exportMatch[2] === "json" ? "json" : "markdown", room: exportMatch[1] });
   }
 
+  const coordinationOverviewMatch = /^\/([^/]+)\/coordination$/u.exec(url.pathname);
+  if (coordinationOverviewMatch && request.method === "GET") {
+    if (!service.coordinationOverview) return notFound();
+    await enforceRateLimit(request, options.rateLimits?.reads);
+    const result = await service.coordinationOverview({ room: coordinationOverviewMatch[1]! });
+    const etag = coordinationEtag(result.coordination_cursor, result.published_revision, result.expires_at);
+    if (request.headers.get("if-none-match") === etag) return new Response(null, { headers: { etag, "retry-after": "5" }, status: 304 });
+    const response = jsonResponse(result);
+    response.headers.set("etag", etag);
+    response.headers.set("retry-after", "5");
+    return response;
+  }
+  const coordinationProposalCollection = /^\/([^/]+)\/coordination\/proposals$/u.exec(url.pathname);
+  if (coordinationProposalCollection && request.method === "GET") {
+    if (!service.listCoordinationProposals) return notFound();
+    await enforceRateLimit(request, options.rateLimits?.reads);
+    const selectors = parseCoordinationListSelectors(url);
+    return jsonResponse(await service.listCoordinationProposals({ room: coordinationProposalCollection[1]!, after: selectors.after, limit: selectors.limit, ...(selectors.through === undefined ? {} : { through: selectors.through }) }));
+  }
+  if (coordinationProposalCollection && request.method === "POST") {
+    if (!service.submitCoordinationProposal) return notFound();
+    await enforceRateLimit(request, options.rateLimits?.posts);
+    return jsonResponse(await service.submitCoordinationProposal({ body: await parseRequestBody(request, { maxBytes: MAX_ROOM_REQUEST_BYTES }), room: coordinationProposalCollection[1]! }), 201);
+  }
+  const coordinationRevisionMatch = /^\/([^/]+)\/coordination\/proposals\/([^/]+)\/revisions$/u.exec(url.pathname);
+  if (coordinationRevisionMatch && request.method === "POST") {
+    if (!service.submitCoordinationRevision) return notFound();
+    await enforceRateLimit(request, options.rateLimits?.posts);
+    return jsonResponse(await service.submitCoordinationRevision({ body: await parseRequestBody(request, { maxBytes: MAX_ROOM_REQUEST_BYTES }), proposalId: decodePathSegment(coordinationRevisionMatch[2]!), room: coordinationRevisionMatch[1]! }), 201);
+  }
+  const coordinationRevisionDetailMatch = /^\/([^/]+)\/coordination\/proposals\/([^/]+)\/revisions\/([1-9][0-9]*)$/u.exec(url.pathname);
+  if (coordinationRevisionDetailMatch && request.method === "GET") {
+    if (!service.readCoordinationProposalRevision) return notFound();
+    await enforceRateLimit(request, options.rateLimits?.reads);
+    return jsonResponse(await service.readCoordinationProposalRevision({ proposalId: decodePathSegment(coordinationRevisionDetailMatch[2]!), revision: Number(coordinationRevisionDetailMatch[3]!), room: coordinationRevisionDetailMatch[1]! }));
+  }
+  const coordinationProposalDetail = /^\/([^/]+)\/coordination\/proposals\/([^/]+)$/u.exec(url.pathname);
+  if (coordinationProposalDetail && request.method === "GET") {
+    if (!service.readCoordinationProposal) return notFound();
+    await enforceRateLimit(request, options.rateLimits?.reads);
+    return jsonResponse(await service.readCoordinationProposal({ proposalId: decodePathSegment(coordinationProposalDetail[2]!), room: coordinationProposalDetail[1]! }));
+  }
+  const coordinationRequestCollection = /^\/([^/]+)\/coordination\/requests$/u.exec(url.pathname);
+  if (coordinationRequestCollection && request.method === "GET") {
+    if (!service.listCoordinationRequests) return notFound();
+    await enforceRateLimit(request, options.rateLimits?.reads);
+    const selectors = parseCoordinationListSelectors(url);
+    return jsonResponse(await service.listCoordinationRequests({ room: coordinationRequestCollection[1]!, after: selectors.after, limit: selectors.limit, ...(selectors.through === undefined ? {} : { through: selectors.through }) }));
+  }
+  const coordinationRequestDetail = /^\/([^/]+)\/coordination\/requests\/([^/]+)$/u.exec(url.pathname);
+  if (coordinationRequestDetail && request.method === "GET") {
+    if (!service.readCoordinationRequest) return notFound();
+    await enforceRateLimit(request, options.rateLimits?.reads);
+    const selectors = parseCoordinationListSelectors(url);
+    return jsonResponse(await service.readCoordinationRequest({ requestId: decodePathSegment(coordinationRequestDetail[2]!), room: coordinationRequestDetail[1]!, after: selectors.after, limit: selectors.limit, ...(selectors.through === undefined ? {} : { through: selectors.through }) }));
+  }
+  const coordinationPublishMatch = /^\/manage\/([^/]+)\/([^/]+)\/coordination\/publish$/u.exec(url.pathname);
+  if (coordinationPublishMatch && request.method === "POST") {
+    if (!service.publishCoordinationRequest) return notFound();
+    await enforceRateLimit(request, options.rateLimits?.posts);
+    return jsonResponse(await service.publishCoordinationRequest({ body: await parseRequestBody(request, { maxBytes: MAX_ROOM_REQUEST_BYTES }), ownerToken: decodePathSegment(coordinationPublishMatch[2]!), room: coordinationPublishMatch[1]! }), 201);
+  }
+
   const messageMatch = /^\/([^/]+)\/messages\/([^/]+)$/u.exec(url.pathname);
   if (messageMatch && request.method === "GET") {
     if (!service.readMessage) return notFound();
@@ -452,7 +517,7 @@ async function route(request: Request, service: RoomService, options: MsgWorkerO
         return htmlResponse(page.html, 200, page.styleNonce);
       }
       const etag = selectors.bounded
-        ? roomEtag(result.latest_message, selectors.after, { expiresAt: result.expires_at, limit: selectors.limit ?? DEFAULT_READ_LIMIT, through: result.through })
+        ? roomEtag(result.latest_message, selectors.after, { expiresAt: result.expires_at, limit: selectors.limit ?? DEFAULT_READ_LIMIT, through: result.through, ...(result.coordination_cursor === undefined ? {} : { coordinationCursor: result.coordination_cursor }), ...(result.published_revision === undefined ? {} : { publishedRevision: result.published_revision }) })
         : roomEtag(result.latest_message, selectors.after);
       if (request.headers.get("if-none-match") === etag) {
         return new Response(null, { headers: { etag, "retry-after": "5" }, status: 304 });
@@ -860,17 +925,19 @@ function errorResponse(
   message: string,
   status: number,
   representation: ErrorRepresentation,
-  details?: StaleSequenceDetails,
+  details?: StaleSequenceDetails | StaleRevisionDetails,
 ): Response {
   const safeDetails = code === ERROR_CODES.staleSequence && isStaleSequenceDetails(details) ? details : undefined;
+  const safeRevisionDetails = code === ERROR_CODES.staleRevision && isStaleRevisionDetails(details) ? details : undefined;
   if (representation === "json") {
     return jsonResponse({ error: {
       code,
       message,
       ...(safeDetails === undefined ? {} : { latest_message: safeDetails.latest_message, review_after: safeDetails.review_after }),
+      ...(safeRevisionDetails === undefined ? {} : { current_revision: safeRevisionDetails.current_revision, submitted_base_revision: safeRevisionDetails.submitted_base_revision }),
     } }, status);
   }
-  const displayMessage = renderedErrorMessage(message, safeDetails);
+  const displayMessage = renderedErrorMessage(message, safeDetails, safeRevisionDetails);
   if (representation === "html") {
     return new Response(
       `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Request failed</title></head><body><main><h1>Request failed</h1><p>Code: ${escapeHtml(code)}</p><p>${escapeHtml(displayMessage)}</p></main></body></html>`,
@@ -886,9 +953,10 @@ function errorResponse(
   return textResponse(`${code}: ${displayMessage}\n`, status);
 }
 
-function renderedErrorMessage(message: string, details?: StaleSequenceDetails): string {
-  if (details === undefined) return message;
-  return `${message} Current latest sequence: ${details.latest_message}. Review after sequence: ${details.review_after}.`;
+function renderedErrorMessage(message: string, details?: StaleSequenceDetails, revisionDetails?: StaleRevisionDetails): string {
+  if (details !== undefined) return `${message} Current latest sequence: ${details.latest_message}. Review after sequence: ${details.review_after}.`;
+  if (revisionDetails !== undefined) return `${message} Current published revision: ${revisionDetails.current_revision}. Submitted base revision: ${revisionDetails.submitted_base_revision}.`;
+  return message;
 }
 
 type ErrorRepresentation = "plain" | ReturnType<typeof negotiateRepresentation>;

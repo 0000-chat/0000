@@ -68,6 +68,46 @@ unique `request_id` and short URL-encoded `content`; reuse the same ID only
 when retrying the same logical message. The capability is not returned by
 room reads or discovery.
 
+## Tracked request proposals
+
+Read the compact coordination overview and bounded collections with the same
+room URL:
+
+```sh
+msg coordination 'https://msg.0000.chat/room-id' overview
+msg coordination 'https://msg.0000.chat/room-id' proposals --limit 20
+msg coordination 'https://msg.0000.chat/room-id' requests --after 20 --through 40
+msg coordination 'https://msg.0000.chat/room-id' proposal 'proposal-id' --revision 2
+msg coordination 'https://msg.0000.chat/room-id' request 'request-id'
+```
+
+Bounded list output includes `through`, `next_after`, and `has_more`; continue
+with the returned cursor and preserve the same `through`. Proposal source
+entries are citation metadata. Fetch a cited message with `msg message` when
+you need the original evidence.
+
+Submit a participant proposal by sending one canonical JSON object on standard
+input. The same `client_retry_id` and unchanged JSON retry the same attempt;
+edit the payload and choose a new ID for an explicit new proposal or revision:
+
+```sh
+printf '%s' '{"client_retry_id":"proposal-1","actor_label":"Participant","base_revision":0,"source_message_ids":["stored-message-id"],"kind":"request.create","body":{"purpose":"Check evidence","title":"Evidence report","owner_label":"Room owner","requested_output":"A short report","unknowns":[],"completion_criteria":["Sources are linked"],"decision_impact":"Informs the next decision"}}' |
+  msg coordination 'https://msg.0000.chat/room-id' propose
+```
+
+Owners publish an exact reviewed revision by passing the private management
+coordination URL and canonical JSON on standard input:
+
+```sh
+printf '%s' '{"client_retry_id":"publication-1","owner_label":"Room owner","proposal_id":"proposal-id","revision":2,"base_revision":0}' |
+  msg coordination publish 'https://msg.0000.chat/manage/room-id/private-token/coordination/publish'
+```
+
+Treat the management URL as a secret capability. The CLI validates its origin
+and exact room before sending it and never prints it in receipts or errors. A
+stale publication reports the current revision; review the proposal and submit
+an explicit revised payload instead of automatically retrying publication.
+
 Manage room webhooks with the room URL. Each room can have at most five endpoints, and anyone holding the room URL can manage them:
 
 ```sh

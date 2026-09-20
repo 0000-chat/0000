@@ -1,9 +1,10 @@
 import { DurableObject } from "cloudflare:workers";
 
-import { ERROR_CODES, ProtocolError } from "./errors";
+import { ERROR_CODES, isStaleRevisionDetails, isStaleSequenceDetails, ProtocolError, type StaleRevisionDetails, type StaleSequenceDetails } from "./errors";
+import { coordinationMutationFingerprint, coordinationStorageBytes, COORDINATION_DEFAULT_LIMIT, COORDINATION_KIND, MAX_COORDINATION_PAGE_BYTES, parseCoordinationListSelectors, parseCoordinationProposal, parseCoordinationPublish, parseCoordinationRevision, type CoordinationProposalInput, type CoordinationPublishInput, type CoordinationRequestBody } from "./coordination-domain";
 import { byteLength, compareCapabilities, DEFAULT_READ_LIMIT, MAX_READ_MESSAGE_BYTES, messageStorageBytes, ROOM_LIMITS, validateBasedOnSequence, validateBoundedCursor, validateCursor, validateReadLimit, validateRequestId, validateThrough } from "./room-domain";
 import type { MessageInput } from "./room-domain";
-import { PROTOCOL_VERSION, type CreateWebhookResponse, type ManageWebhookResponse, type RedeliverWebhookResponse, type RotateWebhookSecretResponse, type WebhookAttemptMetadata, type WebhookDeliveryMetadata, type WebhookSummary } from "./protocol";
+import { PROTOCOL_VERSION, type CoordinationProposal, type CoordinationProposalSummary, type CoordinationRequest, type CoordinationRequestSummary, type CoordinationSourceMessage, type CreateWebhookResponse, type ManageWebhookResponse, type RedeliverWebhookResponse, type RotateWebhookSecretResponse, type WebhookAttemptMetadata, type WebhookDeliveryMetadata, type WebhookSummary } from "./protocol";
 import { CURRENT_ROOM_SCHEMA_VERSION, migrateRoomSchema } from "./room-schema";
 import { discardWebhookResponseBody, generateWebhookSecret, normalizeWebhookUrl, redactWebhookUrl, signWebhookPayload, webhookRequestTarget } from "./webhooks";
 import { createWebPushRequest } from "./web-push-crypto";
@@ -41,12 +42,62 @@ interface RoomState {
   readonly management_hash: string | null;
   readonly get_post_enabled: number;
   readonly get_post_hash: string | null;
+  readonly coordination_cursor: number;
+  readonly published_revision: number;
   readonly message_count: number;
   readonly next_sequence: number;
   readonly notification_id: string;
   readonly status: "active" | "deleted";
   readonly tombstone_expires_at: number | null;
   readonly total_bytes: number;
+}
+
+interface StoredCoordinationProposal {
+  readonly actor_label: string;
+  readonly authority_class: "management" | "participant";
+  readonly base_revision: number;
+  readonly body: string;
+  readonly created_at: number;
+  readonly kind: string;
+  readonly proposal_id: string;
+  readonly request_id: string | null;
+  readonly revision: number;
+  readonly source_message_ids: string;
+  readonly byte_count: number;
+}
+
+interface StoredCoordinationRequest {
+  readonly completion_criteria: string;
+  readonly created_at: number;
+  readonly decision_impact: string;
+  readonly owner_label: string;
+  readonly published_revision: number;
+  readonly purpose: string;
+  readonly request_id: string;
+  readonly requested_output: string;
+  readonly status: "open";
+  readonly title: string;
+  readonly unknowns: string;
+  readonly updated_at: number;
+  readonly byte_count: number;
+}
+
+interface StoredCoordinationEvent {
+  readonly actor_label: string;
+  readonly authority_class: "management" | "participant";
+  readonly base_revision: number;
+  readonly body: string;
+  readonly byte_count: number;
+  readonly created_at: number;
+  readonly cursor: number;
+  readonly event_id: string;
+  readonly kind: string;
+  readonly operation: string;
+  readonly proposal_id: string;
+  readonly proposal_revision: number;
+  readonly request_id: string;
+  readonly resulting_revision: number | null;
+  readonly source_message_ids: string;
 }
 
 interface StoredMessage extends MessageInput {
@@ -207,6 +258,19 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
       const messageMatch = /^\/messages\/([^/]+)$/u.exec(url.pathname);
       if (request.method === "GET" && messageMatch) return await this.readMessage(decodePathSegment(messageMatch[1]!));
       if (request.method === "GET" && url.pathname === "/read") return await this.read(url);
+      if (request.method === "GET" && url.pathname === "/coordination") return await this.readCoordinationOverview();
+      if (request.method === "GET" && url.pathname === "/coordination/proposals") return await this.listCoordinationProposals(url);
+      if (request.method === "POST" && url.pathname === "/coordination/proposals") return await this.submitCoordinationProposal(request);
+      const proposalRevisionMatch = /^\/coordination\/proposals\/([^/]+)\/revisions$/u.exec(url.pathname);
+      if (request.method === "POST" && proposalRevisionMatch) return await this.submitCoordinationRevision(request, decodePathSegment(proposalRevisionMatch[1]!));
+      const proposalRevisionDetailMatch = /^\/coordination\/proposals\/([^/]+)\/revisions\/([1-9][0-9]*)$/u.exec(url.pathname);
+      if (request.method === "GET" && proposalRevisionDetailMatch) return await this.readCoordinationProposalRevision(decodePathSegment(proposalRevisionDetailMatch[1]!), Number(proposalRevisionDetailMatch[2]!));
+      const proposalMatch = /^\/coordination\/proposals\/([^/]+)$/u.exec(url.pathname);
+      if (request.method === "GET" && proposalMatch) return await this.readCoordinationProposal(decodePathSegment(proposalMatch[1]!), url);
+      if (request.method === "GET" && url.pathname === "/coordination/requests") return await this.listCoordinationRequests(url);
+      const requestMatch = /^\/coordination\/requests\/([^/]+)$/u.exec(url.pathname);
+      if (request.method === "GET" && requestMatch) return await this.readCoordinationRequest(decodePathSegment(requestMatch[1]!), url);
+      if (request.method === "POST" && url.pathname === "/coordination/publish") return await this.publishCoordination(request);
       if (request.method === "POST" && url.pathname === "/messages") return await this.post(request);
       if (request.method === "GET" && url.pathname === "/manage") return await this.manage(request, false);
       if (request.method === "DELETE" && url.pathname === "/manage") return await this.manage(request, true);
@@ -234,6 +298,10 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
           this.ctx.storage.sql.exec("DELETE FROM webhook_endpoints");
           this.ctx.storage.sql.exec("DELETE FROM push_deliveries");
           this.ctx.storage.sql.exec("DELETE FROM push_subscriptions");
+          this.ctx.storage.sql.exec("DELETE FROM coordination_retries");
+          this.ctx.storage.sql.exec("DELETE FROM coordination_events");
+          this.ctx.storage.sql.exec("DELETE FROM coordination_proposals");
+          this.ctx.storage.sql.exec("DELETE FROM coordination_requests");
           this.ctx.storage.sql.exec("DELETE FROM room_state");
         });
         await this.ctx.storage.deleteAlarm();
@@ -302,7 +370,7 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
       const bytes = messageStorageBytes(input.initial, undefined, id);
       const inactivity = now + this.limits.inactivityTtlMs;
       this.ctx.storage.sql.exec(
-        "INSERT INTO room_state (singleton, schema_version, protocol_version, created_at, last_message_at, inactivity_expires_at, absolute_expires_at, next_sequence, message_count, total_bytes, status, tombstone_expires_at, management_hash, notification_id, get_post_hash, get_post_enabled) VALUES (1, ?, ?, ?, ?, ?, ?, 2, 1, ?, 'active', NULL, ?, ?, NULL, 0)",
+        "INSERT INTO room_state (singleton, schema_version, protocol_version, created_at, last_message_at, inactivity_expires_at, absolute_expires_at, next_sequence, message_count, total_bytes, status, tombstone_expires_at, management_hash, notification_id, get_post_hash, get_post_enabled, coordination_cursor, published_revision) VALUES (1, ?, ?, ?, ?, ?, ?, 2, 1, ?, 'active', NULL, ?, ?, NULL, 0, 0, 0)",
         CURRENT_ROOM_SCHEMA_VERSION, PROTOCOL_VERSION, now, now, inactivity, inactivity, bytes, input.management_hash, notificationId,
       );
       this.insertMessage({ ...input.initial, byte_count: bytes, created_at: now, id, sequence: 1, source_browser_id: null });
@@ -318,7 +386,7 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
     const after = bounded ? validateBoundedCursor(url.searchParams.get("after"), "after") : validateCursor(url.searchParams.get("after"));
     if (!bounded) {
       const messages = rows<StoredMessage>(this.ctx.storage.sql.exec("SELECT * FROM messages WHERE sequence > ? ORDER BY sequence ASC", after)).map((message) => this.toMessage(message));
-      return this.json({ protocol_version: PROTOCOL_VERSION, messages, latest_message: state.next_sequence - 1, expires_at: iso(state.inactivity_expires_at), access_warning: "All authors and display names are self-declared and unverified." });
+      return this.json({ protocol_version: PROTOCOL_VERSION, messages, latest_message: state.next_sequence - 1, expires_at: iso(state.inactivity_expires_at), coordination_cursor: state.coordination_cursor, published_revision: state.published_revision, access_warning: "All authors and display names are self-declared and unverified." });
     }
 
     const limit = validateReadLimit(url.searchParams.get("limit")) ?? DEFAULT_READ_LIMIT;
@@ -356,6 +424,8 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
       messages,
       latest_message: latest,
       expires_at: iso(state.inactivity_expires_at),
+      coordination_cursor: state.coordination_cursor,
+      published_revision: state.published_revision,
       access_warning: "All authors and display names are self-declared and unverified.",
       next_after: messages.at(-1)?.sequence ?? after,
       has_more: hasMore,
@@ -373,6 +443,347 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
       message: this.toMessage(message),
       latest_message: state.next_sequence - 1,
       expires_at: iso(state.inactivity_expires_at),
+    });
+  }
+
+  private async readCoordinationOverview(): Promise<Response> {
+    const state = await this.requireActive(this.now());
+    const pendingRows = rows<StoredCoordinationProposal>(this.ctx.storage.sql.exec(
+      "SELECT p.* FROM coordination_proposals AS p WHERE p.revision = (SELECT MAX(latest.revision) FROM coordination_proposals AS latest WHERE latest.proposal_id = p.proposal_id) AND p.request_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM coordination_requests AS r WHERE r.request_id = p.request_id) ORDER BY p.created_at DESC, p.proposal_id DESC LIMIT ?",
+      5,
+    ));
+    const publishedRows = rows<StoredCoordinationRequest>(this.ctx.storage.sql.exec(
+      "SELECT * FROM coordination_requests ORDER BY published_revision DESC, request_id DESC LIMIT ?",
+      5,
+    ));
+    const pendingCount = rows<{ count: number }>(this.ctx.storage.sql.exec(
+      "SELECT COUNT(*) AS count FROM coordination_proposals AS p WHERE p.revision = (SELECT MAX(latest.revision) FROM coordination_proposals AS latest WHERE latest.proposal_id = p.proposal_id) AND p.request_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM coordination_requests AS r WHERE r.request_id = p.request_id)",
+    ))[0]?.count ?? 0;
+    const publishedCount = rows<{ count: number }>(this.ctx.storage.sql.exec("SELECT COUNT(*) AS count FROM coordination_requests"))[0]?.count ?? 0;
+    return this.json({
+      conversation_url: this.publicRoomPath(),
+      coordination_cursor: state.coordination_cursor,
+      empty: pendingCount === 0 && publishedCount === 0,
+      expires_at: iso(state.inactivity_expires_at),
+      latest_message: state.next_sequence - 1,
+      pending_proposal_count: pendingCount,
+      pending_proposals: pendingRows.map((proposal) => this.toCoordinationProposalSummary(proposal)),
+      protocol_version: PROTOCOL_VERSION,
+      published_request_count: publishedCount,
+      published_requests: publishedRows.map((request) => this.toCoordinationRequestSummary(request)),
+      proposals_url: "/coordination/proposals?limit=20",
+      requests_url: "/coordination/requests?limit=20",
+      published_revision: state.published_revision,
+    });
+  }
+
+  private async listCoordinationProposals(url: URL): Promise<Response> {
+    const state = await this.requireActive(this.now());
+    const selectors = parseCoordinationListSelectors(url);
+    const through = selectors.through ?? state.coordination_cursor;
+    if (through > state.coordination_cursor) throw new ProtocolError(ERROR_CODES.invalidBody, "The coordination through cursor is in the future.", 400);
+    const candidates = rows<StoredCoordinationProposal & { event_cursor: number }>(this.ctx.storage.sql.exec(
+      "SELECT p.*, e.cursor AS event_cursor FROM coordination_proposals AS p JOIN coordination_events AS e ON e.proposal_id = p.proposal_id AND e.proposal_revision = p.revision AND e.operation = 'proposal.created' WHERE p.revision = (SELECT MAX(as_of.revision) FROM coordination_proposals AS as_of JOIN coordination_events AS as_of_event ON as_of_event.proposal_id = as_of.proposal_id AND as_of_event.proposal_revision = as_of.revision AND as_of_event.operation = 'proposal.created' WHERE as_of.proposal_id = p.proposal_id AND as_of_event.cursor <= ?) AND e.cursor > ? AND e.cursor <= ? ORDER BY e.cursor ASC LIMIT ?",
+      through,
+      selectors.after, through, selectors.limit + 1,
+    ));
+    const proposals: CoordinationProposal[] = [];
+    let proposalBytes = 2;
+    for (const candidate of candidates) {
+      if (proposals.length >= selectors.limit) break;
+      const next = this.toCoordinationProposal(candidate, undefined, undefined, through);
+      const nextBytes = byteLength(JSON.stringify(next)) + (proposals.length === 0 ? 0 : 1);
+      if (proposals.length > 0 && proposalBytes + nextBytes > MAX_COORDINATION_PAGE_BYTES) break;
+      proposals.push(next);
+      proposalBytes += nextBytes;
+    }
+    return this.json({
+      coordination_cursor: state.coordination_cursor,
+      expires_at: iso(state.inactivity_expires_at),
+      has_more: proposals.length < candidates.length,
+      latest_message: state.next_sequence - 1,
+      next_after: candidates[proposals.length - 1]?.event_cursor ?? selectors.after,
+      proposals,
+      protocol_version: PROTOCOL_VERSION,
+      through,
+    });
+  }
+
+  private async readCoordinationProposal(proposalId: string, url?: URL): Promise<Response> {
+    const state = await this.requireActive(this.now());
+    const latest = rows<StoredCoordinationProposal>(this.ctx.storage.sql.exec(
+      "SELECT * FROM coordination_proposals WHERE proposal_id = ? ORDER BY revision DESC LIMIT 1",
+      proposalId,
+    ))[0];
+    if (!latest) throw new ProtocolError(ERROR_CODES.notFound, "The requested resource was not found.", 404);
+    const selectors = url === undefined ? { after: 0, limit: COORDINATION_DEFAULT_LIMIT, through: latest.revision } : parseCoordinationListSelectors(url);
+    const through = selectors.through ?? latest.revision;
+    if (through > latest.revision) throw new ProtocolError(ERROR_CODES.invalidBody, "The proposal revision cursor is in the future.", 400);
+    const candidateRevisions = rows<StoredCoordinationProposal>(this.ctx.storage.sql.exec(
+      "SELECT * FROM coordination_proposals WHERE proposal_id = ? AND revision > ? AND revision <= ? ORDER BY revision ASC LIMIT ?",
+      proposalId, selectors.after, through, selectors.limit + 1,
+    ));
+    const revisions: StoredCoordinationProposal[] = [];
+    let revisionBytes = 2;
+    for (const candidate of candidateRevisions) {
+      if (revisions.length >= selectors.limit) break;
+      const next = this.toCoordinationProposal(candidate);
+      const nextBytes = byteLength(JSON.stringify(next)) + (revisions.length === 0 ? 0 : 1);
+      if (revisions.length > 0 && revisionBytes + nextBytes > MAX_COORDINATION_PAGE_BYTES) break;
+      revisions.push(candidate);
+      revisionBytes += nextBytes;
+    }
+    return this.json({
+      coordination_cursor: state.coordination_cursor,
+      expires_at: iso(state.inactivity_expires_at),
+      latest_message: state.next_sequence - 1,
+      proposal: this.toCoordinationProposal(latest),
+      protocol_version: PROTOCOL_VERSION,
+      revisions: revisions.map((revision) => this.toCoordinationProposal(revision)),
+      revisions_has_more: revisions.length < candidateRevisions.length,
+      revisions_next_after: revisions.at(-1)?.revision ?? selectors.after,
+      revisions_through: through,
+    });
+  }
+
+  private async readCoordinationProposalRevision(proposalId: string, revision: number): Promise<Response> {
+    const state = await this.requireActive(this.now());
+    const proposal = rows<StoredCoordinationProposal>(this.ctx.storage.sql.exec("SELECT * FROM coordination_proposals WHERE proposal_id = ? AND revision = ?", proposalId, revision))[0];
+    if (!proposal) throw new ProtocolError(ERROR_CODES.notFound, "The requested resource was not found.", 404);
+    const value = this.toCoordinationProposal(proposal);
+    return this.json({
+      coordination_cursor: state.coordination_cursor,
+      expires_at: iso(state.inactivity_expires_at),
+      latest_message: state.next_sequence - 1,
+      proposal: value,
+      protocol_version: PROTOCOL_VERSION,
+      revisions: [value],
+      revisions_has_more: false,
+      revisions_next_after: revision,
+      revisions_through: revision,
+    });
+  }
+
+  private async submitCoordinationProposal(request: Request): Promise<Response> {
+    const input = parseCoordinationProposal(await request.json());
+    const result = this.commitCoordinationProposal(input, undefined, this.now());
+    if (result.expired) {
+      await this.expire(this.now(), "Conversation expired");
+      throw new ProtocolError(ERROR_CODES.gone, "The conversation has expired.", 410);
+    }
+    return this.json(result.response, result.replayed ? 200 : 201);
+  }
+
+  private async submitCoordinationRevision(request: Request, proposalId: string): Promise<Response> {
+    const input = parseCoordinationRevision(await request.json());
+    const result = this.commitCoordinationProposal(input, proposalId, this.now());
+    if (result.expired) {
+      await this.expire(this.now(), "Conversation expired");
+      throw new ProtocolError(ERROR_CODES.gone, "The conversation has expired.", 410);
+    }
+    return this.json(result.response, result.replayed ? 200 : 201);
+  }
+
+  private async listCoordinationRequests(url: URL): Promise<Response> {
+    const state = await this.requireActive(this.now());
+    const selectors = parseCoordinationListSelectors(url);
+    const through = selectors.through ?? state.published_revision;
+    if (through > state.published_revision) throw new ProtocolError(ERROR_CODES.invalidBody, "The published revision cursor is in the future.", 400);
+    const candidates = rows<StoredCoordinationRequest>(this.ctx.storage.sql.exec(
+      "SELECT * FROM coordination_requests WHERE published_revision > ? AND published_revision <= ? ORDER BY published_revision ASC, request_id ASC LIMIT ?",
+      selectors.after, through, selectors.limit + 1,
+    ));
+    const requests: StoredCoordinationRequest[] = [];
+    let requestBytes = 2;
+    for (const candidate of candidates) {
+      if (requests.length >= selectors.limit) break;
+      const next = this.toCoordinationRequest(candidate);
+      const nextBytes = byteLength(JSON.stringify(next)) + (requests.length === 0 ? 0 : 1);
+      if (requests.length > 0 && requestBytes + nextBytes > MAX_COORDINATION_PAGE_BYTES) break;
+      requests.push(candidate);
+      requestBytes += nextBytes;
+    }
+    return this.json({
+      expires_at: iso(state.inactivity_expires_at),
+      has_more: requests.length < candidates.length,
+      latest_message: state.next_sequence - 1,
+      next_after: requests.at(-1)?.published_revision ?? selectors.after,
+      protocol_version: PROTOCOL_VERSION,
+      published_revision: state.published_revision,
+      requests: requests.map((request) => this.toCoordinationRequest(request)),
+      through,
+    });
+  }
+
+  private async readCoordinationRequest(requestId: string, url?: URL): Promise<Response> {
+    const state = await this.requireActive(this.now());
+    const request = rows<StoredCoordinationRequest>(this.ctx.storage.sql.exec("SELECT * FROM coordination_requests WHERE request_id = ?", requestId))[0];
+    if (!request) throw new ProtocolError(ERROR_CODES.notFound, "The requested resource was not found.", 404);
+    const latestRevision = rows<{ revision: number }>(this.ctx.storage.sql.exec("SELECT MAX(revision) AS revision FROM coordination_proposals WHERE request_id = ?", requestId))[0]?.revision ?? 0;
+    const selectors = url === undefined ? { after: 0, limit: COORDINATION_DEFAULT_LIMIT, through: latestRevision } : parseCoordinationListSelectors(url);
+    const through = selectors.through ?? latestRevision;
+    if (through > latestRevision) throw new ProtocolError(ERROR_CODES.invalidBody, "The request revision cursor is in the future.", 400);
+    const revisions = rows<StoredCoordinationProposal>(this.ctx.storage.sql.exec(
+      "SELECT * FROM coordination_proposals WHERE request_id = ? AND revision > ? AND revision <= ? ORDER BY revision ASC LIMIT ?",
+      requestId, selectors.after, through, selectors.limit + 1,
+    ));
+    const delivered: StoredCoordinationProposal[] = [];
+    let revisionBytes = 2;
+    for (const revision of revisions) {
+      if (delivered.length >= selectors.limit) break;
+      const next = this.toCoordinationProposal(revision);
+      const nextBytes = byteLength(JSON.stringify(next)) + (delivered.length === 0 ? 0 : 1);
+      if (delivered.length > 0 && revisionBytes + nextBytes > MAX_COORDINATION_PAGE_BYTES) break;
+      delivered.push(revision);
+      revisionBytes += nextBytes;
+    }
+    return this.json({
+      coordination_cursor: state.coordination_cursor,
+      expires_at: iso(state.inactivity_expires_at),
+      latest_message: state.next_sequence - 1,
+      protocol_version: PROTOCOL_VERSION,
+      request: this.toCoordinationRequest(request),
+      revisions: delivered.map((revision) => this.toCoordinationProposal(revision)),
+      revisions_has_more: delivered.length < revisions.length,
+      revisions_next_after: delivered.at(-1)?.revision ?? selectors.after,
+      revisions_through: through,
+    });
+  }
+
+  private async publishCoordination(request: Request): Promise<Response> {
+    const url = new URL(request.url);
+    const token = url.searchParams.get("token") ?? "";
+    const managementHash = await hashToken(token);
+    const input = parseCoordinationPublish(await request.json());
+    const result = this.commitCoordinationPublication(input, managementHash, this.now());
+    if (result.expired) {
+      await this.expire(this.now(), "Conversation expired");
+      throw new ProtocolError(ERROR_CODES.gone, "The conversation has expired.", 410);
+    }
+    return this.json(result.response, result.replayed ? 200 : 201);
+  }
+
+  private commitCoordinationProposal(input: CoordinationProposalInput, requestedProposalId: string | undefined, now: number) {
+    return this.ctx.storage.transactionSync(() => {
+      const state = this.requireState();
+      if (state.status !== "active" || now >= state.inactivity_expires_at) return { expired: true as const };
+      const operation = requestedProposalId === undefined ? "proposal:create" : `proposal:revision:${requestedProposalId}`;
+      const fingerprint = coordinationMutationFingerprint(input);
+      const existingRetry = this.coordinationRetry(operation, input.client_retry_id);
+      if (existingRetry) {
+        if (existingRetry.fingerprint !== fingerprint) throw new ProtocolError(ERROR_CODES.conflict, "The coordination retry identifier is already used for another mutation.", 409);
+        return { expired: false as const, replayed: true as const, response: { ...JSON.parse(existingRetry.receipt) as Record<string, unknown>, replayed: true } };
+      }
+      if (input.base_revision > state.published_revision) throw new ProtocolError(ERROR_CODES.invalidBody, "The coordination base revision is in the future.", 400);
+      const sourceMessages = this.requireCoordinationSources(input.source_message_ids);
+      const proposalId = requestedProposalId ?? crypto.randomUUID();
+      const previous = requestedProposalId === undefined
+        ? undefined
+        : rows<StoredCoordinationProposal>(this.ctx.storage.sql.exec("SELECT * FROM coordination_proposals WHERE proposal_id = ? ORDER BY revision DESC LIMIT 1", requestedProposalId))[0];
+      if (requestedProposalId !== undefined && !previous) throw new ProtocolError(ERROR_CODES.notFound, "The requested resource was not found.", 404);
+      if (previous && previous.request_id && rows<{ request_id: string }>(this.ctx.storage.sql.exec("SELECT request_id FROM coordination_requests WHERE request_id = ?", previous.request_id))[0]) {
+        throw new ProtocolError(ERROR_CODES.conflict, "A published request cannot be revised through the proposal route.", 409);
+      }
+      const requestId = previous?.request_id ?? crypto.randomUUID();
+      const revision = (previous?.revision ?? 0) + 1;
+      const cursor = state.coordination_cursor + 1;
+      const proposal: StoredCoordinationProposal = {
+        actor_label: input.actor_label,
+        authority_class: "participant",
+        base_revision: input.base_revision,
+        body: JSON.stringify(input.body),
+        created_at: now,
+        kind: COORDINATION_KIND,
+        proposal_id: proposalId,
+        request_id: requestId,
+        revision,
+        source_message_ids: JSON.stringify(input.source_message_ids),
+        byte_count: coordinationStorageBytes(input.body, proposalId),
+      };
+      const eventBody = JSON.stringify(input.body);
+      const eventBytes = coordinationStorageBytes({ operation: "proposal.created", proposal, eventBody }, crypto.randomUUID());
+      const receipt = this.coordinationProposalResponse(proposal, sourceMessages, state, cursor, false);
+      const receiptText = JSON.stringify(receipt);
+      const retryBytes = coordinationStorageBytes({ operation, retry_id: input.client_retry_id, fingerprint, receipt: receiptText });
+      this.ensureCoordinationCapacity(state, proposal.byte_count + eventBytes + retryBytes);
+      this.ctx.storage.sql.exec(
+        "INSERT INTO coordination_proposals (proposal_id, revision, request_id, kind, actor_label, authority_class, base_revision, source_message_ids, body, created_at, byte_count) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        proposal.proposal_id, proposal.revision, proposal.request_id, proposal.kind, proposal.actor_label, proposal.authority_class, proposal.base_revision, proposal.source_message_ids, proposal.body, proposal.created_at, proposal.byte_count,
+      );
+      this.ctx.storage.sql.exec(
+        "INSERT INTO coordination_events (cursor, event_id, operation, proposal_id, proposal_revision, request_id, kind, actor_label, authority_class, source_message_ids, base_revision, resulting_revision, body, created_at, byte_count) VALUES (?, ?, 'proposal.created', ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)",
+        cursor, crypto.randomUUID(), proposal.proposal_id, proposal.revision, proposal.request_id, proposal.kind, proposal.actor_label, proposal.authority_class, proposal.source_message_ids, proposal.base_revision, eventBody, now, eventBytes,
+      );
+      this.ctx.storage.sql.exec("INSERT INTO coordination_retries (operation, retry_id, fingerprint, receipt, created_at, byte_count) VALUES (?, ?, ?, ?, ?, ?)", operation, input.client_retry_id, fingerprint, receiptText, now, retryBytes);
+      this.ctx.storage.sql.exec("UPDATE room_state SET coordination_cursor = ?, total_bytes = total_bytes + ? WHERE singleton = 1", cursor, proposal.byte_count + eventBytes + retryBytes);
+      return { expired: false as const, replayed: false as const, response: receipt };
+    });
+  }
+
+  private commitCoordinationPublication(input: CoordinationPublishInput, managementHash: string, now: number) {
+    return this.ctx.storage.transactionSync(() => {
+      const state = this.requireState();
+      if (!state.management_hash || !compareCapabilities(managementHash, state.management_hash)) {
+        throw new ProtocolError(ERROR_CODES.notFound, "The requested resource was not found.", 404);
+      }
+      if (state.status !== "active" || now >= state.inactivity_expires_at) return { expired: true as const };
+      const operation = "publication";
+      const fingerprint = coordinationMutationFingerprint(input);
+      const existingRetry = this.coordinationRetry(operation, input.client_retry_id);
+      if (existingRetry) {
+        if (existingRetry.fingerprint !== fingerprint) throw new ProtocolError(ERROR_CODES.conflict, "The coordination retry identifier is already used for another mutation.", 409);
+        return { expired: false as const, replayed: true as const, response: { ...JSON.parse(existingRetry.receipt) as Record<string, unknown>, replayed: true } };
+      }
+      if (input.base_revision !== state.published_revision) {
+        throw new ProtocolError(ERROR_CODES.staleRevision, "The published coordination state advanced; rebase the proposal before publishing.", 409, undefined, { current_revision: state.published_revision, submitted_base_revision: input.base_revision });
+      }
+      const proposal = rows<StoredCoordinationProposal>(this.ctx.storage.sql.exec("SELECT * FROM coordination_proposals WHERE proposal_id = ? AND revision = ?", input.proposal_id, input.revision))[0];
+      if (!proposal) throw new ProtocolError(ERROR_CODES.notFound, "The requested resource was not found.", 404);
+      const latestProposal = rows<{ revision: number }>(this.ctx.storage.sql.exec("SELECT revision FROM coordination_proposals WHERE proposal_id = ? ORDER BY revision DESC LIMIT 1", input.proposal_id))[0];
+      if (!latestProposal || latestProposal.revision !== input.revision) throw new ProtocolError(ERROR_CODES.conflict, "The proposal has a newer revision; review and publish the latest revision.", 409);
+      if (!proposal.request_id) throw new ProtocolError(ERROR_CODES.conflict, "The proposal kind cannot be published as a request.", 409);
+      if (proposal.base_revision !== input.base_revision) {
+        throw new ProtocolError(ERROR_CODES.staleRevision, "The proposal was based on a different published revision; rebase it before publishing.", 409, undefined, { current_revision: state.published_revision, submitted_base_revision: proposal.base_revision });
+      }
+      if (rows<{ request_id: string }>(this.ctx.storage.sql.exec("SELECT request_id FROM coordination_requests WHERE request_id = ?", proposal.request_id))[0]) {
+        throw new ProtocolError(ERROR_CODES.conflict, "The proposal revision has already been published.", 409);
+      }
+      const sourceMessages = this.requireCoordinationSources(JSON.parse(proposal.source_message_ids) as string[]);
+      const nextRevision = state.published_revision + 1;
+      const cursor = state.coordination_cursor + 1;
+      const body = JSON.parse(proposal.body) as CoordinationRequestBody;
+      const requestProjection: StoredCoordinationRequest = {
+        completion_criteria: JSON.stringify(body.completion_criteria),
+        created_at: now,
+        decision_impact: body.decision_impact,
+        owner_label: body.owner_label,
+        published_revision: nextRevision,
+        purpose: body.purpose,
+        request_id: proposal.request_id,
+        requested_output: body.requested_output,
+        status: "open",
+        title: body.title,
+        unknowns: JSON.stringify(body.unknowns),
+        updated_at: now,
+        byte_count: coordinationStorageBytes(body, proposal.request_id),
+      };
+      const eventBody = proposal.body;
+      const eventBytes = coordinationStorageBytes({ operation: "request.published", proposal, owner_label: input.owner_label }, crypto.randomUUID());
+      const receipt = this.coordinationPublicationResponse(proposal, requestProjection, sourceMessages, state, cursor, nextRevision, false);
+      const receiptText = JSON.stringify(receipt);
+      const retryBytes = coordinationStorageBytes({ operation, retry_id: input.client_retry_id, fingerprint, proposal_id: input.proposal_id, revision: input.revision, receipt: receiptText });
+      this.ensureCoordinationCapacity(state, requestProjection.byte_count + eventBytes + retryBytes);
+      this.ctx.storage.sql.exec(
+        "INSERT INTO coordination_requests (request_id, published_revision, purpose, title, owner_label, requested_output, unknowns, completion_criteria, decision_impact, status, created_at, updated_at, byte_count) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?)",
+        requestProjection.request_id, requestProjection.published_revision, requestProjection.purpose, requestProjection.title, requestProjection.owner_label, requestProjection.requested_output, requestProjection.unknowns, requestProjection.completion_criteria, requestProjection.decision_impact, requestProjection.created_at, requestProjection.updated_at, requestProjection.byte_count,
+      );
+      this.ctx.storage.sql.exec(
+        "INSERT INTO coordination_events (cursor, event_id, operation, proposal_id, proposal_revision, request_id, kind, actor_label, authority_class, source_message_ids, base_revision, resulting_revision, body, created_at, byte_count) VALUES (?, ?, 'request.published', ?, ?, ?, ?, ?, 'management', ?, ?, ?, ?, ?, ?)",
+        cursor, crypto.randomUUID(), proposal.proposal_id, proposal.revision, proposal.request_id, proposal.kind, input.owner_label, proposal.source_message_ids, input.base_revision, nextRevision, eventBody, now, eventBytes,
+      );
+      this.ctx.storage.sql.exec("INSERT INTO coordination_retries (operation, retry_id, fingerprint, receipt, created_at, byte_count) VALUES (?, ?, ?, ?, ?, ?)", operation, input.client_retry_id, fingerprint, receiptText, now, retryBytes);
+      this.ctx.storage.sql.exec("UPDATE room_state SET coordination_cursor = ?, published_revision = ?, total_bytes = total_bytes + ? WHERE singleton = 1", cursor, nextRevision, requestProjection.byte_count + eventBytes + retryBytes);
+      return { expired: false as const, replayed: false as const, response: receipt };
     });
   }
 
@@ -957,7 +1368,11 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
       this.ctx.storage.sql.exec("DELETE FROM webhook_endpoints");
       this.ctx.storage.sql.exec("DELETE FROM push_deliveries");
       this.ctx.storage.sql.exec("DELETE FROM push_subscriptions");
-      this.ctx.storage.sql.exec("UPDATE room_state SET status = 'deleted', tombstone_expires_at = ?, management_hash = NULL, get_post_hash = NULL, get_post_enabled = 0, message_count = 0, total_bytes = 0 WHERE singleton = 1", now + this.limits.tombstoneTtlMs);
+      this.ctx.storage.sql.exec("DELETE FROM coordination_retries");
+      this.ctx.storage.sql.exec("DELETE FROM coordination_events");
+      this.ctx.storage.sql.exec("DELETE FROM coordination_proposals");
+      this.ctx.storage.sql.exec("DELETE FROM coordination_requests");
+      this.ctx.storage.sql.exec("UPDATE room_state SET status = 'deleted', tombstone_expires_at = ?, management_hash = NULL, get_post_hash = NULL, get_post_enabled = 0, message_count = 0, total_bytes = 0, coordination_cursor = 0, published_revision = 0 WHERE singleton = 1", now + this.limits.tombstoneTtlMs);
       return true;
     });
   }
@@ -1691,6 +2106,149 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
     this.ctx.storage.sql.exec("INSERT INTO messages (sequence, id, content, author, display_name, client, semantic_type, reply_to, created_at, client_message_id, byte_count, idempotency_key, source_browser_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", message.sequence, message.id, message.content, message.author, message.display_name, message.client ?? null, message.semantic_type, message.reply_to ?? null, message.created_at, message.client_message_id ?? null, message.byte_count, message.idempotency_key ?? null, message.source_browser_id);
   }
 
+  private coordinationRetry(operation: string, retryId: string): { readonly fingerprint: string; readonly receipt: string } | undefined {
+    return rows<{ fingerprint: string; receipt: string }>(this.ctx.storage.sql.exec(
+      "SELECT fingerprint, receipt FROM coordination_retries WHERE operation = ? AND retry_id = ?",
+      operation, retryId,
+    ))[0];
+  }
+
+  private requireCoordinationSources(ids: readonly string[]): StoredMessage[] {
+    const messages: StoredMessage[] = [];
+    for (const id of ids) {
+      const message = rows<StoredMessage>(this.ctx.storage.sql.exec("SELECT * FROM messages WHERE id = ?", id))[0];
+      if (!message) throw new ProtocolError(ERROR_CODES.notFound, "A coordination source message was not found in this room.", 404);
+      messages.push(message);
+    }
+    return messages;
+  }
+
+  private ensureCoordinationCapacity(state: RoomState, addedBytes: number): void {
+    if (state.total_bytes + addedBytes > this.limits.maxRoomBytes) {
+      throw new ProtocolError(ERROR_CODES.rateLimited, "The room storage limit is reached.", 429);
+    }
+  }
+
+  private coordinationProposalResponse(proposal: StoredCoordinationProposal, sourceMessages: readonly StoredMessage[], state: RoomState, cursor: number, replayed: boolean): Record<string, unknown> {
+    const responseProposal = this.toCoordinationProposal(proposal, sourceMessages);
+    return {
+      coordination_cursor: cursor,
+      expires_at: iso(state.inactivity_expires_at),
+      latest_message: state.next_sequence - 1,
+      proposal: responseProposal,
+      protocol_version: PROTOCOL_VERSION,
+      replayed,
+      revisions: [responseProposal],
+    };
+  }
+
+  private coordinationPublicationResponse(proposal: StoredCoordinationProposal, request: StoredCoordinationRequest, sourceMessages: readonly StoredMessage[], state: RoomState, cursor: number, publishedRevision: number, replayed: boolean): Record<string, unknown> {
+    const responseProposal = this.toCoordinationProposal(proposal, sourceMessages, "published");
+    return {
+      coordination_cursor: cursor,
+      expires_at: iso(state.inactivity_expires_at),
+      latest_message: state.next_sequence - 1,
+      protocol_version: PROTOCOL_VERSION,
+      published_revision: publishedRevision,
+      replayed,
+      request: this.toCoordinationRequest(request),
+      proposal: responseProposal,
+    };
+  }
+
+  private toCoordinationProposal(proposal: StoredCoordinationProposal, sourceMessages?: readonly StoredMessage[], statusOverride?: "pending" | "published" | "superseded", asOfCursor?: number): CoordinationProposal {
+    const body = JSON.parse(proposal.body) as CoordinationRequestBody;
+    const sourceIds = JSON.parse(proposal.source_message_ids) as string[];
+    const publication = rows<{ proposal_revision: number }>(this.ctx.storage.sql.exec("SELECT proposal_revision FROM coordination_events WHERE operation = 'request.published' AND proposal_id = ? AND proposal_revision = ? AND (? IS NULL OR cursor <= ?)", proposal.proposal_id, proposal.revision, asOfCursor ?? null, asOfCursor ?? null))[0];
+    const request = proposal.request_id === null ? undefined : rows<{ request_id: string }>(this.ctx.storage.sql.exec("SELECT request_id FROM coordination_requests WHERE request_id = ?", proposal.request_id))[0];
+    const newerRevision = rows<{ revision: number }>(this.ctx.storage.sql.exec(
+      "SELECT p.revision FROM coordination_proposals AS p JOIN coordination_events AS e ON e.proposal_id = p.proposal_id AND e.proposal_revision = p.revision AND e.operation = 'proposal.created' WHERE p.proposal_id = ? AND p.revision > ? AND (? IS NULL OR e.cursor <= ?) LIMIT 1",
+      proposal.proposal_id, proposal.revision, asOfCursor ?? null, asOfCursor ?? null,
+    ))[0];
+    const requestPublishedAtSnapshot = asOfCursor === undefined
+      ? request !== undefined
+      : rows<{ request_id: string }>(this.ctx.storage.sql.exec("SELECT request_id FROM coordination_events WHERE operation = 'request.published' AND request_id = ? AND cursor <= ? LIMIT 1", proposal.request_id, asOfCursor))[0];
+    const sources = sourceMessages ?? this.requireCoordinationSources(sourceIds);
+    return {
+      actor_label: proposal.actor_label,
+      authority_class: proposal.authority_class,
+      base_revision: proposal.base_revision,
+      body,
+      created_at: iso(proposal.created_at),
+      detail_url: `/coordination/proposals/${encodeURIComponent(proposal.proposal_id)}`,
+      kind: proposal.kind,
+      proposal_id: proposal.proposal_id,
+      request_id: proposal.request_id,
+      revision: proposal.revision,
+      source_message_ids: sourceIds,
+      source_messages: sources.map((message): CoordinationSourceMessage => ({
+        author: message.author,
+        created_at: iso(message.created_at),
+        display_name: message.display_name,
+        id: message.id,
+        sequence: message.sequence,
+        citation_url: `/messages/${encodeURIComponent(message.id)}`,
+      })),
+      status: statusOverride ?? (publication ? "published" : newerRevision || requestPublishedAtSnapshot ? "superseded" : "pending"),
+    };
+  }
+
+  private toCoordinationProposalSummary(proposal: StoredCoordinationProposal): CoordinationProposalSummary {
+    const body = JSON.parse(proposal.body) as CoordinationRequestBody;
+    const published = proposal.request_id !== null && rows<{ proposal_revision: number }>(this.ctx.storage.sql.exec("SELECT proposal_revision FROM coordination_events WHERE operation = 'request.published' AND proposal_id = ? AND proposal_revision = ?", proposal.proposal_id, proposal.revision))[0] !== undefined;
+    const superseded = !published && rows<{ revision: number }>(this.ctx.storage.sql.exec(
+      "SELECT revision FROM coordination_proposals WHERE proposal_id = ? AND revision > ? LIMIT 1",
+      proposal.proposal_id, proposal.revision,
+    ))[0] !== undefined;
+    return {
+      actor_label: proposal.actor_label,
+      authority_class: proposal.authority_class,
+      base_revision: proposal.base_revision,
+      created_at: iso(proposal.created_at),
+      detail_url: `/coordination/proposals/${encodeURIComponent(proposal.proposal_id)}`,
+      kind: proposal.kind,
+      proposal_id: proposal.proposal_id,
+      request_id: proposal.request_id,
+      revision: proposal.revision,
+      status: published ? "published" : superseded ? "superseded" : "pending",
+      title: body.title,
+    };
+  }
+
+  private toCoordinationRequest(request: StoredCoordinationRequest): CoordinationRequest {
+    return {
+      body: {
+        completion_criteria: JSON.parse(request.completion_criteria) as string[],
+        decision_impact: request.decision_impact,
+        owner_label: request.owner_label,
+        purpose: request.purpose,
+        requested_output: request.requested_output,
+        title: request.title,
+        unknowns: JSON.parse(request.unknowns) as string[],
+      },
+      created_at: iso(request.created_at),
+      detail_url: `/coordination/requests/${encodeURIComponent(request.request_id)}`,
+      published_revision: request.published_revision,
+      request_id: request.request_id,
+      status: request.status,
+      updated_at: iso(request.updated_at),
+    };
+  }
+
+  private toCoordinationRequestSummary(request: StoredCoordinationRequest): CoordinationRequestSummary {
+    return {
+      detail_url: `/coordination/requests/${encodeURIComponent(request.request_id)}`,
+      owner_label: request.owner_label,
+      published_revision: request.published_revision,
+      request_id: request.request_id,
+      status: request.status,
+      title: request.title,
+      updated_at: iso(request.updated_at),
+    };
+  }
+
+  private publicRoomPath(): string { return "/coordination"; }
+
   private state(): RoomState | undefined { return rows<RoomState>(this.ctx.storage.sql.exec("SELECT * FROM room_state WHERE singleton = 1"))[0]; }
   private requireState(): RoomState { const state = this.state(); if (!state) throw new ProtocolError(ERROR_CODES.notFound, "The requested resource was not found.", 404); return state; }
   private async requireActive(now: number): Promise<RoomState> { const state = this.requireState(); if (state.status === "deleted") throw new ProtocolError(ERROR_CODES.gone, "The conversation has expired.", 410); if (now >= state.inactivity_expires_at) { await this.expire(now, "Conversation expired"); throw new ProtocolError(ERROR_CODES.gone, "The conversation has expired.", 410); } await this.schedule(); return state; }
@@ -1702,12 +2260,13 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
   private async expire(now: number, reason: string): Promise<void> { if (!this.deleteToTombstone(now)) return; this.broadcast({ protocol_version: PROTOCOL_VERSION, type: "conversation.expired" }); this.closeSockets(1001, reason); await this.schedule(); }
   private broadcast(frame: unknown): void { const payload = JSON.stringify(frame); for (const socket of this.ctx.getWebSockets(socketTag) as HibernatingSocket[]) socket.send(payload); }
   private closeSockets(code: number, reason: string): void { for (const socket of this.ctx.getWebSockets(socketTag) as HibernatingSocket[]) socket.close(code, reason); }
-  private json(value: unknown): Response { return new Response(JSON.stringify(value), { headers: { "content-type": "application/json; charset=utf-8" } }); }
-  private error(code: string, message: string, status: number, details?: { readonly latest_message: number; readonly review_after: number }): Response {
+  private json(value: unknown, status = 200): Response { return new Response(JSON.stringify(value), { headers: { "content-type": "application/json; charset=utf-8" }, status }); }
+  private error(code: string, message: string, status: number, details?: StaleSequenceDetails | StaleRevisionDetails): Response {
     return new Response(JSON.stringify({ error: {
       code,
       message,
-      ...(code === ERROR_CODES.staleSequence && details !== undefined ? { latest_message: details.latest_message, review_after: details.review_after } : {}),
+      ...(code === ERROR_CODES.staleSequence && isStaleSequenceDetails(details) ? { latest_message: details.latest_message, review_after: details.review_after } : {}),
+      ...(code === ERROR_CODES.staleRevision && isStaleRevisionDetails(details) ? { current_revision: details.current_revision, submitted_base_revision: details.submitted_base_revision } : {}),
     } }), { headers: { "content-type": "application/json; charset=utf-8" }, status });
   }
 }

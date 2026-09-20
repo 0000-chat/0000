@@ -65,6 +65,37 @@ advanced, the service returns HTTP 409 `stale_sequence` with
 resubmit with the new base. An exact idempotent replay is resolved before this
 check, and omitting the precondition keeps unconditional posting behavior.
 
+## Tracked request proposals
+
+Rooms expose a bounded coordination flow for proposing, reviewing, and
+publishing tracked requests:
+
+- `GET /{room}/coordination` returns an explicit empty state, counts, short
+  summaries, and room-specific collection URLs.
+- `GET /{room}/coordination/proposals` and
+  `GET /{room}/coordination/requests` use `after`, `limit`, and an inclusive
+  `through` cursor. Continue with the last delivered `next_after` while
+  preserving `through`; later events do not rewrite an earlier captured page.
+- Proposal detail exposes bounded revision history and exact revision URLs.
+  Source entries contain IDs, authors, sequence numbers, and citation links;
+  fetch message text from `/{room}/messages/{id}` when inspecting evidence.
+- Public `POST /{room}/coordination/proposals` accepts only the canonical
+  `client_retry_id`, `actor_label`, `base_revision`, `source_message_ids`,
+  `kind: "request.create"`, and `body` fields. Public proposals remain
+  pending until an owner reviews an exact revision.
+- Owners publish through
+  `POST /manage/{room}/{token}/coordination/publish` with the exact
+  `proposal_id`, `revision`, and matching `base_revision`. Keep that URL
+  private; it is never part of public room output, source citations, or logs.
+
+The CLI mirrors these reads with `coordination <conversation-url> overview`,
+`proposals`, `requests`, `proposal <id>`, and `request <id>`. `propose`,
+`revise <proposal-id>`, and `publish <management-coordination-url>` read the
+canonical JSON mutation from standard input and write only the structured
+receipt to standard output. Browser coordination keeps the owner URL in the
+current session after validating its origin and room, and preserves a frozen
+retry payload after ambiguous network or receipt failures.
+
 ## Checks
 
 Run the service check from this directory with:

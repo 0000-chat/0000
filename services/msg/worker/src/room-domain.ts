@@ -110,8 +110,10 @@ function validateNonnegativeInteger(value: string | null, field: "after" | "thro
 }
 
 export interface RoomEtagOptions {
+  readonly coordinationCursor?: number;
   readonly expiresAt?: string;
   readonly limit?: number;
+  readonly publishedRevision?: number;
   readonly through?: number;
 }
 
@@ -119,11 +121,17 @@ export function roomEtag(latestSequence: number, after: number, options?: RoomEt
   if (options === undefined) return `W/"room-${latestSequence}-after-${after}"`;
   const selectors = [
     `after=${after}`,
+    `coordination=${options.coordinationCursor ?? ""}`,
     `limit=${options.limit ?? DEFAULT_READ_LIMIT}`,
+    `published=${options.publishedRevision ?? ""}`,
     `through=${options.through ?? latestSequence}`,
     `expires=${options.expiresAt ?? ""}`,
   ].join("&");
   return `W/"room-${latestSequence}-${selectors}"`;
+}
+
+export function coordinationEtag(cursor: number, publishedRevision: number, expiresAt: string): string {
+  return `W/\"coordination-${cursor}-published-${publishedRevision}-expires-${expiresAt}\"`;
 }
 
 export function validateIdempotencyKey(value: string): string {

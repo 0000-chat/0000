@@ -1,7 +1,7 @@
 import { ROOM_LIMITS } from "./room-domain";
 import { WEBHOOK_RETRY_INITIAL_DELAY_MS, WEBHOOK_RETRY_WINDOW_MS } from "./webhook-policy";
 
-export const CURRENT_ROOM_SCHEMA_VERSION = 8;
+export const CURRENT_ROOM_SCHEMA_VERSION = 9;
 
 interface SqlStorage {
   exec(query: string, ...values: unknown[]): Iterable<unknown>;
@@ -233,6 +233,45 @@ function applyMigration(sql: SqlStorage, version: number, inactivityTtlMs: numbe
     const columns = new Set(rows<{ name: string }>(sql.exec("PRAGMA table_info(room_state)")).map((column) => column.name));
     if (!columns.has("get_post_hash")) sql.exec("ALTER TABLE room_state ADD COLUMN get_post_hash TEXT");
     if (!columns.has("get_post_enabled")) sql.exec("ALTER TABLE room_state ADD COLUMN get_post_enabled INTEGER NOT NULL DEFAULT 0");
+    sql.exec("UPDATE room_state SET schema_version = ? WHERE singleton = 1", CURRENT_ROOM_SCHEMA_VERSION);
+    return;
+  }
+  if (version === 9) {
+    const columns = new Set(rows<{ name: string }>(sql.exec("PRAGMA table_info(room_state)")).map((column) => column.name));
+    if (!columns.has("coordination_cursor")) sql.exec("ALTER TABLE room_state ADD COLUMN coordination_cursor INTEGER NOT NULL DEFAULT 0");
+    if (!columns.has("published_revision")) sql.exec("ALTER TABLE room_state ADD COLUMN published_revision INTEGER NOT NULL DEFAULT 0");
+    sql.exec(`
+      CREATE TABLE IF NOT EXISTS coordination_proposals (
+        proposal_id TEXT NOT NULL, revision INTEGER NOT NULL, request_id TEXT,
+        kind TEXT NOT NULL, actor_label TEXT NOT NULL, authority_class TEXT NOT NULL CHECK(authority_class IN ('participant', 'management')),
+        base_revision INTEGER NOT NULL, source_message_ids TEXT NOT NULL, body TEXT NOT NULL,
+        created_at INTEGER NOT NULL, byte_count INTEGER NOT NULL,
+        PRIMARY KEY (proposal_id, revision)
+      );
+      CREATE INDEX IF NOT EXISTS coordination_proposals_cursor ON coordination_proposals(created_at, proposal_id, revision);
+      CREATE INDEX IF NOT EXISTS coordination_proposals_request ON coordination_proposals(request_id, revision);
+      CREATE TABLE IF NOT EXISTS coordination_requests (
+        request_id TEXT PRIMARY KEY, published_revision INTEGER NOT NULL,
+        purpose TEXT NOT NULL, title TEXT NOT NULL, owner_label TEXT NOT NULL,
+        requested_output TEXT NOT NULL, unknowns TEXT NOT NULL, completion_criteria TEXT NOT NULL,
+        decision_impact TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('open', 'in_progress', 'blocked', 'done', 'withdrawn')),
+        created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, byte_count INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS coordination_requests_revision ON coordination_requests(published_revision, request_id);
+      CREATE TABLE IF NOT EXISTS coordination_events (
+        cursor INTEGER PRIMARY KEY, event_id TEXT NOT NULL UNIQUE, operation TEXT NOT NULL,
+        proposal_id TEXT, proposal_revision INTEGER, request_id TEXT,
+        kind TEXT NOT NULL, actor_label TEXT NOT NULL, authority_class TEXT NOT NULL CHECK(authority_class IN ('participant', 'management')),
+        source_message_ids TEXT NOT NULL, base_revision INTEGER NOT NULL, resulting_revision INTEGER,
+        body TEXT NOT NULL, created_at INTEGER NOT NULL, byte_count INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS coordination_events_request ON coordination_events(request_id, cursor);
+      CREATE TABLE IF NOT EXISTS coordination_retries (
+        operation TEXT NOT NULL, retry_id TEXT NOT NULL, fingerprint TEXT NOT NULL,
+        receipt TEXT NOT NULL, created_at INTEGER NOT NULL, byte_count INTEGER NOT NULL,
+        PRIMARY KEY (operation, retry_id)
+      );
+    `);
     sql.exec("UPDATE room_state SET schema_version = ? WHERE singleton = 1", CURRENT_ROOM_SCHEMA_VERSION);
     return;
   }

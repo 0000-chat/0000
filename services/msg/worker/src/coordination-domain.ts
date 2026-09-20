@@ -1,0 +1,207 @@
+import { ERROR_CODES, ProtocolError } from "./errors";
+import { byteLength, validateRequestId } from "./room-domain";
+
+export const COORDINATION_DEFAULT_LIMIT = 20;
+export const COORDINATION_MAX_LIMIT = 100;
+export const COORDINATION_MAX_SOURCE_IDS = 50;
+export const COORDINATION_MAX_ARRAY_ITEMS = 50;
+export const COORDINATION_MAX_LABEL_CHARS = 80;
+export const COORDINATION_MAX_LABEL_BYTES = 320;
+export const COORDINATION_MAX_FIELD_CHARS = 2_000;
+export const COORDINATION_MAX_FIELD_BYTES = 8 * 1024;
+export const COORDINATION_MAX_SOURCE_ID_CHARS = 512;
+export const COORDINATION_MAX_SOURCE_ID_BYTES = 2 * 1024;
+export const MAX_COORDINATION_PAGE_BYTES = 128 * 1024;
+export const COORDINATION_KIND = "request.create" as const;
+
+export type CoordinationAuthority = "management" | "participant";
+
+export interface CoordinationRequestBody {
+  readonly completion_criteria: readonly string[];
+  readonly decision_impact: string;
+  readonly owner_label: string;
+  readonly purpose: string;
+  readonly requested_output: string;
+  readonly title: string;
+  readonly unknowns: readonly string[];
+}
+
+export interface CoordinationProposalInput {
+  readonly actor_label: string;
+  readonly base_revision: number;
+  readonly body: CoordinationRequestBody;
+  readonly client_retry_id: string;
+  readonly kind: typeof COORDINATION_KIND;
+  readonly source_message_ids: readonly string[];
+}
+
+export interface CoordinationPublishInput {
+  readonly base_revision: number;
+  readonly client_retry_id: string;
+  readonly owner_label: string;
+  readonly proposal_id: string;
+  readonly revision: number;
+}
+
+export interface CoordinationListSelectors {
+  readonly after: number;
+  readonly limit: number;
+  readonly through?: number;
+}
+
+export function parseCoordinationProposal(value: unknown): CoordinationProposalInput {
+  const record = object(value, "The coordination proposal must be a JSON object.");
+  allowlist(record, ["client_retry_id", "actor_label", "base_revision", "source_message_ids", "kind", "body"]);
+  const clientRetryId = requiredString(record.client_retry_id, "client_retry_id");
+  const actorLabel = requiredString(record.actor_label, "actor_label");
+  const baseRevision = nonnegativeInteger(record.base_revision, "base_revision");
+  const sourceMessageIds = parseSourceIds(record.source_message_ids);
+  const kind = record.kind;
+  if (kind !== COORDINATION_KIND) throw invalid("The coordination proposal kind is not supported.");
+  const body = parseRequestBody(record.body);
+  return {
+    actor_label: bounded(actorLabel, "actor_label", COORDINATION_MAX_LABEL_CHARS, COORDINATION_MAX_LABEL_BYTES),
+    base_revision: baseRevision,
+    body,
+    client_retry_id: validateRequestId(clientRetryId),
+    kind: COORDINATION_KIND,
+    source_message_ids: sourceMessageIds,
+  };
+}
+
+export function parseCoordinationRevision(value: unknown): CoordinationProposalInput {
+  return parseCoordinationProposal(value);
+}
+
+export function parseCoordinationPublish(value: unknown): CoordinationPublishInput {
+  const record = object(value, "The coordination publication must be a JSON object.");
+  allowlist(record, ["client_retry_id", "owner_label", "proposal_id", "revision", "base_revision"]);
+  const clientRetryId = requiredString(record.client_retry_id, "client_retry_id");
+  const ownerLabel = requiredString(record.owner_label, "owner_label");
+  const proposalId = stringField(record.proposal_id, "proposal_id");
+  const revision = positiveInteger(record.revision, "revision");
+  const baseRevision = nonnegativeInteger(record.base_revision, "base_revision");
+  return {
+    base_revision: baseRevision,
+    client_retry_id: validateRequestId(clientRetryId),
+    owner_label: bounded(ownerLabel, "owner_label", COORDINATION_MAX_LABEL_CHARS, COORDINATION_MAX_LABEL_BYTES),
+    proposal_id: bounded(proposalId, "proposal_id", 128, 512),
+    revision,
+  };
+}
+
+export function parseCoordinationListSelectors(url: URL): CoordinationListSelectors {
+  const after = parseCursor(url.searchParams.get("after"), "after");
+  const limit = parseLimit(url.searchParams.get("limit"));
+  const throughValue = url.searchParams.get("through");
+  const through = throughValue === null ? undefined : parseCursor(throughValue, "through");
+  if (through !== undefined && after > through) throw invalid("The after cursor must not be greater than through.");
+  return { after, limit, ...(through === undefined ? {} : { through }) };
+}
+
+export function coordinationMutationFingerprint(input: unknown): string {
+  return JSON.stringify(input);
+}
+
+export function coordinationStorageBytes(value: unknown, id?: string): number {
+  return 128 + byteLength(JSON.stringify(value)) + (id === undefined ? 0 : byteLength(id));
+}
+
+function parseRequestBody(value: unknown): CoordinationRequestBody {
+  const record = object(value, "The coordination request body must be a JSON object.");
+  const allowed = new Set(["purpose", "title", "owner_label", "requested_output", "unknowns", "completion_criteria", "decision_impact"]);
+  for (const key of Object.keys(record)) if (!allowed.has(key)) throw invalid("The coordination request body contains an unsupported field.");
+  const purpose = optionalString(record.purpose) ?? optionalString(record.title);
+  const title = optionalString(record.title) ?? purpose;
+  if (purpose === undefined || title === undefined) throw invalid("The coordination request purpose or title is required.");
+  const ownerLabel = requiredString(record.owner_label, "owner_label");
+  const requestedOutput = requiredString(record.requested_output, "requested_output");
+  const unknowns = stringArray(record.unknowns, "unknowns");
+  const completionCriteria = stringArray(record.completion_criteria, "completion_criteria");
+  const decisionImpact = requiredString(record.decision_impact, "decision_impact");
+  return {
+    completion_criteria: completionCriteria,
+    decision_impact: bounded(decisionImpact, "decision_impact", COORDINATION_MAX_FIELD_CHARS, COORDINATION_MAX_FIELD_BYTES),
+    owner_label: bounded(ownerLabel, "owner_label", COORDINATION_MAX_LABEL_CHARS, COORDINATION_MAX_LABEL_BYTES),
+    purpose: bounded(purpose, "purpose", COORDINATION_MAX_FIELD_CHARS, COORDINATION_MAX_FIELD_BYTES),
+    requested_output: bounded(requestedOutput, "requested_output", COORDINATION_MAX_FIELD_CHARS, COORDINATION_MAX_FIELD_BYTES),
+    title: bounded(title, "title", COORDINATION_MAX_FIELD_CHARS, COORDINATION_MAX_FIELD_BYTES),
+    unknowns,
+  };
+}
+
+function parseSourceIds(value: unknown): string[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.length > COORDINATION_MAX_SOURCE_IDS) throw invalid("source_message_ids must be a bounded array.");
+  const result = value.map((item) => bounded(stringField(item, "source_message_ids"), "source_message_id", COORDINATION_MAX_SOURCE_ID_CHARS, COORDINATION_MAX_SOURCE_ID_BYTES));
+  if (new Set(result).size !== result.length) throw invalid("source_message_ids must not contain duplicates.");
+  return result;
+}
+
+function stringArray(value: unknown, field: string): string[] {
+  if (!Array.isArray(value) || value.length > COORDINATION_MAX_ARRAY_ITEMS) throw invalid(`The ${field} field must be a bounded array of strings.`);
+  return value.map((item) => bounded(stringField(item, field), field, COORDINATION_MAX_FIELD_CHARS, COORDINATION_MAX_FIELD_BYTES));
+}
+
+function allowlist(value: Record<string, unknown>, fields: readonly string[]): void {
+  const allowed = new Set(fields);
+  if (Object.keys(value).some((field) => !allowed.has(field))) throw invalid("The coordination mutation contains an unsupported field.");
+}
+
+function object(value: unknown, message: string): Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) throw invalid(message);
+  return value as Record<string, unknown>;
+}
+
+function requiredString(value: unknown, field: string): string {
+  return stringField(value, field);
+}
+
+function optionalString(value: unknown): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string") throw invalid("Coordination text fields must be strings.");
+  return value;
+}
+
+function stringField(value: unknown, field: string): string {
+  if (typeof value !== "string") throw invalid(`The ${field} field must be a string.`);
+  return value;
+}
+
+function bounded(value: string, field: string, maxChars: number, maxBytes: number): string {
+  if (Array.from(value).length === 0) throw invalid(`The ${field} field must not be empty.`);
+  if (Array.from(value).length > maxChars) throw invalid(`The ${field} field is too long.`);
+  if (byteLength(value) > maxBytes) throw new ProtocolError(ERROR_CODES.bodyTooLarge, `The ${field} field is too large.`, 413);
+  return value;
+}
+
+function nonnegativeInteger(value: unknown, field: string): number {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) throw invalid(`The ${field} field must be a nonnegative safe integer.`);
+  return value;
+}
+
+function positiveInteger(value: unknown, field: string): number {
+  const result = nonnegativeInteger(value, field);
+  if (result < 1) throw invalid(`The ${field} field must be a positive safe integer.`);
+  return result;
+}
+
+function parseCursor(value: string | null, field: string): number {
+  if (value === null) return 0;
+  if (!/^(?:0|[1-9][0-9]*)$/u.test(value)) throw invalid(`The ${field} cursor must be a nonnegative safe integer.`);
+  const result = Number(value);
+  if (!Number.isSafeInteger(result)) throw invalid(`The ${field} cursor must be a nonnegative safe integer.`);
+  return result;
+}
+
+function parseLimit(value: string | null): number {
+  if (value === null) return COORDINATION_DEFAULT_LIMIT;
+  if (!/^[1-9][0-9]*$/u.test(value)) throw invalid(`The coordination limit must be between 1 and ${COORDINATION_MAX_LIMIT}.`);
+  const result = Number(value);
+  if (!Number.isSafeInteger(result) || result > COORDINATION_MAX_LIMIT) throw invalid(`The coordination limit must be between 1 and ${COORDINATION_MAX_LIMIT}.`);
+  return result;
+}
+
+function invalid(message: string): ProtocolError {
+  return new ProtocolError(ERROR_CODES.invalidBody, message, 400);
+}

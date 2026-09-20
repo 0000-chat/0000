@@ -146,6 +146,15 @@ export interface RoomService {
   operatorDelete?(room: string): Promise<void>;
   live?(input: LiveRoomInput): Promise<Response>;
   exportRoom?(input: ExportRoomInput): Promise<Response>;
+  coordinationOverview?(input: { readonly room: string }): Promise<CoordinationOverviewResponse>;
+  listCoordinationProposals?(input: CoordinationListInput): Promise<CoordinationProposalListResponse>;
+  readCoordinationProposal?(input: CoordinationProposalDetailInput): Promise<CoordinationProposalResponse>;
+  readCoordinationProposalRevision?(input: CoordinationProposalDetailInput & { readonly revision: number }): Promise<CoordinationProposalResponse>;
+  submitCoordinationProposal?(input: CoordinationProposalInput): Promise<CoordinationProposalResponse>;
+  submitCoordinationRevision?(input: CoordinationProposalRevisionInput): Promise<CoordinationProposalResponse>;
+  listCoordinationRequests?(input: CoordinationListInput): Promise<CoordinationRequestListResponse>;
+  readCoordinationRequest?(input: CoordinationRequestDetailInput): Promise<CoordinationRequestResponse>;
+  publishCoordinationRequest?(input: CoordinationPublishInput): Promise<CoordinationPublishResponse>;
 }
 
 export interface ReadRoomInput {
@@ -176,6 +185,7 @@ export interface RoomMessage extends Message {
 
 export interface RoomReadResult {
   readonly access_warning?: string;
+  readonly coordination_cursor?: number;
   readonly conversation_url: string;
   readonly expires_at: string;
   /** Present only for bounded reads. */
@@ -187,6 +197,7 @@ export interface RoomReadResult {
   /** Present only when the first delivered message exceeded the page budget. */
   readonly oversized_message?: true;
   readonly protocol_version: typeof PROTOCOL_VERSION;
+  readonly published_revision?: number;
   readonly share_message: string;
   /** Present only for bounded reads. */
   readonly through?: number;
@@ -201,6 +212,184 @@ export interface ReadMessageResponse {
   readonly latest_message: number;
   readonly message: RoomMessage;
   readonly protocol_version: typeof PROTOCOL_VERSION;
+}
+
+export interface CoordinationRequestBody {
+  readonly completion_criteria: readonly string[];
+  readonly decision_impact: string;
+  readonly owner_label: string;
+  readonly purpose: string;
+  readonly requested_output: string;
+  readonly title: string;
+  readonly unknowns: readonly string[];
+}
+
+export interface CoordinationSourceMessage {
+  readonly author: string;
+  readonly created_at: string;
+  readonly display_name: string;
+  readonly id: string;
+  readonly sequence: number;
+  readonly citation_url: string;
+}
+
+export interface CoordinationProposal {
+  readonly actor_label: string;
+  readonly authority_class: "management" | "participant";
+  readonly base_revision: number;
+  readonly body: CoordinationRequestBody;
+  readonly created_at: string;
+  readonly detail_url: string;
+  readonly kind: string;
+  readonly proposal_id: string;
+  readonly request_id: string | null;
+  readonly revision: number;
+  readonly source_message_ids: readonly string[];
+  readonly source_messages: readonly CoordinationSourceMessage[];
+  readonly status: "pending" | "published" | "superseded";
+}
+
+export interface CoordinationProposalSummary {
+  readonly actor_label: string;
+  readonly authority_class: "management" | "participant";
+  readonly base_revision: number;
+  readonly created_at: string;
+  readonly detail_url: string;
+  readonly kind: string;
+  readonly proposal_id: string;
+  readonly request_id: string | null;
+  readonly revision: number;
+  readonly status: "pending" | "published" | "superseded";
+  readonly title: string;
+}
+
+export interface CoordinationRequest {
+  readonly body: CoordinationRequestBody;
+  readonly created_at: string;
+  readonly detail_url: string;
+  readonly published_revision: number;
+  readonly request_id: string;
+  readonly status: "open";
+  readonly updated_at: string;
+}
+
+export interface CoordinationRequestSummary {
+  readonly detail_url: string;
+  readonly owner_label: string;
+  readonly published_revision: number;
+  readonly request_id: string;
+  readonly status: "open";
+  readonly title: string;
+  readonly updated_at: string;
+}
+
+export interface CoordinationOverviewResponse {
+  readonly conversation_url: string;
+  readonly coordination_cursor: number;
+  readonly empty: boolean;
+  readonly expires_at: string;
+  readonly latest_message: number;
+  readonly pending_proposal_count: number;
+  readonly pending_proposals: readonly CoordinationProposalSummary[];
+  readonly protocol_version: typeof PROTOCOL_VERSION;
+  readonly published_request_count: number;
+  readonly published_requests: readonly CoordinationRequestSummary[];
+  readonly proposals_url: string;
+  readonly requests_url: string;
+  readonly published_revision: number;
+}
+
+export interface CoordinationProposalListResponse {
+  readonly coordination_cursor: number;
+  readonly expires_at: string;
+  readonly has_more: boolean;
+  readonly latest_message: number;
+  readonly next_after: number;
+  readonly proposals: readonly CoordinationProposal[];
+  readonly protocol_version: typeof PROTOCOL_VERSION;
+  readonly through: number;
+}
+
+export interface CoordinationProposalResponse {
+  readonly coordination_cursor: number;
+  readonly expires_at: string;
+  readonly latest_message: number;
+  readonly proposal: CoordinationProposal;
+  readonly protocol_version: typeof PROTOCOL_VERSION;
+  readonly replayed?: boolean;
+  readonly revisions: readonly CoordinationProposal[];
+  readonly revisions_has_more?: boolean;
+  readonly revisions_next_after?: number;
+  readonly revisions_through?: number;
+}
+
+export interface CoordinationRequestListResponse {
+  readonly expires_at: string;
+  readonly has_more: boolean;
+  readonly latest_message: number;
+  readonly next_after: number;
+  readonly protocol_version: typeof PROTOCOL_VERSION;
+  readonly published_revision: number;
+  readonly requests: readonly CoordinationRequest[];
+  readonly through: number;
+}
+
+export interface CoordinationRequestResponse {
+  readonly coordination_cursor: number;
+  readonly expires_at: string;
+  readonly latest_message: number;
+  readonly protocol_version: typeof PROTOCOL_VERSION;
+  readonly request: CoordinationRequest;
+  readonly revisions: readonly CoordinationProposal[];
+  readonly revisions_has_more?: boolean;
+  readonly revisions_next_after?: number;
+  readonly revisions_through?: number;
+}
+
+export interface CoordinationProposalInput {
+  readonly body: RequestBody;
+  readonly room: string;
+}
+
+export interface CoordinationListInput {
+  readonly after?: number;
+  readonly limit?: number;
+  readonly room: string;
+  readonly through?: number;
+}
+
+export interface CoordinationProposalDetailInput {
+  readonly proposalId: string;
+  readonly room: string;
+}
+
+export interface CoordinationRequestDetailInput {
+  readonly after?: number;
+  readonly limit?: number;
+  readonly requestId: string;
+  readonly room: string;
+  readonly through?: number;
+}
+
+export interface CoordinationProposalRevisionInput extends CoordinationProposalInput {
+  readonly proposalId: string;
+}
+
+export interface CoordinationPublishInput {
+  readonly body: RequestBody;
+  readonly ownerToken: string;
+  readonly room: string;
+}
+
+export interface CoordinationPublishResponse {
+  readonly coordination_cursor: number;
+  readonly expires_at: string;
+  readonly latest_message: number;
+  readonly protocol_version: typeof PROTOCOL_VERSION;
+  readonly published_revision: number;
+  readonly replayed: boolean;
+  readonly request: CoordinationRequest;
+  readonly proposal: CoordinationProposal;
 }
 
 export interface PostMessageInput {

@@ -68,6 +68,10 @@ Accept: application/json
   expect(AGENT_INSTRUCTIONS).not.toContain("Do not open or automate the web page");
   expect(AGENT_INSTRUCTIONS).toContain("/{room}/post?token");
   expect(AGENT_INSTRUCTIONS).toContain("URL previews can trigger its first write");
+  expect(AGENT_INSTRUCTIONS).toContain("Tracked request coordination is a separate proposal and review flow");
+  expect(AGENT_INSTRUCTIONS).toContain("request.create");
+  expect(AGENT_INSTRUCTIONS).toContain("/manage/{room}/{token}/coordination/publish");
+  expect(AGENT_INSTRUCTIONS).toContain("proposal-attempt-1");
 });
 
 test("renders root discovery in every supported representation", async () => {
@@ -183,5 +187,9 @@ test("documents responses for every OpenAPI operation", () => {
   expect(OPENAPI_DOCUMENT.paths["/{room}/messages/{id}"].get.responses["200"]).toBeDefined();
   expect(OPENAPI_DOCUMENT.paths["/{room}/messages/{id}"].get.responses["200"].content["application/json"].schema.required).toEqual(["protocol_version", "conversation_url", "message", "latest_message", "expires_at"]);
   expect(OPENAPI_DOCUMENT.paths["/{room}"].get.responses["304"].description).toContain("normalized after cursor");
-  expect(Object.keys(OPENAPI_DOCUMENT.paths).sort()).toEqual(["/", "/healthz", "/manage/{room}/{token}", "/{room}", "/{room}/agent", "/{room}/export.json", "/{room}/export.md", "/{room}/live", "/{room}/messages/{id}", "/{room}/post", "/{room}/webhooks", "/{room}/webhooks/{id}", "/{room}/webhooks/{id}/deliveries/{event_id}/redeliver", "/{room}/webhooks/{id}/disable", "/{room}/webhooks/{id}/enable", "/{room}/webhooks/{id}/rotate-secret"]);
+  expect(OPENAPI_DOCUMENT.paths["/{room}/coordination"].get).toBeDefined();
+  expect(OPENAPI_DOCUMENT.paths["/{room}/coordination/proposals"].post.requestBody.content["application/json"].schema.additionalProperties).toBe(false);
+  expect(OPENAPI_DOCUMENT.paths["/{room}/coordination/proposals"].post.requestBody.content["application/json"].schema.properties.kind.const).toBe("request.create");
+  expect(OPENAPI_DOCUMENT.paths["/manage/{room}/{token}/coordination/publish"].post.description).toContain("Never expose this URL");
+  expect(Object.keys(OPENAPI_DOCUMENT.paths).sort()).toEqual(["/", "/healthz", "/manage/{room}/{token}", "/manage/{room}/{token}/coordination/publish", "/{room}", "/{room}/agent", "/{room}/coordination", "/{room}/coordination/proposals", "/{room}/coordination/proposals/{id}", "/{room}/coordination/proposals/{id}/revisions", "/{room}/coordination/proposals/{id}/revisions/{revision}", "/{room}/coordination/requests", "/{room}/coordination/requests/{request_id}", "/{room}/export.json", "/{room}/export.md", "/{room}/live", "/{room}/messages/{id}", "/{room}/post", "/{room}/webhooks", "/{room}/webhooks/{id}", "/{room}/webhooks/{id}/deliveries/{event_id}/redeliver", "/{room}/webhooks/{id}/disable", "/{room}/webhooks/{id}/enable", "/{room}/webhooks/{id}/rotate-secret"]);
 });

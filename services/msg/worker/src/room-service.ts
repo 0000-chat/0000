@@ -1,6 +1,7 @@
-import { ERROR_CODES, isStaleSequenceDetails, ProtocolError } from "./errors";
+import { ERROR_CODES, isStaleRevisionDetails, isStaleSequenceDetails, ProtocolError } from "./errors";
+import { parseCoordinationProposal, parseCoordinationPublish, parseCoordinationRevision } from "./coordination-domain";
 import { hashCapability, parseBasedOnSequence, parseMessageInput, randomCapability, validateIdempotencyKey, validateRequestId } from "./room-domain";
-import { buildShareMessage, foregroundWait, PROTOCOL_VERSION, stripLegacyAbsoluteExpiry, type CreateRoomInput, type CreateRoomResponse, type CreateWebhookInput, type CreateWebhookResponse, type EnrollPushInput, type ExportRoomInput, type GetPostMessageInput, type GetPostMessageResponse, type ListWebhooksInput, type ListWebhooksResponse, type LiveRoomInput, type ManageRoomInput, type ManageRoomResponse, type ManageWebhookInput, type ManageWebhookResponse, type PostMessageInput, type PostMessageResponse, type PushEnrollmentInput, type PushEnrollmentResponse, type ReadMessageInput, type ReadMessageResponse, type ReadRoomInput, type ReadRoomResponse, type RedeliverWebhookInput, type RedeliverWebhookResponse, type RemovePushEnrollmentResponse, type RemoveWebhookInput, type RemoveWebhookResponse, type RotateWebhookSecretResponse, type RoomService } from "./protocol";
+import { buildShareMessage, foregroundWait, PROTOCOL_VERSION, stripLegacyAbsoluteExpiry, type CoordinationListInput, type CoordinationOverviewResponse, type CoordinationProposalDetailInput, type CoordinationProposalInput, type CoordinationProposalResponse, type CoordinationProposalRevisionInput, type CoordinationProposalListResponse, type CoordinationPublishInput, type CoordinationPublishResponse, type CoordinationRequestDetailInput, type CoordinationRequestListResponse, type CoordinationRequestResponse, type CreateRoomInput, type CreateRoomResponse, type CreateWebhookInput, type CreateWebhookResponse, type EnrollPushInput, type ExportRoomInput, type GetPostMessageInput, type GetPostMessageResponse, type ListWebhooksInput, type ListWebhooksResponse, type LiveRoomInput, type ManageRoomInput, type ManageRoomResponse, type ManageWebhookInput, type ManageWebhookResponse, type PostMessageInput, type PostMessageResponse, type PushEnrollmentInput, type PushEnrollmentResponse, type ReadMessageInput, type ReadMessageResponse, type ReadRoomInput, type ReadRoomResponse, type RedeliverWebhookInput, type RedeliverWebhookResponse, type RemovePushEnrollmentResponse, type RemoveWebhookInput, type RemoveWebhookResponse, type RotateWebhookSecretResponse, type RoomService } from "./protocol";
 
 export interface RoomStub { fetch(request: Request): Promise<Response>; }
 export interface RoomNamespace { getByName(name: string): RoomStub; }
@@ -169,6 +170,55 @@ export class DurableRoomService implements RoomService {
     return responsePassthrough(await this.room(input.room).fetch(new Request(`https://room/export.${input.format === "json" ? "json" : "md"}`)));
   }
 
+  async coordinationOverview(input: { readonly room: string }): Promise<CoordinationOverviewResponse> {
+    const value = await responseJson(await this.room(input.room).fetch(new Request("https://room/coordination"))) as unknown as CoordinationOverviewResponse;
+    return hydrateCoordination(value, this.origin, input.room) as CoordinationOverviewResponse;
+  }
+
+  async listCoordinationProposals(input: CoordinationListInput): Promise<CoordinationProposalListResponse> {
+    const value = await responseJson(await this.room(input.room).fetch(new Request(coordinationListUrl("/coordination/proposals", input)))) as unknown as CoordinationProposalListResponse;
+    return hydrateCoordination(value, this.origin, input.room) as CoordinationProposalListResponse;
+  }
+
+  async readCoordinationProposal(input: CoordinationProposalDetailInput): Promise<CoordinationProposalResponse> {
+    const value = await responseJson(await this.room(input.room).fetch(new Request(`https://room/coordination/proposals/${encodeURIComponent(input.proposalId)}`))) as unknown as CoordinationProposalResponse;
+    return hydrateCoordination(value, this.origin, input.room) as CoordinationProposalResponse;
+  }
+
+  async readCoordinationProposalRevision(input: CoordinationProposalDetailInput & { readonly revision: number }): Promise<CoordinationProposalResponse> {
+    const value = await responseJson(await this.room(input.room).fetch(new Request(`https://room/coordination/proposals/${encodeURIComponent(input.proposalId)}/revisions/${input.revision}`))) as unknown as CoordinationProposalResponse;
+    return hydrateCoordination(value, this.origin, input.room) as CoordinationProposalResponse;
+  }
+
+  async submitCoordinationProposal(input: CoordinationProposalInput): Promise<CoordinationProposalResponse> {
+    const body = input.body.kind === "json" ? parseCoordinationProposal(input.body.value) : (() => { throw new ProtocolError(ERROR_CODES.invalidBody, "The coordination proposal must be JSON.", 400); })();
+    const value = await responseJson(await this.room(input.room).fetch(jsonRequest("/coordination/proposals", body))) as unknown as CoordinationProposalResponse;
+    return hydrateCoordination(value, this.origin, input.room) as CoordinationProposalResponse;
+  }
+
+  async submitCoordinationRevision(input: CoordinationProposalRevisionInput): Promise<CoordinationProposalResponse> {
+    const body = input.body.kind === "json" ? parseCoordinationRevision(input.body.value) : (() => { throw new ProtocolError(ERROR_CODES.invalidBody, "The coordination revision must be JSON.", 400); })();
+    const value = await responseJson(await this.room(input.room).fetch(jsonRequest(`/coordination/proposals/${encodeURIComponent(input.proposalId)}/revisions`, body))) as unknown as CoordinationProposalResponse;
+    return hydrateCoordination(value, this.origin, input.room) as CoordinationProposalResponse;
+  }
+
+  async listCoordinationRequests(input: CoordinationListInput): Promise<CoordinationRequestListResponse> {
+    const value = await responseJson(await this.room(input.room).fetch(new Request(coordinationListUrl("/coordination/requests", input)))) as unknown as CoordinationRequestListResponse;
+    return hydrateCoordination(value, this.origin, input.room) as CoordinationRequestListResponse;
+  }
+
+  async readCoordinationRequest(input: CoordinationRequestDetailInput): Promise<CoordinationRequestResponse> {
+    const endpoint = coordinationListUrl(`/coordination/requests/${encodeURIComponent(input.requestId)}`, input);
+    const value = await responseJson(await this.room(input.room).fetch(new Request(endpoint))) as unknown as CoordinationRequestResponse;
+    return hydrateCoordination(value, this.origin, input.room) as CoordinationRequestResponse;
+  }
+
+  async publishCoordinationRequest(input: CoordinationPublishInput): Promise<CoordinationPublishResponse> {
+    const body = input.body.kind === "json" ? parseCoordinationPublish(input.body.value) : (() => { throw new ProtocolError(ERROR_CODES.invalidBody, "The coordination publication must be JSON.", 400); })();
+    const value = await responseJson(await this.room(input.room).fetch(jsonRequest(`/coordination/publish?token=${encodeURIComponent(input.ownerToken)}`, body))) as unknown as CoordinationPublishResponse;
+    return hydrateCoordination(value, this.origin, input.room) as CoordinationPublishResponse;
+  }
+
   private room(capability: string): RoomStub { return this.rooms.getByName(capability); }
 }
 
@@ -195,6 +245,49 @@ async function responseError(response: Response): Promise<ProtocolError> {
   const code = (error?.code as typeof ERROR_CODES[keyof typeof ERROR_CODES]) ?? ERROR_CODES.internal;
   const details = code === ERROR_CODES.staleSequence && isStaleSequenceDetails(error)
     ? { latest_message: error.latest_message, review_after: error.review_after }
-    : undefined;
+    : code === ERROR_CODES.staleRevision && isStaleRevisionDetails(error)
+      ? { current_revision: error.current_revision, submitted_base_revision: error.submitted_base_revision }
+      : undefined;
   return new ProtocolError(code, error?.message ?? "The room could not complete the request.", response.status, undefined, details);
+}
+
+function coordinationListUrl(path: string, input: CoordinationListInput): string {
+  const url = new URL(`https://room${path}`);
+  if (input.after !== undefined) url.searchParams.set("after", String(input.after));
+  if (input.limit !== undefined) url.searchParams.set("limit", String(input.limit));
+  if (input.through !== undefined) url.searchParams.set("through", String(input.through));
+  return url.toString();
+}
+
+function hydrateCoordination(value: unknown, origin: string, room: string): unknown {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+  const result = { ...(value as Record<string, unknown>) };
+  const base = `${origin}/${encodeURIComponent(room)}`;
+  if ("coordination_cursor" in result || "published_revision" in result) result.conversation_url = base;
+  for (const key of ["proposals_url", "requests_url"] as const) {
+    if (typeof result[key] === "string" && result[key].startsWith("/")) result[key] = `${base}${result[key]}`;
+  }
+  for (const key of ["proposal", "request"] as const) {
+    const item = result[key];
+    if (item && typeof item === "object" && !Array.isArray(item)) result[key] = hydrateCoordinationItem(item as Record<string, unknown>, base);
+  }
+  for (const key of ["proposals", "pending_proposals", "requests", "published_requests", "revisions"] as const) {
+    const items = result[key];
+    if (Array.isArray(items)) result[key] = items.map((item) => item && typeof item === "object" && !Array.isArray(item) ? hydrateCoordinationItem(item as Record<string, unknown>, base) : item);
+  }
+  return result;
+}
+
+function hydrateCoordinationItem(item: Record<string, unknown>, base: string): Record<string, unknown> {
+  const result = { ...item };
+  if (typeof result.detail_url === "string" && result.detail_url.startsWith("/")) result.detail_url = `${base}${result.detail_url}`;
+  if (Array.isArray(result.source_messages)) {
+    result.source_messages = result.source_messages.map((source) => {
+      if (!source || typeof source !== "object" || Array.isArray(source)) return source;
+      const hydrated = { ...(source as Record<string, unknown>) };
+      if (typeof hydrated.citation_url === "string" && hydrated.citation_url.startsWith("/")) hydrated.citation_url = `${base}${hydrated.citation_url}`;
+      return hydrated;
+    });
+  }
+  return result;
 }
