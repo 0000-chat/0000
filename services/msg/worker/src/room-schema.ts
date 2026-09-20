@@ -1,7 +1,7 @@
 import { ROOM_LIMITS } from "./room-domain";
 import { WEBHOOK_RETRY_INITIAL_DELAY_MS, WEBHOOK_RETRY_WINDOW_MS } from "./webhook-policy";
 
-export const CURRENT_ROOM_SCHEMA_VERSION = 9;
+export const CURRENT_ROOM_SCHEMA_VERSION = 10;
 
 interface SqlStorage {
   exec(query: string, ...values: unknown[]): Iterable<unknown>;
@@ -271,6 +271,27 @@ function applyMigration(sql: SqlStorage, version: number, inactivityTtlMs: numbe
         receipt TEXT NOT NULL, created_at INTEGER NOT NULL, byte_count INTEGER NOT NULL,
         PRIMARY KEY (operation, retry_id)
       );
+    `);
+    sql.exec("UPDATE room_state SET schema_version = ? WHERE singleton = 1", CURRENT_ROOM_SCHEMA_VERSION);
+    return;
+  }
+  if (version === 10) {
+    sql.exec(`
+      CREATE TABLE IF NOT EXISTS coordination_panel (
+        singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+        published_revision INTEGER NOT NULL,
+        proposal_id TEXT NOT NULL,
+        proposal_revision INTEGER NOT NULL,
+        purpose TEXT,
+        phase TEXT,
+        artifacts TEXT NOT NULL,
+        next_actions TEXT NOT NULL,
+        source_message_ids TEXT NOT NULL,
+        owner_label TEXT NOT NULL,
+        published_at INTEGER NOT NULL,
+        byte_count INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS coordination_events_panel ON coordination_events(operation, resulting_revision, cursor);
     `);
     sql.exec("UPDATE room_state SET schema_version = ? WHERE singleton = 1", CURRENT_ROOM_SCHEMA_VERSION);
     return;

@@ -398,6 +398,33 @@ async function route(request: Request, service: RoomService, options: MsgWorkerO
     response.headers.set("retry-after", "5");
     return response;
   }
+  const coordinationPanelHistoryMatch = /^\/([^/]+)\/coordination\/panel\/history$/u.exec(url.pathname);
+  if (coordinationPanelHistoryMatch && request.method === "GET") {
+    if (!service.listCoordinationPanelHistory) return notFound();
+    await enforceRateLimit(request, options.rateLimits?.reads);
+    const selectors = parseCoordinationListSelectors(url);
+    const result = await service.listCoordinationPanelHistory({ room: coordinationPanelHistoryMatch[1]!, after: selectors.after, limit: selectors.limit, ...(selectors.through === undefined ? {} : { through: selectors.through }) });
+    const etag = coordinationPanelHistoryEtag(result, selectors);
+    if (request.headers.get("if-none-match") === etag) return new Response(null, { headers: { etag, "retry-after": "5" }, status: 304 });
+    const response = jsonResponse(result);
+    response.headers.set("etag", etag);
+    response.headers.set("retry-after", "5");
+    return response;
+  }
+  const coordinationPanelMatch = /^\/([^/]+)\/coordination\/panel$/u.exec(url.pathname);
+  if (coordinationPanelMatch && request.method === "GET") {
+    if (!service.readCoordinationPanel) return notFound();
+    await enforceRateLimit(request, options.rateLimits?.reads);
+    const revisionValue = url.searchParams.get("revision");
+    const revision = revisionValue === null ? undefined : parsePositiveCoordinationRevision(revisionValue);
+    const result = await service.readCoordinationPanel({ room: coordinationPanelMatch[1]!, ...(revision === undefined ? {} : { revision }) });
+    const etag = coordinationPanelEtag(result, revision);
+    if (request.headers.get("if-none-match") === etag) return new Response(null, { headers: { etag, "retry-after": "5" }, status: 304 });
+    const response = jsonResponse(result);
+    response.headers.set("etag", etag);
+    response.headers.set("retry-after", "5");
+    return response;
+  }
   const coordinationProposalCollection = /^\/([^/]+)\/coordination\/proposals$/u.exec(url.pathname);
   if (coordinationProposalCollection && request.method === "GET") {
     if (!service.listCoordinationProposals) return notFound();
@@ -523,8 +550,10 @@ async function route(request: Request, service: RoomService, options: MsgWorkerO
         return htmlResponse(page.html, 200, page.styleNonce);
       }
       const etag = selectors.bounded
-        ? roomEtag(result.latest_message, selectors.after, { expiresAt: result.expires_at, limit: selectors.limit ?? DEFAULT_READ_LIMIT, through: result.through, ...(result.coordination_cursor === undefined ? {} : { coordinationCursor: result.coordination_cursor }), ...(result.published_revision === undefined ? {} : { publishedRevision: result.published_revision }) })
-        : roomEtag(result.latest_message, selectors.after);
+        ? roomEtag(result.latest_message, selectors.after, { expiresAt: result.expires_at, mode: "bounded", limit: selectors.limit ?? DEFAULT_READ_LIMIT, through: result.through, ...(result.coordination_cursor === undefined ? {} : { coordinationCursor: result.coordination_cursor }), ...(result.published_revision === undefined ? {} : { publishedRevision: result.published_revision }) })
+        : result.coordination_cursor === undefined && result.published_revision === undefined
+          ? roomEtag(result.latest_message, selectors.after)
+          : roomEtag(result.latest_message, selectors.after, { coordinationCursor: result.coordination_cursor, expiresAt: result.expires_at, mode: "unbounded", publishedRevision: result.published_revision });
       if (request.headers.get("if-none-match") === etag) {
         return new Response(null, { headers: { etag, "retry-after": "5" }, status: 304 });
       }
@@ -682,8 +711,25 @@ function parseReadSelectors(url: URL): ReadSelectors {
 }
 
 function coordinationListEtag(kind: "requests", result: unknown, selectors: { readonly after: number; readonly limit: number; readonly owner_label?: string; readonly status?: string; readonly through?: number }): string {
-  const value = result && typeof result === "object" && !Array.isArray(result) ? result as { coordination_cursor?: unknown; published_revision?: unknown; through?: unknown } : {};
-  return `W/"coordination-${kind}-${String(value.coordination_cursor ?? "")}-${String(value.published_revision ?? "")}-after-${selectors.after}-limit-${selectors.limit}-through-${String(selectors.through ?? value.through ?? "")}-owner-${encodeURIComponent(selectors.owner_label ?? "")}-status-${selectors.status ?? ""}"`;
+  const value = result && typeof result === "object" && !Array.isArray(result) ? result as { coordination_cursor?: unknown; expires_at?: unknown; published_revision?: unknown; through?: unknown } : {};
+  return `W/"coordination-${kind}-${String(value.coordination_cursor ?? "")}-${String(value.published_revision ?? "")}-after-${selectors.after}-limit-${selectors.limit}-through-${String(selectors.through ?? value.through ?? "")}-owner-${encodeURIComponent(selectors.owner_label ?? "")}-status-${selectors.status ?? ""}-expires-${String(value.expires_at ?? "")}"`;
+}
+
+function parsePositiveCoordinationRevision(value: string): number {
+  if (!/^[1-9][0-9]*$/u.test(value)) throw new ProtocolError(ERROR_CODES.invalidBody, "The panel revision must be a positive safe integer.", 400);
+  const revision = Number(value);
+  if (!Number.isSafeInteger(revision)) throw new ProtocolError(ERROR_CODES.invalidBody, "The panel revision must be a positive safe integer.", 400);
+  return revision;
+}
+
+function coordinationPanelEtag(result: unknown, revision: number | undefined): string {
+  const value = result && typeof result === "object" && !Array.isArray(result) ? result as { coordination_cursor?: unknown; expires_at?: unknown; panel_published_revision?: unknown; published_revision?: unknown } : {};
+  return `W/"coordination-panel-${String(value.coordination_cursor ?? "")}-${String(value.published_revision ?? "")}-${String(value.panel_published_revision ?? "")}-revision-${String(revision ?? "latest")}-expires-${String(value.expires_at ?? "")}"`;
+}
+
+function coordinationPanelHistoryEtag(result: unknown, selectors: { readonly after: number; readonly limit: number; readonly through?: number }): string {
+  const value = result && typeof result === "object" && !Array.isArray(result) ? result as { coordination_cursor?: unknown; expires_at?: unknown; published_revision?: unknown; history_through?: unknown } : {};
+  return `W/"coordination-panel-history-${String(value.coordination_cursor ?? "")}-${String(value.published_revision ?? "")}-after-${selectors.after}-limit-${selectors.limit}-through-${String(selectors.through ?? value.history_through ?? "")}-expires-${String(value.expires_at ?? "")}"`;
 }
 
 async function enforceRateLimit(request: Request, binding: MsgRateLimit | undefined): Promise<void> {

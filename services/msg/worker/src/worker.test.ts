@@ -969,6 +969,26 @@ test("reads a room as JSON and returns its ETag", async () => {
   expect(value).not.toHaveProperty("absolute_expires_at");
 });
 
+test("keeps legacy unbounded and bounded read validators distinct while covering state and expiry", async () => {
+  const messages = Array.from({ length: 25 }, (_, index) => ({ content: `message-${index + 1}`, id: `m${index + 1}`, sequence: index + 1 }));
+  const worker = createWorker({
+    create: async () => createdRoom,
+    read: async ({ limit, through }) => ({
+      coordination_cursor: 0,
+      expires_at: "2026-08-16T00:00:00.000Z",
+      latest_message: 25,
+      messages: limit === undefined ? messages : messages.slice(0, limit),
+      ...(limit === undefined ? {} : { has_more: true, next_after: limit, through: through ?? 25 }),
+      protocol_version: 1 as const,
+      published_revision: 0,
+    }),
+  });
+  const legacy = await worker.fetch(new Request("https://msg.0000.chat/example?after=0", { headers: { accept: "application/json" } }));
+  const bounded = await worker.fetch(new Request("https://msg.0000.chat/example?after=0&limit=20&through=25", { headers: { accept: "application/json" } }));
+  expect(legacy.headers.get("etag")).not.toBe(bounded.headers.get("etag"));
+  expect(legacy.headers.get("etag")).toContain("expires=2026-08-16T00:00:00.000Z");
+});
+
 test("does not replay a legacy absolute expiry field from a stored creation response", async () => {
   const legacy = { ...createdRoom, absolute_expires_at: "2026-09-09T00:00:00.000Z" } as CreateRoomResponse;
   const worker = createWorker({ create: async () => legacy });

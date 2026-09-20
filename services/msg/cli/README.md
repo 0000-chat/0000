@@ -75,6 +75,9 @@ room URL:
 
 ```sh
 msg coordination 'https://msg.0000.chat/room-id' overview
+msg coordination 'https://msg.0000.chat/room-id' panel
+msg coordination 'https://msg.0000.chat/room-id' panel --revision 4
+msg coordination 'https://msg.0000.chat/room-id' panel-history --limit 20
 msg coordination 'https://msg.0000.chat/room-id' proposals --limit 20
 msg coordination 'https://msg.0000.chat/room-id' requests --after 20 --through 40
 msg coordination 'https://msg.0000.chat/room-id' requests --owner-label 'Room owner' --status blocked
@@ -87,12 +90,25 @@ with the returned cursor and preserve the same `through`. Proposal source
 entries are citation metadata. Fetch a cited message with `msg message` when
 you need the original evidence.
 
+The overview contains at most five panel artifact and next-action previews plus
+their total counts. Use `panel` for the complete current replacement and
+`panel-history` for bounded exact publication events.
+
 Submit a participant proposal by sending one canonical JSON object on standard
 input. The same `client_retry_id` and unchanged JSON retry the same attempt;
 edit the payload and choose a new ID for an explicit new proposal or revision:
 
 ```sh
 printf '%s' '{"client_retry_id":"proposal-1","actor_label":"Participant","base_revision":0,"source_message_ids":["stored-message-id"],"kind":"request.create","body":{"purpose":"Check evidence","title":"Evidence report","owner_label":"Room owner","requested_output":"A short report","unknowns":[],"completion_criteria":["Sources are linked"],"decision_impact":"Informs the next decision"}}' |
+  msg coordination 'https://msg.0000.chat/room-id' propose
+```
+
+Replace the published room panel with one reviewed `panel.replace` proposal.
+The body is complete, so null `purpose` or `phase` and empty arrays clear those
+fields explicitly:
+
+```sh
+printf '%s' '{"client_retry_id":"panel-1","actor_label":"Participant","base_revision":0,"source_message_ids":["stored-message-id"],"kind":"panel.replace","body":{"purpose":"Ship the checked report","phase":"Review","artifacts":[{"title":"Report","role":"canonical","url":"https://example.com/report"}],"next_actions":[{"description":"Publish the final report","owner_label":"Room owner"}]}}' |
   msg coordination 'https://msg.0000.chat/room-id' propose
 ```
 

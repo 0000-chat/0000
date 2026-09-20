@@ -110,6 +110,7 @@ function validateNonnegativeInteger(value: string | null, field: "after" | "thro
 }
 
 export interface RoomEtagOptions {
+  readonly mode?: "bounded" | "unbounded";
   readonly coordinationCursor?: number;
   readonly expiresAt?: string;
   readonly limit?: number;
@@ -122,9 +123,9 @@ export function roomEtag(latestSequence: number, after: number, options?: RoomEt
   const selectors = [
     `after=${after}`,
     `coordination=${options.coordinationCursor ?? ""}`,
-    `limit=${options.limit ?? DEFAULT_READ_LIMIT}`,
+    `limit=${options.mode === "unbounded" ? "all" : options.limit ?? DEFAULT_READ_LIMIT}`,
     `published=${options.publishedRevision ?? ""}`,
-    `through=${options.through ?? latestSequence}`,
+    `through=${options.mode === "unbounded" ? "all" : options.through ?? latestSequence}`,
     `expires=${options.expiresAt ?? ""}`,
   ].join("&");
   return `W/"room-${latestSequence}-${selectors}"`;

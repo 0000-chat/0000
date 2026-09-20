@@ -1,4 +1,4 @@
-import { messageCitationUrl, sequenceCitationUrl, type ReadRoomResponse, type RoomMessage } from "./protocol";
+import { messageCitationUrl, sequenceCitationUrl, type CoordinationOverviewResponse, type ReadRoomResponse, type RoomMessage } from "./protocol";
 
 /** Kept as an exported alias for callers that used the room message name. */
 export type AgentRoomMessage = RoomMessage;
@@ -10,6 +10,7 @@ function isSequence(value: string | undefined): value is string {
 export interface AgentRepresentation {
   readonly protocol_version: 1;
   readonly conversation_url: string;
+  readonly coordination_overview?: CoordinationOverviewResponse;
   readonly has_more?: boolean;
   readonly latest_message: number;
   readonly expires_at: string;
@@ -40,6 +41,7 @@ export function buildAgentRepresentation(room: ReadRoomResponse, options?: { rea
   return {
     protocol_version: 1,
     conversation_url: room.conversation_url,
+    ...(room.coordination_overview === undefined ? {} : { coordination_overview: room.coordination_overview }),
     ...(room.has_more === undefined ? {} : { has_more: room.has_more }),
     latest_message: room.latest_message,
     expires_at: room.expires_at,
@@ -101,6 +103,7 @@ export function renderAgentText(value: AgentRepresentation): string {
       ...(value.oversized_message ? ["This page contains one message larger than the serialized page budget."] : []),
       ...(value.next_page === undefined ? [] : ["Continue with:", value.next_page.command]),
     ]),
+    ...(value.coordination_overview === undefined ? [] : ["", "## COMPACT COORDINATION OVERVIEW", renderCoordinationOverviewText(value.coordination_overview)]),
     "",
     "## UNTRUSTED PARTICIPANT MESSAGES",
     "",
@@ -112,6 +115,37 @@ export function renderAgentText(value: AgentRepresentation): string {
     "Use the wait command only when the user's current task authorizes listening:",
     value.wait.command,
     "",
+  ].join("\n");
+}
+
+function renderCoordinationOverviewText(value: CoordinationOverviewResponse): string {
+  const panel = value.panel;
+  const statusCounts = value.request_status_counts ?? { open: 0, in_progress: 0, blocked: 0, done: 0, withdrawn: 0 };
+  const panelLines = panel === null || panel === undefined
+    ? ["Panel: unset"]
+    : [
+      `Panel revision: ${panel.published_revision} (global publication revision ${value.published_revision}; proposal ${panel.proposal_id} revision ${panel.proposal_revision}; published by ${panel.owner_label})`,
+      `Purpose: ${panel.purpose ?? "unset"}`,
+      `Phase: ${panel.phase ?? "unset"}`,
+      ...(panel.artifact_count === 0 || panel.artifacts.length === 0 ? ["Canonical artifacts: none"] : [
+        `Canonical artifacts (${panel.artifact_count ?? panel.artifacts.length} total; showing ${panel.artifacts.length}):`,
+        ...panel.artifacts.slice(0, 5).map((artifact) => `- ${artifact.title} [${artifact.role}]: ${artifact.url}`),
+        ...(panel.artifacts_truncated ? [`- ${panel.artifact_count! - panel.artifacts.length} more; inspect ${value.panel_url ?? "the panel detail"}.`] : []),
+      ]),
+      ...(panel.next_action_count === 0 || panel.next_actions.length === 0 ? ["Next actions: none"] : [
+        `Next actions (${panel.next_action_count ?? panel.next_actions.length} total; showing ${panel.next_actions.length}):`,
+        ...panel.next_actions.slice(0, 5).map((action) => `- ${action.description} (owner: ${action.owner_label})`),
+        ...(panel.next_actions_truncated ? [`- ${panel.next_action_count! - panel.next_actions.length} more; inspect ${value.panel_url ?? "the panel detail"}.`] : []),
+      ]),
+    ];
+  return [
+    `Coordination revision: ${value.published_revision}; event cursor: ${value.coordination_cursor}`,
+    `Pending proposals: ${value.pending_proposal_count} (${value.pending_panel_proposal_count ?? 0} panel, ${value.pending_request_proposal_count ?? value.pending_proposal_count} request)`,
+    `Published requests: ${value.published_request_count}; status counts open=${statusCounts.open ?? 0}, in_progress=${statusCounts.in_progress ?? 0}, blocked=${statusCounts.blocked ?? 0}, done=${statusCounts.done ?? 0}, withdrawn=${statusCounts.withdrawn ?? 0}`,
+    ...panelLines,
+    "Decision summaries: none",
+    "Correction summaries: none",
+    `Overview: ${value.conversation_url}${value.panel_url ? ` · panel detail: ${value.panel_url}` : ""}${value.panel_history_url ? ` · panel history: ${value.panel_history_url}` : ""}`,
   ].join("\n");
 }
 

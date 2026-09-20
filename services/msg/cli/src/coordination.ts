@@ -1,11 +1,13 @@
 import { validateConversationUrl } from "./wait.js";
 
-const USAGE = "Usage: msg coordination <conversation-url> overview | proposals [--after N] [--limit N] [--through N] | proposal <proposal-id> [--revision N] | requests [--after N] [--limit N] [--through N] [--owner-label LABEL] [--status STATUS] | request <request-id> [--after N] [--limit N] [--through N] | propose | revise <proposal-id> | publish <management-coordination-url>";
+const USAGE = "Usage: msg coordination <conversation-url> overview | panel [--revision N] | panel-history [--after N] [--limit N] [--through N] | proposals [--after N] [--limit N] [--through N] | proposal <proposal-id> [--revision N] | requests [--after N] [--limit N] [--through N] [--owner-label LABEL] [--status STATUS] | request <request-id> [--after N] [--limit N] [--through N] | propose | revise <proposal-id> | publish <management-coordination-url>";
 
 const COORDINATION_STATUSES = new Set(["open", "in_progress", "blocked", "done", "withdrawn"]);
 
 export type CoordinationCommand =
   | { readonly conversationUrl: string; readonly operation: "overview" }
+  | { readonly conversationUrl: string; readonly operation: "panel"; readonly revision?: number }
+  | { readonly after?: number; readonly conversationUrl: string; readonly limit?: number; readonly operation: "panel-history"; readonly through?: number }
   | { readonly after?: number; readonly conversationUrl: string; readonly limit?: number; readonly operation: "proposals" | "requests"; readonly ownerLabel?: string; readonly status?: string; readonly through?: number }
   | { readonly after?: number; readonly conversationUrl: string; readonly id: string; readonly limit?: number; readonly operation: "proposal" | "request"; readonly revision?: number; readonly through?: number }
   | { readonly conversationUrl: string; readonly operation: "propose" }
@@ -33,6 +35,25 @@ export function parseCoordinationCommand(args: readonly string[]): CoordinationC
     if (operation === "overview" && args.length === 3) return { conversationUrl, operation };
     if (operation === "propose" && args.length === 3) return { conversationUrl, operation };
     if (operation === "revise" && args.length === 4 && args[3]) return { conversationUrl, id: args[3], operation };
+  }
+  if (operation === "panel") {
+    if (args.length === 3) return { conversationUrl, operation };
+    if (args.length === 5 && args[3] === "--revision") return { conversationUrl, operation, revision: parsePositiveInteger(args[4] ?? "") };
+    throw new Error(USAGE);
+  }
+  if (operation === "panel-history") {
+    const selectors: { after?: number; limit?: number; through?: number } = {};
+    const seen = new Set<string>();
+    for (let index = 3; index < args.length; index += 2) {
+      const flag = args[index];
+      const raw = args[index + 1];
+      if ((flag !== "--after" && flag !== "--limit" && flag !== "--through") || raw === undefined || seen.has(flag)) throw new Error(USAGE);
+      seen.add(flag);
+      if (flag === "--limit") selectors.limit = parseLimit(raw);
+      else if (flag === "--after") selectors.after = parseNonnegativeInteger(raw);
+      else selectors.through = parseNonnegativeInteger(raw);
+    }
+    return { conversationUrl, operation, ...selectors };
   }
   if (operation === "proposals" || operation === "requests") {
     const selectors: { after?: number; limit?: number; ownerLabel?: string; status?: string; through?: number } = {};
@@ -92,6 +113,8 @@ function coordinationEndpoint(options: CoordinationOptions): URL {
   if (options.operation === "publish") return new URL(options.managementUrl);
   const url = new URL(validateConversationUrl(options.conversationUrl));
   if (options.operation === "overview") url.pathname += "/coordination";
+  else if (options.operation === "panel") url.pathname += "/coordination/panel";
+  else if (options.operation === "panel-history") url.pathname += "/coordination/panel/history";
   else if (options.operation === "proposals" || options.operation === "propose") url.pathname += "/coordination/proposals";
   else if (options.operation === "proposal" || options.operation === "revise") url.pathname += `/coordination/proposals/${encodeURIComponent(options.id)}`;
   else if (options.operation === "requests") url.pathname += "/coordination/requests";
@@ -99,7 +122,8 @@ function coordinationEndpoint(options: CoordinationOptions): URL {
   else throw new Error(USAGE);
   if (options.operation === "revise") url.pathname += "/revisions";
   if (options.operation === "proposal" && options.revision !== undefined) url.pathname += `/revisions/${options.revision}`;
-  if (options.operation === "proposals" || options.operation === "requests") {
+  if (options.operation === "panel" && options.revision !== undefined) url.searchParams.set("revision", String(options.revision));
+  if (options.operation === "proposals" || options.operation === "requests" || options.operation === "panel-history") {
     if (options.after !== undefined) url.searchParams.set("after", String(options.after));
     if (options.limit !== undefined) url.searchParams.set("limit", String(options.limit));
     if (options.operation === "requests" && options.ownerLabel !== undefined) url.searchParams.set("owner_label", options.ownerLabel);
@@ -207,7 +231,8 @@ function validateMutationReceipt(operation: "propose" | "revise" | "publish", va
   if (operation === "publish") {
     const proposal = value.proposal;
     const request = value.request;
-    if (!isRecord(proposal) || !nonemptyString(proposal.proposal_id) || !positiveInteger(proposal.revision) || !isRecord(request) || !nonemptyString(request.request_id) || !positiveInteger(value.published_revision)) {
+    const panel = value.panel;
+    if (!isRecord(proposal) || !nonemptyString(proposal.proposal_id) || !positiveInteger(proposal.revision) || !positiveInteger(value.published_revision) || !((isRecord(request) && nonemptyString(request.request_id)) || (isRecord(panel) && nonemptyString(panel.proposal_id)))) {
       throw new Error("The coordination publication response was incomplete.");
     }
     return value;

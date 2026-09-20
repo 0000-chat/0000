@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 
-import { browserAsset } from "./browser";
+import { browserAsset, renderBrowserPage } from "./browser";
 import { bootCoordinationBrowser, createCoordinationBrowserHelpers, normalizeCoordinationManagementUrl, readCoordinationManagementUrl, retainCoordinationManagementUrl } from "./browser-coordination";
 
 function memoryStorage(initial: Record<string, string> = {}) {
@@ -44,6 +44,127 @@ test("served browser wiring contains the real coordination runtime and private r
   expect(source).toContain("Source evidence");
   expect(source).toContain("Save this private owner access URL");
   expect(() => new Function(source ?? "")).not.toThrow();
+});
+
+test("renders the pinned compact panel and labelled replacement form", () => {
+  const html = renderBrowserPage({ room: "room-a", title: "Room" });
+  expect(html).toContain('id="coordination-pinned-panel"');
+  expect(html).toContain('id="coordination-panel-form"');
+  expect(html).toContain('id="coordination-panel-purpose"');
+  expect(html).toContain('id="coordination-panel-artifacts"');
+  expect(html).toContain('id="coordination-panel-next-actions"');
+  expect(html).toContain("panel.replace");
+  expect(html).toContain("absolute HTTP(S) URL");
+});
+
+test("executes the served panel flow with frozen retry, exact hydration, pinned previews, and publication", async () => {
+  const source = await browserAsset("client.js")?.text();
+  class Element {
+    value = "";
+    textContent: string | null = "";
+    disabled = false;
+    hidden = false;
+    className = "";
+    dataset: Record<string, string> = {};
+    href = "";
+    target = "";
+    rel = "";
+    type = "";
+    children: Element[] = [];
+    onclick: (() => void) | null = null;
+    listeners = new Map<string, (event: { preventDefault(): void }) => void>();
+    addEventListener(type: string, listener: (event: { preventDefault(): void }) => void) { this.listeners.set(type, listener); }
+    append(...nodes: Element[]) { this.children.push(...nodes); }
+    replaceChildren(...nodes: Element[]) { this.children = [...nodes]; }
+    querySelector<T extends Element>(): T | null { return null; }
+    querySelectorAll(): Element[] { return []; }
+    select() {}
+    showModal() {}
+    close() {}
+    async submit() { await this.listeners.get("submit")?.({ preventDefault() {} }); }
+  }
+  const names = [
+    "coordination-panel", "coordination-pinned-panel", "coordination-overview", "coordination-review", "coordination-status",
+    "coordination-refresh", "coordination-filter-form", "coordination-filter-owner-label", "coordination-filter-status",
+    "coordination-panel-form", "coordination-panel-actor", "coordination-panel-purpose", "coordination-panel-phase",
+    "coordination-panel-artifacts", "coordination-panel-next-actions", "coordination-panel-sources", "coordination-panel-submit", "coordination-panel-new",
+    "coordination-proposal-form", "coordination-progress-form", "coordination-owner-form", "coordination-owner-url", "coordination-owner-save",
+  ];
+  const elements = new Map(names.map((name) => [name, new Element()]));
+  elements.get("coordination-panel-actor")!.value = "panel editor";
+  elements.get("coordination-panel-purpose")!.value = "Initial panel";
+  elements.get("coordination-panel-phase")!.value = "Draft";
+  elements.get("coordination-panel-artifacts")!.value = "Edited artifact | canonical | https://example.com/edited";
+  elements.get("coordination-panel-next-actions")!.value = "Review panel | room-owner";
+  elements.get("coordination-panel-sources")!.value = "message-1";
+  const exactArtifacts = Array.from({ length: 6 }, (_, index) => ({ title: `Artifact ${index + 1}`, role: "canonical", url: `https://example.com/artifact-${index + 1}` }));
+  const exactActions = Array.from({ length: 6 }, (_, index) => ({ description: `Action ${index + 1}`, owner_label: "room-owner" }));
+  const summaryPanel = {
+    authority_class: "management", body: { purpose: "Published panel", phase: "Review", artifacts: exactArtifacts.slice(0, 5), next_actions: exactActions.slice(0, 5) },
+    artifacts: exactArtifacts.slice(0, 5), artifact_count: 6, artifacts_truncated: true,
+    next_actions: exactActions.slice(0, 5), next_action_count: 6, next_actions_truncated: true,
+    owner_label: "room-owner", phase: "Review", proposal_id: "published-panel", proposal_revision: 1, published_at: "2026-09-21T00:00:00.000Z", published_revision: 2, purpose: "Published panel", source_message_ids: ["message-1"], source_messages: [],
+  };
+  const exactPanel = { ...summaryPanel, body: { purpose: "Published panel", phase: "Review", artifacts: exactArtifacts, next_actions: exactActions }, artifacts: exactArtifacts, next_actions: exactActions, artifact_count: 6, next_action_count: 6 };
+  const overviewPayload = () => ({ pending_proposal_count: 1, pending_panel_proposal_count: 1, pending_request_proposal_count: 0, pending_proposals: [{ proposal_id: "panel-proposal", revision: 1, kind: "panel.replace", title: "Published room panel", status: "pending", detail_url: "/coordination/proposals/panel-proposal" }], published_request_count: 0, published_requests: [], request_status_counts: { open: 0, in_progress: 0, blocked: 0, done: 0, withdrawn: 0 }, published_revision: 2, coordination_cursor: 4, panel: summaryPanel, panel_url: "/coordination/panel", panel_history_url: "/coordination/panel/history?limit=20", proposals_url: "/coordination/proposals?limit=20", requests_url: "/coordination/requests?limit=20" });
+  const storage = memoryStorage({ "0000:coordination-management-url:v1:room-a": "https://msg.0000.chat/manage/room-a/owner-token" });
+  const documentObject = {
+    body: { dataset: { room: "room-a" } },
+    documentElement: { dataset: {} as Record<string, string> },
+    createElement: () => new Element(),
+    querySelector<T extends Element>(selector: string) { return elements.get(selector.slice(1)) as T | undefined ?? null; },
+    querySelectorAll: () => [] as Element[],
+  };
+  const globals = globalThis as unknown as Record<string, unknown>;
+  const saved = Object.fromEntries(["addEventListener", "document", "fetch", "location", "localStorage", "matchMedia", "navigator", "sessionStorage"].map((key) => [key, globals[key]]));
+  const calls: { url: string; body?: string }[] = [];
+  let panelSubmission = 0;
+  globals.document = documentObject;
+  globals.location = { origin: "https://msg.0000.chat", pathname: "/room-a", href: "https://msg.0000.chat/room-a", protocol: "https:" };
+  globals.navigator = { onLine: true };
+  globals.matchMedia = () => ({ matches: false, addEventListener() {} });
+  globals.localStorage = { getItem: () => null, setItem: () => {} };
+  globals.sessionStorage = storage;
+  globals.addEventListener = () => {};
+  globals.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input); calls.push({ url, body: typeof init?.body === "string" ? init.body : undefined });
+    if (url.endsWith("/coordination")) return new Response(JSON.stringify(overviewPayload()), { status: 200 });
+    if (url.endsWith("/coordination/panel")) return new Response(JSON.stringify({ panel: exactPanel }), { status: 200 });
+    if (url.includes("/coordination/proposals/panel-proposal/revisions/1")) return new Response(JSON.stringify({ proposal: { proposal_id: "panel-proposal", revision: 1, base_revision: 2, actor_label: "panel editor", kind: "panel.replace", status: "pending", body: exactPanel.body, source_messages: [{ id: "message-1", display_name: "Source", citation_url: "/messages/message-1" }] } }), { status: 200 });
+    if (url.endsWith("/coordination/proposals")) {
+      panelSubmission += 1;
+      if (panelSubmission === 1) return new Response(JSON.stringify({ error: { message: "temporary panel failure" } }), { status: 503 });
+      return new Response(JSON.stringify({ proposal: { proposal_id: "panel-proposal", revision: 1 } }), { status: 201 });
+    }
+    if (url.endsWith("/coordination/publish")) return new Response(JSON.stringify({ proposal: { proposal_id: "panel-proposal", revision: 1 }, panel: { proposal_id: "panel-proposal", published_revision: 3 } }), { status: 201 });
+    return new Response(JSON.stringify({ latest_message: 0, messages: [], expires_at: null }), { status: 200 });
+  };
+  try {
+    new Function(source ?? "")();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(elements.get("coordination-panel-artifacts")!.value.split("\n")).toHaveLength(6);
+    expect(elements.get("coordination-pinned-panel")!.children.some((child) => child.textContent?.includes("Canonical artifacts (6; showing 5)"))).toBe(true);
+    expect(elements.get("coordination-pinned-panel")!.children.filter((child) => child.href.startsWith("https://example.com/artifact-"))).toHaveLength(5);
+    await elements.get("coordination-panel-form")!.submit();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const firstPayload = JSON.parse(calls.at(-1)?.body ?? "{}");
+    expect(elements.get("coordination-status")!.textContent).toContain("temporary panel failure");
+    await elements.get("coordination-panel-form")!.submit();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const proposalCalls = calls.filter(({ url }) => url.endsWith("/coordination/proposals"));
+    expect(JSON.parse(proposalCalls.at(-1)?.body ?? "{}")).toEqual(firstPayload);
+    const reviewButton = elements.get("coordination-overview")!.children.flatMap((child) => child.children).find((child) => child.textContent === "Review exact revision");
+    reviewButton?.onclick?.();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const publishButton = elements.get("coordination-review")!.children.find((child) => child.textContent === "Publish this exact revision");
+    publishButton?.onclick?.();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const publication = calls.find(({ url }) => url.endsWith("/coordination/publish"));
+    expect(publication?.body && JSON.parse(publication.body)).not.toHaveProperty("request_id");
+    expect(elements.get("coordination-status")!.textContent).toContain("Published the exact reviewed proposal revision");
+  } finally {
+    Object.assign(globals, saved);
+  }
 });
 
 test("submits a real progress report with an operation-specific frozen retry", async () => {

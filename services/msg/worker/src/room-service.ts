@@ -1,7 +1,7 @@
 import { ERROR_CODES, isStaleRevisionDetails, isStaleSequenceDetails, ProtocolError } from "./errors";
 import { parseCoordinationProposal, parseCoordinationPublish, parseCoordinationRevision } from "./coordination-domain";
 import { hashCapability, parseBasedOnSequence, parseMessageInput, randomCapability, validateIdempotencyKey, validateRequestId } from "./room-domain";
-import { buildShareMessage, foregroundWait, PROTOCOL_VERSION, stripLegacyAbsoluteExpiry, type CoordinationListInput, type CoordinationOverviewResponse, type CoordinationProposalDetailInput, type CoordinationProposalInput, type CoordinationProposalResponse, type CoordinationProposalRevisionInput, type CoordinationProposalListResponse, type CoordinationPublishInput, type CoordinationPublishResponse, type CoordinationRequestDetailInput, type CoordinationRequestListResponse, type CoordinationRequestResponse, type CreateRoomInput, type CreateRoomResponse, type CreateWebhookInput, type CreateWebhookResponse, type EnrollPushInput, type ExportRoomInput, type GetPostMessageInput, type GetPostMessageResponse, type ListWebhooksInput, type ListWebhooksResponse, type LiveRoomInput, type ManageRoomInput, type ManageRoomResponse, type ManageWebhookInput, type ManageWebhookResponse, type PostMessageInput, type PostMessageResponse, type PushEnrollmentInput, type PushEnrollmentResponse, type ReadMessageInput, type ReadMessageResponse, type ReadRoomInput, type ReadRoomResponse, type RedeliverWebhookInput, type RedeliverWebhookResponse, type RemovePushEnrollmentResponse, type RemoveWebhookInput, type RemoveWebhookResponse, type RotateWebhookSecretResponse, type RoomService } from "./protocol";
+import { buildShareMessage, foregroundWait, PROTOCOL_VERSION, stripLegacyAbsoluteExpiry, type CoordinationListInput, type CoordinationOverviewResponse, type CoordinationPanelDetailInput, type CoordinationPanelHistoryInput, type CoordinationPanelHistoryResponse, type CoordinationPanelResponse, type CoordinationProposalDetailInput, type CoordinationProposalInput, type CoordinationProposalResponse, type CoordinationProposalRevisionInput, type CoordinationProposalListResponse, type CoordinationPublishInput, type CoordinationPublishResponse, type CoordinationRequestDetailInput, type CoordinationRequestListResponse, type CoordinationRequestResponse, type CreateRoomInput, type CreateRoomResponse, type CreateWebhookInput, type CreateWebhookResponse, type EnrollPushInput, type ExportRoomInput, type GetPostMessageInput, type GetPostMessageResponse, type ListWebhooksInput, type ListWebhooksResponse, type LiveRoomInput, type ManageRoomInput, type ManageRoomResponse, type ManageWebhookInput, type ManageWebhookResponse, type PostMessageInput, type PostMessageResponse, type PushEnrollmentInput, type PushEnrollmentResponse, type ReadMessageInput, type ReadMessageResponse, type ReadRoomInput, type ReadRoomResponse, type RedeliverWebhookInput, type RedeliverWebhookResponse, type RemovePushEnrollmentResponse, type RemoveWebhookInput, type RemoveWebhookResponse, type RotateWebhookSecretResponse, type RoomService } from "./protocol";
 
 export interface RoomStub { fetch(request: Request): Promise<Response>; }
 export interface RoomNamespace { getByName(name: string): RoomStub; }
@@ -46,7 +46,7 @@ export class DurableRoomService implements RoomService {
     endpoint.searchParams.set("after", String(input.after));
     if (input.limit !== undefined) endpoint.searchParams.set("limit", String(input.limit));
     if (input.through !== undefined) endpoint.searchParams.set("through", String(input.through));
-    const value = stripLegacyAbsoluteExpiry(await responseJson(await this.room(input.room).fetch(new Request(endpoint))));
+    const value = hydrateCoordination(stripLegacyAbsoluteExpiry(await responseJson(await this.room(input.room).fetch(new Request(endpoint)))), this.origin, input.room) as Record<string, unknown>;
     const conversation_url = `${this.origin}/${input.room}`;
     const latest = value.latest_message as number;
     const waitAfter = typeof value.next_after === "number" ? value.next_after : latest;
@@ -190,6 +190,18 @@ export class DurableRoomService implements RoomService {
     return hydrateCoordination(value, this.origin, input.room) as CoordinationProposalResponse;
   }
 
+  async readCoordinationPanel(input: CoordinationPanelDetailInput): Promise<CoordinationPanelResponse> {
+    const endpoint = new URL("https://room/coordination/panel");
+    if (input.revision !== undefined) endpoint.searchParams.set("revision", String(input.revision));
+    const value = await responseJson(await this.room(input.room).fetch(new Request(endpoint))) as unknown as CoordinationPanelResponse;
+    return hydrateCoordination(value, this.origin, input.room) as CoordinationPanelResponse;
+  }
+
+  async listCoordinationPanelHistory(input: CoordinationPanelHistoryInput): Promise<CoordinationPanelHistoryResponse> {
+    const value = await responseJson(await this.room(input.room).fetch(new Request(coordinationListUrl("/coordination/panel/history", input)))) as unknown as CoordinationPanelHistoryResponse;
+    return hydrateCoordination(value, this.origin, input.room) as CoordinationPanelHistoryResponse;
+  }
+
   async submitCoordinationProposal(input: CoordinationProposalInput): Promise<CoordinationProposalResponse> {
     const body = input.body.kind === "json" ? parseCoordinationProposal(input.body.value) : (() => { throw new ProtocolError(ERROR_CODES.invalidBody, "The coordination proposal must be JSON.", 400); })();
     const value = await responseJson(await this.room(input.room).fetch(jsonRequest("/coordination/proposals", body))) as unknown as CoordinationProposalResponse;
@@ -251,7 +263,7 @@ async function responseError(response: Response): Promise<ProtocolError> {
   return new ProtocolError(code, error?.message ?? "The room could not complete the request.", response.status, undefined, details);
 }
 
-function coordinationListUrl(path: string, input: CoordinationListInput): string {
+function coordinationListUrl(path: string, input: { readonly after?: number; readonly limit?: number; readonly owner_label?: string; readonly status?: string; readonly through?: number }): string {
   const url = new URL(`https://room${path}`);
   if (input.after !== undefined) url.searchParams.set("after", String(input.after));
   if (input.limit !== undefined) url.searchParams.set("limit", String(input.limit));
@@ -266,14 +278,16 @@ function hydrateCoordination(value: unknown, origin: string, room: string): unkn
   const result = { ...(value as Record<string, unknown>) };
   const base = `${origin}/${encodeURIComponent(room)}`;
   if ("coordination_cursor" in result || "published_revision" in result) result.conversation_url = base;
-  for (const key of ["proposals_url", "requests_url"] as const) {
+  for (const key of ["proposals_url", "requests_url", "panel_url", "panel_history_url"] as const) {
     if (typeof result[key] === "string" && result[key].startsWith("/")) result[key] = `${base}${result[key]}`;
   }
-  for (const key of ["proposal", "request"] as const) {
+  for (const key of ["proposal", "request", "panel", "coordination_overview"] as const) {
     const item = result[key];
-    if (item && typeof item === "object" && !Array.isArray(item)) result[key] = hydrateCoordinationItem(item as Record<string, unknown>, base);
+    if (item && typeof item === "object" && !Array.isArray(item)) result[key] = key === "coordination_overview"
+      ? hydrateCoordination(item, origin, room)
+      : hydrateCoordinationItem(item as Record<string, unknown>, base);
   }
-  for (const key of ["proposals", "pending_proposals", "requests", "published_requests", "revisions"] as const) {
+  for (const key of ["proposals", "pending_proposals", "requests", "published_requests", "revisions", "events"] as const) {
     const items = result[key];
     if (Array.isArray(items)) result[key] = items.map((item) => item && typeof item === "object" && !Array.isArray(item) ? hydrateCoordinationItem(item as Record<string, unknown>, base) : item);
   }

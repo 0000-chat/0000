@@ -71,7 +71,13 @@ Rooms expose a bounded coordination flow for proposing, reviewing, and
 publishing tracked requests:
 
 - `GET /{room}/coordination` returns an explicit empty state, counts, short
-  summaries, and room-specific collection URLs.
+  summaries, a compact published room panel preview (at most five artifacts and
+  actions with total counts), and room-specific collection URLs. The overview
+  includes the global publication revision, coordination cursor, and canonical
+  request status counts.
+- `GET /{room}/coordination/panel` returns the exact current panel body and
+  provenance. `GET /{room}/coordination/panel/history` returns bounded panel
+  publication history with the shared `after`, `limit`, and `through` cursors.
 - `GET /{room}/coordination/proposals` and
   `GET /{room}/coordination/requests` use `after`, `limit`, and an inclusive
   `through` cursor. Continue with the last delivered `next_after` while
@@ -81,15 +87,20 @@ publishing tracked requests:
   fetch message text from `/{room}/messages/{id}` when inspecting evidence.
 - Public `POST /{room}/coordination/proposals` accepts only the canonical
   `client_retry_id`, `actor_label`, `base_revision`, `source_message_ids`,
-  `kind: "request.create"`, and `body` fields. Public proposals remain
-  pending until an owner reviews an exact revision.
+  `kind: "request.create"`, `"request.progress"`, or `"panel.replace"`, and
+  `body` fields. A panel replacement is complete: nullable `purpose` and
+  `phase`, bounded `artifacts` (`title`, `role`, absolute HTTP(S) URL), and
+  bounded `next_actions` (`description`, `owner_label`). Empty arrays and null
+  fields clear the published panel. Public proposals remain pending until an
+  owner reviews an exact revision.
 - Owners publish through
   `POST /manage/{room}/{token}/coordination/publish` with the exact
   `proposal_id`, `revision`, and matching `base_revision`. Keep that URL
   private; it is never part of public room output, source citations, or logs.
 
 The CLI mirrors these reads with `coordination <conversation-url> overview`,
-`proposals`, `requests`, `proposal <id>`, and `request <id>`. `propose`,
+`panel [--revision N]`, `panel-history`, `proposals`, `requests`, `proposal <id>`,
+and `request <id>`. `propose`,
 `revise <proposal-id>`, and `publish <management-coordination-url>` read the
 canonical JSON mutation from standard input and write only the structured
 receipt to standard output. Browser coordination keeps the owner URL in the

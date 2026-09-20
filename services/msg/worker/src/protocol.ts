@@ -1,4 +1,4 @@
-import type { CoordinationEvidence, CoordinationKind, CoordinationProgressBody, CoordinationRequestBody as DomainCoordinationRequestBody, CoordinationStatus } from "./coordination-domain";
+import type { CoordinationEvidence, CoordinationKind, CoordinationPanelBody as DomainCoordinationPanelBody, CoordinationProgressBody, CoordinationRequestBody as DomainCoordinationRequestBody, CoordinationStatus } from "./coordination-domain";
 
 export const PROTOCOL_VERSION = 1 as const;
 
@@ -156,6 +156,8 @@ export interface RoomService {
   submitCoordinationRevision?(input: CoordinationProposalRevisionInput): Promise<CoordinationProposalResponse>;
   listCoordinationRequests?(input: CoordinationListInput): Promise<CoordinationRequestListResponse>;
   readCoordinationRequest?(input: CoordinationRequestDetailInput): Promise<CoordinationRequestResponse>;
+  readCoordinationPanel?(input: CoordinationPanelDetailInput): Promise<CoordinationPanelResponse>;
+  listCoordinationPanelHistory?(input: CoordinationPanelHistoryInput): Promise<CoordinationPanelHistoryResponse>;
   publishCoordinationRequest?(input: CoordinationPublishInput): Promise<CoordinationPublishResponse>;
 }
 
@@ -200,6 +202,7 @@ export interface RoomReadResult {
   readonly oversized_message?: true;
   readonly protocol_version: typeof PROTOCOL_VERSION;
   readonly published_revision?: number;
+  readonly coordination_overview?: CoordinationOverviewResponse;
   readonly share_message: string;
   /** Present only for bounded reads. */
   readonly through?: number;
@@ -217,6 +220,7 @@ export interface ReadMessageResponse {
 }
 
 export type CoordinationRequestBody = DomainCoordinationRequestBody;
+export type CoordinationPanelBody = DomainCoordinationPanelBody;
 export type CoordinationEvidenceItem = CoordinationEvidence & { readonly reported_by: string };
 export type CoordinationProgress = Omit<CoordinationProgressBody, "evidence"> & {
   readonly authority_class: "management";
@@ -242,7 +246,7 @@ export interface CoordinationProposal {
   readonly actor_label: string;
   readonly authority_class: "management" | "participant";
   readonly base_revision: number;
-  readonly body: CoordinationRequestBody | CoordinationProgressBody;
+  readonly body: CoordinationRequestBody | CoordinationProgressBody | CoordinationPanelBody;
   readonly created_at: string;
   readonly detail_url: string;
   readonly kind: CoordinationKind;
@@ -305,6 +309,76 @@ export interface CoordinationOverviewResponse {
   readonly published_requests: readonly CoordinationRequestSummary[];
   readonly proposals_url: string;
   readonly requests_url: string;
+  readonly published_revision: number;
+  readonly panel?: CoordinationPanel | null;
+  readonly panel_published_revision?: number | null;
+  readonly pending_panel_proposal_count?: number;
+  readonly pending_request_proposal_count?: number;
+  readonly request_status_counts?: Readonly<Record<CoordinationStatus, number>>;
+  readonly decision_summaries?: readonly never[];
+  readonly correction_summaries?: readonly never[];
+  readonly panel_url?: string;
+  readonly panel_history_url?: string;
+}
+
+export interface CoordinationPanelArtifact {
+  readonly role: string;
+  readonly title: string;
+  readonly url: string;
+}
+
+export interface CoordinationPanelNextAction {
+  readonly description: string;
+  readonly owner_label: string;
+}
+
+export interface CoordinationPanel {
+  readonly artifacts: readonly CoordinationPanelArtifact[];
+  readonly artifact_count?: number;
+  readonly artifacts_truncated?: boolean;
+  readonly authority_class: "management";
+  readonly body: CoordinationPanelBody;
+  readonly next_action_count?: number;
+  readonly next_actions_truncated?: boolean;
+  readonly owner_label: string;
+  readonly phase: string | null;
+  readonly proposal_id: string;
+  readonly proposal_revision: number;
+  readonly published_at: string;
+  readonly published_revision: number;
+  readonly purpose: string | null;
+  readonly source_message_count?: number;
+  readonly source_messages_truncated?: boolean;
+  readonly source_message_ids: readonly string[];
+  readonly source_messages: readonly CoordinationSourceMessage[];
+  readonly next_actions: readonly CoordinationPanelNextAction[];
+}
+
+export interface CoordinationPanelResponse {
+  readonly coordination_cursor: number;
+  readonly expires_at: string;
+  readonly latest_message: number;
+  readonly panel: CoordinationPanel | null;
+  readonly panel_published_revision: number | null;
+  readonly protocol_version: typeof PROTOCOL_VERSION;
+  readonly published_revision: number;
+}
+
+export interface CoordinationPanelHistoryEntry extends CoordinationPanel {
+  readonly cursor: number;
+  readonly event_id: string;
+}
+
+export interface CoordinationPanelHistoryResponse {
+  readonly coordination_cursor: number;
+  readonly events: readonly CoordinationPanelHistoryEntry[];
+  readonly expires_at: string;
+  readonly has_more: boolean;
+  readonly history_after: number;
+  readonly history_next_after: number;
+  readonly history_through: number;
+  readonly latest_message: number;
+  readonly protocol_version: typeof PROTOCOL_VERSION;
   readonly published_revision: number;
 }
 
@@ -384,6 +458,18 @@ export interface CoordinationRequestDetailInput {
   readonly through?: number;
 }
 
+export interface CoordinationPanelDetailInput {
+  readonly revision?: number;
+  readonly room: string;
+}
+
+export interface CoordinationPanelHistoryInput {
+  readonly after?: number;
+  readonly limit?: number;
+  readonly room: string;
+  readonly through?: number;
+}
+
 export interface CoordinationProposalRevisionInput extends CoordinationProposalInput {
   readonly proposalId: string;
 }
@@ -401,8 +487,10 @@ export interface CoordinationPublishResponse {
   readonly protocol_version: typeof PROTOCOL_VERSION;
   readonly published_revision: number;
   readonly replayed: boolean;
-  readonly request: CoordinationRequest;
+  readonly panel?: CoordinationPanel;
   readonly proposal: CoordinationProposal;
+  readonly request?: CoordinationRequest;
+  readonly panel_published_revision?: number;
 }
 
 export interface PostMessageInput {

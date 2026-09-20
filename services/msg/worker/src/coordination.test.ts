@@ -81,6 +81,74 @@ function progress(retry: string, requestId: string, status: string, baseRevision
   };
 }
 
+function panelProposal(retry: string, source: string, baseRevision = 0, purpose: string | null = "Ship the room panel") {
+  return {
+    actor_label: "panel-author",
+    base_revision: baseRevision,
+    body: {
+      artifacts: [{ role: "canonical spec", title: "Room spec", url: "https://example.com/spec" }],
+      next_actions: [{ description: "Review the panel", owner_label: "room-owner" }],
+      phase: "review",
+      purpose,
+    },
+    client_retry_id: retry,
+    kind: "panel.replace",
+    source_message_ids: [source],
+  };
+}
+
+test("routes a complete panel replacement through pending review, exact publication, history, and agent reads", async () => {
+  const { room: durable } = await room();
+  const initialized = await durable.fetch(json("/initialize", { management_hash: await hashCapability("owner-token"), initial: { content: "panel source", author: "a", display_name: "A", semantic_type: "message" } }));
+  const sourceId = (await initialized.json() as { id: string }).id;
+  const service = new DurableRoomService({ getByName: () => ({ fetch: (request: Request) => durable.fetch(request) }) }, "https://msg.0000.chat");
+  const worker = createWorker(service);
+  const initialLegacyRead = await worker.fetch(new Request("https://msg.0000.chat/room", { headers: { accept: "application/json" } }));
+  const initialLegacyEtag = initialLegacyRead.headers.get("etag");
+  const initialLegacyValue = await initialLegacyRead.json() as { latest_message: number; expires_at: string };
+  const initialBoundedRead = await worker.fetch(new Request("https://msg.0000.chat/room?limit=20", { headers: { accept: "application/json" } }));
+  const initialBoundedEtag = initialBoundedRead.headers.get("etag");
+  const initialBoundedValue = await initialBoundedRead.json() as { latest_message: number; expires_at: string };
+  expect(initialLegacyEtag).not.toBe(initialBoundedEtag);
+  const initialOverview = await worker.fetch(new Request("https://msg.0000.chat/room/coordination"));
+  const initialEtag = initialOverview.headers.get("etag");
+  const proposalResponse = await durable.fetch(json("/coordination/proposals", panelProposal("panel-proposal", sourceId)));
+  expect(proposalResponse.status).toBe(201);
+  const proposalValue = await proposalResponse.json() as { proposal: { proposal_id: string; request_id: string | null; revision: number } };
+  expect(proposalValue.proposal.request_id).toBeNull();
+  expect((await (await durable.fetch(new Request("https://room/coordination"))).json()) as { pending_panel_proposal_count: number; panel: unknown }).toMatchObject({ pending_panel_proposal_count: 1, panel: null });
+  const pendingOverview = await worker.fetch(new Request("https://msg.0000.chat/room/coordination", { headers: { "if-none-match": initialEtag ?? "" } }));
+  expect(pendingOverview.status).toBe(200);
+  expect(pendingOverview.headers.get("etag")).not.toBe(initialEtag);
+  const pendingLegacyRead = await worker.fetch(new Request("https://msg.0000.chat/room", { headers: { accept: "application/json", "if-none-match": initialLegacyEtag ?? "" } }));
+  expect(pendingLegacyRead.status).toBe(200);
+  expect(await pendingLegacyRead.json()).toMatchObject({ latest_message: initialLegacyValue.latest_message, expires_at: initialLegacyValue.expires_at });
+  const pendingBoundedRead = await worker.fetch(new Request("https://msg.0000.chat/room?limit=20", { headers: { accept: "application/json", "if-none-match": initialBoundedEtag ?? "" } }));
+  expect(pendingBoundedRead.status).toBe(200);
+  expect(await pendingBoundedRead.json()).toMatchObject({ latest_message: initialBoundedValue.latest_message, expires_at: initialBoundedValue.expires_at });
+  const published = await durable.fetch(json("/coordination/publish?token=owner-token", { base_revision: 0, client_retry_id: "panel-publish", owner_label: "room-owner", proposal_id: proposalValue.proposal.proposal_id, revision: 1 }));
+  expect(published.status).toBe(201);
+  const publication = await published.json() as { panel: { purpose: string | null; artifacts: readonly { role: string }[]; next_actions: readonly { owner_label: string }[]; published_revision: number }; request?: unknown; published_revision: number };
+  expect(publication.request).toBeUndefined();
+  expect(publication).toMatchObject({ published_revision: 1, panel: { purpose: "Ship the room panel", artifacts: [{ role: "canonical spec" }], next_actions: [{ owner_label: "room-owner" }], published_revision: 1 } });
+  const afterPublication = await worker.fetch(new Request("https://msg.0000.chat/room/coordination", { headers: { "if-none-match": pendingOverview.headers.get("etag") ?? "" } }));
+  expect(afterPublication.status).toBe(200);
+  const afterPublicationLegacyRead = await worker.fetch(new Request("https://msg.0000.chat/room", { headers: { accept: "application/json", "if-none-match": pendingLegacyRead.headers.get("etag") ?? "" } }));
+  expect(afterPublicationLegacyRead.status).toBe(200);
+  expect(await afterPublicationLegacyRead.json()).toMatchObject({ latest_message: initialLegacyValue.latest_message, expires_at: initialLegacyValue.expires_at });
+  const afterPublicationBoundedRead = await worker.fetch(new Request("https://msg.0000.chat/room?limit=20", { headers: { accept: "application/json", "if-none-match": pendingBoundedRead.headers.get("etag") ?? "" } }));
+  expect(afterPublicationBoundedRead.status).toBe(200);
+  expect(await afterPublicationBoundedRead.json()).toMatchObject({ latest_message: initialBoundedValue.latest_message, expires_at: initialBoundedValue.expires_at });
+  const panel = await (await durable.fetch(new Request("https://room/coordination/panel"))).json() as { panel: { proposal_id: string; published_revision: number } | null };
+  expect(panel).toMatchObject({ panel: { proposal_id: proposalValue.proposal.proposal_id, published_revision: 1 } });
+  expect((await durable.fetch(new Request("https://room/coordination/panel?revision=1"))).status).toBe(200);
+  expect((await durable.fetch(new Request("https://room/coordination/panel?revision=9"))).status).toBe(404);
+  const history = await (await durable.fetch(new Request("https://room/coordination/panel/history?limit=20"))).json() as { events: readonly { cursor: number; panel?: unknown }[] };
+  expect(history.events).toHaveLength(1);
+  const read = await (await durable.fetch(new Request("https://room/read?after=0&limit=20"))).json() as { coordination_overview: { panel_published_revision: number } };
+  expect(read.coordination_overview.panel_published_revision).toBe(1);
+});
+
 test("runs proposal, review, exact publication, retries, and revisions inside the room route", async () => {
   const { room: durable } = await room();
   const initialized = await durable.fetch(json("/initialize", { management_hash: await hashCapability("owner-token"), initial: { content: "source evidence", author: "participant", display_name: "Participant", semantic_type: "message" } }));
