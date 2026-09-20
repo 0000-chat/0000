@@ -49,6 +49,22 @@ different path. Set `T11_KEEP_STATE=1` to retain the temporary local state for
 inspection after the runner stops both processes. The default cleanup removes
 that state and leaves no issued credential artifact behind.
 
+Startup waits default to 30 seconds, each child stage defaults to 120 seconds,
+and each local health request has a five-second deadline. Override the first
+two with `T11_STARTUP_TIMEOUT_MS` and `T11_STAGE_TIMEOUT_MS` when exercising a
+failure path. Every detached child is tracked as its own process group; cleanup
+sends `SIGTERM`, waits, then sends `SIGKILL` and verifies that the group is gone.
+`SIGINT` and `SIGTERM` use the same cleanup path. Each Cargo stage must report
+one exact test and its expected fixed statuses. A missing or zero-test stage
+produces null observations and a failing runner result instead of fabricated
+assertion counts.
+
+The body deadline regression can be run without starting Workers:
+
+```sh
+node --test scripts/platform-rust-composition/health.test.mjs
+```
+
 The test uses the explicit Rust `loopback-test` feature because the local
 Workers use HTTP. Production Rust constructors remain HTTPS-only. No remote
 Wrangler, deployment, or external provider write is performed.

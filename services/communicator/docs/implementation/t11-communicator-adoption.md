@@ -78,10 +78,13 @@ require HTTPS. Results:
   `Allowed` for the outbound claim.
 
 The completed checked-in runner recorded safe metadata and result
-classifications in `/tmp/platform-t11-rust-composition-final.log`; it does not
-contain credential values, OAuth callback values, or claim bodies. The earlier
-temporary-hook logs remain available as historical evidence, but the acceptance
-run described here is the checked-in runner execution.
+classifications in `/tmp/platform-t11-rust-composition-health-fixed.log`; its
+SHA256 is `51af241d56102a3763a9175da6ead8c74299905304c583e984f9208d32ea63cc`.
+It
+does not contain credential values, OAuth callback values, or claim bodies. The
+runner exits nonzero if either exact Cargo test is absent, times out, or does
+not produce every expected status; assertion counts are derived from observed
+stage output rather than hardcoded into a failed run.
 
 The complete reproducible fixture runner is checked in at
 `services/communicator/scripts/platform-rust-composition/run.mjs`. Its bridge,
@@ -103,7 +106,7 @@ The checked-in Rust test is an ignored integration test behind the explicit
 `loopback-test` Cargo feature; that feature only exposes the loopback
 constructors used by the fixture, while production constructors continue to
 require HTTPS. A completed default-cleanup runner log is
-`/tmp/platform-t11-rust-composition-final.log`: the runner exited 0, with two
+`/tmp/platform-t11-rust-composition-health-fixed.log`: the runner exited 0, with two
 assertions in the pre-revocation stage and six in the revocation/replacement
 stage. It recorded ingestion `Accepted`, claim `Allowed`, Platform revoke
 HTTP 200, direct revoked claim HTTP 401, old ingestion `Paused` with
@@ -111,6 +114,39 @@ HTTP 200, direct revoked claim HTTP 401, old ingestion `Paused` with
 `Accepted`/claim `Allowed`. The runner's safe log contains statuses and counts
 only; issued metadata and fixture state were removed by the runner's bounded
 default cleanup and are not repository files.
+
+The hardened runner was also exercised against bounded failure paths. These
+checks use isolated temporary state and leave only the safe logs listed below:
+
+- `T11_STARTUP_TIMEOUT_MS=1500 T11_PLATFORM_PORT=36089 node
+  scripts/platform-rust-composition/run.mjs` exited 1 after the startup
+  deadline; no Rust stage ran, the owned Platform group stopped, and state was
+  removed (`/tmp/platform-t11-rust-composition-startup-failure.log`, SHA256
+  `fa52580cd9332e36376fde90cbd855fd1bb9514dde743678a4406043be7455a2`).
+- An adversarial `cargo` wrapper that spawned a 60-second child was run with
+  `T11_STAGE_TIMEOUT_MS=30000`. The `before` stage reported
+  `timedOut:true`, cleanup verified every group stopped, and the descendant
+  PID was no longer alive (`/tmp/platform-t11-rust-composition-stage-timeout.log`,
+  SHA256 `5c52250c81eebe9689787e45a81be58a0ad6434aac42b59d9792ef4f4ecd8c3f`).
+- The same hanging stage was interrupted with `SIGINT`; the runner exited 1,
+  stopped the detached descendant group, and retained state only because
+  `T11_KEEP_STATE=1` was requested
+  (`/tmp/platform-t11-rust-composition-interrupted.log`, SHA256
+  `8a255c94e7d516393d03434a05eb1adbb65f86bb641b52df1ccd1f165534c090`).
+- A post-patch startup interruption produced `interruptedBy:"SIGINT"` in the
+  runner's JSON summary, stopped every group already started, and removed its
+  state (`/tmp/platform-t11-rust-composition-interrupted-summary.log`, SHA256
+  `63c34ea45f26123ecce6d7e012cbd8de87035c53296143defaa4be2f54eec677`).
+- A wrapper that caused both exact Cargo filters to match zero tests exited 1
+  with `ran:false`, null observations, and null assertion counts while all
+  started groups stopped and state was removed
+  (`/tmp/platform-t11-rust-composition-zero-test.log`, SHA256
+  `3d7e6ef48ed87b5f40e673e6fce62a3cf9429358f026fb303efdee5a33a6b139`).
+- `node --test scripts/platform-rust-composition/health.test.mjs` passed its
+  one regression: a response that sends headers and stalls its body is aborted
+  by the five-second health request deadline (the test uses a 100 ms bound).
+  The post-fix happy-path run above also exited 0 with `interruptedBy:null`,
+  `allStopped:true`, and `stateRemoved:true`.
 
 ## Browser and realtime evidence boundary
 

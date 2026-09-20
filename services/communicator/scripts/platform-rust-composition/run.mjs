@@ -5,6 +5,8 @@ import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 import { createServer } from "node:net";
 
+import { fetchWithDeadline } from "./health.mjs";
+
 const here = dirname(fileURLToPath(import.meta.url));
 const communicatorRoot = resolve(here, "../..");
 const controlPlaneRoot = join(communicatorRoot, "apps/control-plane");
@@ -224,26 +226,15 @@ async function waitForJson(path, timeoutMs = startupTimeoutMs) {
   throw new Error(`timed out waiting for ${path}`);
 }
 
-async function fetchWithDeadline(url) {
-  const controller = new AbortController();
-  const abort = () => controller.abort();
-  const timer = setTimeout(() => controller.abort(), requestTimeoutMs);
-  shutdownController.signal.addEventListener("abort", abort, { once: true });
-  try {
-    return await fetch(url, { signal: controller.signal });
-  } finally {
-    clearTimeout(timer);
-    shutdownController.signal.removeEventListener("abort", abort);
-  }
-}
-
 async function waitForHealth(url, timeoutMs = startupTimeoutMs) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     assertNotInterrupted();
     try {
-      const response = await fetchWithDeadline(`${url}/healthz`);
-      await response.arrayBuffer();
+      const response = await fetchWithDeadline(`${url}/healthz`, {
+        shutdownSignal: shutdownController.signal,
+        timeoutMs: requestTimeoutMs,
+      });
       if (response.ok) return;
     } catch {
       // The local Wrangler process is still starting.
@@ -375,7 +366,8 @@ async function runRevocation(environment) {
     code: stageResult.code,
     signal: stageResult.signal,
     timedOut: stageResult.timedOut,
-    passed: stageResult.code === 0 && !stageResult.timedOut && observed !== null,
+    passed:
+      stageResult.code === 0 && !stageResult.timedOut && observed !== null,
     observed,
   };
   await append(JSON.stringify({ stage: "revoke-service", ...value }));
@@ -565,6 +557,7 @@ const summary = {
   revoke: result.revoke,
   after: result.after,
   error: result.error ?? null,
+  interruptedBy,
   assertions: {
     before: result.before?.observed ? 2 : null,
     after: result.after?.observed ? 6 : null,
