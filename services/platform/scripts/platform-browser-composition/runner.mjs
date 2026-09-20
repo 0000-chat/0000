@@ -1917,11 +1917,7 @@ async function cleanup() {
       timeoutMs = cleanupTimeoutMs,
     ) => {
       try {
-        const result = await runBoundedCleanup(
-          label,
-          operation,
-          timeoutMs,
-        );
+        const result = await runBoundedCleanup(label, operation, timeoutMs);
         return { ok: true, result };
       } catch {
         state.cleanupFailures.push(label);
