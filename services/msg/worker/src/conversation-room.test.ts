@@ -337,46 +337,112 @@ test("supports delegated GET posting with replay receipts and owner revocation",
   const managementToken = "management-token";
   const delegatedToken = "delegated-token";
   const rotatedToken = "rotated-token";
-  const { room: durable } = await room(undefined, () => now);
+  const { context, room: durable } = await room(undefined, () => now);
   await durable.fetch(request("/initialize", {
     now,
     management_hash: await hashCapability(managementToken),
     initial: { content: "first", author: "a", display_name: "a", semantic_type: "message" },
   }));
 
+  const live = await durable.fetch(new Request("https://room/live?after=0"));
+  expect(live.status).toBe(101);
+  const socket = context.sockets[0]!;
+  const messageCreatedCount = () => socket.sent.filter((frame) => (JSON.parse(frame) as { type?: string }).type === "message.created").length;
+  const readExpiry = async () => {
+    const response = await durable.fetch(new Request("https://room/read?after=0"));
+    expect(response.status).toBe(200);
+    return (await response.json() as { expires_at: string }).expires_at;
+  };
+  const initialExpiry = await readExpiry();
+  expect(socket.sent).toHaveLength(1);
+  expect(messageCreatedCount()).toBe(0);
+
   const enabled = await durable.fetch(request(`/manage?token=${managementToken}`, { action: "enable", get_post_token: delegatedToken }));
   expect(enabled.status).toBe(200);
   expect(await enabled.json()).toMatchObject({ get_post_enabled: true });
+  expect(await readExpiry()).toBe(initialExpiry);
+  expect(messageCreatedCount()).toBe(0);
 
-  const getPost = (requestId: string, content: string, token = delegatedToken) => durable.fetch(request("/get-post", {
-    input: { author: "fetch-only", content, display_name: "fetch-only", semantic_type: "message" },
+  const getPost = (requestId: string, content: string, token = delegatedToken, replyTo?: string) => durable.fetch(request("/get-post", {
+    input: { author: "fetch-only", content, display_name: "fetch-only", semantic_type: "message", ...(replyTo === undefined ? {} : { reply_to: replyTo }) },
     request_id: requestId,
     token,
   }));
+  const invalidReply = await getPost("invalid-reply", "must not store", delegatedToken, "999");
+  expect(invalidReply.status).toBe(404);
+  expect(await readExpiry()).toBe(initialExpiry);
+  expect(messageCreatedCount()).toBe(0);
+
+  now = 2_000;
   const first = await getPost("request-1", "second");
   expect(first.status).toBe(200);
   const firstValue = await first.json() as Record<string, unknown> & { message: Record<string, unknown> };
-  expect(firstValue).toMatchObject({ accepted: true, protocol_version: 1, replayed: false, request_id: "request-1", sequence: 2, message: { sequence: 2, id: expect.any(String), created_at: expect.any(String) } });
+  expect(firstValue.accepted).toBe(true);
+  expect(firstValue.protocol_version).toBe(1);
+  expect(firstValue.replayed).toBe(false);
+  expect(firstValue.request_id).toBe("request-1");
+  expect(firstValue.sequence).toBe(2);
+  expect(firstValue.message.sequence).toBe(2);
+  expect(typeof firstValue.message.id).toBe("string");
+  expect(typeof firstValue.message.created_at).toBe("string");
   expect(firstValue).not.toHaveProperty("content");
   expect(JSON.stringify(firstValue)).not.toContain("delegated-token");
+  const delegatedExpiry = new Date(now + ROOM_LIMITS.inactivityTtlMs).toISOString();
+  expect(await readExpiry()).toBe(delegatedExpiry);
+  expect(messageCreatedCount()).toBe(1);
 
-  now += 1;
+  now = 3_000;
   const replay = await getPost("request-1", "second");
   expect(await replay.json()).toMatchObject({ accepted: true, replayed: true, request_id: "request-1", sequence: 2, message: firstValue.message });
-  expect((await getPost("request-1", "changed")).status).toBe(409);
+  expect(await readExpiry()).toBe(delegatedExpiry);
+  expect(messageCreatedCount()).toBe(1);
 
-  now += 1;
+  const conflict = await getPost("request-1", "changed");
+  expect(conflict.status).toBe(409);
+  expect(await readExpiry()).toBe(delegatedExpiry);
+  expect(messageCreatedCount()).toBe(1);
+
+  now = 4_000;
   const normal = await durable.fetch(request("/messages", { input: { content: "third", author: "a", display_name: "a", semantic_type: "message" } }));
   expect((await normal.json()).message.sequence).toBe(3);
+  const normalExpiry = new Date(now + ROOM_LIMITS.inactivityTtlMs).toISOString();
+  expect(await readExpiry()).toBe(normalExpiry);
+  expect(messageCreatedCount()).toBe(2);
+
+  now = 5_000;
+  const replayAfterNormal = await getPost("request-1", "second");
+  expect(await replayAfterNormal.json()).toMatchObject({ accepted: true, replayed: true, request_id: "request-1", sequence: 2, message: firstValue.message });
+  expect(await readExpiry()).toBe(normalExpiry);
+  expect(messageCreatedCount()).toBe(2);
 
   const disabled = await durable.fetch(request(`/manage?token=${managementToken}`, { action: "disable" }));
   expect(await disabled.json()).toMatchObject({ get_post_enabled: false });
+  expect(await readExpiry()).toBe(normalExpiry);
+  expect(messageCreatedCount()).toBe(2);
   expect((await getPost("request-1", "second")).status).toBe(404);
+  expect(await readExpiry()).toBe(normalExpiry);
+  expect(messageCreatedCount()).toBe(2);
 
   const rotated = await durable.fetch(request(`/manage?token=${managementToken}`, { action: "rotate", get_post_token: rotatedToken }));
   expect(await rotated.json()).toMatchObject({ get_post_enabled: true });
-  expect((await getPost("request-2", "fourth")).status).toBe(404);
-  expect((await getPost("request-2", "fourth", rotatedToken)).status).toBe(200);
+  expect(await readExpiry()).toBe(normalExpiry);
+  expect(messageCreatedCount()).toBe(2);
+  expect((await getPost("request-1", "second")).status).toBe(404);
+  expect(await readExpiry()).toBe(normalExpiry);
+  expect(messageCreatedCount()).toBe(2);
+
+  now = 8_000;
+  const rotatedPost = await getPost("request-2", "fourth", rotatedToken);
+  expect(rotatedPost.status).toBe(200);
+  expect((await rotatedPost.json()).sequence).toBe(4);
+  const rotatedExpiry = new Date(now + ROOM_LIMITS.inactivityTtlMs).toISOString();
+  expect(await readExpiry()).toBe(rotatedExpiry);
+  expect(messageCreatedCount()).toBe(3);
+
+  const finalDisabled = await durable.fetch(request(`/manage?token=${managementToken}`, { action: "disable" }));
+  expect(await finalDisabled.json()).toMatchObject({ get_post_enabled: false });
+  expect(await readExpiry()).toBe(rotatedExpiry);
+  expect(messageCreatedCount()).toBe(3);
 });
 
 test("rejects idempotency key reuse with changed body or client message id", async () => {
