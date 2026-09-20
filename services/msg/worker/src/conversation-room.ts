@@ -82,24 +82,6 @@ interface StoredCoordinationRequest {
   readonly byte_count: number;
 }
 
-interface StoredCoordinationEvent {
-  readonly actor_label: string;
-  readonly authority_class: "management" | "participant";
-  readonly base_revision: number;
-  readonly body: string;
-  readonly byte_count: number;
-  readonly created_at: number;
-  readonly cursor: number;
-  readonly event_id: string;
-  readonly kind: string;
-  readonly operation: string;
-  readonly proposal_id: string;
-  readonly proposal_revision: number;
-  readonly request_id: string;
-  readonly resulting_revision: number | null;
-  readonly source_message_ids: string;
-}
-
 interface StoredMessage extends MessageInput {
   readonly byte_count: number;
   readonly created_at: number;

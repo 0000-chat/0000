@@ -131,7 +131,7 @@ export function roomEtag(latestSequence: number, after: number, options?: RoomEt
 }
 
 export function coordinationEtag(cursor: number, publishedRevision: number, expiresAt: string): string {
-  return `W/\"coordination-${cursor}-published-${publishedRevision}-expires-${expiresAt}\"`;
+  return `W/"coordination-${cursor}-published-${publishedRevision}-expires-${expiresAt}"`;
 }
 
 export function validateIdempotencyKey(value: string): string {

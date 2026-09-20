@@ -444,20 +444,6 @@ const DISCOVERY_DOCUMENT = {
   agent_instructions: "/agent.txt",
 } as const;
 
-const COORDINATION_SOURCE_SCHEMA = {
-  type: "object",
-  additionalProperties: false,
-  required: ["id", "sequence", "created_at", "author", "display_name", "citation_url"],
-  properties: {
-    id: { type: "string" },
-    sequence: { type: "integer", minimum: 1 },
-    created_at: { type: "string", format: "date-time" },
-    author: { type: "string" },
-    display_name: { type: "string" },
-    citation_url: { type: "string", format: "uri-reference" },
-  },
-} as const;
-
 const COORDINATION_BODY_SCHEMA = {
   type: "object",
   additionalProperties: false,

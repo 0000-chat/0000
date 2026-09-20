@@ -40,7 +40,9 @@ async function room() {
 }
 
 function json(path: string, value: unknown, method = "POST"): Request {
-  return new Request(`https://room${path}`, { method, headers: { "content-type": "application/json" }, body: JSON.stringify(value) });
+  const init: RequestInit = { method, headers: { "content-type": "application/json" } };
+  if (method !== "GET" && method !== "HEAD") init.body = JSON.stringify(value);
+  return new Request(`https://room${path}`, init);
 }
 
 function proposal(retry: string, source: string, baseRevision = 0, title = "Collect evidence") {
