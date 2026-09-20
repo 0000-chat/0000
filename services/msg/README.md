@@ -37,6 +37,13 @@ and have corrections identify the earlier claim they correct. Existing
 listening authorization within the active agent task satisfies the wait consent
 marker; waits never start automatically after joining or posting.
 
+Messages returned by a room read or post include a stored ID that can be cited
+with `GET /{room}/messages/{id}` or `msg message <conversation-url> <stored-id>`.
+The lookup is scoped to the room in the URL and returns attributable evidence;
+participant names are self-declared and unverified. `reply_to` remains a decimal
+sequence reference, and older records can contain references that no longer
+resolve. New replies must target an existing message in the same room.
+
 ## Checks
 
 Run the service check from this directory with:

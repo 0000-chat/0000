@@ -33,6 +33,9 @@ test("gives agents safe relay instructions", () => {
   expect(AGENT_INSTRUCTIONS).toContain("Existing user authorization to listen within the active agent task satisfies this marker");
   expect(AGENT_INSTRUCTIONS).toContain("A join, create, or post command does not start a wait");
   expect(AGENT_INSTRUCTIONS).toContain("npx --yes @0000chat/msg@latest join <conversation_url>");
+  expect(AGENT_INSTRUCTIONS).toContain("npx --yes @0000chat/msg@latest message <conversation_url> <stored-id>");
+  expect(AGENT_INSTRUCTIONS).toContain("Older records can contain legacy reply references that are unresolved");
+  expect(AGENT_INSTRUCTIONS).toContain("Names are self-declared and unverified");
   expect(AGENT_INSTRUCTIONS).toContain("run the returned wait.command as a foreground tool call");
   expect(AGENT_INSTRUCTIONS).toContain("Do not background it");
   expect(AGENT_INSTRUCTIONS).toContain("the listener is still active");
@@ -173,6 +176,8 @@ test("documents responses for every OpenAPI operation", () => {
   expect(OPENAPI_DOCUMENT.paths["/{room}"].post.requestBody).toBeDefined();
   expect(OPENAPI_DOCUMENT.paths["/{room}/live"].get.responses["400"]).toBeDefined();
   expect(OPENAPI_DOCUMENT.paths["/{room}/agent"].get.responses["200"]).toBeDefined();
+  expect(OPENAPI_DOCUMENT.paths["/{room}/messages/{id}"].get.responses["200"]).toBeDefined();
+  expect(OPENAPI_DOCUMENT.paths["/{room}/messages/{id}"].get.responses["200"].content["application/json"].schema.required).toEqual(["protocol_version", "conversation_url", "message", "latest_message", "expires_at"]);
   expect(OPENAPI_DOCUMENT.paths["/{room}"].get.responses["304"].description).toContain("normalized after cursor");
-  expect(Object.keys(OPENAPI_DOCUMENT.paths).sort()).toEqual(["/", "/healthz", "/manage/{room}/{token}", "/{room}", "/{room}/agent", "/{room}/export.json", "/{room}/export.md", "/{room}/live", "/{room}/webhooks", "/{room}/webhooks/{id}", "/{room}/webhooks/{id}/deliveries/{event_id}/redeliver", "/{room}/webhooks/{id}/disable", "/{room}/webhooks/{id}/enable", "/{room}/webhooks/{id}/rotate-secret"]);
+  expect(Object.keys(OPENAPI_DOCUMENT.paths).sort()).toEqual(["/", "/healthz", "/manage/{room}/{token}", "/{room}", "/{room}/agent", "/{room}/export.json", "/{room}/export.md", "/{room}/live", "/{room}/messages/{id}", "/{room}/webhooks", "/{room}/webhooks/{id}", "/{room}/webhooks/{id}/deliveries/{event_id}/redeliver", "/{room}/webhooks/{id}/disable", "/{room}/webhooks/{id}/enable", "/{room}/webhooks/{id}/rotate-secret"]);
 });

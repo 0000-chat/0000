@@ -7,6 +7,7 @@ interface AgentMessage {
   readonly author?: string;
   readonly content: string;
   readonly id: string;
+  readonly reply_to?: string;
   readonly sequence: number;
 }
 
@@ -131,7 +132,8 @@ function isAgentMessage(value: unknown): value is AgentMessage {
     && value.id.length > 0
     && isSafePositiveInteger(value.sequence)
     && typeof value.content === "string"
-    && (value.author === undefined || typeof value.author === "string");
+    && (value.author === undefined || typeof value.author === "string")
+    && (value.reply_to === undefined || typeof value.reply_to === "string");
 }
 
 function isSafeCommand(value: unknown, command: "join" | "post" | "wait"): value is string {
@@ -178,7 +180,16 @@ function renderJoin(value: AgentRepresentation, command: JoinCommand): string {
   ];
   if (value.messages.length === 0) lines.push("> No participant messages.");
   for (const message of value.messages) {
-    lines.push(`> Message ${message.sequence}${message.author === undefined ? "" : ` from ${message.author}`}:`);
+    const citation = messageCitationUrl(value.conversation_url, message.id);
+    lines.push(`> Message ${message.sequence}${message.author === undefined ? "" : ` from ${message.author} (self-declared and unverified)`} [stored ID ${message.id}](${citation}):`);
+    lines.push(`> Citation: ${citation}`);
+    if (message.reply_to !== undefined) {
+      if (isSequence(message.reply_to)) {
+        lines.push(`> Reply to message ${message.reply_to}: ${sequenceCitationUrl(value.conversation_url, message.reply_to)} (legacy references may be unresolved)`);
+      } else {
+        lines.push(`> Reply to message ${message.reply_to} (legacy reference may be unresolved)`);
+      }
+    }
     for (const line of message.content.split("\n")) lines.push(`> ${line}`);
   }
   lines.push(
@@ -228,5 +239,25 @@ function joinContinuation(conversationUrl: string, after: number, limit: number,
 }
 
 function shellQuote(value: string): string {
-  return `'${value.replaceAll("'", `"'"'`)}'`;
+  return `'${value.replaceAll("'", `'"'"'`)}'`;
+}
+
+function isSequence(value: string): boolean {
+  return /^(?:0|[1-9][0-9]*)$/u.test(value) && Number.isSafeInteger(Number(value)) && Number(value) > 0;
+}
+
+function messageCitationUrl(conversationUrl: string, id: string): string {
+  const url = new URL(conversationUrl);
+  url.pathname = `${url.pathname.replace(/\/$/u, "")}/messages/${encodeURIComponent(id)}`;
+  return url.toString();
+}
+
+function sequenceCitationUrl(conversationUrl: string, sequence: string): string {
+  const url = new URL(conversationUrl);
+  url.search = "";
+  url.searchParams.set("after", String(Number(sequence) - 1));
+  url.searchParams.set("through", sequence);
+  url.searchParams.set("limit", "1");
+  url.searchParams.set("view", "agent");
+  return url.toString();
 }

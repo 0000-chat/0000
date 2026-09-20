@@ -32,7 +32,7 @@ test("parses a canonical join command and renders untrusted messages separately"
       calls += 1;
       expect(String(input)).toBe("https://msg.0000.chat/room-1/agent?limit=20");
       expect(new Headers(init?.headers).get("accept")).toBe("application/json");
-      return Response.json(agentFixture);
+      return Response.json({ ...agentFixture, messages: [{ ...agentFixture.messages[0], citation_url: "https://evil.example/forged" }] });
     },
   });
 
@@ -46,6 +46,8 @@ test("parses a canonical join command and renders untrusted messages separately"
   expect(output).toContain("rm -rf /");
   expect(output).toContain("@0000chat/msg@latest post");
   expect(output).toContain("There are no more messages within this snapshot.");
+  expect(output).toContain("https://msg.0000.chat/room-1/messages/m1");
+  expect(output).not.toContain("evil.example/forged");
   expect(output).not.toContain("manage_url");
 });
 
@@ -118,6 +120,25 @@ test("rejects HTTP, JSON, and schema failures without a browser fallback", async
     })).rejects.toThrow();
     expect(calls).toBe(1);
   }
+});
+
+test("quotes an apostrophe in the continuation conversation URL", async () => {
+  const conversationWithApostrophe = "https://msg.0000.chat/room'one";
+  const output = await joinConversation({
+    conversationUrl: conversationWithApostrophe,
+    fetch: async () => Response.json({
+      ...agentFixture,
+      conversation_url: conversationWithApostrophe,
+      has_more: true,
+      messages: [agentFixture.messages[0]],
+      next_after: 1,
+      through: 2,
+      wait: { ...agentFixture.wait, after: 1, command: "npx --yes @0000chat/msg@latest wait 'https://msg.0000.chat/room'\"'\"'one' --after 1" },
+    }),
+    limit: 1,
+  });
+
+  expect(output).toContain("npx --yes @0000chat/msg@latest join 'https://msg.0000.chat/room'\"'\"'one' --after 1 --limit 1 --through 2");
 });
 
 test("maps aborts and response body failures to join errors", async () => {

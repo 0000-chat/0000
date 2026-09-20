@@ -313,8 +313,33 @@ test("reports help and version without network access", async () => {
   expect(await runCli(["--help"], silentDeps(stdout, stderr))).toBe(0);
   expect(await runCli(["--version"], silentDeps(stdout, stderr))).toBe(0);
   expect(stdout.join("")).toContain("msg wait");
+  expect(stdout.join("")).toContain("Usage: msg message <conversation-url> <stored-id>");
   expect(stdout.join("")).toContain("Usage: msg post <conversation-url> --author <author> [--content <content>] [--client-message-id <id>]");
   expect(stdout.join("")).toContain("0.3.0");
+  expect(stderr).toEqual([]);
+});
+
+test("dispatches the message lookup without starting a wait", async () => {
+  const stdout: string[] = [];
+  const stderr: string[] = [];
+  let requested = "";
+  const code = await runCli(["message", "https://msg.0000.chat/room-1", "message-1"], {
+    ...silentDeps(stdout, stderr),
+    fetch: async (input) => {
+      requested = String(input);
+      return Response.json({
+        conversation_url: "https://msg.0000.chat/room-1",
+        expires_at: "2026-08-16T00:00:00.000Z",
+        latest_message: 1,
+        message: { author: "a", content: "hello", created_at: "2026-08-15T00:00:00.000Z", id: "message-1", sequence: 1 },
+        protocol_version: 1,
+      });
+    },
+  });
+
+  expect(code).toBe(0);
+  expect(requested).toBe("https://msg.0000.chat/room-1/messages/message-1");
+  expect(stdout[0]).toContain("Stored ID: message-1");
   expect(stderr).toEqual([]);
 });
 

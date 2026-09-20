@@ -160,9 +160,9 @@ async function createRoom(miniflare: Awaited<ReturnType<typeof startMsgMiniflare
   return await response.json() as { conversation_url: string; manage_url: string; room: { id: string } };
 }
 
-async function post(miniflare: Awaited<ReturnType<typeof startMsgMiniflare>>["miniflare"], room: string, content: string, idempotencyKey?: string, browserId?: string) {
+async function post(miniflare: Awaited<ReturnType<typeof startMsgMiniflare>>["miniflare"], room: string, content: string, idempotencyKey?: string, browserId?: string, replyTo?: string) {
   return miniflare.dispatchFetch(`https://msg.0000.chat/${room}`, {
-    body: JSON.stringify({ content, author: "beta", display_name: "Beta", semantic_type: "message" }),
+    body: JSON.stringify({ content, author: "beta", display_name: "Beta", semantic_type: "message", ...(replyTo === undefined ? {} : { reply_to: replyTo }) }),
     headers: { ...jsonHeaders, ...(idempotencyKey !== undefined ? { "idempotency-key": idempotencyKey } : {}), ...(browserId !== undefined ? { "x-msg-browser-id": browserId } : {}) },
     method: "POST",
   });
@@ -1360,6 +1360,48 @@ test.serial("serves the agent representation through a real Durable Object", { t
       conversation_url: `https://msg.0000.chat/${room.id}`,
       wait: { requires_user_consent: true },
     });
+  });
+});
+
+test.serial("looks up stored IDs and validates reply targets through the real Worker and Durable Object", { timeout: 15_000 }, async () => {
+  await withRuntime(async (miniflare) => {
+    const created = await createRoom(miniflare, "first <script>alert(1)</script>");
+    const room = created.room.id;
+    const other = await createRoom(miniflare, "other");
+    const transcript = await miniflare.dispatchFetch(`https://msg.0000.chat/${room}`, { headers: { accept: "application/json" } });
+    const transcriptValue = await transcript.json() as { messages: Array<{ id: string; sequence: number }> };
+    const id = transcriptValue.messages[0]!.id;
+
+    const found = await miniflare.dispatchFetch(`https://msg.0000.chat/${room}/messages/${encodeURIComponent(id)}`, { headers: { accept: "application/json" } });
+    expect(found.status).toBe(200);
+    expect(await found.json()).toMatchObject({ conversation_url: `https://msg.0000.chat/${room}`, message: { id, sequence: 1, content: "first <script>alert(1)</script>" }, latest_message: 1 });
+    expect((await miniflare.dispatchFetch(`https://msg.0000.chat/${other.room.id}/messages/${encodeURIComponent(id)}`, { headers: { accept: "application/json" } })).status).toBe(404);
+    expect((await miniflare.dispatchFetch(`https://msg.0000.chat/${room}/messages/missing`, { headers: { accept: "application/json" } })).status).toBe(404);
+    expect((await miniflare.dispatchFetch(`https://msg.0000.chat/${room}/messages/%`, { headers: { accept: "application/json" } })).status).toBe(404);
+
+    const html = await miniflare.dispatchFetch(`https://msg.0000.chat/${room}/messages/${encodeURIComponent(id)}`, { headers: { accept: "text/html" } });
+    expect(html.status).toBe(200);
+    const htmlBody = await html.text();
+    expect(htmlBody).toContain("Back to conversation");
+    expect(htmlBody).toContain("Self-declared and unverified");
+    expect(htmlBody).toContain("&lt;script&gt;alert(1)&lt;/script&gt;");
+    const markdown = await miniflare.dispatchFetch(`https://msg.0000.chat/${room}/messages/${encodeURIComponent(id)}`, { headers: { accept: "text/markdown" } });
+    expect(markdown.status).toBe(200);
+    const markdownBody = await markdown.text();
+    expect(markdownBody).toContain("self-declared and unverified");
+    expect(markdownBody).toContain(`Stored ID: [${id}]`);
+
+    const rejected = await post(miniflare, room, "missing reply", "retry-after-rejection", undefined, "999");
+    expect(rejected.status).toBe(404);
+    const accepted = await post(miniflare, room, "valid reply", "retry-after-rejection", undefined, "1");
+    expect(accepted.status).toBe(201);
+    const acceptedValue = await accepted.json() as { message: { id: string; reply_to: string; sequence: number }; replayed: boolean };
+    expect(acceptedValue).toMatchObject({ replayed: false, message: { sequence: 2, reply_to: "1" } });
+    const replyHtml = await miniflare.dispatchFetch(`https://msg.0000.chat/${room}/messages/${encodeURIComponent(acceptedValue.message.id)}`, { headers: { accept: "text/html" } });
+    expect(await replyHtml.text()).toContain("after=0&amp;through=1&amp;limit=1&amp;view=agent");
+    const bounded = await miniflare.dispatchFetch(`https://msg.0000.chat/${room}?after=0&through=2&limit=1&view=agent`, { headers: { accept: "application/json" } });
+    expect(bounded.status).toBe(200);
+    expect(await bounded.json()).toMatchObject({ through: 2, next_after: 1, messages: [{ sequence: 1 }] });
   });
 });
 

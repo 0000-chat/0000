@@ -77,6 +77,60 @@ test("stores ordered messages and idempotent replay in SQLite", async () => {
   } finally { Date.now = originalNow; }
 });
 
+test("looks up a stored message only inside the room and preserves its sequence", async () => {
+  const { room: durable } = await room();
+  const initialized = await durable.fetch(request("/initialize", { management_hash: "hash", initial: { content: "first", author: "a", display_name: "a", semantic_type: "message" } }));
+  const id = (await initialized.json() as { id: string }).id;
+
+  const found = await durable.fetch(new Request(`https://room/messages/${id}`));
+  expect(found.status).toBe(200);
+  expect(await found.json()).toMatchObject({ message: { id, content: "first", sequence: 1 }, latest_message: 1 });
+  expect((await durable.fetch(new Request("https://room/messages/missing"))).status).toBe(404);
+  expect((await durable.fetch(new Request("https://room/messages/%"))).status).toBe(404);
+});
+
+test("rejects missing reply targets without consuming state or retry keys", async () => {
+  const database = new Database(":memory:");
+  let now = 1_000;
+  const { context, room: durable } = await room(database, () => now);
+  await durable.fetch(request("/initialize", { now, management_hash: "hash", initial: { content: "first", author: "a", display_name: "a", semantic_type: "message" } }));
+  expect((await durable.fetch(new Request("https://room/live?after=1"))).status).toBe(101);
+  const before = await (await durable.fetch(new Request("https://room/read?after=0"))).json() as { expires_at: string; latest_message: number; messages: readonly unknown[] };
+  expect(context.sockets[0]?.sent).toHaveLength(1);
+
+  const rejected = await durable.fetch(request("/messages", { now: now + 1, idempotency_key: "retry-after-rejection", input: { content: "reply", author: "b", display_name: "b", semantic_type: "message", reply_to: "999" } }));
+  expect(rejected.status).toBe(404);
+  const afterRejected = await (await durable.fetch(new Request("https://room/read?after=0"))).json() as { expires_at: string; latest_message: number; messages: readonly unknown[] };
+  expect(afterRejected).toMatchObject({ expires_at: before.expires_at, latest_message: before.latest_message });
+  expect(afterRejected.messages).toHaveLength(1);
+  expect(context.sockets[0]?.sent).toHaveLength(1);
+
+  now += 2;
+  const accepted = await durable.fetch(request("/messages", { now: now, idempotency_key: "retry-after-rejection", input: { content: "reply", author: "b", display_name: "b", semantic_type: "message", reply_to: "1" } }));
+  expect(accepted.status).toBe(200);
+  expect(await accepted.json()).toMatchObject({ replayed: false, message: { sequence: 2, reply_to: "1" } });
+  expect(JSON.parse(context.sockets[0]!.sent.at(-1)!)).toMatchObject({ type: "message.created", sequence: 2 });
+  const afterAccepted = await (await durable.fetch(new Request("https://room/read?after=0"))).json() as { expires_at: string; latest_message: number; messages: readonly unknown[] };
+  expect(afterAccepted.latest_message).toBe(2);
+  expect(afterAccepted.messages).toHaveLength(2);
+  expect(afterAccepted.expires_at).toBe(new Date(now + ROOM_LIMITS.inactivityTtlMs).toISOString());
+  expect(context.alarmAt).toBe(now + ROOM_LIMITS.inactivityTtlMs);
+  database.close();
+});
+
+test("rejects an initial reply before room creation but preserves prior initialization replay", async () => {
+  const empty = await room();
+  expect((await empty.room.fetch(request("/initialize", { management_hash: "hash", initial: { content: "invalid", author: "a", display_name: "a", semantic_type: "message", reply_to: "1" } }))).status).toBe(404);
+  expect((await empty.room.fetch(new Request("https://room/read?after=0"))).status).toBe(404);
+  expect((await empty.room.fetch(request("/initialize", { management_hash: "hash", initial: { content: "first", author: "a", display_name: "a", semantic_type: "message" } }))).status).toBe(200);
+
+  const existing = await room();
+  await existing.room.fetch(request("/initialize", { management_hash: "hash", initial: { content: "first", author: "a", display_name: "a", semantic_type: "message" } }));
+  const replay = await existing.room.fetch(request("/initialize", { management_hash: "hash", initial: { content: "ignored", author: "b", display_name: "b", semantic_type: "message", reply_to: "999" } }));
+  expect(replay.status).toBe(200);
+  expect(await replay.json()).toMatchObject({ created: false, sequence: 1, content: "first" });
+});
+
 test("rejects room writes while the post kill switch is enabled", async () => {
   const { room: durable } = await room(undefined, Date.now, { MSG_POST_DISABLED: "1" });
   await durable.fetch(request("/initialize", { management_hash: "hash", initial: { content: "first", author: "a", display_name: "a", semantic_type: "message" } }));
@@ -210,13 +264,17 @@ test("migrates a capped legacy room before its old alarm can expire it", async (
   database.exec("DROP TABLE webhook_delivery_attempts; DROP TABLE webhook_deliveries; DROP TABLE webhook_endpoints;");
   database.query("UPDATE room_schema SET version = 2").run();
   database.query("INSERT INTO room_state (singleton, schema_version, protocol_version, created_at, last_message_at, inactivity_expires_at, absolute_expires_at, next_sequence, message_count, total_bytes, status, tombstone_expires_at, management_hash) VALUES (1, 2, 1, ?, ?, ?, ?, 2, 1, 5, 'active', NULL, 'hash')").run(start, lastMessageAt, oldAbsolute, oldAbsolute);
-  database.query("INSERT INTO messages (sequence, id, content, author, display_name, client, semantic_type, reply_to, created_at, client_message_id, byte_count, idempotency_key) VALUES (1, 'legacy-message', 'first', 'a', 'a', NULL, 'message', NULL, ?, NULL, 5, NULL)").run(lastMessageAt);
+  database.query("INSERT INTO messages (sequence, id, content, author, display_name, client, semantic_type, reply_to, created_at, client_message_id, byte_count, idempotency_key) VALUES (1, 'legacy-message', 'first', 'a', 'a', NULL, 'message', '999', ?, 'legacy-client', 5, NULL)").run(lastMessageAt);
 
   now = oldAbsolute + 1;
   const restarted = await room(database, () => now);
   await restarted.room.alarm();
 
   expect((await restarted.room.fetch(new Request("https://room/read?after=0"))).status).toBe(200);
+  expect(await (await restarted.room.fetch(new Request("https://room/messages/legacy-message"))).json()).toMatchObject({ message: { id: "legacy-message", reply_to: "999" } });
+  const replay = await restarted.room.fetch(request("/messages", { input: { content: "first", author: "a", display_name: "a", semantic_type: "message", client_message_id: "legacy-client", reply_to: "999" } }));
+  expect(replay.status).toBe(200);
+  expect(await replay.json()).toMatchObject({ replayed: true, message: { id: "legacy-message", reply_to: "999" } });
   expect(restarted.context.alarmAt).toBe(lastMessageAt + ROOM_LIMITS.inactivityTtlMs);
 });
 

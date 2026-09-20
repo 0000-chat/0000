@@ -243,6 +243,8 @@ test("serves the browser code from same-origin assets for the strict page policy
   expect(source).toContain("htmlLabels:false");
   expect(source).toContain("maxEdges:100,logLevel:5");
   expect(source).toContain("createLiveController");
+  expect(source).toContain("message-citation");
+  expect(source).toContain("Replying to message");
   expect(source).toContain("#create-room");
   expect(source).toContain(".conversation_url");
   expect(source).toContain("URL.createObjectURL");
@@ -334,6 +336,87 @@ test("runs when the Worker bundler adds function name helpers", async () => {
     const runtime = new Function(`${bundledSource}\nreturn globalThis.__msgBrowserRuntime;`)() as { renderMarkdown: (value: string) => string };
     runtime.renderMarkdown("A message");
   }).not.toThrow();
+});
+
+test("renders stored-ID and reply citation links in the served browser client", async () => {
+  const source = await browserAsset("client.js")?.text();
+  const globals = globalThis as Record<string, unknown>;
+  const saved = Object.fromEntries(["WebSocket", "addEventListener", "clearTimeout", "document", "fetch", "localStorage", "location", "matchMedia", "navigator", "requestAnimationFrame", "scrollTo", "setTimeout"].map((key) => [key, globals[key]]));
+  class FakeElement {
+    readonly children: FakeElement[] = [];
+    readonly classList = { add: () => {}, contains: () => false, remove: () => {} };
+    readonly nodes = new Map<string, FakeElement>();
+    className = "";
+    hidden = false;
+    innerHTML = "";
+    isConnected = true;
+    nextElementSibling: FakeElement | null = null;
+    scrollHeight = 0;
+    textContent = "";
+    href = "";
+    addEventListener() {}
+    append(...nodes: FakeElement[]) { this.children.push(...nodes); }
+    replaceChildren(...nodes: FakeElement[]) { this.children.splice(0, this.children.length, ...nodes); }
+    querySelector(selector: string): FakeElement {
+      const existing = this.nodes.get(selector);
+      if (existing) return existing;
+      const node = new FakeElement();
+      this.nodes.set(selector, node);
+      return node;
+    }
+    querySelectorAll() { return []; }
+    setAttribute() {}
+  }
+  let render: () => void = () => {};
+  const rendered = new Promise<void>((resolve) => { render = resolve; });
+  let box: FakeElement;
+  box = new FakeElement();
+  const append = box.append.bind(box);
+  box.append = (...nodes: FakeElement[]) => { append(...nodes); render(); };
+  const field = new FakeElement();
+  const sockets: Array<{ onclose: (() => void) | null; onerror: (() => void) | null; onmessage: ((event: { data: string }) => void) | null; onopen: (() => void) | null; readyState: number; close: () => void }> = [];
+
+  try {
+    globals.document = {
+      body: { dataset: { room: "room-1" } },
+      createElement: () => new FakeElement(),
+      documentElement: { dataset: {}, scrollHeight: 0 },
+      querySelector: (selector: string) => ({ "#messages": box, "#reply": field }[selector] ?? null),
+      querySelectorAll: () => [],
+    };
+    globals.fetch = async () => Response.json({ latest_message: 7, messages: [{ author: "Alice", content: "Hello", created_at: "2026-08-15T00:00:00.000Z", id: "message-7", reply_to: "6", sequence: 7 }] });
+    globals.WebSocket = class {
+      onclose = null;
+      onerror = null;
+      onmessage = null;
+      onopen = null;
+      readyState = 0;
+      constructor() { sockets.push(this); }
+      close() {}
+    };
+    globals.addEventListener = () => {};
+    globals.clearTimeout = () => {};
+    globals.localStorage = { getItem: () => "dismissed", setItem: () => {} };
+    globals.location = { href: "https://msg.0000.chat/room-1", origin: "https://msg.0000.chat", pathname: "/room-1", protocol: "https:" };
+    globals.matchMedia = () => ({ matches: false, addEventListener: () => {} });
+    globals.navigator = { onLine: true };
+    globals.requestAnimationFrame = (callback: () => void) => { callback(); return 0; };
+    globals.scrollTo = () => {};
+    globals.setTimeout = () => 0;
+
+    new Function(source ?? "")();
+    await rendered;
+
+    const node = box.children[0]!;
+    const citation = node.querySelector(".author").children.find((child) => child.className === "message-citation");
+    expect(citation?.textContent).toBe("Stored ID message-7");
+    expect(citation?.href).toBe("https://msg.0000.chat/room-1/messages/message-7");
+    const reply = node.querySelector(".reply-reference").children[0]!;
+    expect(reply.textContent).toBe("Replying to message 6");
+    expect(reply.href).toBe("https://msg.0000.chat/room-1?after=5&through=6&limit=1&view=agent");
+  } finally {
+    Object.assign(globals, saved);
+  }
 });
 
 test("keeps the final served runtime Live during a WebSocket refresh", async () => {
@@ -488,6 +571,7 @@ test("keeps the approved transcript, mobile rail, and accessibility contracts", 
   expect(css).toContain(".room-rail,.room-facts div,.room-facts dd{min-width:0}");
   expect(css).toContain(".room-facts dd{overflow-wrap:anywhere}");
   expect(css).toContain(".identity{text-transform:uppercase");
+  expect(css).toContain(".message-citation{margin-left:auto");
   expect(css).toContain(".date-rule{letter-spacing:");
   expect(html).toContain("Deletion time");
   expect(html).toContain("Share and export");

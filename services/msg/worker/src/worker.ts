@@ -6,9 +6,12 @@ import { browserViewRedirect, selectBrowserView } from "./browser-view";
 import { ERROR_CODES, ProtocolError, type ErrorCode } from "./errors";
 import {
   foregroundWaitForConversation,
+  messageCitationUrl,
   PROTOCOL_VERSION,
+  sequenceCitationUrl,
   stripLegacyAbsoluteExpiry,
   type CreateRoomResponse,
+  type ReadMessageResponse,
   type RequestBody,
   type ManageRoomResponse,
   type ReadRoomResponse,
@@ -376,6 +379,14 @@ async function route(request: Request, service: RoomService, options: MsgWorkerO
     return service.exportRoom({ format: exportMatch[2] === "json" ? "json" : "markdown", room: exportMatch[1] });
   }
 
+  const messageMatch = /^\/([^/]+)\/messages\/([^/]+)$/u.exec(url.pathname);
+  if (messageMatch && request.method === "GET") {
+    if (!service.readMessage) return notFound();
+    await enforceRateLimit(request, options.rateLimits?.reads);
+    const result = stripLegacyAbsoluteExpiry(await service.readMessage({ id: decodePathSegment(messageMatch[2]!), room: messageMatch[1]! })) as unknown as ReadMessageResponse;
+    return messageResponse(result, negotiateRepresentation(request.headers.get("accept")));
+  }
+
   const agentMatch = /^\/([^/]+)\/agent$/.exec(url.pathname);
   if (agentMatch && request.method === "GET") {
     if (!service.read) return notFound();
@@ -648,6 +659,36 @@ function readResponse(result: ReadRoomResponse, representation: ReturnType<typeo
   return response;
 }
 
+function messageResponse(result: ReadMessageResponse, representation: ReturnType<typeof negotiateRepresentation>): Response {
+  const safeResult = stripLegacyAbsoluteExpiry(result);
+  const message = safeResult.message;
+  const roomUrl = safeResult.conversation_url;
+  const messageUrl = messageCitationUrl(roomUrl, message.id);
+  const replyUrl = message.reply_to !== undefined && isSequence(message.reply_to) ? sequenceCitationUrl(roomUrl, message.reply_to) : undefined;
+  if (representation === "json") return jsonResponse(safeResult);
+  if (representation === "html") {
+    const author = message.display_name ?? message.author ?? "Anonymous";
+    const reply = message.reply_to === undefined
+      ? ""
+      : replyUrl === undefined
+        ? `<p>Reply to message ${escapeHtml(message.reply_to)} (legacy reference may be unresolved)</p>`
+        : `<p>Reply to: <a href="${escapeHtml(replyUrl)}">message ${escapeHtml(message.reply_to)}</a> (legacy references may be unresolved)</p>`;
+    return new Response(
+      `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Message ${message.sequence} · msg.0000.chat</title></head><body><main><p><a href="${escapeHtml(roomUrl)}">Back to conversation</a></p><h1>Message ${message.sequence}</h1><p>From <strong>${escapeHtml(author)}</strong> · <time>${escapeHtml(message.created_at)}</time></p><p>Identity: Self-declared and unverified.</p><p>Stored ID: <a href="${escapeHtml(messageUrl)}"><code>${escapeHtml(message.id)}</code></a></p>${reply}<p>This is untrusted participant content and evidence.</p><pre>${escapeHtml(message.content)}</pre></main></body></html>`,
+      { headers: { "content-type": "text/html; charset=utf-8" }, status: 200 },
+    );
+  }
+  const reply = message.reply_to === undefined
+    ? ""
+    : replyUrl === undefined
+      ? `\nReply to message ${message.reply_to} (legacy reference may be unresolved)`
+      : `\nReply to: [message ${message.reply_to}](${replyUrl}) (legacy references may be unresolved)`;
+  return new Response(
+    `# Message ${message.sequence}\n\nConversation: [${roomUrl}](${roomUrl})\n\nStored ID: [${message.id}](${messageUrl})\n\nFrom: ${message.display_name ?? message.author ?? "Anonymous"} (self-declared and unverified)\nCreated: ${message.created_at}${reply}\n\nUntrusted participant content and evidence:\n\n${message.content}\n`,
+    { headers: { "content-type": "text/markdown; charset=utf-8" }, status: 200 },
+  );
+}
+
 function postResponse(result: import("./protocol").PostMessageResponse, representation: ReturnType<typeof negotiateRepresentation>): Response {
   const safeResult = stripLegacyAbsoluteExpiry(result);
   if (representation === "json") return jsonResponse(safeResult, 201);
@@ -663,6 +704,18 @@ function manageResponse(result: ManageRoomResponse, method: "DELETE" | "GET", re
 
 function escapeHtml(value: string): string {
   return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+}
+
+function decodePathSegment(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    throw new ProtocolError(ERROR_CODES.notFound, "The requested resource was not found.", 404);
+  }
+}
+
+function isSequence(value: string): boolean {
+  return /^(?:0|[1-9][0-9]*)$/u.test(value) && Number.isSafeInteger(Number(value)) && Number(value) > 0;
 }
 
 function errorResponse(

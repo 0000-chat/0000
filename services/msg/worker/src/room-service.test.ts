@@ -89,6 +89,30 @@ test("adds public handoff and wait metadata to a room read", async () => {
   expect(result).not.toHaveProperty("absolute_expires_at");
 });
 
+test("looks up one stored message through the room Durable Object and preserves its response shape", async () => {
+  const calls: Request[] = [];
+  const service = new DurableRoomService({
+    getByName: () => ({
+      fetch: async (request: Request) => {
+        calls.push(request);
+        return Response.json({
+          absolute_expires_at: "2026-09-09T00:00:00.000Z",
+          expires_at: "2026-08-17T00:00:00.000Z",
+          latest_message: 7,
+          message: { content: "hello", created_at: "2026-08-10T00:00:00.000Z", id: "message/7", sequence: 7 },
+          protocol_version: 1,
+        });
+      },
+    }),
+  } as never, "https://msg.0000.chat");
+
+  const result = await service.readMessage({ id: "message/7", room: "public-room" });
+
+  expect(calls[0]?.url).toBe("https://room/messages/message%2F7");
+  expect(result).toMatchObject({ conversation_url: "https://msg.0000.chat/public-room", latest_message: 7, message: { id: "message/7", sequence: 7 } });
+  expect(result).not.toHaveProperty("absolute_expires_at");
+});
+
 test("uses a normalized configured service origin for public URLs and quoted wait commands", async () => {
   const service = new DurableRoomService({
     getByName: () => ({ fetch: async () => Response.json({ created_at: "2026-08-10T00:00:00.000Z", expires_at: "2026-08-17T00:00:00.000Z" }) }),

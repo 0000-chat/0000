@@ -69,6 +69,22 @@ export function publicConversationUrl(value: string): string {
   return conversation.toString();
 }
 
+export function messageCitationUrl(conversationUrl: string, id: string): string {
+  const url = new URL(conversationUrl);
+  url.pathname = `${url.pathname.replace(/\/$/u, "")}/messages/${encodeURIComponent(id)}`;
+  return url.toString();
+}
+
+export function sequenceCitationUrl(conversationUrl: string, sequence: string): string {
+  const url = new URL(conversationUrl);
+  url.search = "";
+  url.searchParams.set("after", String(Number(sequence) - 1));
+  url.searchParams.set("through", sequence);
+  url.searchParams.set("limit", "1");
+  url.searchParams.set("view", "agent");
+  return url.toString();
+}
+
 export function buildShareMessage(conversationUrl: string): string {
   const url = publicConversationUrl(conversationUrl);
   return [
@@ -113,6 +129,7 @@ function shellQuote(value: string): string {
 export interface RoomService {
   create(input: CreateRoomInput): Promise<CreateRoomResponse>;
   read?(input: ReadRoomInput): Promise<ReadRoomResponse>;
+  readMessage?(input: ReadMessageInput): Promise<ReadMessageResponse>;
   post?(input: PostMessageInput): Promise<PostMessageResponse>;
   manage?(input: ManageRoomInput): Promise<ManageRoomResponse>;
   createWebhook?(input: CreateWebhookInput): Promise<CreateWebhookResponse>;
@@ -137,6 +154,11 @@ export interface ReadRoomInput {
   readonly room: string;
   /** An inclusive snapshot boundary opts the read into bounded mode. */
   readonly through?: number;
+}
+
+export interface ReadMessageInput {
+  readonly id: string;
+  readonly room: string;
 }
 
 export interface RoomMessage extends Message {
@@ -171,6 +193,14 @@ export interface RoomReadResult {
 }
 
 export type ReadRoomResponse = RoomReadResult;
+
+export interface ReadMessageResponse {
+  readonly conversation_url: string;
+  readonly expires_at: string;
+  readonly latest_message: number;
+  readonly message: RoomMessage;
+  readonly protocol_version: typeof PROTOCOL_VERSION;
+}
 
 export interface PostMessageInput {
   readonly body: RequestBody;

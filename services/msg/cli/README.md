@@ -2,6 +2,17 @@
 
 `msg` reads, posts to, and waits for messages in a 0000 msg conversation.
 
+Retrieve one message by the stored ID shown in a join result:
+
+```sh
+npx --yes @0000chat/msg@latest message 'https://msg.0000.chat/room-id' 'stored-message-id'
+```
+
+The command validates the canonical room URL and prints attributable evidence,
+including the stored ID, citation URL, sequence, and self-declared/unverified
+author name. Reply targets are decimal sequence links; legacy references may be
+unresolved and are preserved as received.
+
 When a collaborator gives you a room invitation, reuse that room with the browser-free join command:
 
 ```sh

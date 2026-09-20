@@ -202,6 +202,8 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
         await this.alarm();
         return this.json({ triggered: true });
       }
+      const messageMatch = /^\/messages\/([^/]+)$/u.exec(url.pathname);
+      if (request.method === "GET" && messageMatch) return await this.readMessage(decodePathSegment(messageMatch[1]!));
       if (request.method === "GET" && url.pathname === "/read") return await this.read(url);
       if (request.method === "POST" && url.pathname === "/messages") return await this.post(request);
       if (request.method === "GET" && url.pathname === "/manage") return await this.manage(request, false);
@@ -288,6 +290,9 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
     const result = this.ctx.storage.transactionSync(() => {
       const prior = this.state();
       if (prior) return { created: false, message: this.messageBySequence(1), state: prior };
+      if (input.initial.reply_to !== undefined) {
+        throw new ProtocolError(ERROR_CODES.notFound, "The replied-to message was not found.", 404);
+      }
       const id = crypto.randomUUID();
       const notificationId = crypto.randomUUID();
       const bytes = messageStorageBytes(input.initial, undefined, id);
@@ -355,6 +360,18 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
     });
   }
 
+  private async readMessage(id: string): Promise<Response> {
+    const state = await this.requireActive(this.now());
+    const message = rows<StoredMessage>(this.ctx.storage.sql.exec("SELECT * FROM messages WHERE id = ?", id))[0];
+    if (!message) throw new ProtocolError(ERROR_CODES.notFound, "The requested resource was not found.", 404);
+    return this.json({
+      protocol_version: PROTOCOL_VERSION,
+      message: this.toMessage(message),
+      latest_message: state.next_sequence - 1,
+      expires_at: iso(state.inactivity_expires_at),
+    });
+  }
+
   private async post(request: Request): Promise<Response> {
     if (this.config.MSG_POST_DISABLED === "1") {
       throw new ProtocolError(ERROR_CODES.serviceUnavailable, "New messages are temporarily unavailable.", 503);
@@ -372,6 +389,9 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
       if (previous) {
         if (!sameInput(previous, input.input)) throw new ProtocolError(ERROR_CODES.conflict, "The idempotency key is already used for another message.", 409);
         return { expired: false as const, message: previous, state, replayed: true };
+      }
+      if (input.input.reply_to !== undefined && !this.messageBySequenceOptional(Number(input.input.reply_to))) {
+        throw new ProtocolError(ERROR_CODES.notFound, "The replied-to message was not found.", 404);
       }
       const id = crypto.randomUUID();
       const bytes = messageStorageBytes(input.input, key, id);
@@ -1560,6 +1580,7 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
   private requireState(): RoomState { const state = this.state(); if (!state) throw new ProtocolError(ERROR_CODES.notFound, "The requested resource was not found.", 404); return state; }
   private async requireActive(now: number): Promise<RoomState> { const state = this.requireState(); if (state.status === "deleted") throw new ProtocolError(ERROR_CODES.gone, "The conversation has expired.", 410); if (now >= state.inactivity_expires_at) { await this.expire(now, "Conversation expired"); throw new ProtocolError(ERROR_CODES.gone, "The conversation has expired.", 410); } await this.schedule(); return state; }
   private messageBySequence(sequence: number): StoredMessage { const message = rows<StoredMessage>(this.ctx.storage.sql.exec("SELECT * FROM messages WHERE sequence = ?", sequence))[0]; if (!message) throw new Error("Initial message was not stored."); return message; }
+  private messageBySequenceOptional(sequence: number): StoredMessage | undefined { return rows<StoredMessage>(this.ctx.storage.sql.exec("SELECT * FROM messages WHERE sequence = ?", sequence))[0]; }
   private messageByIdempotencyKey(key: string): StoredMessage | undefined { return rows<StoredMessage>(this.ctx.storage.sql.exec("SELECT * FROM messages WHERE idempotency_key = ?", key))[0]; }
   private messageByClientMessageId(key: string): StoredMessage | undefined { return rows<StoredMessage>(this.ctx.storage.sql.exec("SELECT * FROM messages WHERE client_message_id = ?", key))[0]; }
   private toMessage(message: StoredMessage) { return { id: message.id, sequence: message.sequence, content: message.content, author: message.author, display_name: message.display_name, identity_verified: false as const, ...(message.client ? { client: message.client } : {}), semantic_type: message.semantic_type, ...(message.reply_to ? { reply_to: message.reply_to } : {}), created_at: iso(message.created_at), ...(message.client_message_id ? { client_message_id: message.client_message_id } : {}), byte_count: message.byte_count }; }
@@ -1579,6 +1600,13 @@ function createDeferredSignal(): DeferredSignal {
 function rows<T>(cursor: Iterable<unknown>): T[] { return [...cursor] as T[]; }
 function isRecord(value: unknown): value is Record<string, unknown> { return typeof value === "object" && value !== null && !Array.isArray(value); }
 function iso(value: number): string { return new Date(value).toISOString(); }
+function decodePathSegment(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    throw new ProtocolError(ERROR_CODES.notFound, "The requested resource was not found.", 404);
+  }
+}
 function decodeBase64Url(value: string): Uint8Array {
   const base64 = value.replaceAll("-", "+").replaceAll("_", "/");
   const decoded = atob(base64 + "=".repeat((4 - base64.length % 4) % 4));
