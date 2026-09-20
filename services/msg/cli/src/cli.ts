@@ -22,7 +22,7 @@ export interface CliDependencies {
 
 export async function runCli(args: readonly string[], dependencies: CliDependencies): Promise<number> {
   if (args.length === 1 && args[0] === "--help") {
-    dependencies.stdout("Usage: msg join <conversation-url>\nUsage: msg post <conversation-url> --author <author> [--content <content>] [--client-message-id <id>]\nUsage: msg wait <conversation-url> --after <positive integer> [--timeout <duration>]\nUsage: msg webhooks <conversation-url> list | create <https-url> | remove <endpoint-id> | disable <endpoint-id> | enable <endpoint-id> | rotate <endpoint-id> | redeliver <endpoint-id> <event-id>\n");
+    dependencies.stdout("Usage: msg join <conversation-url> [--after N] [--limit N] [--through N]\nUsage: msg post <conversation-url> --author <author> [--content <content>] [--client-message-id <id>]\nUsage: msg wait <conversation-url> --after <nonnegative integer> [--timeout <duration>]\nUsage: msg webhooks <conversation-url> list | create <https-url> | remove <endpoint-id> | disable <endpoint-id> | enable <endpoint-id> | rotate <endpoint-id> | redeliver <endpoint-id> <event-id>\n");
     return 0;
   }
   if (args.length === 1 && args[0] === "--version") {

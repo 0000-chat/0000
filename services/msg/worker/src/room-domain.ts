@@ -13,6 +13,9 @@ export const ROOM_LIMITS = {
 
 /** Permits JSON field overhead while the normalized content stays at 64 KiB. */
 export const MAX_ROOM_REQUEST_BYTES = ROOM_LIMITS.maxMessageBytes + 8 * 1024;
+export const MAX_READ_MESSAGE_BYTES = 128 * 1024;
+export const DEFAULT_READ_LIMIT = 20;
+export const MAX_READ_LIMIT = 100;
 const maxIdentityChars = 80;
 const maxIdentityBytes = 320;
 const maxClientMessageIdChars = 128;
@@ -41,18 +44,60 @@ export function parseMessageInput(body: RequestBody): MessageInput {
 
 export function validateCursor(value: string | null): number {
   if (value === null || value === "") return 0;
-  if (!/^(?:0|[1-9][0-9]*)$/.test(value)) {
-    throw invalidMessage("The after cursor must be a nonnegative sequence.");
+  return validateNonnegativeInteger(value, "after");
+}
+
+export function validateBoundedCursor(value: string | null, field: "after" | "through"): number {
+  if (value === null) return 0;
+  return validateNonnegativeInteger(value, field);
+}
+
+export function validateReadLimit(value: string | null): number | undefined {
+  if (value === null) return undefined;
+  if (!/^[1-9][0-9]*$/u.test(value)) {
+    throw invalidMessage("The limit must be a positive safe integer no greater than 100.");
+  }
+  const limit = Number(value);
+  if (!Number.isSafeInteger(limit) || limit > MAX_READ_LIMIT) {
+    throw invalidMessage("The limit must be a positive safe integer no greater than 100.");
+  }
+  return limit;
+}
+
+export function validateThrough(value: string | null): number | undefined {
+  if (value === null) return undefined;
+  return validateBoundedCursor(value, "through");
+}
+
+function validateNonnegativeInteger(value: string | null, field: "after" | "through"): number {
+  if (value === null || value === "") {
+    throw invalidMessage(`The ${field} cursor must be a nonnegative sequence.`);
+  }
+  if (!/^(?:0|[1-9][0-9]*)$/u.test(value)) {
+    throw invalidMessage(`The ${field} cursor must be a nonnegative sequence.`);
   }
   const cursor = Number(value);
   if (!Number.isSafeInteger(cursor)) {
-    throw invalidMessage("The after cursor must be a nonnegative sequence.");
+    throw invalidMessage(`The ${field} cursor must be a nonnegative safe integer.`);
   }
   return cursor;
 }
 
-export function roomEtag(latestSequence: number, after: number): string {
-  return `W/"room-${latestSequence}-after-${after}"`;
+export interface RoomEtagOptions {
+  readonly expiresAt?: string;
+  readonly limit?: number;
+  readonly through?: number;
+}
+
+export function roomEtag(latestSequence: number, after: number, options?: RoomEtagOptions): string {
+  if (options === undefined) return `W/"room-${latestSequence}-after-${after}"`;
+  const selectors = [
+    `after=${after}`,
+    `limit=${options.limit ?? DEFAULT_READ_LIMIT}`,
+    `through=${options.through ?? latestSequence}`,
+    `expires=${options.expiresAt ?? ""}`,
+  ].join("&");
+  return `W/"room-${latestSequence}-${selectors}"`;
 }
 
 export function validateIdempotencyKey(value: string): string {

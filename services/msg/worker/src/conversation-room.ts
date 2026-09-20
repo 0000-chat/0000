@@ -1,7 +1,7 @@
 import { DurableObject } from "cloudflare:workers";
 
 import { ERROR_CODES, ProtocolError } from "./errors";
-import { compareCapabilities, messageStorageBytes, ROOM_LIMITS } from "./room-domain";
+import { byteLength, compareCapabilities, DEFAULT_READ_LIMIT, MAX_READ_MESSAGE_BYTES, messageStorageBytes, ROOM_LIMITS, validateBoundedCursor, validateCursor, validateReadLimit, validateThrough } from "./room-domain";
 import type { MessageInput } from "./room-domain";
 import { PROTOCOL_VERSION, type CreateWebhookResponse, type ManageWebhookResponse, type RedeliverWebhookResponse, type RotateWebhookSecretResponse, type WebhookAttemptMetadata, type WebhookDeliveryMetadata, type WebhookSummary } from "./protocol";
 import { CURRENT_ROOM_SCHEMA_VERSION, migrateRoomSchema } from "./room-schema";
@@ -305,9 +305,54 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
 
   private async read(url: URL): Promise<Response> {
     const state = await this.requireActive(this.now());
-    const after = Number(url.searchParams.get("after") ?? 0);
-    const messages = rows<StoredMessage>(this.ctx.storage.sql.exec("SELECT * FROM messages WHERE sequence > ? ORDER BY sequence ASC", after)).map((message) => this.toMessage(message));
-    return this.json({ protocol_version: PROTOCOL_VERSION, messages, latest_message: state.next_sequence - 1, expires_at: iso(state.inactivity_expires_at), access_warning: "All authors and display names are self-declared and unverified." });
+    const bounded = url.searchParams.has("limit") || url.searchParams.has("through");
+    const after = bounded ? validateBoundedCursor(url.searchParams.get("after"), "after") : validateCursor(url.searchParams.get("after"));
+    if (!bounded) {
+      const messages = rows<StoredMessage>(this.ctx.storage.sql.exec("SELECT * FROM messages WHERE sequence > ? ORDER BY sequence ASC", after)).map((message) => this.toMessage(message));
+      return this.json({ protocol_version: PROTOCOL_VERSION, messages, latest_message: state.next_sequence - 1, expires_at: iso(state.inactivity_expires_at), access_warning: "All authors and display names are self-declared and unverified." });
+    }
+
+    const limit = validateReadLimit(url.searchParams.get("limit")) ?? DEFAULT_READ_LIMIT;
+    const latest = state.next_sequence - 1;
+    const through = validateThrough(url.searchParams.get("through")) ?? latest;
+    if (after > latest) throw new ProtocolError(ERROR_CODES.invalidBody, "The after cursor is in the future.", 400);
+    if (through > latest) throw new ProtocolError(ERROR_CODES.invalidBody, "The through cursor is in the future.", 400);
+    if (after > through) throw new ProtocolError(ERROR_CODES.invalidBody, "The after cursor must not be greater than through.", 400);
+
+    const candidates = rows<StoredMessage>(this.ctx.storage.sql.exec(
+      "SELECT * FROM messages WHERE sequence > ? AND sequence <= ? ORDER BY sequence ASC LIMIT ?",
+      after,
+      through,
+      limit + 1,
+    )).map((message) => this.toMessage(message));
+    const messages = [] as ReturnType<ConversationRoom["toMessage"]>[];
+    let serializedBytes = 2; // The [] wrapper around the serialized message array.
+    let oversized = false;
+    for (const message of candidates) {
+      if (messages.length >= limit) break;
+      const messageBytes = byteLength(JSON.stringify(message));
+      const separatorBytes = messages.length === 0 ? 0 : 1;
+      if (messages.length === 0 && serializedBytes + messageBytes > MAX_READ_MESSAGE_BYTES) {
+        messages.push(message);
+        oversized = true;
+        break;
+      }
+      if (serializedBytes + separatorBytes + messageBytes > MAX_READ_MESSAGE_BYTES) break;
+      messages.push(message);
+      serializedBytes += separatorBytes + messageBytes;
+    }
+    const hasMore = messages.length < candidates.length;
+    return this.json({
+      protocol_version: PROTOCOL_VERSION,
+      messages,
+      latest_message: latest,
+      expires_at: iso(state.inactivity_expires_at),
+      access_warning: "All authors and display names are self-declared and unverified.",
+      next_after: messages.at(-1)?.sequence ?? after,
+      has_more: hasMore,
+      through,
+      ...(oversized ? { oversized_message: true } : {}),
+    });
   }
 
   private async post(request: Request): Promise<Response> {

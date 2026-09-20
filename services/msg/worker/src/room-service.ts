@@ -41,14 +41,19 @@ export class DurableRoomService implements RoomService {
   }
 
   async read(input: ReadRoomInput): Promise<ReadRoomResponse> {
-    const value = stripLegacyAbsoluteExpiry(await responseJson(await this.room(input.room).fetch(new Request(`https://room/read?after=${input.after}`))));
+    const endpoint = new URL("https://room/read");
+    endpoint.searchParams.set("after", String(input.after));
+    if (input.limit !== undefined) endpoint.searchParams.set("limit", String(input.limit));
+    if (input.through !== undefined) endpoint.searchParams.set("through", String(input.through));
+    const value = stripLegacyAbsoluteExpiry(await responseJson(await this.room(input.room).fetch(new Request(endpoint))));
     const conversation_url = `${this.origin}/${input.room}`;
     const latest = value.latest_message as number;
+    const waitAfter = typeof value.next_after === "number" ? value.next_after : latest;
     return {
       ...value,
       conversation_url,
       share_message: buildShareMessage(conversation_url),
-      wait: foregroundWait(this.origin, input.room, latest),
+      wait: foregroundWait(this.origin, input.room, waitAfter),
     } as unknown as ReadRoomResponse;
   }
 

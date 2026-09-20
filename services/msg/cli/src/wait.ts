@@ -33,12 +33,12 @@ export class WaitSignalError extends Error {
 }
 
 export function parseWaitCommand(args: readonly string[]): WaitCommand {
-  if (args[0] !== "wait" || args.length < 4) throw new Error("Usage: msg wait <conversation-url> --after <positive integer> [--timeout <duration>]");
+  if (args[0] !== "wait" || args.length < 4) throw new Error("Usage: msg wait <conversation-url> --after <nonnegative integer> [--timeout <duration>]");
   const conversationUrl = validateConversationUrl(args[1] ?? "");
-  if (args[2] !== "--after" || !/^[1-9][0-9]*$/.test(args[3] ?? "")) throw new Error("--after must be a positive integer.");
+  if (args[2] !== "--after" || !/^(?:0|[1-9][0-9]*)$/u.test(args[3] ?? "") || !Number.isSafeInteger(Number(args[3]))) throw new Error("--after must be a nonnegative safe integer.");
   const timeout = args.slice(4);
   if (timeout.length === 0) return { after: Number(args[3]), conversationUrl };
-  if (timeout.length !== 2 || timeout[0] !== "--timeout") throw new Error("Usage: msg wait <conversation-url> --after <positive integer> [--timeout <duration>]");
+  if (timeout.length !== 2 || timeout[0] !== "--timeout") throw new Error("Usage: msg wait <conversation-url> --after <nonnegative integer> [--timeout <duration>]");
   const timeoutMs = parseDuration(timeout[1] ?? "");
   return { after: Number(args[3]), conversationUrl, timeoutMs };
 }

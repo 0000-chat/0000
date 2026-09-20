@@ -63,7 +63,7 @@ async function withSharedRuntime(run: (miniflare: Awaited<ReturnType<typeof star
 
 async function withRuntime(
   run: (miniflare: Awaited<ReturnType<typeof startMsgMiniflare>>["miniflare"]) => Promise<void>,
-  limits?: typeof SHORT_LIVED_TEST_ROOM_LIMITS,
+  limits?: typeof TEST_ROOM_LIMITS,
   nowMs?: number,
   testMode = true,
 ) {
@@ -1230,6 +1230,104 @@ test.serial("persists rooms across workerd restarts", { timeout: 15_000 }, async
     }
   }
   if (failed) throw failure;
+});
+
+test.serial("reads bounded pages through a stable snapshot without changing legacy reads", { timeout: 20_000 }, async () => {
+  await withRuntime(async (miniflare) => {
+    const { room } = await createRoom(miniflare, "message-1");
+    for (let sequence = 2; sequence <= 26; sequence += 1) {
+      expect((await post(miniflare, room.id, `message-${sequence}`)).status).toBe(201);
+    }
+
+    const first = await miniflare.dispatchFetch(`https://msg.0000.chat/${room.id}?limit=20`, { headers: { accept: "application/json" } });
+    expect(first.status).toBe(200);
+    const firstValue = await first.json() as { has_more: boolean; latest_message: number; messages: Array<{ sequence: number }>; next_after: number; through: number };
+    expect(firstValue.messages.map(({ sequence }) => sequence)).toEqual(Array.from({ length: 20 }, (_, index) => index + 1));
+    expect(firstValue).toMatchObject({ has_more: true, latest_message: 26, next_after: 20, through: 26 });
+
+    const agentPage = await miniflare.dispatchFetch(`https://msg.0000.chat/${room.id}/agent?limit=2&through=${firstValue.through}`, { headers: { accept: "application/json" } });
+    expect(agentPage.status).toBe(200);
+    const agentValue = await agentPage.json() as { has_more: boolean; messages: Array<{ sequence: number }>; next_after: number; next_page?: { command: string }; through: number; wait: { after: number } };
+    expect(agentValue.messages.map(({ sequence }) => sequence)).toEqual([1, 2]);
+    expect(agentValue).toMatchObject({ has_more: true, next_after: 2, through: 26, wait: { after: 2 } });
+    expect(agentValue.next_page?.command).toContain("--after 2 --limit 2 --through 26");
+
+    const agentHtml = await miniflare.dispatchFetch(`https://msg.0000.chat/${room.id}?view=agent&limit=2&through=${firstValue.through}`, { headers: { accept: "text/html" } });
+    expect(agentHtml.status).toBe(200);
+    const agentHtmlBody = await agentHtml.text();
+    expect(agentHtmlBody).toContain("Partial history");
+    expect(agentHtmlBody).toContain("Load the next page");
+
+    expect((await post(miniflare, room.id, "arrived-after-snapshot")).status).toBe(201);
+    const second = await miniflare.dispatchFetch(`https://msg.0000.chat/${room.id}?after=20&limit=20&through=${firstValue.through}`, { headers: { accept: "application/json" } });
+    const secondValue = await second.json() as { has_more: boolean; latest_message: number; messages: Array<{ sequence: number }>; next_after: number; through: number };
+    expect(secondValue.messages.map(({ sequence }) => sequence)).toEqual(Array.from({ length: 6 }, (_, index) => index + 21));
+    expect(secondValue).toMatchObject({ has_more: false, latest_message: 27, next_after: 26, through: 26, wait: { after: 26 } });
+
+    const empty = await miniflare.dispatchFetch(`https://msg.0000.chat/${room.id}?after=26&limit=20&through=26`, { headers: { accept: "application/json" } });
+    expect(await empty.json()).toMatchObject({ has_more: false, latest_message: 27, messages: [], next_after: 26, through: 26 });
+
+    const legacy = await miniflare.dispatchFetch(`https://msg.0000.chat/${room.id}?after=20`, { headers: { accept: "application/json" } });
+    const legacyValue = await legacy.json() as Record<string, unknown> & { messages: Array<{ sequence: number }> };
+    expect(legacyValue.messages.map(({ sequence }) => sequence)).toEqual(Array.from({ length: 7 }, (_, index) => index + 21));
+    expect(legacyValue).not.toHaveProperty("next_after");
+
+    const selectorBaseline = await miniflare.dispatchFetch(`https://msg.0000.chat/${room.id}?limit=20&through=27`, { headers: { accept: "application/json" } });
+    const differentPage = await miniflare.dispatchFetch(`https://msg.0000.chat/${room.id}?limit=10&through=27`, { headers: { accept: "application/json" } });
+    expect(differentPage.headers.get("etag")).not.toBe(selectorBaseline.headers.get("etag"));
+    const mismatchedValidator = await miniflare.dispatchFetch(`https://msg.0000.chat/${room.id}?limit=10&through=27`, { headers: { accept: "application/json", "if-none-match": selectorBaseline.headers.get("etag") ?? "" } });
+    expect(mismatchedValidator.status).toBe(200);
+
+    for (const path of [
+      `/${room.id}?limit=0`,
+      `/${room.id}?through=`,
+      `/${room.id}?after=&limit=20`,
+      `/${room.id}?after=2&limit=20&through=1`,
+      `/${room.id}?limit=20&through=999`,
+    ]) {
+      expect((await miniflare.dispatchFetch(`https://msg.0000.chat${path}`, { headers: { accept: "application/json" } })).status).toBe(400);
+    }
+    const budgetRoom = await createRoom(miniflare, "budget-start");
+    const normalContent = "n".repeat(50_000);
+    for (let sequence = 2; sequence <= 5; sequence += 1) {
+      const posted = await miniflare.dispatchFetch(`https://msg.0000.chat/${budgetRoom.room.id}`, {
+        body: normalContent,
+        headers: { accept: "application/json", "content-type": "text/plain" },
+        method: "POST",
+      });
+      expect(posted.status).toBe(201);
+    }
+    const budgetPage = await miniflare.dispatchFetch(`https://msg.0000.chat/${budgetRoom.room.id}?limit=20&through=5`, { headers: { accept: "application/json" } });
+    const budgetValue = await budgetPage.json() as { has_more: boolean; messages: Array<{ content: string; sequence: number }>; next_after: number };
+    expect(budgetValue.messages.map(({ sequence }) => sequence)).toEqual([1, 2, 3]);
+    expect(budgetValue).toMatchObject({ has_more: true, next_after: 3 });
+    expect(new TextEncoder().encode(JSON.stringify(budgetValue.messages)).byteLength).toBeLessThanOrEqual(128 * 1024);
+    expect(budgetValue.messages.slice(1).every((message) => new TextEncoder().encode(JSON.stringify(message)).byteLength < 128 * 1024)).toBe(true);
+    const continuation = await miniflare.dispatchFetch(`https://msg.0000.chat/${budgetRoom.room.id}?after=${budgetValue.next_after}&limit=20&through=5`, { headers: { accept: "application/json" } });
+    const continuationValue = await continuation.json() as { has_more: boolean; messages: Array<{ sequence: number }>; next_after: number };
+    expect(continuationValue).toMatchObject({ has_more: false, next_after: 5 });
+    expect(continuationValue.messages.map(({ sequence }) => sequence)).toEqual([4, 5]);
+  }, { ...TEST_ROOM_LIMITS, maxMessages: 100 });
+});
+
+test.serial("returns a control-heavy oversized message alone within bounded pagination", { timeout: 20_000 }, async () => {
+  await withRuntime(async (miniflare) => {
+    const { room } = await createRoom(miniflare, "small");
+    const content = "\u0001".repeat(64 * 1024);
+    const posted = await miniflare.dispatchFetch(`https://msg.0000.chat/${room.id}`, {
+      body: content,
+      headers: { accept: "application/json", "content-type": "text/plain" },
+      method: "POST",
+    });
+    expect(posted.status).toBe(201);
+
+    const response = await miniflare.dispatchFetch(`https://msg.0000.chat/${room.id}?after=1&limit=20&through=2`, { headers: { accept: "application/json" } });
+    const value = await response.json() as { messages: Array<{ content: string; sequence: number }>; next_after: number; oversized_message?: boolean };
+    expect(value.messages).toHaveLength(1);
+    expect(value.messages[0]).toMatchObject({ content, sequence: 2 });
+    expect(value).toMatchObject({ next_after: 2, oversized_message: true });
+    expect(new TextEncoder().encode(JSON.stringify(value.messages)).byteLength).toBeGreaterThan(128 * 1024);
+  });
 });
 
 test.serial("runs the production Worker against SQLite Durable Objects", { timeout: 15_000 }, async () => {

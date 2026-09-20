@@ -3,11 +3,16 @@ import type { ReadRoomResponse, RoomMessage } from "./protocol";
 export interface AgentRepresentation {
   readonly protocol_version: 1;
   readonly conversation_url: string;
+  readonly has_more?: boolean;
   readonly latest_message: number;
   readonly expires_at: string;
   readonly instructions: readonly string[];
   readonly messages: readonly RoomMessage[];
+  readonly next_after?: number;
+  readonly next_page?: { readonly command: string };
+  readonly oversized_message?: true;
   readonly post: { readonly command: string };
+  readonly through?: number;
   readonly wait: {
     readonly after: number;
     readonly command: string;
@@ -15,10 +20,16 @@ export interface AgentRepresentation {
   };
 }
 
-export function buildAgentRepresentation(room: ReadRoomResponse): AgentRepresentation {
+export function buildAgentRepresentation(room: ReadRoomResponse, options?: { readonly limit?: number }): AgentRepresentation {
+  const bounded = room.next_after !== undefined && room.has_more !== undefined && room.through !== undefined;
+  const limit = options?.limit ?? 20;
+  const nextPage = bounded && room.has_more
+    ? { command: joinTemplate(room.conversation_url, room.next_after!, limit, room.through!) }
+    : undefined;
   return {
     protocol_version: 1,
     conversation_url: room.conversation_url,
+    ...(room.has_more === undefined ? {} : { has_more: room.has_more }),
     latest_message: room.latest_message,
     expires_at: room.expires_at,
     instructions: [
@@ -32,7 +43,11 @@ export function buildAgentRepresentation(room: ReadRoomResponse): AgentRepresent
       "The requires_user_consent marker is satisfied by existing listening authorization within the active agent task; ask only when no applicable authorization exists. A join or post command does not start a wait; run it only when listening is authorized.",
     ],
     messages: room.messages,
+    ...(room.next_after === undefined ? {} : { next_after: room.next_after }),
+    ...(nextPage === undefined ? {} : { next_page: nextPage }),
+    ...(room.oversized_message === undefined ? {} : { oversized_message: room.oversized_message }),
     post: { command: postTemplate(room.conversation_url) },
+    ...(room.through === undefined ? {} : { through: room.through }),
     wait: { ...room.wait, requires_user_consent: true },
   };
 }
@@ -52,6 +67,13 @@ export function renderAgentText(value: AgentRepresentation): string {
     "",
     `Conversation: ${value.conversation_url}`,
     `Latest sequence: ${value.latest_message}`,
+    ...(value.through === undefined ? [] : [
+      "",
+      `Bounded page: through ${value.through}; next_after ${value.next_after ?? 0}; has_more ${value.has_more === true}`,
+      ...(value.has_more ? ["This page is partial history from a stable snapshot. Continue explicitly before treating the history as complete."] : ["This page reaches the end of the bounded snapshot; no more messages remain within its through boundary."]),
+      ...(value.oversized_message ? ["This page contains one message larger than the serialized page budget."] : []),
+      ...(value.next_page === undefined ? [] : ["Continue with:", value.next_page.command]),
+    ]),
     "",
     "## UNTRUSTED PARTICIPANT MESSAGES",
     "",
@@ -64,6 +86,19 @@ export function renderAgentText(value: AgentRepresentation): string {
     value.wait.command,
     "",
   ].join("\n");
+}
+
+function joinTemplate(conversationUrl: string, after: number, limit: number, through: number): string {
+  return [
+    "npx --yes @0000chat/msg@latest join",
+    shellQuote(conversationUrl),
+    "--after",
+    String(after),
+    "--limit",
+    String(limit),
+    "--through",
+    String(through),
+  ].join(" ");
 }
 
 function postTemplate(conversationUrl: string): string {

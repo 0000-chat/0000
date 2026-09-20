@@ -14,7 +14,7 @@ import {
   type ReadRoomResponse,
   type RoomService,
 } from "./protocol";
-import { compareCapabilities, MAX_ROOM_REQUEST_BYTES, roomEtag, validateCursor, validateIdempotencyKey } from "./room-domain";
+import { compareCapabilities, DEFAULT_READ_LIMIT, MAX_ROOM_REQUEST_BYTES, roomEtag, validateBoundedCursor, validateCursor, validateIdempotencyKey, validateReadLimit, validateThrough } from "./room-domain";
 import {
   negotiateCreateRepresentation,
   negotiateRepresentation,
@@ -380,11 +380,14 @@ async function route(request: Request, service: RoomService, options: MsgWorkerO
   if (agentMatch && request.method === "GET") {
     if (!service.read) return notFound();
     await enforceRateLimit(request, options.rateLimits?.reads);
+    const selectors = parseReadSelectors(url);
     const result = stripLegacyAbsoluteExpiry(await service.read({
-      after: validateCursor(url.searchParams.get("after")),
+      after: selectors.after,
+      ...(selectors.limit === undefined ? {} : { limit: selectors.limit }),
       room: agentMatch[1],
+      ...(selectors.through === undefined ? {} : { through: selectors.through }),
     })) as unknown as ReadRoomResponse;
-    const document = buildAgentRepresentation(result);
+    const document = buildAgentRepresentation(result, selectors.bounded ? { limit: selectors.limit ?? DEFAULT_READ_LIMIT } : undefined);
     return request.headers.get("accept")?.toLowerCase().includes("application/json")
       ? jsonResponse(document)
       : textResponse(renderAgentText(document));
@@ -396,8 +399,13 @@ async function route(request: Request, service: RoomService, options: MsgWorkerO
     if (request.method === "GET") {
       if (!service.read) return notFound();
       await enforceRateLimit(request, options.rateLimits?.reads);
-      const after = validateCursor(url.searchParams.get("after"));
-      const result = stripLegacyAbsoluteExpiry(await service.read({ after, room })) as unknown as ReadRoomResponse;
+      const selectors = parseReadSelectors(url);
+      const result = stripLegacyAbsoluteExpiry(await service.read({
+        after: selectors.after,
+        ...(selectors.limit === undefined ? {} : { limit: selectors.limit }),
+        room,
+        ...(selectors.through === undefined ? {} : { through: selectors.through }),
+      })) as unknown as ReadRoomResponse;
       if (negotiateRepresentation(request.headers.get("accept")) === "html") {
         if (selectBrowserView(url, request.headers.get("cookie")) === "agent") {
           return htmlResponse(renderAgentRoomPage(result, url));
@@ -405,7 +413,9 @@ async function route(request: Request, service: RoomService, options: MsgWorkerO
         const page = renderBrowserDocument({ pushPublicKey: options.pushConfigured ? options.pushVapidPublicKey : undefined, room, title: "Temporary conversation", url });
         return htmlResponse(page.html, 200, page.styleNonce);
       }
-      const etag = roomEtag(result.latest_message, after);
+      const etag = selectors.bounded
+        ? roomEtag(result.latest_message, selectors.after, { expiresAt: result.expires_at, limit: selectors.limit ?? DEFAULT_READ_LIMIT, through: result.through })
+        : roomEtag(result.latest_message, selectors.after);
       if (request.headers.get("if-none-match") === etag) {
         return new Response(null, { headers: { etag, "retry-after": "5" }, status: 304 });
       }
@@ -450,6 +460,25 @@ async function route(request: Request, service: RoomService, options: MsgWorkerO
     404,
     negotiateRepresentation(request.headers.get("accept")),
   );
+}
+
+interface ReadSelectors {
+  readonly after: number;
+  readonly bounded: boolean;
+  readonly limit?: number;
+  readonly through?: number;
+}
+
+function parseReadSelectors(url: URL): ReadSelectors {
+  const bounded = url.searchParams.has("limit") || url.searchParams.has("through");
+  const limit = validateReadLimit(url.searchParams.get("limit"));
+  const through = validateThrough(url.searchParams.get("through"));
+  return {
+    after: bounded ? validateBoundedCursor(url.searchParams.get("after"), "after") : validateCursor(url.searchParams.get("after")),
+    bounded,
+    ...(limit === undefined ? {} : { limit }),
+    ...(through === undefined ? {} : { through }),
+  };
 }
 
 async function enforceRateLimit(request: Request, binding: MsgRateLimit | undefined): Promise<void> {

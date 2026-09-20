@@ -132,7 +132,11 @@ export interface RoomService {
 
 export interface ReadRoomInput {
   readonly after: number;
+  /** A positive page size opts the read into bounded mode. */
+  readonly limit?: number;
   readonly room: string;
+  /** An inclusive snapshot boundary opts the read into bounded mode. */
+  readonly through?: number;
 }
 
 export interface RoomMessage extends Message {
@@ -151,10 +155,18 @@ export interface RoomReadResult {
   readonly access_warning?: string;
   readonly conversation_url: string;
   readonly expires_at: string;
+  /** Present only for bounded reads. */
+  readonly has_more?: boolean;
   readonly latest_message: number;
   readonly messages: readonly RoomMessage[];
+  /** Present only for bounded reads. */
+  readonly next_after?: number;
+  /** Present only when the first delivered message exceeded the page budget. */
+  readonly oversized_message?: true;
   readonly protocol_version: typeof PROTOCOL_VERSION;
   readonly share_message: string;
+  /** Present only for bounded reads. */
+  readonly through?: number;
   readonly wait: WaitMetadata;
 }
 

@@ -10,9 +10,10 @@ test("parses a wait command with an integer cursor and duration timeout", () => 
   });
 });
 
-test("rejects a non-production conversation URL and non-positive cursor", () => {
+test("rejects a non-production conversation URL and malformed cursor", () => {
   expect(() => parseWaitCommand(["wait", "https://example.test/room-1", "--after", "4"])).toThrow("https://msg.0000.chat/{room}");
-  expect(() => parseWaitCommand(["wait", "https://msg.0000.chat/room-1", "--after", "0"])).toThrow("positive integer");
+  expect(parseWaitCommand(["wait", "https://msg.0000.chat/room-1", "--after", "0"])).toMatchObject({ after: 0 });
+  expect(() => parseWaitCommand(["wait", "https://msg.0000.chat/room-1", "--after", "9007199254740992"])).toThrow("safe integer");
 });
 
 test("returns the first read result when messages already exist", async () => {
