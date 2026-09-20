@@ -21,4 +21,3 @@ This breakdown maps every numbered user story in the Room Notifications spec to 
 | 03 Recover and manage webhook delivery | 4, 6–8 (manual controls and secret rotation), 23 (explicit disable/re-enable behavior), 24, 27 (full management parity) |
 | 04 Subscribe to browser push for a room | 28–32, 34 (push delivery TTL), 35, 36–37 (push lifetime and cleanup) |
 | 05 Suppress redundant browser alerts | 33–34 (focus, own-post suppression, and same-room collapse) |
-

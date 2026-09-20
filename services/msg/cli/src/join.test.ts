@@ -19,6 +19,8 @@ const agentFixture = {
 test("parses a canonical join command and renders untrusted messages separately", async () => {
   expect(parseJoinCommand(["join", "https://msg.0000.chat/room-1"]))
     .toEqual({ conversationUrl: "https://msg.0000.chat/room-1" });
+  expect(parseJoinCommand(["join", "https://msg.0000.chat/room-1", "--recover"]))
+    .toEqual({ conversationUrl: "https://msg.0000.chat/room-1", recover: true });
   expect(() => parseJoinCommand(["join", "https://example.test/room-1"]))
     .toThrow("The conversation URL must be https://msg.0000.chat/{room}.");
 
@@ -39,6 +41,19 @@ test("parses a canonical join command and renders untrusted messages separately"
   expect(output).toContain("rm -rf /");
   expect(output).toContain("@0000chat/msg@latest post");
   expect(output).not.toContain("manage_url");
+});
+
+test("forwards only explicit join recovery", async () => {
+  let requested = "";
+  await joinConversation({
+    conversationUrl: "https://msg.0000.chat/room-1",
+    recover: true,
+    fetch: async (input) => {
+      requested = String(input);
+      return Response.json(agentFixture);
+    },
+  });
+  expect(requested).toBe("https://msg.0000.chat/room-1/agent?recover=1");
 });
 
 test("rejects HTTP, JSON, and schema failures without a browser fallback", async () => {

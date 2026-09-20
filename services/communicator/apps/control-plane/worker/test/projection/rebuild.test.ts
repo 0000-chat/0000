@@ -17,6 +17,7 @@ import { deriveManifestPrefix } from "../../archive/keys";
 import { encodeReplayCursor } from "../../archive/reader";
 import { canonicalJsonStringify } from "../../archive/canonical-json";
 import { sha256Hex } from "../../archive/codec";
+import { clearDirectory } from "../support/directory-fixtures";
 
 const DERIVED_TABLES = [
   "resource_tombstones",
@@ -86,6 +87,58 @@ const tenantCounter = { value: 0 };
 const newTenant = (): string => {
   tenantCounter.value += 1;
   return `tenant_rebuild_${tenantCounter.value}`;
+};
+
+const seedRebuildDirectory = async (tenant: string): Promise<void> => {
+  const database = env.CONTROL_DB as D1Database;
+  const timestamp = "2026-09-07T00:00:00.000Z";
+  await clearDirectory(database);
+  await database.batch([
+    database
+      .prepare(
+        "INSERT INTO tenants (id, slug, display_name, status, created_at, updated_at) VALUES (?, ?, ?, 'active', ?, ?)",
+      )
+      .bind(tenant, tenant, "Rebuild fixture", timestamp, timestamp),
+    database
+      .prepare(
+        "INSERT INTO principals (id, issuer, subject, principal_type, display_name, status, created_at, updated_at) VALUES (?, ?, ?, 'human', ?, 'active', ?, ?)",
+      )
+      .bind(
+        "principal_rebuild",
+        "https://issuer.example/",
+        `rebuild-${tenant}`,
+        "Rebuild fixture principal",
+        timestamp,
+        timestamp,
+      ),
+    database
+      .prepare(
+        "INSERT INTO memberships (id, tenant_id, principal_id, role, status, created_at, updated_at) VALUES (?, ?, ?, 'owner', 'active', ?, ?)",
+      )
+      .bind(
+        "membership_rebuild",
+        tenant,
+        "principal_rebuild",
+        timestamp,
+        timestamp,
+      ),
+    database
+      .prepare(
+        "INSERT INTO identities (id, tenant_id, identity_kind, display_name, status, created_at, updated_at) VALUES (?, ?, 'human', ?, 'active', ?, ?)",
+      )
+      .bind(
+        "identity_a",
+        tenant,
+        "Rebuild fixture identity",
+        timestamp,
+        timestamp,
+      ),
+    database
+      .prepare(
+        "INSERT INTO identity_grants (tenant_id, membership_id, identity_id, operation_scope, created_at) VALUES (?, ?, ?, 'conversation.read', ?)",
+      )
+      .bind(tenant, "membership_rebuild", "identity_a", timestamp),
+  ]);
 };
 
 const eventFor = ({
@@ -331,6 +384,7 @@ const nextSocketClose = (socket: WebSocket): Promise<number> =>
 describe("TenantProjectionDO resumable rebuilds", () => {
   it("sends the next-generation reset before closing sockets and never broadcasts replay pages", async () => {
     const tenant = newTenant();
+    await seedRebuildDirectory(tenant);
     const stub = await initialize(tenant);
     const issuedAt = new Date(Date.now() - 1_000);
     const realtimeContext = {
@@ -417,6 +471,77 @@ describe("TenantProjectionDO resumable rebuilds", () => {
         "connected",
         "reset_required",
       ]);
+    } finally {
+      if (socket.readyState !== 3) socket.close(1000, "test complete");
+    }
+  });
+
+  it("does not reset a socket after its current read grant is revoked", async () => {
+    const tenant = newTenant();
+    await seedRebuildDirectory(tenant);
+    const stub = await initialize(tenant);
+    const issuedAt = new Date(Date.now() - 1_000);
+    const realtimeContext = {
+      schema_version: 1 as const,
+      tenant_id: tenant,
+      principal_id: "principal_rebuild",
+      membership_id: "membership_rebuild",
+      subscriptions: [
+        { identity_id: "identity_a", families: ["projection"] as const },
+      ],
+      resume: [],
+      issued_at: issuedAt.toISOString(),
+      expires_at: new Date(issuedAt.getTime() + 30_000).toISOString(),
+    };
+    const response = await stub.fetch(
+      new Request("https://tenant-projection.internal/realtime", {
+        method: "GET",
+        headers: {
+          Upgrade: "websocket",
+          Connection: "Upgrade",
+          "Sec-WebSocket-Protocol": REALTIME_SUBPROTOCOL,
+          "X-Communicator-Realtime-Context": JSON.stringify(realtimeContext),
+        },
+      }),
+    );
+    expect(response.status).toBe(101);
+    const socket = response.webSocket;
+    if (socket === null) throw new Error("missing realtime socket");
+    const frames: Record<string, unknown>[] = [];
+    socket.addEventListener("message", (event) => {
+      frames.push(JSON.parse(String(event.data)) as Record<string, unknown>);
+    });
+    const connected = nextSocketFrame(
+      socket,
+      (frame) => frame.type === "connected",
+    );
+    socket.accept();
+    await connected;
+    const reset = nextSocketFrame(
+      socket,
+      (frame) => frame.type === "reset_required",
+    );
+    const closed = nextSocketClose(socket);
+
+    try {
+      await (env.CONTROL_DB as D1Database)
+        .prepare(
+          "DELETE FROM identity_grants WHERE tenant_id = ? AND membership_id = ? AND identity_id = ? AND operation_scope = 'conversation.read'",
+        )
+        .bind(tenant, "membership_rebuild", "identity_a")
+        .run();
+
+      await expect(
+        begin(stub, tenant, "rebuild_socket_reset_revoked", 1),
+      ).resolves.toMatchObject({
+        state: "rebuilding",
+        generation: 2,
+      });
+      await expect(reset).rejects.toThrow(
+        "Timed out waiting for realtime frame",
+      );
+      await expect(closed).resolves.toBe(1008);
+      expect(frames.map((frame) => frame.type)).toEqual(["connected"]);
     } finally {
       if (socket.readyState !== 3) socket.close(1000, "test complete");
     }

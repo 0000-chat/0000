@@ -1,7 +1,7 @@
 import { ROOM_LIMITS } from "./room-domain";
 import { WEBHOOK_RETRY_INITIAL_DELAY_MS, WEBHOOK_RETRY_WINDOW_MS } from "./webhook-policy";
 
-export const CURRENT_ROOM_SCHEMA_VERSION = 7;
+export const CURRENT_ROOM_SCHEMA_VERSION = 8;
 
 interface SqlStorage {
   exec(query: string, ...values: unknown[]): Iterable<unknown>;
@@ -71,11 +71,24 @@ function applyMigration(sql: SqlStorage, version: number, inactivityTtlMs: numbe
     return;
   }
   if (version === 4) {
+    // Ownership and service-local participation are separate durable facts.
+    // Legacy rows remain explicitly unowned until a valid link establishes a
+    // participant grant; no visitor is promoted to owner by this migration.
     const columns = rows<{ name: string }>(sql.exec("PRAGMA table_info(room_state)"));
+    if (!columns.some((column) => column.name === "owner_guest_id")) sql.exec("ALTER TABLE room_state ADD COLUMN owner_guest_id TEXT");
     if (!columns.some((column) => column.name === "notification_id")) sql.exec("ALTER TABLE room_state ADD COLUMN notification_id TEXT");
     const roomsWithoutNotificationId = rows<{ singleton: number }>(sql.exec("SELECT singleton FROM room_state WHERE notification_id IS NULL"));
     for (const room of roomsWithoutNotificationId) sql.exec("UPDATE room_state SET notification_id = ?, schema_version = ? WHERE singleton = ?", crypto.randomUUID(), CURRENT_ROOM_SCHEMA_VERSION, room.singleton);
     sql.exec(`
+      CREATE TABLE IF NOT EXISTS room_acl (
+        guest_id TEXT NOT NULL,
+        source TEXT NOT NULL CHECK (source IN ('owner', 'public', 'management')),
+        capabilities TEXT NOT NULL,
+        active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1)),
+        created_at INTEGER NOT NULL,
+        PRIMARY KEY (guest_id, source)
+      );
+      CREATE INDEX IF NOT EXISTS room_acl_room_guest ON room_acl(guest_id, source);
       CREATE TABLE IF NOT EXISTS webhook_endpoints (
         id TEXT PRIMARY KEY, url TEXT NOT NULL, secret TEXT NOT NULL,
         created_at INTEGER NOT NULL, status TEXT NOT NULL CHECK(status = 'active')
@@ -92,10 +105,13 @@ function applyMigration(sql: SqlStorage, version: number, inactivityTtlMs: numbe
       CREATE INDEX IF NOT EXISTS webhook_deliveries_endpoint ON webhook_deliveries(endpoint_id, created_at DESC);
       CREATE INDEX IF NOT EXISTS webhook_deliveries_retention ON webhook_deliveries(created_at);
     `);
-    sql.exec("UPDATE room_state SET schema_version = ? WHERE singleton = 1", CURRENT_ROOM_SCHEMA_VERSION);
     return;
   }
   if (version === 5) {
+    const columns = rows<{ name: string }>(sql.exec("PRAGMA table_info(room_acl)"));
+    if (!columns.some((column) => column.name === "grant_id")) sql.exec("ALTER TABLE room_acl ADD COLUMN grant_id TEXT");
+    const webhookTables = rows<{ name: string }>(sql.exec("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'webhook_endpoints'"));
+    if (webhookTables.length === 0) createVersionFourWebhookTables(sql);
     sql.exec("ALTER TABLE webhook_endpoints RENAME TO webhook_endpoints_v4");
     sql.exec(`
       CREATE TABLE webhook_endpoints (
@@ -202,34 +218,177 @@ function applyMigration(sql: SqlStorage, version: number, inactivityTtlMs: numbe
     return;
   }
   if (version === 6) {
-    sql.exec("ALTER TABLE webhook_deliveries ADD COLUMN manual_redelivery_requested_at INTEGER");
+    const columns = rows<{ name: string }>(sql.exec("PRAGMA table_info(room_state)"));
+    if (!columns.some((column) => column.name === "creation_guest_id")) sql.exec("ALTER TABLE room_state ADD COLUMN creation_guest_id TEXT");
+    if (!columns.some((column) => column.name === "owner_organization_id")) sql.exec("ALTER TABLE room_state ADD COLUMN owner_organization_id TEXT");
+    if (!columns.some((column) => column.name === "owner_subject_id")) sql.exec("ALTER TABLE room_state ADD COLUMN owner_subject_id TEXT");
+    if (!columns.some((column) => column.name === "links_revoked")) sql.exec("ALTER TABLE room_state ADD COLUMN links_revoked INTEGER NOT NULL DEFAULT 0 CHECK (links_revoked IN (0, 1))");
+    sql.exec("UPDATE room_state SET creation_guest_id = owner_guest_id WHERE creation_guest_id IS NULL AND owner_guest_id IS NOT NULL");
+    sql.exec(`
+      CREATE TABLE IF NOT EXISTS claim_receipts (
+        idempotency_key TEXT PRIMARY KEY,
+        request_digest TEXT NOT NULL,
+        original_guest_id TEXT NOT NULL,
+        claimant_subject_id TEXT NOT NULL,
+        organization_id TEXT NOT NULL,
+        revoke_links INTEGER NOT NULL CHECK (revoke_links IN (0, 1)),
+        claimed_at INTEGER NOT NULL
+      )
+    `);
+    const webhookColumns = rows<{ name: string }>(sql.exec("PRAGMA table_info(webhook_deliveries)"));
+    if (!webhookColumns.some((column) => column.name === "manual_redelivery_requested_at")) sql.exec("ALTER TABLE webhook_deliveries ADD COLUMN manual_redelivery_requested_at INTEGER");
     sql.exec("UPDATE room_state SET schema_version = ? WHERE singleton = 1", CURRENT_ROOM_SCHEMA_VERSION);
     return;
   }
   if (version === 7) {
-    sql.exec("ALTER TABLE messages ADD COLUMN source_browser_id TEXT");
-    sql.exec(`
-      CREATE TABLE push_subscriptions (
-        id TEXT PRIMARY KEY, source_browser_id TEXT NOT NULL UNIQUE,
-        endpoint TEXT NOT NULL UNIQUE, p256dh TEXT NOT NULL, auth TEXT NOT NULL,
-        created_at INTEGER NOT NULL
-      );
-      CREATE TABLE push_deliveries (
-        id TEXT PRIMARY KEY, subscription_id TEXT NOT NULL, event_id TEXT NOT NULL,
-        message_id TEXT NOT NULL, message_sequence INTEGER NOT NULL,
-        created_at INTEGER NOT NULL, due_at INTEGER NOT NULL, retry_expires_at INTEGER NOT NULL,
-        attempted_at INTEGER, completed_at INTEGER, lease_expires_at INTEGER,
-        status TEXT NOT NULL CHECK(status IN ('pending', 'sending', 'retrying', 'delivered', 'failed')),
-        attempt_count INTEGER NOT NULL, failure_category TEXT
-      );
-      CREATE INDEX push_deliveries_due ON push_deliveries(status, due_at, retry_expires_at, created_at);
-      CREATE INDEX push_deliveries_subscription ON push_deliveries(subscription_id, created_at DESC);
-      CREATE INDEX push_deliveries_retention ON push_deliveries(created_at);
-    `);
+    ensurePlatformSchema(sql);
+    ensureNotificationSchema(sql);
+    sql.exec("UPDATE room_state SET schema_version = ? WHERE singleton = 1", CURRENT_ROOM_SCHEMA_VERSION);
+    return;
+  }
+  if (version === 8) {
+    // Upstream notifications and Platform both shipped schema version 7.
+    // This forward reconciliation is deliberately a new version so an
+    // already-version-7 room cannot skip either side of the merged schema.
+    ensurePlatformSchema(sql);
+    ensureNotificationSchema(sql);
     sql.exec("UPDATE room_state SET schema_version = ? WHERE singleton = 1", CURRENT_ROOM_SCHEMA_VERSION);
     return;
   }
   throw new Error("The room schema migration is not defined.");
+}
+
+/** Reconcile Platform ownership state without promoting any existing guest. */
+function ensurePlatformSchema(sql: SqlStorage): void {
+  const stateColumns = rows<{ name: string }>(sql.exec("PRAGMA table_info(room_state)"));
+  if (!stateColumns.some((column) => column.name === "creation_guest_id")) sql.exec("ALTER TABLE room_state ADD COLUMN creation_guest_id TEXT");
+  if (!stateColumns.some((column) => column.name === "owner_guest_id")) sql.exec("ALTER TABLE room_state ADD COLUMN owner_guest_id TEXT");
+  if (!stateColumns.some((column) => column.name === "owner_organization_id")) sql.exec("ALTER TABLE room_state ADD COLUMN owner_organization_id TEXT");
+  if (!stateColumns.some((column) => column.name === "owner_subject_id")) sql.exec("ALTER TABLE room_state ADD COLUMN owner_subject_id TEXT");
+  if (!stateColumns.some((column) => column.name === "links_revoked")) sql.exec("ALTER TABLE room_state ADD COLUMN links_revoked INTEGER NOT NULL DEFAULT 0 CHECK (links_revoked IN (0, 1))");
+  sql.exec("UPDATE room_state SET creation_guest_id = owner_guest_id WHERE creation_guest_id IS NULL AND owner_guest_id IS NOT NULL");
+  sql.exec(`
+    CREATE TABLE IF NOT EXISTS room_acl (
+      guest_id TEXT NOT NULL,
+      source TEXT NOT NULL CHECK (source IN ('owner', 'public', 'management')),
+      capabilities TEXT NOT NULL,
+      active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1)),
+      created_at INTEGER NOT NULL,
+      grant_id TEXT,
+      PRIMARY KEY (guest_id, source)
+    );
+    CREATE INDEX IF NOT EXISTS room_acl_room_guest ON room_acl(guest_id, source);
+    CREATE TABLE IF NOT EXISTS claim_receipts (
+      idempotency_key TEXT PRIMARY KEY,
+      request_digest TEXT NOT NULL,
+      original_guest_id TEXT NOT NULL,
+      claimant_subject_id TEXT NOT NULL,
+      organization_id TEXT NOT NULL,
+      revoke_links INTEGER NOT NULL CHECK (revoke_links IN (0, 1)),
+      claimed_at INTEGER NOT NULL
+    );
+  `);
+  const aclColumns = rows<{ name: string }>(sql.exec("PRAGMA table_info(room_acl)"));
+  if (!aclColumns.some((column) => column.name === "grant_id")) sql.exec("ALTER TABLE room_acl ADD COLUMN grant_id TEXT");
+}
+
+function createVersionFourWebhookTables(sql: SqlStorage): void {
+  sql.exec(`
+    CREATE TABLE IF NOT EXISTS webhook_endpoints (
+      id TEXT PRIMARY KEY, url TEXT NOT NULL, secret TEXT NOT NULL,
+      created_at INTEGER NOT NULL, status TEXT NOT NULL CHECK(status = 'active')
+    );
+    CREATE TABLE IF NOT EXISTS webhook_deliveries (
+      id TEXT PRIMARY KEY, endpoint_id TEXT NOT NULL, event_id TEXT NOT NULL,
+      message_id TEXT NOT NULL, message_sequence INTEGER NOT NULL,
+      created_at INTEGER NOT NULL, due_at INTEGER NOT NULL,
+      attempted_at INTEGER, completed_at INTEGER, lease_expires_at INTEGER,
+      status TEXT NOT NULL CHECK(status IN ('pending', 'sending', 'delivered', 'failed')),
+      attempt_count INTEGER NOT NULL, failure_category TEXT
+    );
+    CREATE INDEX IF NOT EXISTS webhook_deliveries_due ON webhook_deliveries(status, due_at, created_at);
+    CREATE INDEX IF NOT EXISTS webhook_deliveries_endpoint ON webhook_deliveries(endpoint_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS webhook_deliveries_retention ON webhook_deliveries(created_at);
+  `);
+}
+
+function ensureNotificationSchema(sql: SqlStorage): void {
+  const stateColumns = rows<{ name: string }>(sql.exec("PRAGMA table_info(room_state)"));
+  if (!stateColumns.some((column) => column.name === "notification_id")) sql.exec("ALTER TABLE room_state ADD COLUMN notification_id TEXT");
+  const roomsWithoutNotificationId = rows<{ singleton: number }>(sql.exec("SELECT singleton FROM room_state WHERE notification_id IS NULL"));
+  for (const room of roomsWithoutNotificationId) sql.exec("UPDATE room_state SET notification_id = ? WHERE singleton = ?", crypto.randomUUID(), room.singleton);
+
+  createVersionFourWebhookTables(sql);
+  const endpointColumns = rows<{ name: string }>(sql.exec("PRAGMA table_info(webhook_endpoints)"));
+  if (!endpointColumns.some((column) => column.name === "failure_started_at")) {
+    sql.exec("ALTER TABLE webhook_endpoints RENAME TO webhook_endpoints_v4");
+    sql.exec(`
+      CREATE TABLE webhook_endpoints (
+        id TEXT PRIMARY KEY, url TEXT NOT NULL, secret TEXT NOT NULL,
+        created_at INTEGER NOT NULL, status TEXT NOT NULL CHECK(status IN ('active', 'disabled')),
+        failure_started_at INTEGER, last_success_at INTEGER, last_failure_at INTEGER,
+        recovered_at INTEGER, disabled_at INTEGER
+      )
+    `);
+    sql.exec("INSERT INTO webhook_endpoints (id, url, secret, created_at, status) SELECT id, url, secret, created_at, status FROM webhook_endpoints_v4");
+    sql.exec("DROP TABLE webhook_endpoints_v4");
+  }
+  const deliveryColumns = rows<{ name: string }>(sql.exec("PRAGMA table_info(webhook_deliveries)"));
+  if (!deliveryColumns.some((column) => column.name === "retry_expires_at")) {
+    sql.exec("ALTER TABLE webhook_deliveries RENAME TO webhook_deliveries_v4");
+    sql.exec(`
+      CREATE TABLE webhook_deliveries (
+        id TEXT PRIMARY KEY, endpoint_id TEXT NOT NULL, event_id TEXT NOT NULL,
+        message_id TEXT NOT NULL, message_sequence INTEGER NOT NULL,
+        created_at INTEGER NOT NULL, due_at INTEGER NOT NULL, retry_expires_at INTEGER NOT NULL,
+        attempted_at INTEGER, completed_at INTEGER, lease_expires_at INTEGER, cancelled_at INTEGER,
+        status TEXT NOT NULL CHECK(status IN ('pending', 'sending', 'retrying', 'delivered', 'failed', 'cancelled')),
+        attempt_count INTEGER NOT NULL, failure_category TEXT
+      )
+    `);
+    sql.exec(`
+      INSERT INTO webhook_deliveries (id, endpoint_id, event_id, message_id, message_sequence, created_at, due_at, retry_expires_at, attempted_at, completed_at, lease_expires_at, cancelled_at, status, attempt_count, failure_category)
+      SELECT id, endpoint_id, event_id, message_id, message_sequence, created_at, due_at, created_at + ${WEBHOOK_RETRY_WINDOW_MS}, attempted_at, completed_at, lease_expires_at, NULL, status, attempt_count, failure_category
+      FROM webhook_deliveries_v4
+    `);
+    sql.exec("DROP TABLE webhook_deliveries_v4");
+  }
+  const currentDeliveryColumns = rows<{ name: string }>(sql.exec("PRAGMA table_info(webhook_deliveries)"));
+  if (!currentDeliveryColumns.some((column) => column.name === "manual_redelivery_requested_at")) sql.exec("ALTER TABLE webhook_deliveries ADD COLUMN manual_redelivery_requested_at INTEGER");
+  sql.exec(`
+    CREATE TABLE IF NOT EXISTS webhook_delivery_attempts (
+      delivery_id TEXT NOT NULL, attempt_number INTEGER NOT NULL,
+      attempted_at INTEGER NOT NULL, completed_at INTEGER,
+      status TEXT NOT NULL CHECK(status IN ('sending', 'delivered', 'failed')),
+      failure_category TEXT,
+      PRIMARY KEY (delivery_id, attempt_number)
+    );
+    CREATE INDEX IF NOT EXISTS webhook_deliveries_due ON webhook_deliveries(status, due_at, retry_expires_at, created_at);
+    CREATE INDEX IF NOT EXISTS webhook_deliveries_endpoint ON webhook_deliveries(endpoint_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS webhook_deliveries_retention ON webhook_deliveries(created_at);
+    CREATE INDEX IF NOT EXISTS webhook_delivery_attempts_delivery ON webhook_delivery_attempts(delivery_id, attempt_number);
+  `);
+
+  const messageColumns = rows<{ name: string }>(sql.exec("PRAGMA table_info(messages)"));
+  if (!messageColumns.some((column) => column.name === "source_browser_id")) sql.exec("ALTER TABLE messages ADD COLUMN source_browser_id TEXT");
+  sql.exec(`
+    CREATE TABLE IF NOT EXISTS push_subscriptions (
+      id TEXT PRIMARY KEY, source_browser_id TEXT NOT NULL UNIQUE,
+      endpoint TEXT NOT NULL UNIQUE, p256dh TEXT NOT NULL, auth TEXT NOT NULL,
+      created_at INTEGER NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS push_deliveries (
+      id TEXT PRIMARY KEY, subscription_id TEXT NOT NULL, event_id TEXT NOT NULL,
+      message_id TEXT NOT NULL, message_sequence INTEGER NOT NULL,
+      created_at INTEGER NOT NULL, due_at INTEGER NOT NULL, retry_expires_at INTEGER NOT NULL,
+      attempted_at INTEGER, completed_at INTEGER, lease_expires_at INTEGER,
+      status TEXT NOT NULL CHECK(status IN ('pending', 'sending', 'retrying', 'delivered', 'failed')),
+      attempt_count INTEGER NOT NULL, failure_category TEXT
+    );
+    CREATE INDEX IF NOT EXISTS push_deliveries_due ON push_deliveries(status, due_at, retry_expires_at, created_at);
+    CREATE INDEX IF NOT EXISTS push_deliveries_subscription ON push_deliveries(subscription_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS push_deliveries_retention ON push_deliveries(created_at);
+  `);
 }
 
 function rows<T>(cursor: Iterable<unknown>): T[] { return [...cursor] as T[]; }

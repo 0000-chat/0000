@@ -316,6 +316,62 @@ test("uses only the Durable Object clock for expiry and inactivity refresh", asy
   expect((await durable.fetch(request("/messages", { now: 0, input: { content: "late", author: "a", display_name: "a", semantic_type: "message" } }))).status).toBe(410);
 });
 
+test("checks inactivity inside the claim transaction before a new claim or receipt replay", async () => {
+  const originalFetch = globalThis.fetch;
+  let now = 1_000;
+  const env = {
+    MSG_AUTH_REQUIRED: "1",
+    MSG_PLATFORM_BASE_URL: "https://platform.test",
+    MSG_PLATFORM_AUTHORITY: "platform-test",
+    MSG_PLATFORM_AUDIENCE: "https://msg.test",
+    MSG_PLATFORM_SERVICE_VERIFIER: "service-verifier",
+  };
+  const database = new Database(":memory:");
+  const first = await room(database, () => now, env);
+  const claimRequest = (key: string) => new Request("https://room/claim?resource=room-1", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      authorization: "Bearer human-claim",
+      "x-msg-auth-kind": "claim",
+      "x-msg-guest-id": "guest-owner",
+    },
+    body: JSON.stringify({ idempotency_key: key, request_digest: "digest", revoke_links: false }),
+  });
+  const platformPrincipal = {
+    version: 1,
+    authority: "platform-test",
+    kind: "human",
+    subjectId: "human-claimant",
+    credentialId: "human-credential",
+    audience: "https://msg.test",
+    capabilities: ["msg:claim"],
+    expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    organizationId: "org-claimant",
+    membershipId: "membership-claimant",
+  };
+  globalThis.fetch = (async () => Response.json({ status: "authenticated", principal: platformPrincipal }, { status: 200 })) as typeof fetch;
+  try {
+    await first.room.fetch(request("/initialize", { management_hash: "hash", owner_guest_id: "guest-owner", initial: { content: "first", author: "owner", display_name: "Owner", semantic_type: "message" } }));
+    expect((await first.room.fetch(claimRequest("claim-before-expiry"))).status).toBe(200);
+    expect(database.query("SELECT COUNT(*) AS count FROM claim_receipts").get()).toEqual({ count: 1 });
+
+    now += ROOM_LIMITS.inactivityTtlMs + 1;
+    expect((await first.room.fetch(claimRequest("claim-before-expiry"))).status).toBe(410);
+    expect(database.query("SELECT status FROM room_state").get()).toEqual({ status: "deleted" });
+    expect(database.query("SELECT COUNT(*) AS count FROM claim_receipts").get()).toEqual({ count: 0 });
+
+    const secondDatabase = new Database(":memory:");
+    const second = await room(secondDatabase, () => now, env);
+    await second.room.fetch(request("/initialize", { management_hash: "hash", owner_guest_id: "guest-owner", initial: { content: "second", author: "owner", display_name: "Owner", semantic_type: "message" } }));
+    now += ROOM_LIMITS.inactivityTtlMs + 1;
+    expect((await second.room.fetch(claimRequest("new-claim-after-expiry"))).status).toBe(410);
+    expect(secondDatabase.query("SELECT status FROM room_state").get()).toEqual({ status: "deleted" });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("exports a complete ascending transcript with safety warnings", async () => {
   const { room: durable } = await room();
   await durable.fetch(request("/initialize", { management_hash: "hash", initial: { content: "first", author: "a", display_name: "Alpha", semantic_type: "message" } }));
@@ -424,4 +480,29 @@ test("accepts a reconnect cursor and reports the current latest sequence", async
   await durable.fetch(request("/messages", { now: now + 1, input: { content: "second", author: "a", display_name: "a", semantic_type: "message" } }));
   expect((await durable.fetch(new Request("https://room/live?after=1"))).status).toBe(101);
   expect(JSON.parse(context.sockets[0].sent[0])).toMatchObject({ type: "ready", latest_message: 2 });
+});
+
+test("preserves identity-authority HTTP statuses and tombstones at the DO boundary", async () => {
+  const originalFetch = globalThis.fetch;
+  const { room: durable } = await room(undefined, Date.now, {
+    MSG_AUTH_REQUIRED: "1",
+    MSG_PLATFORM_BASE_URL: "https://platform.test",
+    MSG_PLATFORM_AUTHORITY: "platform-test",
+    MSG_PLATFORM_AUDIENCE: "https://msg.test",
+    MSG_PLATFORM_SERVICE_VERIFIER: "service-verifier",
+  });
+  await durable.fetch(request("/initialize", { management_hash: "hash", initial: { content: "first", author: "a", display_name: "a", semantic_type: "message" } }));
+  try {
+    globalThis.fetch = (async () => Response.json({ status: "invalid_credential" }, { status: 401 })) as typeof fetch;
+    const invalid = await durable.fetch(new Request("https://room/read?resource=room-1", { headers: { authorization: "Bearer invalid", "x-msg-guest-id": "guest-1", "x-msg-source": "public" } }));
+    expect(invalid.status).toBe(401);
+    globalThis.fetch = (async () => { throw new Error("platform unavailable"); }) as typeof fetch;
+    const unavailable = await durable.fetch(new Request("https://room/read?resource=room-1", { headers: { authorization: "Bearer unavailable", "x-msg-guest-id": "guest-1", "x-msg-source": "public" } }));
+    expect(unavailable.status).toBe(503);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  await durable.fetch(new Request("https://room/operator-delete", { method: "POST" }));
+  const check = await durable.fetch(request("/access/check", { guest_id: "guest-1", source: "public", action: "read" }));
+  expect(check.status).toBe(410);
 });

@@ -1,10 +1,37 @@
 {
   "name": "@0000/platform",
   "private": true,
+  "type": "module",
   "version": "0.0.0",
-  "description": "Placeholder for the shared 0000 identity and control-plane service.",
+  "description": "Shared 0000 identity authority and experimental Worker/D1 authentication probe.",
   "scripts": {
-    "check": "bun ../../scripts/check-workspace.mjs --workspace @0000/platform",
-    "check:application": "./scripts/check"
+    "check": "sh scripts/check",
+    "dev": "bun scripts/wrangler-config.ts dev --local",
+    "generate:migration": "bun scripts/generate-migration.ts",
+    "test": "vitest run --config vitest.worker.config.ts && bun run test:config && bun run test:rate-limits && bun run test:native-boundaries && bun run test:restart",
+    "test:config": "bun test scripts/wrangler-config.test.ts",
+    "test:rate-limits": "bun scripts/test-native-rate-limits.mjs",
+    "test:native-boundaries": "bun scripts/test-platform-native-boundaries.mjs",
+    "test:restart": "bun scripts/test-restart.mjs",
+    "wrangler": "bun scripts/wrangler-config.ts",
+    "wrangler:types": "bun scripts/wrangler-config.ts types worker-configuration.d.ts --include-runtime=true",
+    "provision:service": "bun scripts/provision-service.ts",
+    "provision:oauth-client": "bun scripts/provision-oauth-client.ts",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@0000/contracts": "workspace:*",
+    "@0000/platform-client": "workspace:*",
+    "@better-auth/oauth-provider": "1.7.5",
+    "better-auth": "1.7.5",
+    "drizzle-orm": "0.45.2"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-plugin": "1.1.13",
+    "@types/node": "22.20.3",
+    "miniflare": "5.20260918.0-alpha",
+    "typescript": "7.0.2",
+    "vitest": "4.1.11",
+    "wrangler": "4.135.0"
   }
 }

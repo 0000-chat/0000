@@ -1,17 +1,31 @@
-import { spawn } from "node:child_process";
+import { execFile as execFileCallback, spawn } from "node:child_process";
 import { Buffer } from "node:buffer";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createInterface } from "node:readline";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 
 import { acquireMiniflareTestLock } from "./miniflare-test-lock";
+import {
+  buildMsgMiniflareRateLimits,
+  type MsgMiniflareRateLimitBinding,
+  type MsgRateLimitPolicy,
+} from "../../scripts/msg-rate-limit-policy";
 
 const appDirectory = fileURLToPath(new URL("../", import.meta.url));
 const temporaryDirectory = join(appDirectory, ".miniflare-tests");
 const workerEntry = fileURLToPath(new URL("../src/worker-entry.ts", import.meta.url));
 const nodeRuntimeEntry = fileURLToPath(new URL("./msg-worker.node-runtime.mjs", import.meta.url));
+const bunWorkerBundleTimeoutMs = 20_000;
+const bunWorkerBundleOutputLimit = 16 * 1024;
+const isolatedScenarioEnvironment = "MSG_PLATFORM_SCENARIO_CHILD";
+const isolatedScenarioOutputLimit = 64 * 1024;
+const isolatedScenarioTerminationGraceMs = 1_000;
+const isolatedScenarioDiagnosticsDirectory = join(temporaryDirectory, "isolated-scenario-diagnostics");
+const execFile = promisify(execFileCallback);
 let workerScriptPromise: Promise<string> | undefined;
+let isolatedScenarioDiagnosticCounter = 0;
 
 export const TEST_ROOM_LIMITS = {
   maxMessages: 4,
@@ -27,6 +41,188 @@ export const SHORT_LIVED_TEST_ROOM_LIMITS = {
   ...TEST_ROOM_LIMITS,
   inactivityTtlMs: 100,
   tombstoneTtlMs: 100,
+};
+
+export interface IsolatedScenarioResult {
+  readonly assertions: number;
+  readonly tests: number;
+}
+
+function isolatedScenarioMarker(scenario: string, scenarioFile: string): string {
+  return `${scenario}|${scenarioFile}`;
+}
+
+export function isMsgPlatformScenarioChild(scenario: string, scenarioFile: string): boolean {
+  return process.env[isolatedScenarioEnvironment] === isolatedScenarioMarker(scenario, scenarioFile);
+}
+
+function captureIsolatedScenarioOutput(current: string, chunk: Buffer | string): string {
+  return `${current}${chunk.toString()}`.slice(-isolatedScenarioOutputLimit);
+}
+
+async function writeIsolatedScenarioDiagnostics(scenario: string, output: string): Promise<string | undefined> {
+  try {
+    await mkdir(isolatedScenarioDiagnosticsDirectory, { recursive: true, mode: 0o700 });
+    await chmod(isolatedScenarioDiagnosticsDirectory, 0o700);
+    const suffix = `${process.pid}-${Date.now()}-${isolatedScenarioDiagnosticCounter++}`;
+    const safeScenario = scenario.replace(/[^a-zA-Z0-9._-]/gu, "_");
+    const path = join(isolatedScenarioDiagnosticsDirectory, `${safeScenario}-${suffix}.log`);
+    await writeFile(path, output, { encoding: "utf8", flag: "wx", mode: 0o600 });
+    return path;
+  } catch {
+    return undefined;
+  }
+}
+
+function parseIsolatedScenarioSummary(output: string, scenario: string): IsolatedScenarioResult {
+  const tests = [...output.matchAll(/(?:^|\n)\s*(\d+) pass\s*$/gmu)].at(-1)?.[1];
+  const failures = [...output.matchAll(/(?:^|\n)\s*(\d+) fail\s*$/gmu)].at(-1)?.[1];
+  const assertions = [...output.matchAll(/(?:^|\n)\s*(\d+) expect\(\) calls\s*$/gmu)].at(-1)?.[1];
+  if (tests !== "1" || failures !== "0" || assertions === undefined || Number(assertions) <= 0) {
+    throw new Error(`Isolated ${scenario} child did not report one passing test.`);
+  }
+  return { assertions: Number(assertions), tests: Number(tests) };
+}
+
+function isIsolatedScenarioProcessGroupAlive(child: ReturnType<typeof spawn>): boolean {
+  if (child.pid === undefined) return child.exitCode === null && child.signalCode === null;
+  try {
+    process.kill(-child.pid, 0);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "EPERM") return true;
+    return child.exitCode === null && child.signalCode === null;
+  }
+}
+
+function signalIsolatedScenarioProcessGroup(child: ReturnType<typeof spawn>, signal: NodeJS.Signals): void {
+  if (child.pid !== undefined) {
+    try {
+      process.kill(-child.pid, signal);
+      return;
+    } catch {
+      // The group may have ended between the liveness check and the signal.
+    }
+  }
+  if (child.exitCode === null && child.signalCode === null) {
+    try {
+      child.kill(signal);
+    } catch {
+      // The owned child may have exited while the signal was in flight.
+    }
+  }
+}
+
+async function waitForIsolatedScenarioProcessGroupExit(
+  child: ReturnType<typeof spawn>,
+  closed: Promise<{ code: number | null; error?: Error; signal: string | null }>,
+  timeoutMs: number,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (isIsolatedScenarioProcessGroupAlive(child) && Date.now() < deadline) {
+    await Promise.race([closed, new Promise<void>((resolve) => setTimeout(resolve, 25))]);
+  }
+}
+
+async function terminateIsolatedScenarioChild(
+  child: ReturnType<typeof spawn>,
+  closed: Promise<{ code: number | null; error?: Error; signal: string | null }>,
+): Promise<void> {
+  // Signal the owned process group even after the leader has exited. A child
+  // descendant can retain our stdout pipe after its leader closes.
+  signalIsolatedScenarioProcessGroup(child, "SIGTERM");
+  await waitForIsolatedScenarioProcessGroupExit(child, closed, isolatedScenarioTerminationGraceMs);
+  if (isIsolatedScenarioProcessGroupAlive(child)) {
+    signalIsolatedScenarioProcessGroup(child, "SIGKILL");
+    await waitForIsolatedScenarioProcessGroupExit(child, closed, isolatedScenarioTerminationGraceMs);
+  }
+}
+
+/** Runs one real Platform/msg scenario in a fresh Bun process. */
+export async function runMsgPlatformScenarioInChild(options: {
+  scenario: string;
+  scenarioFile: string;
+  timeoutMs: number;
+}): Promise<IsolatedScenarioResult> {
+  const marker = isolatedScenarioMarker(options.scenario, options.scenarioFile);
+  const child = spawn(process.execPath, ["test", options.scenarioFile], {
+    cwd: appDirectory,
+    detached: true,
+    env: { ...process.env, [isolatedScenarioEnvironment]: marker },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let output = "";
+  child.stdout?.on("data", (chunk: Buffer | string) => {
+    output = captureIsolatedScenarioOutput(output, chunk);
+  });
+  child.stderr?.on("data", (chunk: Buffer | string) => {
+    output = captureIsolatedScenarioOutput(output, chunk);
+  });
+  const closed = new Promise<{ code: number | null; error?: Error; signal: string | null }>((resolve) => {
+    let childError: Error | undefined;
+    child.once("error", (error) => {
+      childError = error instanceof Error ? error : new Error(String(error));
+    });
+    child.once("close", (code, signal) => resolve({ code, error: childError, signal }));
+  });
+  const watchdogMs = Math.max(1_000, options.timeoutMs - 5_000);
+  let timedOut = false;
+  let terminationPromise: Promise<void> | undefined;
+  const terminate = (): Promise<void> => {
+    if (!terminationPromise) terminationPromise = terminateIsolatedScenarioChild(child, closed);
+    return terminationPromise;
+  };
+  let watchdog: ReturnType<typeof setTimeout> | undefined;
+  let resolveWatchdog: (() => void) | undefined;
+  const watchdogSignal = new Promise<void>((resolve) => {
+    resolveWatchdog = resolve;
+    watchdog = setTimeout(() => {
+      timedOut = true;
+      void terminate().finally(() => resolve());
+    }, watchdogMs);
+  });
+  try {
+    const outcome = await Promise.race([
+      closed.then((result) => ({ kind: "closed" as const, result })),
+      watchdogSignal.then(() => ({ kind: "timeout" as const })),
+    ]);
+    if (outcome.kind === "timeout" || timedOut) {
+      const diagnosticsPath = await writeIsolatedScenarioDiagnostics(options.scenario, output);
+      throw new Error(`Isolated ${options.scenario} child exceeded its bounded runtime.${diagnosticsPath ? ` Diagnostics: ${diagnosticsPath}` : ""}`);
+    }
+    const result = outcome.result;
+    if (result.error || result.code !== 0 || result.signal !== null) {
+      const diagnosticsPath = await writeIsolatedScenarioDiagnostics(options.scenario, output);
+      throw new Error(`Isolated ${options.scenario} child failed (code=${result.code ?? "null"}, signal=${result.signal ?? "none"}).${diagnosticsPath ? ` Diagnostics: ${diagnosticsPath}` : ""}`);
+    }
+    let summary: IsolatedScenarioResult;
+    try {
+      summary = parseIsolatedScenarioSummary(output, options.scenario);
+    } catch (error) {
+      const diagnosticsPath = await writeIsolatedScenarioDiagnostics(options.scenario, output);
+      throw new Error(`Isolated ${options.scenario} child produced an invalid summary.${diagnosticsPath ? ` Diagnostics: ${diagnosticsPath}` : ""}`, { cause: error });
+    }
+    console.info(JSON.stringify({
+      assertions: summary.assertions,
+      event: "msg.platform.scenario.child",
+      outcome: "passed",
+      scenario: options.scenario,
+      tests: summary.tests,
+    }));
+    return summary;
+  } finally {
+    if (watchdog !== undefined) clearTimeout(watchdog);
+    resolveWatchdog?.();
+    await terminate();
+  }
+}
+
+/** Generous local bindings keep auth/integration fixtures focused on their own behavior. */
+export const TEST_MSG_RATE_LIMIT_POLICY: MsgRateLimitPolicy = {
+  creation: { limit: 100, namespace_id: "913001" },
+  reads: { limit: 1_000, namespace_id: "913002" },
+  posts: { limit: 100, namespace_id: "913003" },
+  live: { limit: 100, namespace_id: "913004" },
 };
 
 export interface MsgMiniflareRuntime {
@@ -69,17 +265,14 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 interface NodeRuntimeConfiguration {
-  bindings: {
-    MSG_TEST_MODE?: string;
-    MSG_TEST_NOW_MS?: string;
-    MSG_TEST_ROOM_LIMITS?: string;
-    MSG_VAPID_PRIVATE_KEY: string;
-    MSG_VAPID_PUBLIC_KEY: string;
-    MSG_VAPID_SUBJECT: string;
-  };
+  bindings: Record<string, string>;
   compatibilityDate: string;
+  d1Databases?: Record<string, string>;
+  d1MigrationPaths?: string[];
+  d1Persist?: string;
   durableObjects: { ConversationRoom: { className: string; useSQLite: boolean } };
   persistenceDirectory: string;
+  ratelimits: Readonly<Record<string, MsgMiniflareRateLimitBinding>>;
   script: string;
 }
 
@@ -103,6 +296,37 @@ interface NodeRuntimeProcess {
 export async function createMsgMiniflareTempDirectory(label: string): Promise<string> {
   await mkdir(temporaryDirectory, { recursive: true });
   return mkdtemp(join(temporaryDirectory, `${label}-`));
+}
+
+/** Builds a Worker bundle in a separate pinned Bun process and returns its script. */
+export async function buildWorkerBundleInChild(entrypoint: string): Promise<string> {
+  const buildDirectory = await createMsgMiniflareTempDirectory("bun-worker-build");
+  const outputPath = join(buildDirectory, "worker.js");
+  try {
+    await execFile(process.execPath, [
+      "build",
+      entrypoint,
+      "--external",
+      "cloudflare:workers",
+      "--format",
+      "esm",
+      "--target",
+      "browser",
+      "--outfile",
+      outputPath,
+    ], {
+      cwd: appDirectory,
+      killSignal: "SIGKILL",
+      maxBuffer: bunWorkerBundleOutputLimit,
+      timeout: bunWorkerBundleTimeoutMs,
+    });
+    return await readFile(outputPath, "utf8");
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new Error(`Bun Worker bundle failed: ${detail}`, { cause: error });
+  } finally {
+    await rm(buildDirectory, { force: true, recursive: true });
+  }
 }
 
 function workerScript(): Promise<string> {
@@ -344,9 +568,14 @@ async function startNodeRuntimeWithConfiguration(configuration: NodeRuntimeConfi
 export async function startMsgMiniflare(
   persistenceDirectory: string,
   limits = TEST_ROOM_LIMITS,
-  options: { readonly nowMs?: number; readonly testMode?: boolean } = {},
+  extraBindingsOrOptions: Record<string, string> | { readonly nowMs?: number; readonly testMode?: boolean } = {},
+  useTestLimits = true,
+  useOperations = false,
+  rateLimitPolicy: MsgRateLimitPolicy = TEST_MSG_RATE_LIMIT_POLICY,
 ): Promise<MsgMiniflareFixture> {
-  const testMode = options.testMode !== false;
+  const options = isStartOptions(extraBindingsOrOptions) ? extraBindingsOrOptions : {};
+  const extraBindings = isStartOptions(extraBindingsOrOptions) ? {} : extraBindingsOrOptions;
+  const testMode = isStartOptions(extraBindingsOrOptions) ? options.testMode !== false : useTestLimits;
   if (!testMode && options.nowMs !== undefined) throw new Error("The test clock requires explicit test mode.");
   const releaseRuntime = await acquireMiniflareTestLock();
   let runtime: NodeRuntimeProcess | undefined;
@@ -361,12 +590,23 @@ export async function startMsgMiniflare(
         MSG_VAPID_PRIVATE_KEY: TEST_VAPID_PRIVATE_KEY,
         MSG_VAPID_PUBLIC_KEY: TEST_VAPID_PUBLIC_KEY,
         MSG_VAPID_SUBJECT: TEST_VAPID_SUBJECT,
+        ...extraBindings,
       },
       compatibilityDate: "2026-05-15",
+      ...(useOperations ? {
+        d1Databases: { MSG_DB: "msg-operations" },
+        d1MigrationPaths: [
+          fileURLToPath(new URL("../migrations/0001_operations.sql", import.meta.url)),
+          fileURLToPath(new URL("../migrations/0002_operations_retention.sql", import.meta.url)),
+          fileURLToPath(new URL("../migrations/0003_creation_plan.sql", import.meta.url)),
+        ],
+        d1Persist: `${persistenceDirectory}-d1`,
+      } : {}),
       durableObjects: {
         ConversationRoom: { className: "ConversationRoom", useSQLite: true },
       },
       persistenceDirectory,
+      ratelimits: buildMsgMiniflareRateLimits(rateLimitPolicy),
       script,
     });
   } catch (error) {
@@ -424,4 +664,8 @@ export async function startMsgMiniflare(
       if (disposeFailed) throw disposeFailure;
     },
   };
+}
+
+function isStartOptions(value: Record<string, string> | { readonly nowMs?: number; readonly testMode?: boolean }): value is { readonly nowMs?: number; readonly testMode?: boolean } {
+  return Object.hasOwn(value, "nowMs") || Object.hasOwn(value, "testMode");
 }

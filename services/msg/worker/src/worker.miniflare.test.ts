@@ -1338,15 +1338,15 @@ test.serial("uses workerd alarms to tombstone then purge expired rooms", { timeo
   await withRuntime(async (miniflare) => {
     const { room } = await createRoom(miniflare);
     const live = await openSocket(socketUrl(await miniflare.ready, room.id));
-    await nextSocketMessage(live);
-    const expired = await nextSocketMessage(live);
+    await nextSocketMessage(live, 5_000);
+    const expired = await nextSocketMessage(live, 5_000);
     expect(JSON.parse(expired)).toMatchObject({ type: "conversation.expired" });
     // workerd v1.20260515.1 closes hibernating sockets with 1000 after the
     // Durable Object sends 1001; the expiry frame proves the alarm path ran.
-    expect(await nextSocketClose(live)).toBe(1000);
+    expect(await nextSocketClose(live, 5_000)).toBe(1000);
     expect((await miniflare.dispatchFetch(`https://msg.0000.chat/${room.id}`, { headers: { accept: "application/json" } })).status).toBe(410);
-    expect((await waitForStatus(miniflare, `/${room.id}`, 404)).status).toBe(404);
-  }, SHORT_LIVED_TEST_ROOM_LIMITS);
+    expect((await waitForStatus(miniflare, `/${room.id}`, 404, 5_000)).status).toBe(404);
+  }, { ...SHORT_LIVED_TEST_ROOM_LIMITS, inactivityTtlMs: 2_000, tombstoneTtlMs: 2_000 });
 });
 
 

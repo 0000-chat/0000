@@ -11,7 +11,7 @@ Before the first deploy, an operator must do these tasks.
 3. Add these keys to Phase at `/domains/0000-chat/msg-production` in the `development` environment. Do not print their values.
    - `MSG_D1_DATABASE_ID`
    - `MSG_DATA_ENCRYPTION_KEY_V1` — one 32-byte base64url key.
-   - `MSG_OPERATOR_TOKEN` — a high-entropy bearer token.
+   - `MSG_PLATFORM_OPERATOR_CREDENTIAL` — an issued Platform operator bearer.
 4. Confirm the existing Phase keys at `/shared/providers`: `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID`.
 5. Review the public policy text before launch. It must state that this anonymous relay does not provide a public email support address.
 
@@ -101,7 +101,7 @@ These are Worker configuration values. To change them, make a reviewed `main` co
 
 ## Operator reports and forced deletion
 
-The repository operator command sends requests only to `https://msg.0000.chat`. Load `MSG_OPERATOR_TOKEN` from Phase into a protected temporary environment. Do not echo it.
+The repository operator command sends requests only to `https://msg.0000.chat`. Load `MSG_PLATFORM_OPERATOR_CREDENTIAL` from the protected operator environment. Do not echo it.
 
 ```sh
 bun run msg:operator status
@@ -115,7 +115,7 @@ Use forced deletion only for an approved incident or abuse action. Treat room ID
 
 ## Key rotation
 
-`MSG_OPERATOR_TOKEN` can rotate through a reviewed deploy. Update the Phase value, deploy, then update every approved operator environment.
+Platform operator credentials rotate through the Platform credential lifecycle. Update the protected operator environment after issuing or revoking the approved credential.
 
 Do not replace `MSG_DATA_ENCRYPTION_KEY_V1` without a migration plan. It encrypts retained D1 creation records and abuse reports. The current Worker cannot read old records with a replacement key. First add and deploy a versioned key migration with read support for both keys, re-encrypt retained records, and prove operator reads. A simpler retirement path is to stop writes, wait until the 90-day operator-audit retention window has ended and the scheduled purge has completed, verify D1 is empty of old encrypted records, then deploy the new key. Keep the old key available until this proof is complete.
 

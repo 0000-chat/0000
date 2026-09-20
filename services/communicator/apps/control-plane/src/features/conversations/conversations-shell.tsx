@@ -41,14 +41,16 @@ export function ConversationsShell({
     session,
     activeIdentity,
     isLoading: identityLoading,
+    authStatus,
   } = useIdentityContext();
   const identityId = activeIdentity?.id ?? "";
+  const protectedApiReady = authStatus === "authenticated";
   const selectedChannelId = search.channel;
   const selectedMessageId = search.message;
   const channelsQuery = useQuery({
     queryKey: queryKeys.channels(identityId),
     queryFn: () => apiClient.getChannels(identityId),
-    enabled: Boolean(identityId),
+    enabled: Boolean(identityId && protectedApiReady),
   });
   const [preferredChannelIds, setPreferredChannelIds] = useState<string[]>([]);
 
@@ -71,17 +73,17 @@ export function ConversationsShell({
   const allConversationsQuery = useConversationPages(
     identityId,
     undefined,
-    Boolean(identityId),
+    Boolean(identityId && protectedApiReady),
   );
   const selectedConversationsQuery = useConversationPages(
     identityId,
     selectedChannelId,
-    Boolean(identityId && selectedChannelId),
+    Boolean(identityId && selectedChannelId && protectedApiReady),
   );
   const activeConversationQuery = useQuery({
     queryKey: queryKeys.conversation(identityId, conversationId ?? ""),
     queryFn: () => apiClient.getConversation(identityId, conversationId ?? ""),
-    enabled: Boolean(identityId && conversationId),
+    enabled: Boolean(identityId && conversationId && protectedApiReady),
   });
   const conversationsQuery = selectedChannelId
     ? selectedConversationsQuery
@@ -133,7 +135,14 @@ export function ConversationsShell({
   }, [activeIdentity?.tenant_id, identityId, session?.principal.id]);
 
   useEffect(() => {
-    if (!runtimeRealtimeClient || !session || !identityId) return;
+    if (
+      !runtimeRealtimeClient ||
+      !session ||
+      !identityId ||
+      authStatus !== "authenticated"
+    ) {
+      return;
+    }
     const subscribedIdentityId = identityId;
     const tenantId = session.tenant.id;
     const principalId = session.principal.id;
@@ -245,7 +254,13 @@ export function ConversationsShell({
       unsubscribe();
       runtimeRealtimeClient.close();
     };
-  }, [identityId, queryClient, session?.principal.id, session?.tenant.id]);
+  }, [
+    authStatus,
+    identityId,
+    queryClient,
+    session?.principal.id,
+    session?.tenant.id,
+  ]);
 
   const selectChannel = (channelId?: string) => {
     void navigate({
@@ -280,7 +295,7 @@ export function ConversationsShell({
   if (channelsQuery.isLoading) {
     return <p role="status">Loading channels…</p>;
   }
-  if (channelsQuery.isError) {
+  if (channelsQuery.isError && channels.length === 0) {
     return (
       <div role="alert" className="space-y-3">
         <p>Unable to load channels.</p>

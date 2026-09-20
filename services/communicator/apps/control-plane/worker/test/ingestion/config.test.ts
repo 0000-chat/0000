@@ -120,36 +120,22 @@ const requiredBindings = {
 
 const requiredVars = {
   ingress: "COMMUNICATOR_INGRESS_ENABLED",
-  issuer: "COMMUNICATOR_INGESTION_OIDC_ISSUER",
-  audience: "COMMUNICATOR_INGESTION_OIDC_AUDIENCE",
-  jwks: "COMMUNICATOR_INGESTION_OIDC_JWKS_URL",
-  publicAudience: "COMMUNICATOR_OIDC_AUDIENCE",
+  baseUrl: "COMMUNICATOR_PLATFORM_BASE_URL",
+  authority: "COMMUNICATOR_PLATFORM_AUTHORITY",
+  audience: "COMMUNICATOR_PLATFORM_AUDIENCE",
 } as const;
 
 const EXPECTED_WRANGLER_VAR_KEYS = [
   "COMMUNICATOR_ENV",
   "COMMUNICATOR_DATA_MODE",
-  "COMMUNICATOR_OIDC_ISSUER",
-  "COMMUNICATOR_OIDC_AUDIENCE",
-  "COMMUNICATOR_OIDC_JWKS_URL",
-  "COMMUNICATOR_ACCESS_ISSUER",
-  "COMMUNICATOR_ACCESS_AUDIENCE",
-  "COMMUNICATOR_ACCESS_JWKS_URL",
+  "COMMUNICATOR_PLATFORM_BASE_URL",
+  "COMMUNICATOR_PLATFORM_AUTHORITY",
+  "COMMUNICATOR_PLATFORM_AUDIENCE",
+  "COMMUNICATOR_PLATFORM_BROWSER_CLIENT_ID",
+  "COMMUNICATOR_PLATFORM_BROWSER_REDIRECT_URI",
+  "COMMUNICATOR_PLATFORM_BROWSER_RESOURCE",
+  "COMMUNICATOR_PLATFORM_BROWSER_SCOPES",
   "COMMUNICATOR_INGRESS_ENABLED",
-  "COMMUNICATOR_INGESTION_OIDC_ISSUER",
-  "COMMUNICATOR_INGESTION_OIDC_AUDIENCE",
-  "COMMUNICATOR_INGESTION_OIDC_JWKS_URL",
-  "COMMUNICATOR_OAUTH_ISSUER",
-  "COMMUNICATOR_OAUTH_RESOURCE",
-  "COMMUNICATOR_OAUTH_ACCESS_TOKEN_TTL_SECONDS",
-  "COMMUNICATOR_OAUTH_HUMAN_AUTHORIZE_URL",
-  "COMMUNICATOR_OAUTH_HUMAN_CLIENT_ID",
-  "COMMUNICATOR_OAUTH_HUMAN_REDIRECT_URI",
-  "COMMUNICATOR_OAUTH_HUMAN_SCOPE",
-  "COMMUNICATOR_OAUTH_HUMAN_TOKEN_URL",
-  "COMMUNICATOR_OAUTH_HUMAN_ISSUER",
-  "COMMUNICATOR_OAUTH_HUMAN_AUDIENCE",
-  "COMMUNICATOR_OAUTH_HUMAN_JWKS_URL",
   "CONNECTION_GATEWAY_URL",
 ] as const;
 
@@ -277,12 +263,9 @@ function assertIngestionVars(vars: Record<string, string>) {
     [...EXPECTED_WRANGLER_VAR_KEYS].sort(),
   );
   expect(vars[requiredVars.ingress]).toBe("false");
-  expect(vars[requiredVars.issuer]).toMatch(/^https:\/\//);
+  expect(vars[requiredVars.baseUrl]).toMatch(/^https?:\/\//);
+  expect(vars[requiredVars.authority]).toMatch(/\S/);
   expect(vars[requiredVars.audience]).toMatch(/\S/);
-  expect(vars[requiredVars.jwks]).toMatch(/^https:\/\//);
-  expect(vars[requiredVars.audience]).not.toBe(
-    vars[requiredVars.publicAudience],
-  );
   assertNoCredentialMaterial(vars);
 }
 
@@ -371,13 +354,14 @@ describe("ingestion Wrangler configuration", () => {
 
     const credentialValueVars = {
       ...config.vars,
-      COMMUNICATOR_INGESTION_OIDC_ISSUER: "client_secret=opaque-test-value",
+      COMMUNICATOR_PLATFORM_BASE_URL: "client_secret=opaque-test-value",
     };
     expect(() => assertIngestionVars(credentialValueVars)).toThrow();
 
     const pkcs8ValueVars = {
       ...config.vars,
-      COMMUNICATOR_INGESTION_OIDC_JWKS_URL: "-----BEGIN PRIVATE KEY-----opaque",
+      COMMUNICATOR_PLATFORM_BROWSER_RESOURCE:
+        "-----BEGIN PRIVATE KEY-----opaque",
     };
     expect(() => assertIngestionVars(pkcs8ValueVars)).toThrow();
 
