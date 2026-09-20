@@ -465,6 +465,149 @@ test("creates a room with JSON by default and a Location header", async () => {
   expect(receivedBody).toEqual({ kind: "json", value: { topic: "handoff" } });
 });
 
+test("allows ChatGPT JSON room creation and applies CORS to success and validation errors", async () => {
+  let creates = 0;
+  const worker = createWorker({
+    create: async ({ body }) => {
+      creates += 1;
+      expect(body).toEqual({ kind: "json", value: { topic: "handoff" } });
+      return createdRoom;
+    },
+  });
+  const headers = {
+    accept: "application/json",
+    "content-type": "application/json",
+    "idempotency-key": "chatgpt-create",
+    origin: "https://chatgpt.com",
+  };
+
+  const created = await worker.fetch(new Request("https://msg.0000.chat/", {
+    body: '{"topic":"handoff"}',
+    headers,
+    method: "POST",
+  }));
+
+  expect(created.status).toBe(201);
+  expect(created.headers.get("access-control-allow-origin")).toBe("https://chatgpt.com");
+  expect(created.headers.get("access-control-expose-headers")).toBe("Location, Retry-After");
+  expect(created.headers.get("access-control-allow-credentials")).toBeNull();
+  expect(created.headers.get("vary")).toBe("Origin");
+  expect(created.headers.get("location")).toBe(createdRoom.conversation_url);
+  expect(await created.json()).toEqual(createdRoom);
+
+  const malformed = await worker.fetch(new Request("https://msg.0000.chat/", {
+    body: "{",
+    headers,
+    method: "POST",
+  }));
+
+  expect(malformed.status).toBe(400);
+  expect(await malformed.json()).toEqual({ error: { code: "invalid_json", message: "The request body is not valid JSON." } });
+  expect(malformed.headers.get("access-control-allow-origin")).toBe("https://chatgpt.com");
+  expect(malformed.headers.get("vary")).toBe("Origin");
+  expect(creates).toBe(1);
+
+  const sameRequestWithoutOrigin = await worker.fetch(new Request("https://msg.0000.chat/", {
+    body: "{",
+    headers: { accept: "application/json", "content-type": "application/json" },
+    method: "POST",
+  }));
+  expect(sameRequestWithoutOrigin.status).toBe(400);
+  expect(sameRequestWithoutOrigin.headers.get("access-control-allow-origin")).toBeNull();
+});
+
+test("limits ChatGPT CORS to the exact JSON creation request and preflight", async () => {
+  let creates = 0;
+  const worker = createWorker({
+    create: async () => {
+      creates += 1;
+      return createdRoom;
+    },
+  });
+  const origin = "https://chatgpt.com";
+  const preflightHeaders = {
+    "access-control-request-headers": "Content-Type, Accept, Idempotency-Key",
+    "access-control-request-method": "POST",
+    origin,
+  };
+
+  const preflight = await worker.fetch(new Request("https://msg.0000.chat/", {
+    headers: preflightHeaders,
+    method: "OPTIONS",
+  }));
+  expect(preflight.status).toBe(204);
+  expect(preflight.headers.get("access-control-allow-origin")).toBe(origin);
+  expect(preflight.headers.get("access-control-allow-methods")).toBe("POST");
+  expect(preflight.headers.get("access-control-allow-headers")).toBe("content-type, accept, idempotency-key");
+  expect(preflight.headers.get("access-control-allow-credentials")).toBeNull();
+  expect(preflight.headers.get("vary")).toBe("Origin");
+
+  const rejected = [
+    new Request("https://msg.0000.chat/", {
+      headers: { ...preflightHeaders, "access-control-request-method": "GET" },
+      method: "OPTIONS",
+    }),
+    new Request("https://msg.0000.chat/example", {
+      headers: preflightHeaders,
+      method: "OPTIONS",
+    }),
+    new Request("https://msg.0000.chat/", {
+      headers: { ...preflightHeaders, "access-control-request-headers": "content-type, x-evil" },
+      method: "OPTIONS",
+    }),
+    new Request("https://msg.0000.chat/", {
+      body: '{"topic":"blocked"}',
+      headers: { "content-type": "application/json", origin: "https://chatgpt.com.evil.example" },
+      method: "POST",
+    }),
+    new Request("https://msg.0000.chat/", {
+      body: "topic=blocked",
+      headers: { "content-type": "application/x-www-form-urlencoded", origin },
+      method: "POST",
+    }),
+    new Request("https://msg.0000.chat/example", {
+      body: '{"topic":"blocked"}',
+      headers: { "content-type": "application/json", origin },
+      method: "POST",
+    }),
+  ];
+
+  for (const request of rejected) {
+    const response = await worker.fetch(request);
+    expect(response.status).toBe(403);
+    expect(response.headers.get("access-control-allow-origin")).toBeNull();
+  }
+
+  const wrongMethod = await worker.fetch(new Request("https://msg.0000.chat/", { headers: { origin }, method: "GET" }));
+  expect(wrongMethod.status).toBe(200);
+  expect(wrongMethod.headers.get("access-control-allow-origin")).toBeNull();
+  expect(creates).toBe(0);
+});
+
+test("keeps creation controls active for ChatGPT JSON requests", async () => {
+  const disabled = createWorker({ create: async () => createdRoom }, { createDisabled: true });
+  const blocked = await disabled.fetch(new Request("https://msg.0000.chat/", {
+    body: '{"topic":"blocked"}',
+    headers: { accept: "application/json", "content-type": "application/json", origin: "https://chatgpt.com" },
+    method: "POST",
+  }));
+  expect(blocked.status).toBe(503);
+  expect(blocked.headers.get("access-control-allow-origin")).toBe("https://chatgpt.com");
+  expect(blocked.headers.get("vary")).toBe("Origin");
+
+  const limiter = rateLimit(false);
+  const rateLimited = createWorker({ create: async () => createdRoom }, { rateLimits: { creation: limiter } });
+  const response = await rateLimited.fetch(new Request("https://msg.0000.chat/", {
+    body: '{"topic":"limited"}',
+    headers: { accept: "application/json", "content-type": "application/json", origin: "https://chatgpt.com" },
+    method: "POST",
+  }));
+  expect(response.status).toBe(429);
+  expect(response.headers.get("retry-after")).toBe("60");
+  expect(response.headers.get("access-control-allow-origin")).toBe("https://chatgpt.com");
+  expect(response.headers.get("vary")).toBe("Origin");
+});
+
 test("keeps existing rooms available when new room creation is disabled", async () => {
   const worker = createWorker({ create: async () => createdRoom }, { createDisabled: true });
 

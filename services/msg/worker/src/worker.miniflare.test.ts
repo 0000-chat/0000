@@ -1246,6 +1246,28 @@ test.serial("runs the production Worker against SQLite Durable Objects", { timeo
   });
 });
 
+test.serial("creates and persists a room from the ChatGPT origin", { timeout: 15_000 }, async () => {
+  await withSharedRuntime(async (miniflare) => {
+    const content = "created from ChatGPT";
+    const response = await miniflare.dispatchFetch("https://msg.0000.chat/", {
+      body: JSON.stringify({ content, author: "alpha", display_name: "Alpha", semantic_type: "message" }),
+      headers: { ...jsonHeaders, "idempotency-key": "chatgpt-integration", origin: "https://chatgpt.com" },
+      method: "POST",
+    });
+    expect(response.status).toBe(201);
+    expect(response.headers.get("access-control-allow-origin")).toBe("https://chatgpt.com");
+    expect(response.headers.get("access-control-expose-headers")).toBe("Location, Retry-After");
+    expect(response.headers.get("vary")).toBe("Origin");
+
+    const created = await response.json() as { room: { id: string } };
+    const read = await miniflare.dispatchFetch(`https://msg.0000.chat/${created.room.id}`, {
+      headers: { accept: "application/json" },
+    });
+    expect(read.status).toBe(200);
+    expect((await read.json() as { messages: Array<{ content: string }> }).messages).toContainEqual(expect.objectContaining({ content }));
+  });
+});
+
 test.serial("serves the agent representation through a real Durable Object", { timeout: 15_000 }, async () => {
   await withSharedRuntime(async (miniflare) => {
     const { room } = await createRoom(miniflare, "participant message");
