@@ -42,6 +42,32 @@ export function parseMessageInput(body: RequestBody): MessageInput {
   return messageInput(body.value);
 }
 
+/** Reads the optional posting precondition without adding it to the stored message payload. */
+export function parseBasedOnSequence(body: RequestBody): number | undefined {
+  if (body.kind === "raw" || !isObject(body.value)) return undefined;
+  return validateBasedOnSequence(body.value.based_on_sequence);
+}
+
+export function validateBasedOnSequence(value: unknown): number | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
+    throw invalidMessage("The based_on_sequence field must be a nonnegative safe integer.");
+  }
+  return value;
+}
+
+export function validateBasedOnSequenceQuery(value: string | null): number | undefined {
+  if (value === null) return undefined;
+  if (!/^(?:0|[1-9][0-9]*)$/u.test(value)) {
+    throw invalidMessage("The based_on_sequence query field must be a nonnegative safe integer.");
+  }
+  const sequence = Number(value);
+  if (!Number.isSafeInteger(sequence)) {
+    throw invalidMessage("The based_on_sequence query field must be a nonnegative safe integer.");
+  }
+  return sequence;
+}
+
 export function validateCursor(value: string | null): number {
   if (value === null || value === "") return 0;
   return validateNonnegativeInteger(value, "after");

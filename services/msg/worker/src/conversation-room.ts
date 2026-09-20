@@ -1,7 +1,7 @@
 import { DurableObject } from "cloudflare:workers";
 
 import { ERROR_CODES, ProtocolError } from "./errors";
-import { byteLength, compareCapabilities, DEFAULT_READ_LIMIT, MAX_READ_MESSAGE_BYTES, messageStorageBytes, ROOM_LIMITS, validateBoundedCursor, validateCursor, validateReadLimit, validateRequestId, validateThrough } from "./room-domain";
+import { byteLength, compareCapabilities, DEFAULT_READ_LIMIT, MAX_READ_MESSAGE_BYTES, messageStorageBytes, ROOM_LIMITS, validateBasedOnSequence, validateBoundedCursor, validateCursor, validateReadLimit, validateRequestId, validateThrough } from "./room-domain";
 import type { MessageInput } from "./room-domain";
 import { PROTOCOL_VERSION, type CreateWebhookResponse, type ManageWebhookResponse, type RedeliverWebhookResponse, type RotateWebhookSecretResponse, type WebhookAttemptMetadata, type WebhookDeliveryMetadata, type WebhookSummary } from "./protocol";
 import { CURRENT_ROOM_SCHEMA_VERSION, migrateRoomSchema } from "./room-schema";
@@ -216,7 +216,7 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
       if (request.method === "GET" && (url.pathname === "/export.md" || url.pathname === "/export.json")) return await this.export(url.pathname === "/export.json");
       return this.error(ERROR_CODES.notFound, "The requested resource was not found.", 404);
     } catch (error) {
-      if (error instanceof ProtocolError) return this.error(error.code, error.message, error.status);
+      if (error instanceof ProtocolError) return this.error(error.code, error.message, error.status, error.details);
       return this.error(ERROR_CODES.internal, "The room could not complete the request.", 500);
     }
   }
@@ -380,9 +380,9 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
     if (this.config.MSG_POST_DISABLED === "1") {
       throw new ProtocolError(ERROR_CODES.serviceUnavailable, "New messages are temporarily unavailable.", 503);
     }
-    const input = await request.json() as { browser_id?: string; input: MessageInput; idempotency_key?: string };
+    const input = await request.json() as { based_on_sequence?: unknown; browser_id?: string; input: MessageInput; idempotency_key?: string };
     const now = this.now();
-    const result = this.commitMessage(input.input, { idempotencyKey: input.idempotency_key, sourceBrowserId: input.browser_id ?? null }, now);
+    const result = this.commitMessage(input.input, { basedOnSequence: input.based_on_sequence, idempotencyKey: input.idempotency_key, sourceBrowserId: input.browser_id ?? null }, now);
     if (result.expired) {
       await this.expire(now, "Conversation expired");
       throw new ProtocolError(ERROR_CODES.gone, "The conversation has expired.", 410);
@@ -396,7 +396,7 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
     if (this.config.MSG_POST_DISABLED === "1") {
       throw new ProtocolError(ERROR_CODES.serviceUnavailable, "New messages are temporarily unavailable.", 503);
     }
-    const input = await request.json() as { input: MessageInput; request_id: string; token: string };
+    const input = await request.json() as { based_on_sequence?: unknown; input: MessageInput; request_id: string; token: string };
     const token = typeof input.token === "string" ? input.token : "";
     const requestId = validateRequestId(typeof input.request_id === "string" ? input.request_id : "");
     const tokenHash = await hashToken(token);
@@ -404,6 +404,7 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
     const result = this.commitMessage(
       input.input,
       {
+        basedOnSequence: input.based_on_sequence,
         idempotencyKey: `get:${requestId}`,
         sourceBrowserId: null,
         authorize: (state) => {
@@ -434,6 +435,7 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
     input: MessageInput,
     options: {
       readonly authorize?: (state: RoomState) => void;
+      readonly basedOnSequence?: unknown;
       /** An explicitly supplied idempotency key, such as a POST header or GET request ID. */
       readonly idempotencyKey?: string;
       readonly sourceBrowserId: string | null;
@@ -458,6 +460,22 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
       if (previous) {
         if (!sameInput(previous, input)) throw new ProtocolError(ERROR_CODES.conflict, "The idempotency key is already used for another message.", 409);
         return { expired: false as const, message: previous, state, replayed: true };
+      }
+      const basedOnSequence = validateBasedOnSequence(options.basedOnSequence);
+      const latestMessage = state.next_sequence - 1;
+      if (basedOnSequence !== undefined) {
+        if (basedOnSequence > latestMessage) {
+          throw new ProtocolError(ERROR_CODES.invalidBody, "The based_on_sequence value cannot be newer than the room.", 400);
+        }
+        if (basedOnSequence < latestMessage) {
+          throw new ProtocolError(
+            ERROR_CODES.staleSequence,
+            `The room advanced after sequence ${basedOnSequence}; review the intervening messages before resubmitting.`,
+            409,
+            undefined,
+            { latest_message: latestMessage, review_after: basedOnSequence },
+          );
+        }
       }
       if (input.reply_to !== undefined && !this.messageBySequenceOptional(Number(input.reply_to))) {
         throw new ProtocolError(ERROR_CODES.notFound, "The replied-to message was not found.", 404);
@@ -1685,7 +1703,13 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
   private broadcast(frame: unknown): void { const payload = JSON.stringify(frame); for (const socket of this.ctx.getWebSockets(socketTag) as HibernatingSocket[]) socket.send(payload); }
   private closeSockets(code: number, reason: string): void { for (const socket of this.ctx.getWebSockets(socketTag) as HibernatingSocket[]) socket.close(code, reason); }
   private json(value: unknown): Response { return new Response(JSON.stringify(value), { headers: { "content-type": "application/json; charset=utf-8" } }); }
-  private error(code: string, message: string, status: number): Response { return new Response(JSON.stringify({ error: { code, message } }), { headers: { "content-type": "application/json; charset=utf-8" }, status }); }
+  private error(code: string, message: string, status: number, details?: { readonly latest_message: number; readonly review_after: number }): Response {
+    return new Response(JSON.stringify({ error: {
+      code,
+      message,
+      ...(code === ERROR_CODES.staleSequence && details !== undefined ? { latest_message: details.latest_message, review_after: details.review_after } : {}),
+    } }), { headers: { "content-type": "application/json; charset=utf-8" }, status });
+  }
 }
 
 function createDeferredSignal(): DeferredSignal {

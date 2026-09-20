@@ -160,9 +160,9 @@ async function createRoom(miniflare: Awaited<ReturnType<typeof startMsgMiniflare
   return await response.json() as { conversation_url: string; manage_url: string; room: { id: string } };
 }
 
-async function post(miniflare: Awaited<ReturnType<typeof startMsgMiniflare>>["miniflare"], room: string, content: string, idempotencyKey?: string, browserId?: string, replyTo?: string) {
+async function post(miniflare: Awaited<ReturnType<typeof startMsgMiniflare>>["miniflare"], room: string, content: string, idempotencyKey?: string, browserId?: string, replyTo?: string, basedOnSequence?: number) {
   return miniflare.dispatchFetch(`https://msg.0000.chat/${room}`, {
-    body: JSON.stringify({ content, author: "beta", display_name: "Beta", semantic_type: "message", ...(replyTo === undefined ? {} : { reply_to: replyTo }) }),
+    body: JSON.stringify({ content, author: "beta", display_name: "Beta", semantic_type: "message", ...(replyTo === undefined ? {} : { reply_to: replyTo }), ...(basedOnSequence === undefined ? {} : { based_on_sequence: basedOnSequence }) }),
     headers: { ...jsonHeaders, ...(idempotencyKey !== undefined ? { "idempotency-key": idempotencyKey } : {}), ...(browserId !== undefined ? { "x-msg-browser-id": browserId } : {}) },
     method: "POST",
   });
@@ -1503,6 +1503,100 @@ test.serial("creates, replays, rotates, and disables delegated GET posts through
     });
     expect(await disable.json()).toMatchObject({ get_post_enabled: false });
     expect((await request(rotated.get_post_url, "get-4", "rotated message")).status).toBe(404);
+  });
+});
+
+test.serial("rejects stale JSON posts atomically and carries the review cursor through the actual route", { timeout: 20_000 }, async () => {
+  await withRuntime(async (miniflare) => {
+    const created = await createRoom(miniflare, "snapshot one");
+    const room = created.room.id;
+    const before = await miniflare.dispatchFetch(`https://msg.0000.chat/${room}`, { headers: { accept: "application/json" } });
+    const beforeValue = await before.json() as { expires_at: string; latest_message: number };
+    expect(beforeValue.latest_message).toBe(1);
+
+    const [first, second] = await Promise.all([
+      post(miniflare, room, "race one", "race-one", undefined, undefined, beforeValue.latest_message),
+      post(miniflare, room, "race two", "race-two", undefined, undefined, beforeValue.latest_message),
+    ]);
+    const responses = [first, second];
+    expect(responses.filter((response) => response.status === 201)).toHaveLength(1);
+    expect(responses.filter((response) => response.status === 409)).toHaveLength(1);
+    const stale = responses.find((response) => response.status === 409)!;
+    expect(await stale.json()).toMatchObject({ error: { code: "stale_sequence", latest_message: 2, review_after: 1 } });
+
+    const afterStale = await miniflare.dispatchFetch(`https://msg.0000.chat/${room}`, { headers: { accept: "application/json" } });
+    const afterStaleValue = await afterStale.json() as { expires_at: string; latest_message: number; messages: unknown[] };
+    expect(afterStaleValue).toMatchObject({ expires_at: expect.any(String), latest_message: 2 });
+    expect(afterStaleValue.messages).toHaveLength(2);
+    const winner = responses.find((response) => response.status === 201)!;
+    const winnerValue = await winner.json() as { message: { sequence: number }; replayed: boolean };
+    expect(winnerValue).toMatchObject({ message: { sequence: 2 }, replayed: false });
+
+    const rejectedKey = winner === first ? "race-two" : "race-one";
+    const rejectedContent = winner === first ? "race two" : "race one";
+    const retry = await post(miniflare, room, rejectedContent, rejectedKey, undefined, undefined, 2);
+    expect(retry.status).toBe(201);
+    expect((await retry.json() as { message: { sequence: number }; replayed: boolean })).toMatchObject({ message: { sequence: 3 }, replayed: false });
+
+    const replay = await post(miniflare, room, winner === first ? "race one" : "race two", winner === first ? "race-one" : "race-two", undefined, undefined, 1);
+    expect(replay.status).toBe(201);
+    expect((await replay.json() as { message: { sequence: number }; replayed: boolean })).toMatchObject({ message: { sequence: 2 }, replayed: true });
+    const finalRead = await miniflare.dispatchFetch(`https://msg.0000.chat/${room}`, { headers: { accept: "application/json" } });
+    expect((await finalRead.json() as { latest_message: number; messages: unknown[] })).toMatchObject({ latest_message: 3, messages: expect.any(Array) });
+
+    for (const value of [null, "1", true, 9_007_199_254_740_992]) {
+      const malformed = await miniflare.dispatchFetch(`https://msg.0000.chat/${room}`, {
+        body: JSON.stringify({ author: "beta", content: "must reject", based_on_sequence: value }),
+        headers: jsonHeaders,
+        method: "POST",
+      });
+      expect(malformed.status).toBe(400);
+    }
+    const future = await post(miniflare, room, "future", "future-key", undefined, undefined, 99);
+    expect(future.status).toBe(400);
+    const unchanged = await miniflare.dispatchFetch(`https://msg.0000.chat/${room}`, { headers: { accept: "application/json" } });
+    expect((await unchanged.json() as { latest_message: number }).latest_message).toBe(3);
+  });
+});
+
+test.serial("applies stale review and authorization semantics to delegated GET posting", { timeout: 20_000 }, async () => {
+  await withRuntime(async (miniflare) => {
+    const created = await createRoom(miniflare, "delegated snapshot");
+    const enabled = await miniflare.dispatchFetch(created.manage_url, {
+      body: JSON.stringify({ action: "enable" }),
+      headers: jsonHeaders,
+      method: "POST",
+    });
+    const getPostUrl = (await enabled.json() as { get_post_url: string }).get_post_url;
+    const getUrl = (requestId: string, content: string, basedOnSequence?: string) => {
+      const url = new URL(getPostUrl);
+      url.searchParams.set("request_id", requestId);
+      url.searchParams.set("content", content);
+      if (basedOnSequence !== undefined) url.searchParams.set("based_on_sequence", basedOnSequence);
+      return url.toString();
+    };
+    const first = await miniflare.dispatchFetch(getUrl("delegated-one", "first", "1"), { headers: { accept: "application/json" } });
+    expect(first.status).toBe(200);
+    const normal = await post(miniflare, created.room.id, "normal", "normal-key");
+    expect(normal.status).toBe(201);
+    const stale = await miniflare.dispatchFetch(getUrl("delegated-stale", "stale", "1"), { headers: { accept: "application/json" } });
+    expect(stale.status).toBe(409);
+    expect(await stale.json()).toMatchObject({ error: { code: "stale_sequence", latest_message: 3, review_after: 1 } });
+    const resubmitted = await miniflare.dispatchFetch(getUrl("delegated-stale", "stale", "3"), { headers: { accept: "application/json" } });
+    expect(resubmitted.status).toBe(200);
+    expect(await resubmitted.json()).toMatchObject({ replayed: false, sequence: 4 });
+    for (const suffix of ["&based_on_sequence=", "&based_on_sequence=-1", "&based_on_sequence=1.5", "&based_on_sequence=9007199254740992"] as const) {
+      const invalid = await miniflare.dispatchFetch(`${getUrl(`invalid-${suffix}`, "invalid")}${suffix}`, { headers: { accept: "application/json" } });
+      expect(invalid.status).toBe(400);
+    }
+    const disable = await miniflare.dispatchFetch(created.manage_url, {
+      body: JSON.stringify({ action: "disable" }),
+      headers: jsonHeaders,
+      method: "POST",
+    });
+    expect((await disable.json() as { get_post_enabled: boolean }).get_post_enabled).toBe(false);
+    const revokedReplay = await miniflare.dispatchFetch(getUrl("delegated-one", "first", "1"), { headers: { accept: "application/json" } });
+    expect(revokedReplay.status).toBe(404);
   });
 });
 

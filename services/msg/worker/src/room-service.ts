@@ -1,5 +1,5 @@
-import { ERROR_CODES, ProtocolError } from "./errors";
-import { hashCapability, parseMessageInput, randomCapability, validateIdempotencyKey, validateRequestId } from "./room-domain";
+import { ERROR_CODES, isStaleSequenceDetails, ProtocolError } from "./errors";
+import { hashCapability, parseBasedOnSequence, parseMessageInput, randomCapability, validateIdempotencyKey, validateRequestId } from "./room-domain";
 import { buildShareMessage, foregroundWait, PROTOCOL_VERSION, stripLegacyAbsoluteExpiry, type CreateRoomInput, type CreateRoomResponse, type CreateWebhookInput, type CreateWebhookResponse, type EnrollPushInput, type ExportRoomInput, type GetPostMessageInput, type GetPostMessageResponse, type ListWebhooksInput, type ListWebhooksResponse, type LiveRoomInput, type ManageRoomInput, type ManageRoomResponse, type ManageWebhookInput, type ManageWebhookResponse, type PostMessageInput, type PostMessageResponse, type PushEnrollmentInput, type PushEnrollmentResponse, type ReadMessageInput, type ReadMessageResponse, type ReadRoomInput, type ReadRoomResponse, type RedeliverWebhookInput, type RedeliverWebhookResponse, type RemovePushEnrollmentResponse, type RemoveWebhookInput, type RemoveWebhookResponse, type RotateWebhookSecretResponse, type RoomService } from "./protocol";
 
 export interface RoomStub { fetch(request: Request): Promise<Response>; }
@@ -67,16 +67,19 @@ export class DurableRoomService implements RoomService {
   }
 
   async post(input: PostMessageInput): Promise<PostMessageResponse> {
+    const basedOnSequence = input.basedOnSequence ?? parseBasedOnSequence(input.body);
     const value = stripLegacyAbsoluteExpiry(await responseJson(await this.room(input.room).fetch(jsonRequest("/messages", {
-      input: parseMessageInput(input.body), ...(input.browserId !== undefined ? { browser_id: input.browserId } : {}), ...(input.idempotencyKey !== undefined ? { idempotency_key: validateIdempotencyKey(input.idempotencyKey) } : {}),
+      input: parseMessageInput(input.body), ...(basedOnSequence === undefined ? {} : { based_on_sequence: basedOnSequence }), ...(input.browserId !== undefined ? { browser_id: input.browserId } : {}), ...(input.idempotencyKey !== undefined ? { idempotency_key: validateIdempotencyKey(input.idempotencyKey) } : {}),
     }))));
     const message = value.message as { sequence: number };
     return { ...value, wait: foregroundWait(this.origin, input.room, message.sequence) } as unknown as PostMessageResponse;
   }
 
   async getPost(input: GetPostMessageInput): Promise<GetPostMessageResponse> {
+    const basedOnSequence = input.basedOnSequence ?? parseBasedOnSequence(input.body);
     const value = await responseJson(await this.room(input.room).fetch(jsonRequest("/get-post", {
       input: parseMessageInput(input.body),
+      ...(basedOnSequence === undefined ? {} : { based_on_sequence: basedOnSequence }),
       request_id: validateRequestId(input.requestId),
       token: input.token,
     })));
@@ -189,5 +192,9 @@ async function responsePassthrough(response: Response): Promise<Response> {
 async function responseError(response: Response): Promise<ProtocolError> {
   const value = await response.json().catch(() => ({})) as Record<string, unknown>;
   const error = value.error as { code?: string; message?: string } | undefined;
-  return new ProtocolError((error?.code as typeof ERROR_CODES[keyof typeof ERROR_CODES]) ?? ERROR_CODES.internal, error?.message ?? "The room could not complete the request.", response.status);
+  const code = (error?.code as typeof ERROR_CODES[keyof typeof ERROR_CODES]) ?? ERROR_CODES.internal;
+  const details = code === ERROR_CODES.staleSequence && isStaleSequenceDetails(error)
+    ? { latest_message: error.latest_message, review_after: error.review_after }
+    : undefined;
+  return new ProtocolError(code, error?.message ?? "The room could not complete the request.", response.status, undefined, details);
 }

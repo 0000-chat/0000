@@ -118,6 +118,49 @@ test("rejects missing reply targets without consuming state or retry keys", asyn
   database.close();
 });
 
+test("rejects stale writes without touching expiry, message count, or notifications", async () => {
+  const database = new Database(":memory:");
+  let now = 1_000;
+  const { context, room: durable } = await room(database, () => now);
+  await durable.fetch(request("/initialize", { now, management_hash: "hash", initial: { content: "first", author: "a", display_name: "a", semantic_type: "message" } }));
+  await durable.fetch(new Request("https://room/live?after=1"));
+
+  now += 1;
+  const accepted = await durable.fetch(request("/messages", {
+    based_on_sequence: 1,
+    idempotency_key: "accepted-message",
+    input: { content: "accepted", author: "b", display_name: "b", semantic_type: "message" },
+  }));
+  expect(accepted.status).toBe(200);
+  const acceptedValue = await accepted.json() as { expires_at: string; message: { sequence: number } };
+  const sentAfterAccepted = context.sockets[0]?.sent.length;
+  const beforeStale = await (await durable.fetch(new Request("https://room/read?after=0"))).json() as { expires_at: string; latest_message: number; messages: unknown[] };
+  expect(acceptedValue.expires_at).toBe(beforeStale.expires_at);
+
+  now += 1;
+  const stale = await durable.fetch(request("/messages", {
+    based_on_sequence: 1,
+    idempotency_key: "stale-message",
+    input: { content: "stale", author: "b", display_name: "b", semantic_type: "message" },
+  }));
+  expect(stale.status).toBe(409);
+  expect(await stale.json()).toMatchObject({ error: { code: "stale_sequence", latest_message: 2, review_after: 1 } });
+  const afterStale = await (await durable.fetch(new Request("https://room/read?after=0"))).json() as { expires_at: string; latest_message: number; messages: unknown[] };
+  expect(acceptedValue.message.sequence).toBe(2);
+  expect(afterStale).toMatchObject({ expires_at: beforeStale.expires_at, latest_message: 2 });
+  expect(afterStale.messages).toHaveLength(beforeStale.messages.length);
+  expect(context.sockets[0]?.sent.length).toBe(sentAfterAccepted);
+
+  const retried = await durable.fetch(request("/messages", {
+    based_on_sequence: 2,
+    idempotency_key: "stale-message",
+    input: { content: "stale", author: "b", display_name: "b", semantic_type: "message" },
+  }));
+  expect(retried.status).toBe(200);
+  expect(await retried.json()).toMatchObject({ replayed: false, message: { sequence: 3 } });
+  database.close();
+});
+
 test("rejects an initial reply before room creation but preserves prior initialization replay", async () => {
   const empty = await room();
   expect((await empty.room.fetch(request("/initialize", { management_hash: "hash", initial: { content: "invalid", author: "a", display_name: "a", semantic_type: "message", reply_to: "1" } }))).status).toBe(404);

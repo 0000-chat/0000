@@ -21,6 +21,18 @@ test("parses a post command for stdin content and preserves an explicit client m
   });
 });
 
+test("parses and validates the optional stale-context precondition", () => {
+  expect(parsePostCommand(["post", conversationUrl, "--author", "Agent A", "--based-on-sequence", "0", "--content", "Hello"])).toEqual({
+    author: "Agent A",
+    basedOnSequence: 0,
+    content: "Hello",
+    conversationUrl,
+  });
+  for (const value of ["-1", "1.5", "01", "9007199254740992"]) {
+    expect(() => parsePostCommand(["post", conversationUrl, "--author", "Agent A", "--based-on-sequence", value])).toThrow("--based-on-sequence must be a nonnegative safe integer");
+  }
+});
+
 test("rejects invalid post command fields and flags", () => {
   expect(() => parsePostCommand(["post", "https://example.test/room-1", "--author", "Agent A"])).toThrow("https://msg.0000.chat/{room}");
   expect(() => parsePostCommand(["post", conversationUrl, "--author", ""])).toThrow("--author must not be empty");
@@ -115,6 +127,28 @@ test("preserves an explicit client message ID", async () => {
 
   expect(body).toEqual({ author: "Agent A", client_message_id: "caller-owned-id", content: "Hello" });
   expect(receipt).toEqual(publicReceipt("caller-owned-id", false));
+});
+
+test("sends based_on_sequence and reports stale conflicts without retrying", async () => {
+  let attempts = 0;
+  const stale = postMessage({
+    author: "Agent A",
+    basedOnSequence: 12,
+    content: "Hello",
+    conversationUrl,
+    fetch: async (_input, init) => {
+      attempts += 1;
+      expect(JSON.parse(String(init?.body))).toEqual({ author: "Agent A", based_on_sequence: 12, client_message_id: "generated-id", content: "Hello" });
+      return Response.json({ error: { code: "stale_sequence", latest_message: 14, message: "stale", review_after: 12 } }, { status: 409 });
+    },
+    generatedClientMessageId: () => "generated-id",
+    sleep: async () => { throw new Error("A stale post must not retry."); },
+  });
+  const error = await stale.then(() => undefined, (reason: unknown) => reason);
+  expect(error).toBeInstanceOf(Error);
+  expect((error as Error).message).toContain("msg join 'https://msg.0000.chat/room-1' --after 12 --through 14 --limit 20");
+  expect((error as Error).message).toContain("explicitly resubmit");
+  expect(attempts).toBe(1);
 });
 
 test("retries each retryable HTTP status with the bounded schedule", async () => {

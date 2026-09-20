@@ -3,7 +3,7 @@ import { buildAgentRepresentation, renderAgentText } from "./agent-representatio
 import { agentBrowserAsset, renderAgentHomePage, renderAgentRoomPage, renderAgentStatusPage } from "./agent-browser";
 import { browserAsset, browserIcon, MERMAID_ASSET_PATH, renderBrowserDocument } from "./browser";
 import { browserViewRedirect, selectBrowserView } from "./browser-view";
-import { ERROR_CODES, ProtocolError, type ErrorCode } from "./errors";
+import { ERROR_CODES, isStaleSequenceDetails, ProtocolError, type ErrorCode, type StaleSequenceDetails } from "./errors";
 import {
   foregroundWaitForConversation,
   messageCitationUrl,
@@ -18,7 +18,7 @@ import {
   type ReadRoomResponse,
   type RoomService,
 } from "./protocol";
-import { byteLength, compareCapabilities, DEFAULT_READ_LIMIT, MAX_ROOM_REQUEST_BYTES, roomEtag, validateBoundedCursor, validateCursor, validateIdempotencyKey, validateReadLimit, validateRequestId, validateThrough } from "./room-domain";
+import { byteLength, compareCapabilities, DEFAULT_READ_LIMIT, MAX_ROOM_REQUEST_BYTES, parseBasedOnSequence, roomEtag, validateBasedOnSequenceQuery, validateBoundedCursor, validateCursor, validateIdempotencyKey, validateReadLimit, validateRequestId, validateThrough } from "./room-domain";
 import {
   negotiateCreateRepresentation,
   negotiateRepresentation,
@@ -118,8 +118,8 @@ export function createWorker(service: RoomService, options: MsgWorkerOptions = {
         const response =
           error instanceof ProtocolError
             ? agentHtml
-              ? htmlResponse(renderAgentStatusPage(error.status, error.code, error.message, requestUrl), error.status)
-              : errorResponse(error.code, error.message, error.status, representation)
+              ? htmlResponse(renderAgentStatusPage(error.status, error.code, renderedErrorMessage(error.message, error.details), requestUrl), error.status)
+              : errorResponse(error.code, error.message, error.status, representation, error.details)
             : errorResponse(
                 ERROR_CODES.internal,
                 "The relay could not complete the request.",
@@ -423,6 +423,7 @@ async function route(request: Request, service: RoomService, options: MsgWorkerO
     await enforceRateLimit(request, options.rateLimits?.posts);
     const result = stripLegacyAbsoluteExpiry(await service.getPost({
       body: { kind: "json", value: getPost.input },
+      ...(getPost.basedOnSequence === undefined ? {} : { basedOnSequence: getPost.basedOnSequence }),
       requestId: getPost.requestId,
       room: getPostMatch[1]!,
       token: getPost.token,
@@ -464,8 +465,11 @@ async function route(request: Request, service: RoomService, options: MsgWorkerO
         throw new ProtocolError(ERROR_CODES.serviceUnavailable, "New messages are temporarily unavailable.", 503);
       }
       await enforceRateLimit(request, options.rateLimits?.posts);
+      const body = await parseRequestBody(request, { maxBytes: MAX_ROOM_REQUEST_BYTES });
+      const basedOnSequence = parseBasedOnSequence(body);
       const result = stripLegacyAbsoluteExpiry(await service.post({
-        body: await parseRequestBody(request, { maxBytes: MAX_ROOM_REQUEST_BYTES }),
+        body,
+        ...(basedOnSequence === undefined ? {} : { basedOnSequence }),
         browserId: parseOptionalPushBrowserId(request.headers.get("x-msg-browser-id")),
         idempotencyKey: request.headers.has("idempotency-key") ? validateIdempotencyKey(request.headers.get("idempotency-key") ?? "") : undefined,
         room,
@@ -501,9 +505,10 @@ async function route(request: Request, service: RoomService, options: MsgWorkerO
   );
 }
 
-const GET_POST_QUERY_FIELDS = new Set(["author", "client", "content", "display_name", "reply_to", "request_id", "semantic_type", "token"]);
+const GET_POST_QUERY_FIELDS = new Set(["author", "based_on_sequence", "client", "content", "display_name", "reply_to", "request_id", "semantic_type", "token"]);
 
 interface GetPostQuery {
+  readonly basedOnSequence?: number;
   readonly input: Record<string, string>;
   readonly requestId: string;
   readonly token: string;
@@ -524,6 +529,7 @@ function parseGetPostQuery(request: Request, url: URL): GetPostQuery {
 
   const token = boundedQueryValue(url.searchParams.get("token"), "token", MAX_GET_POST_TOKEN_CHARS, MAX_GET_POST_TOKEN_BYTES);
   const requestId = validateRequestId(requiredQueryValue(url.searchParams.get("request_id"), "request_id"));
+  const basedOnSequence = validateBasedOnSequenceQuery(url.searchParams.get("based_on_sequence"));
   const content = requiredQueryValue(url.searchParams.get("content"), "content");
   if (byteLength(content) > MAX_GET_POST_CONTENT_BYTES) {
     throw new ProtocolError(ERROR_CODES.bodyTooLarge, "The GET posting content is too large.", 413);
@@ -533,7 +539,7 @@ function parseGetPostQuery(request: Request, url: URL): GetPostQuery {
     const value = url.searchParams.get(field);
     if (value !== null) input[field] = value;
   }
-  return { input, requestId, token };
+  return { input, ...(basedOnSequence === undefined ? {} : { basedOnSequence }), requestId, token };
 }
 
 function requiredQueryValue(value: string | null, field: string): string {
@@ -854,23 +860,35 @@ function errorResponse(
   message: string,
   status: number,
   representation: ErrorRepresentation,
+  details?: StaleSequenceDetails,
 ): Response {
+  const safeDetails = code === ERROR_CODES.staleSequence && isStaleSequenceDetails(details) ? details : undefined;
   if (representation === "json") {
-    return jsonResponse({ error: { code, message } }, status);
+    return jsonResponse({ error: {
+      code,
+      message,
+      ...(safeDetails === undefined ? {} : { latest_message: safeDetails.latest_message, review_after: safeDetails.review_after }),
+    } }, status);
   }
+  const displayMessage = renderedErrorMessage(message, safeDetails);
   if (representation === "html") {
     return new Response(
-      `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Request failed</title></head><body><main><h1>Request failed</h1><p>Code: ${code}</p><p>${message}</p></main></body></html>`,
+      `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Request failed</title></head><body><main><h1>Request failed</h1><p>Code: ${escapeHtml(code)}</p><p>${escapeHtml(displayMessage)}</p></main></body></html>`,
       { headers: { "content-type": "text/html; charset=utf-8" }, status },
     );
   }
   if (representation === "markdown") {
-    return new Response(`# Request failed\n\nCode: \`${code}\`\n\n${message}\n`, {
+    return new Response(`# Request failed\n\nCode: \`${code}\`\n\n${displayMessage}\n`, {
       headers: { "content-type": "text/markdown; charset=utf-8" },
       status,
     });
   }
-  return textResponse(`${code}: ${message}\n`, status);
+  return textResponse(`${code}: ${displayMessage}\n`, status);
+}
+
+function renderedErrorMessage(message: string, details?: StaleSequenceDetails): string {
+  if (details === undefined) return message;
+  return `${message} Current latest sequence: ${details.latest_message}. Review after sequence: ${details.review_after}.`;
 }
 
 type ErrorRepresentation = "plain" | ReturnType<typeof negotiateRepresentation>;

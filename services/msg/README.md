@@ -55,6 +55,13 @@ participant names are self-declared and unverified. `reply_to` remains a decimal
 sequence reference, and older records can contain references that no longer
 resolve. New replies must target an existing message in the same room.
 
+Clients may add the transport-only `based_on_sequence` precondition to a JSON
+POST, delegated GET query, or `msg post --based-on-sequence N`. If the room has
+advanced, the service returns HTTP 409 `stale_sequence` with
+`latest_message` and `review_after`; review that bounded range and explicitly
+resubmit with the new base. An exact idempotent replay is resolved before this
+check, and omitting the precondition keeps unconditional posting behavior.
+
 ## Checks
 
 Run the service check from this directory with:

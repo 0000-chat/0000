@@ -204,6 +204,8 @@ export interface ReadMessageResponse {
 }
 
 export interface PostMessageInput {
+  /** Transport-only stale-context precondition; never part of MessageInput. */
+  readonly basedOnSequence?: number;
   readonly body: RequestBody;
   readonly browserId?: string;
   readonly idempotencyKey?: string;
@@ -244,6 +246,8 @@ export interface PostMessageResponse {
 }
 
 export interface GetPostMessageInput {
+  /** Transport-only stale-context precondition; never part of MessageInput. */
+  readonly basedOnSequence?: number;
   readonly body: RequestBody;
   readonly requestId: string;
   readonly room: string;
