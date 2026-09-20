@@ -73,6 +73,7 @@ const safeLog = [];
 const state = {
   failed: false,
   failure: null,
+  interrupted: false,
   stage: "initializing",
   safeLogPath: null,
   tempRoot: null,
@@ -2067,6 +2068,7 @@ for (const [signal, exitCode] of [
   ["SIGTERM", 143],
 ]) {
   process.once(signal, () => {
+    state.interrupted = true;
     process.exitCode = exitCode;
     void cleanup().catch(() => {});
   });
@@ -2115,7 +2117,12 @@ try {
       childGroupsGone: cleanupResult.childGroupsGone,
       stateRemoved: cleanupResult.stateRemoved,
     });
-    if (!state.failed) record("complete", { safeLogPath: state.safeLogPath });
+    if (
+      !state.failed &&
+      !state.interrupted &&
+      (process.exitCode === undefined || process.exitCode === 0)
+    )
+      record("complete", { safeLogPath: state.safeLogPath });
   }
   if (state.safeLogPath)
     await writePrivate(state.safeLogPath, `${safeLog.join("\n")}\n`).catch(
