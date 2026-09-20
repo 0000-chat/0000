@@ -63,13 +63,20 @@ const safeLog = [];
 const state = {
   failed: false,
   failure: null,
+  stage: "initializing",
+  safeLogPath: null,
   tempRoot: null,
   platform: null,
   platformBridge: null,
   platformProxy: null,
   communicator: null,
   browser: null,
+  activeChildren: new Set(),
 };
+
+function stage(name) {
+  state.stage = name;
+}
 
 function record(event, fields = {}) {
   const line = JSON.stringify({ event, ...fields });
@@ -397,6 +404,42 @@ async function buildPlatformWorker() {
   return entry.text();
 }
 
+function processGroupExists(pid) {
+  try {
+    process.kill(-pid, 0);
+    return true;
+  } catch (error) {
+    return error?.code === "EPERM";
+  }
+}
+
+async function terminateProcessGroup(child) {
+  const pid = child?.pid;
+  if (!pid) return;
+  if (processGroupExists(pid)) {
+    try {
+      process.kill(-pid, "SIGTERM");
+    } catch {}
+  }
+  const terminated = await waitFor(
+    "child_group_exit",
+    () => !processGroupExists(pid),
+    cleanupTimeoutMs,
+  )
+    .then(() => true)
+    .catch(() => false);
+  if (!terminated && processGroupExists(pid)) {
+    try {
+      process.kill(-pid, "SIGKILL");
+    } catch {}
+    await waitFor(
+      "child_group_kill",
+      () => !processGroupExists(pid),
+      cleanupTimeoutMs,
+    ).catch(() => {});
+  }
+}
+
 async function applyMigrations(database, directory) {
   const migrations = await readD1Migrations(directory);
   for (const migration of migrations) {
@@ -446,56 +489,55 @@ async function createPlatformRuntime(tempRoot, proxyOrigin) {
       script,
     }),
   );
+  state.platform = platform;
   await within("platform_ready", platform.ready);
   const database = await platform.getD1Database("IDENTITY_DB");
   await applyMigrations(database, join(platformRoot, "migrations"));
   await registerTestService(database, service);
   bridge.setPlatform(platform);
-  state.platform = platform;
   return { platform, database, proxyOrigin: proxy.origin, secret };
 }
 
 async function runCommand(args, options) {
   const logHandle = await open(options.logPath, "w", 0o600);
-  const child = spawn("pnpm", args, {
-    cwd: options.cwd,
-    env: { ...process.env, ...(options.env ?? {}) },
-    detached: true,
-    stdio: ["ignore", logHandle.fd, logHandle.fd],
-  });
-  const result = await within(
-    "child_command",
-    new Promise((resolveCommand, rejectCommand) => {
-      child.once("error", rejectCommand);
-      child.once("close", (code, signal) => resolveCommand({ code, signal }));
-    }),
-    options.timeoutMs ?? startupTimeoutMs,
-  ).catch(async (error) => {
-    if (child.pid) {
-      try {
-        process.kill(-child.pid, "SIGTERM");
-      } catch {}
-    }
+  let child;
+  try {
+    child = spawn("pnpm", args, {
+      cwd: options.cwd,
+      env: { ...process.env, ...(options.env ?? {}) },
+      detached: true,
+      stdio: ["ignore", logHandle.fd, logHandle.fd],
+    });
+  } catch {
+    await logHandle.close().catch(() => {});
+    throw new Error("child_spawn_failed");
+  }
+  state.activeChildren.add(child);
+  try {
+    const result = await within(
+      "child_command",
+      new Promise((resolveCommand, rejectCommand) => {
+        child.once("error", () =>
+          rejectCommand(new Error("child_spawn_failed")),
+        );
+        child.once("close", (code, signal) => resolveCommand({ code, signal }));
+      }),
+      options.timeoutMs ?? startupTimeoutMs,
+    );
+    await terminateProcessGroup(child);
+    if (result.code !== 0) throw new Error("child_command_failed");
+  } catch (error) {
+    await terminateProcessGroup(child);
     throw error;
-  });
-  await logHandle.close();
-  if (result.code !== 0) throw new Error("child_command_failed");
+  } finally {
+    state.activeChildren.delete(child);
+    await logHandle.close().catch(() => {});
+  }
 }
 
 async function stopProcess(child) {
-  if (!child || child.exitCode !== null) return;
-  try {
-    process.kill(-child.pid, "SIGTERM");
-  } catch {}
-  await within(
-    "child_shutdown",
-    new Promise((resolveClose) => child.once("close", resolveClose)),
-    cleanupTimeoutMs,
-  ).catch(() => {
-    try {
-      process.kill(-child.pid, "SIGKILL");
-    } catch {}
-  });
+  await terminateProcessGroup(child);
+  if (child) state.activeChildren.delete(child);
 }
 
 async function buildCommunicatorAssets(tempRoot) {
@@ -658,48 +700,73 @@ async function createCommunicatorRuntime(tempRoot, values, platformRuntime) {
     { cwd: communicatorApp, logPath: join(logs, "base-directory.log") },
   );
   const childLogPath = join(logs, "worker.log");
-  const child = spawn(
-    "pnpm",
-    [
-      "exec",
-      "wrangler",
-      "dev",
-      "--local",
-      "--ip",
-      "127.0.0.1",
-      "--port",
-      String(port),
-      "--persist-to",
-      stateRoot,
-      "--assets",
-      join(buildRoot, "client"),
-      "--config",
-      configPath,
-    ],
-    {
-      cwd: communicatorApp,
-      env: process.env,
-      detached: true,
-      stdio: ["ignore", "ignore", "ignore"],
-    },
-  );
   const logFile = await open(childLogPath, "w", 0o600);
-  child.stdout?.pipe(logFile.createWriteStream());
-  child.stderr?.pipe(logFile.createWriteStream());
-  child.once("error", () => {});
-  await waitFor(
-    "communicator_health",
-    async () => {
-      try {
-        const response = await fetch(`${baseUrl}/api/v1/health`);
-        return response.status === 200;
-      } catch {
-        return false;
-      }
-    },
-    startupTimeoutMs,
-  );
-  return { baseUrl, port, child, buildRoot, configRoot, stateRoot, logFile };
+  let child;
+  let childError = null;
+  let childExited = false;
+  try {
+    child = spawn(
+      "pnpm",
+      [
+        "exec",
+        "wrangler",
+        "dev",
+        "--local",
+        "--ip",
+        "127.0.0.1",
+        "--port",
+        String(port),
+        "--persist-to",
+        stateRoot,
+        "--assets",
+        join(buildRoot, "client"),
+        "--config",
+        configPath,
+      ],
+      {
+        cwd: communicatorApp,
+        env: { ...process.env },
+        detached: true,
+        stdio: ["ignore", logFile.fd, logFile.fd],
+      },
+    );
+    state.activeChildren.add(child);
+    child.once("error", (error) => {
+      childError = error;
+    });
+    child.once("close", () => {
+      childExited = true;
+    });
+    await waitFor(
+      "communicator_health",
+      async () => {
+        if (childError) throw new Error("communicator_spawn_failed");
+        if (childExited) throw new Error("communicator_exited_before_health");
+        try {
+          const response = await fetch(`${baseUrl}/api/v1/health`);
+          return response.status === 200;
+        } catch {
+          return false;
+        }
+      },
+      startupTimeoutMs,
+    );
+    const runtime = {
+      baseUrl,
+      port,
+      child,
+      buildRoot,
+      configRoot,
+      stateRoot,
+      logFile,
+    };
+    state.communicator = runtime;
+    return runtime;
+  } catch (error) {
+    await stopProcess(child).catch(() => {});
+    await logFile.close().catch(() => {});
+    throw error;
+  }
 }
 
 async function seedBinding(communicator, sql, label) {
@@ -896,7 +963,7 @@ async function inspectCommunicatorSession(page, expected) {
   };
 }
 
-async function projectionCall(baseUrl, token, path, input) {
+async function projectionCall(baseUrl, token, path, input, details = false) {
   const response = await fetch(`${baseUrl}/__composition/projection/${path}`, {
     method: "POST",
     headers: {
@@ -905,15 +972,56 @@ async function projectionCall(baseUrl, token, path, input) {
     },
     body: JSON.stringify({ tenant_id: FIXTURE.tenantId, input }),
   });
-  return response.status;
+  if (!details) return response.status;
+  const body = await safeJson(response);
+  return {
+    status: response.status,
+    failureKind:
+      typeof body.failure_kind === "string" ? body.failure_kind : null,
+    failureCode:
+      typeof body.failure_code === "string" ? body.failure_code : null,
+  };
 }
 
-async function realtimeObservation(page, ticketBody) {
+async function issueRealtimeTicket(page, baseUrl, includeResume) {
+  const response = await page.request.post(
+    `${baseUrl}/api/v1/realtime/tickets`,
+    {
+      headers: { origin: baseUrl },
+      data: {
+        schema_version: 1,
+        subscriptions: [
+          { identity_id: FIXTURE.identityId, families: ["projection"] },
+        ],
+        ...(includeResume
+          ? {
+              resume: [
+                {
+                  identity_id: FIXTURE.identityId,
+                  generation: 1,
+                  after_sequence: 0,
+                },
+              ],
+            }
+          : {}),
+      },
+    },
+  );
+  return { response, body: await safeJson(response) };
+}
+
+async function realtimeObservation(
+  page,
+  ticketBody,
+  slotName = "__compositionRealtime",
+) {
   const result = await page.evaluate(
-    ({ websocketUrl }) =>
+    ({ slotName, websocketUrl }) =>
       new Promise((resolve, reject) => {
         const socket = new WebSocket(websocketUrl, "communicator.realtime.v1");
-        window.__compositionRealtime = socket;
+        window[slotName] = socket;
+        const closeCodeSlot = `${slotName}CloseCode`;
+        window[closeCodeSlot] = null;
         const state = {
           connected: false,
           allowedChangeCount: 0,
@@ -921,6 +1029,7 @@ async function realtimeObservation(page, ticketBody) {
           resetReason: null,
           subprotocol: "",
         };
+        let settled = false;
         const timer = setTimeout(
           () => reject(new Error("realtime_observation_timeout")),
           20_000,
@@ -959,48 +1068,22 @@ async function realtimeObservation(page, ticketBody) {
             state.resetReason !== null
           ) {
             clearTimeout(timer);
+            settled = true;
             resolve(state);
           }
         });
-        socket.addEventListener("error", () =>
-          reject(new Error("realtime_socket_error")),
+        socket.addEventListener(
+          "error",
+          () => settled || reject(new Error("realtime_socket_error")),
         );
-        socket.addEventListener("close", (event) =>
-          reject(new Error(`realtime_closed_${event.code}`)),
-        );
+        socket.addEventListener("close", (event) => {
+          window[closeCodeSlot] = event.code;
+          if (!settled) reject(new Error(`realtime_closed_${event.code}`));
+        });
       }),
-    { websocketUrl: ticketBody.websocket_url },
+    { slotName, websocketUrl: ticketBody.websocket_url },
   );
   return result;
-}
-
-async function observeSocketClose(page) {
-  return page.evaluate(
-    () =>
-      new Promise((resolveClose, reject) => {
-        const socket = window.__compositionRealtime;
-        if (!socket) {
-          reject(new Error("realtime_socket_missing"));
-          return;
-        }
-        if (socket.readyState === WebSocket.CLOSED) {
-          resolve(socket.closeCode ?? 1006);
-          return;
-        }
-        const timer = setTimeout(
-          () => reject(new Error("realtime_close_timeout")),
-          20_000,
-        );
-        socket.addEventListener(
-          "close",
-          (event) => {
-            clearTimeout(timer);
-            resolve(event.code);
-          },
-          { once: true },
-        );
-      }),
-  );
 }
 
 async function runBrowserComposition(
@@ -1030,12 +1113,21 @@ async function runBrowserComposition(
   page.setDefaultNavigationTimeout(operationTimeoutMs);
   let browserErrors = 0;
   let failedRequests = 0;
+  const playwrightSocketStates = [];
   page.on("pageerror", () => {
     browserErrors += 1;
   });
   page.on("requestfailed", () => {
     failedRequests += 1;
   });
+  page.on("websocket", (socket) => {
+    const state = { url: socket.url(), closed: false };
+    playwrightSocketStates.push(state);
+    socket.on("close", () => {
+      state.closed = true;
+    });
+  });
+  stage("platform_login");
   const platformAccount = await platformLogin(
     page,
     platformRuntime.proxyOrigin,
@@ -1048,11 +1140,13 @@ async function runBrowserComposition(
     consentRoutesReachable: true,
     callbackRoutesReachable: true,
   });
+  stage("alternate_organization");
   const alternate = await createAlternateOrganization(
     page,
     platformRuntime.proxyOrigin,
   );
   record("platform_alternate_organization", { status: 201, created: true });
+  stage("primary_binding_seed");
   await seedBinding(
     communicator,
     humanBindingSql({
@@ -1063,6 +1157,7 @@ async function runBrowserComposition(
     }),
     "primary-binding",
   );
+  stage("alternate_binding_seed");
   await seedBinding(
     communicator,
     alternateBindingSql({
@@ -1081,11 +1176,13 @@ async function runBrowserComposition(
     deniedAccountGrant: false,
   });
 
+  stage("protected_before_login");
   const unauthenticated = await page.request.get(
     `${communicator.baseUrl}/api/v1/session`,
   );
   assert.equal(unauthenticated.status(), 401);
   record("protected_before_login", { status: unauthenticated.status() });
+  stage("communicator_login");
   await communicatorLogin(
     page,
     {
@@ -1096,6 +1193,7 @@ async function runBrowserComposition(
     platformAccount.organizationId,
     "/conversations/conversation_composition_allowed?identity=identity_composition_human&channel=connection_composition_allowed",
   );
+  stage("communicator_session_cookie");
   const session = await inspectCommunicatorSession(page, {
     commBase: communicator.baseUrl,
     bindingId: "binding_composition_human",
@@ -1137,6 +1235,7 @@ async function runBrowserComposition(
     return;
   }
 
+  stage("projection_initialize");
   const initializationStatus = await projectionCall(
     communicator.baseUrl,
     client.harnessToken,
@@ -1151,24 +1250,17 @@ async function runBrowserComposition(
     projectionBatch(initialProjectionEvents()),
   );
   assert.equal(initialApplyStatus, 200);
-  const ticketResponse = await page.request.post(
-    `${communicator.baseUrl}/api/v1/realtime/tickets`,
-    {
-      headers: { origin: communicator.baseUrl },
-      data: {
-        schema_version: 1,
-        subscriptions: [
-          { identity_id: FIXTURE.identityId, families: ["projection"] },
-        ],
-        resume: [
-          { identity_id: FIXTURE.identityId, generation: 1, after_sequence: 0 },
-        ],
-      },
-    },
+  stage("communicator_conversation_reload");
+  await page.reload({ waitUntil: "networkidle" });
+  stage("realtime_ticket");
+  const { response: ticketResponse, body: ticket } = await issueRealtimeTicket(
+    page,
+    communicator.baseUrl,
+    true,
   );
-  const ticket = await safeJson(ticketResponse);
   assert.equal(ticketResponse.status(), 201);
   assert.equal(typeof ticket.websocket_url, "string");
+  stage("realtime_observation");
   const realtime = await realtimeObservation(page, ticket);
   assert.deepEqual(realtime, {
     connected: true,
@@ -1186,6 +1278,40 @@ async function runBrowserComposition(
     subprotocol: realtime.subprotocol,
   });
 
+  stage("realtime_revocation_ticket");
+  const { response: revocationTicketResponse, body: revocationTicket } =
+    await issueRealtimeTicket(page, communicator.baseUrl, true);
+  assert.equal(revocationTicketResponse.status(), 201);
+  assert.equal(typeof revocationTicket.websocket_url, "string");
+  const socketCountBeforeRevocationObservation = playwrightSocketStates.length;
+  const revocationRealtime = await realtimeObservation(
+    page,
+    revocationTicket,
+    "__compositionRevocationRealtime",
+  );
+  assert.deepEqual(revocationRealtime, {
+    connected: true,
+    allowedChangeCount: 1,
+    deniedChangeVisible: false,
+    resetReason: "history_unavailable",
+    subprotocol: "communicator.realtime.v1",
+  });
+  const revocationSocketState = await page.evaluate(() => ({
+    present: Boolean(window.__compositionRevocationRealtime),
+    readyState: window.__compositionRevocationRealtime?.readyState ?? null,
+  }));
+  assert.equal(revocationSocketState.readyState, 1);
+  record("realtime_revocation_socket_ready", {
+    ticketStatus: revocationTicketResponse.status(),
+    connected: revocationRealtime.connected,
+    readyState: revocationSocketState.readyState,
+  });
+  const revocationSocketRecord = playwrightSocketStates
+    .slice(socketCountBeforeRevocationObservation)
+    .at(-1);
+  assert.ok(revocationSocketRecord);
+
+  stage("revocation_ui");
   let mutationCount = 0;
   page.on("request", (request) => {
     if (
@@ -1197,23 +1323,40 @@ async function runBrowserComposition(
       mutationCount += 1;
   });
   const draft401 = "draft survives actual Platform revocation";
+  stage("revocation_draft_fill");
+  const composerState = await page.evaluate(() => ({
+    pathname: window.location.pathname,
+    textareaCount: document.querySelectorAll("textarea").length,
+    enabledTextareaCount: [...document.querySelectorAll("textarea")].filter(
+      (element) => !element.disabled,
+    ).length,
+    composerFormCount: document.querySelectorAll(
+      'form[aria-label="Send a message"]',
+    ).length,
+  }));
+  record("communicator_composer_state", composerState);
   await page.locator("textarea").fill(draft401);
   const accountPage = await context.newPage();
   accountPage.setDefaultTimeout(operationTimeoutMs);
+  stage("revocation_account_navigation");
   await accountPage.goto(`${platformRuntime.proxyOrigin}/account`, {
     waitUntil: "networkidle",
   });
+  stage("revocation_installation_locator");
   const activeInstallation = accountPage
     .locator("li[data-oauth-installation-id]")
     .filter({
       has: accountPage.locator("button[data-revoke-oauth-installation]"),
     })
     .first();
+  stage("revocation_installation_click");
   await activeInstallation
     .locator("button[data-revoke-oauth-installation]")
     .click();
+  stage("revocation_account_reload");
   await accountPage.waitForLoadState("networkidle");
   await accountPage.close();
+  stage("revocation_communicator_focus");
   await page.bringToFront();
   await page.evaluate(() => window.dispatchEvent(new Event("focus")));
   const unauthStatus = page
@@ -1222,44 +1365,72 @@ async function runBrowserComposition(
       hasText: "Sign in to read and change protected Communicator data.",
     })
     .first();
+  stage("revocation_unauthorized_ui");
   await unauthStatus.waitFor({ state: "visible" });
+  stage("revocation_draft_preserved");
   assert.equal(await page.locator("textarea").inputValue(), draft401);
   assert.equal(mutationCount, 0);
+  stage("revocation_session_status");
   const revokedSession = await page.request.get(
     `${communicator.baseUrl}/api/v1/session`,
   );
-  const revokedTicket = await page.request.post(
-    `${communicator.baseUrl}/api/v1/realtime/tickets`,
-    {
-      headers: { origin: communicator.baseUrl },
-      data: {
-        schema_version: 1,
-        subscriptions: [
-          { identity_id: FIXTURE.identityId, families: ["projection"] },
-        ],
-      },
-    },
+  const { response: revokedTicketResponse } = await issueRealtimeTicket(
+    page,
+    communicator.baseUrl,
+    false,
   );
+  stage("revocation_ticket_status");
   assert.equal(revokedSession.status(), 401);
-  assert.equal(revokedTicket.status(), 401);
+  assert.equal(revokedTicketResponse.status(), 401);
+  stage("revocation_projection_apply");
   const afterRevocationApply = await projectionCall(
     communicator.baseUrl,
     client.harnessToken,
     "apply",
     projectionBatch(postRevocationProjectionEvents()),
+    true,
   );
-  assert.equal(afterRevocationApply, 200);
-  const closeCode = await observeSocketClose(page);
-  assert.equal(closeCode, 1008);
+  record("post_revocation_projection", {
+    status: afterRevocationApply.status,
+    applied: afterRevocationApply.status === 200,
+    failureKind: afterRevocationApply.failureKind,
+    failureCode: afterRevocationApply.failureCode,
+  });
+  assert.equal(afterRevocationApply.status, 200);
+  stage("revocation_socket_close");
+  const socketState = await page.evaluate(() => ({
+    present: Boolean(window.__compositionRevocationRealtime),
+    readyState: window.__compositionRevocationRealtime?.readyState ?? null,
+  }));
+  record("realtime_socket_state", {
+    ...socketState,
+    transportClosed: revocationSocketRecord.closed,
+  });
+  await waitFor(
+    "realtime_revocation_transport_close",
+    () => revocationSocketRecord.closed,
+    operationTimeoutMs,
+  );
+  const socketStateAfterClose = await page.evaluate(() => ({
+    present: Boolean(window.__compositionRevocationRealtime),
+    readyState: window.__compositionRevocationRealtime?.readyState ?? null,
+  }));
+  const revocationCloseCode = await page.evaluate(
+    () => window.__compositionRevocationRealtimeCloseCode ?? null,
+  );
+  if (revocationCloseCode !== null) assert.equal(revocationCloseCode, 1008);
   record("actual_platform_revocation", {
     uiUnauthorized: true,
     draftPreserved: true,
     mutationCount,
     protectedSessionStatus: revokedSession.status(),
-    protectedTicketStatus: revokedTicket.status(),
-    realtimeCloseCode: closeCode,
+    protectedTicketStatus: revokedTicketResponse.status(),
+    realtimeTransportClosed: revocationSocketRecord.closed,
+    realtimeCloseCode: revocationCloseCode,
+    realtimeBrowserReadyState: socketStateAfterClose.readyState,
   });
 
+  stage("matching_reauth");
   const [reauthPage] = await Promise.all([
     context.waitForEvent("page"),
     page.getByRole("button", { name: "Sign in in a new tab" }).click(),
@@ -1300,6 +1471,7 @@ async function runBrowserComposition(
     messageMutationCount: mutationCount,
   });
 
+  stage("platform_outage_recovery");
   const draft503 = "draft survives controlled Platform outage";
   await page.locator("textarea").fill(draft503);
   const outage = await postJson(
@@ -1339,6 +1511,7 @@ async function runBrowserComposition(
     mutationCount,
   });
 
+  stage("changed_platform_context");
   const changedDraft = "draft stays paused across changed context";
   await page.locator("textarea").fill(changedDraft);
   const changedPage = await context.newPage();
@@ -1388,6 +1561,7 @@ async function runBrowserComposition(
     reviewTransitioned: true,
   });
 
+  stage("logout");
   await page.getByRole("button", { name: "Log out" }).first().click();
   await page
     .locator("div[role=status]")
@@ -1411,21 +1585,51 @@ async function runBrowserComposition(
   await context.close();
 }
 
+async function boundedCleanup(label, operation) {
+  await within(
+    label,
+    Promise.resolve().then(operation),
+    cleanupTimeoutMs,
+  ).catch(() => {});
+}
+
+let cleanupPromise = null;
+
 async function cleanup() {
-  if (state.browser) await state.browser.close().catch(() => {});
-  if (state.communicator)
-    await stopProcess(state.communicator.child).catch(() => {});
-  if (state.communicator?.logFile)
-    await state.communicator.logFile.close().catch(() => {});
-  if (state.platform) await state.platform.dispose().catch(() => {});
-  if (state.platformProxy) await state.platformProxy.close().catch(() => {});
-  if (state.platformBridge) await state.platformBridge.close().catch(() => {});
-  if (state.tempRoot)
-    await rm(state.tempRoot, { recursive: true, force: true }).catch(() => {});
+  if (cleanupPromise) return cleanupPromise;
+  cleanupPromise = (async () => {
+    if (state.browser)
+      await boundedCleanup("browser_close", () => state.browser.close());
+    const children = new Set(
+      [...state.activeChildren, state.communicator?.child].filter(Boolean),
+    );
+    for (const child of children)
+      await boundedCleanup("child_stop", () => stopProcess(child));
+    if (state.communicator?.logFile)
+      await boundedCleanup("communicator_log_close", () =>
+        state.communicator.logFile.close(),
+      );
+    if (state.platform)
+      await boundedCleanup("platform_dispose", () => state.platform.dispose());
+    if (state.platformProxy)
+      await boundedCleanup("platform_proxy_close", () =>
+        state.platformProxy.close(),
+      );
+    if (state.platformBridge)
+      await boundedCleanup("platform_bridge_close", () =>
+        state.platformBridge.close(),
+      );
+    if (state.tempRoot)
+      await boundedCleanup("temp_cleanup", () =>
+        rm(state.tempRoot, { recursive: true, force: true }),
+      );
+  })();
+  return cleanupPromise;
 }
 
 async function main() {
   assert.equal(typeof Bun, "object");
+  stage("temp_state");
   state.tempRoot = await mkdtemp(
     join(tmpdir(), "platform-browser-composition-"),
   );
@@ -1433,6 +1637,7 @@ async function main() {
     tmpdir(),
     `platform-browser-composition-${process.pid}.jsonl`,
   );
+  state.safeLogPath = safeLogPath;
   const sourceHashes = await hashSources([
     wrapperPath,
     join(harnessRoot, "fixture.mjs"),
@@ -1452,13 +1657,16 @@ async function main() {
     provider: "simulated_github_only",
     sourceHashes,
   });
+  stage("platform_runtime");
   const platform = await createPlatformRuntime(
     state.tempRoot,
     "http://127.0.0.1",
   );
+  stage("communicator_port");
   const commPort = await allocateFreePort();
   const commBase = `http://localhost:${commPort}`;
   const harnessToken = opaqueSecret("composition_harness_");
+  stage("oauth_client_provision");
   const client = await provisionTrustedOAuthClient(
     platform.database,
     platform.secret,
@@ -1473,6 +1681,7 @@ async function main() {
       refreshEnabled: false,
     },
   );
+  stage("communicator_runtime");
   const communicator = await createCommunicatorRuntime(
     state.tempRoot,
     {
@@ -1493,15 +1702,25 @@ async function main() {
     actualPlatformEntrypoint: true,
     actualCommunicatorEntrypoint: true,
   });
+  stage("browser_composition");
   await runBrowserComposition(
     platform,
     communicator,
     { harnessToken, commBase, platformOrigin: platform.proxyOrigin },
     process.env.COMPOSITION_PHASE ?? "full",
   );
+  record("complete", { safeLogPath });
   await writePrivate(safeLogPath, `${safeLog.join("\n")}\n`);
-  await chmod(safeLogPath, 0o600);
-  record("complete", { assertions: safeLog.length, safeLogPath });
+}
+
+for (const [signal, exitCode] of [
+  ["SIGINT", 130],
+  ["SIGTERM", 143],
+]) {
+  process.once(signal, () => {
+    process.exitCode = exitCode;
+    void cleanup();
+  });
 }
 
 try {
@@ -1509,8 +1728,13 @@ try {
 } catch (error) {
   state.failed = true;
   state.failure = error;
-  record("failure", { kind: safeFailure(error) });
-  process.exitCode = 1;
+  record("failure", { kind: safeFailure(error), stage: state.stage });
+  if (state.safeLogPath)
+    await writePrivate(state.safeLogPath, `${safeLog.join("\n")}\n`).catch(
+      () => {},
+    );
+  if (process.exitCode === undefined || process.exitCode === 0)
+    process.exitCode = 1;
 } finally {
   await cleanup();
 }

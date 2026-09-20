@@ -40,6 +40,8 @@ INSERT INTO gateway_routes (id, service_principal_id, status, created_at, update
 INSERT INTO connections (id, tenant_id, identity_id, provider, display_label, status, created_at, updated_at) VALUES
   (${sql(f.allowedConnectionId)}, ${sql(f.tenantId)}, ${sql(f.identityId)}, 'whatsapp', 'Composition allowed connection', 'ready', ${sql(FIXTURE_TIME)}, ${sql(FIXTURE_TIME)}),
   (${sql(f.deniedConnectionId)}, ${sql(f.tenantId)}, ${sql(f.identityId)}, 'whatsapp', 'Composition denied connection', 'ready', ${sql(FIXTURE_TIME)}, ${sql(FIXTURE_TIME)});
+INSERT INTO connection_capabilities (tenant_id, connection_id, capability, created_at) VALUES
+  (${sql(f.tenantId)}, ${sql(f.allowedConnectionId)}, 'message.send', ${sql(FIXTURE_TIME)});
 INSERT INTO connection_routes (connection_id, gateway_route_id, bridge_instance_id, matrix_user_id, matrix_room_namespace, created_at, updated_at) VALUES
   (${sql(f.allowedConnectionId)}, ${sql(f.allowedGatewayRouteId)}, 'composition-bridge-allowed', '@composition-allowed:example.test', '!composition-allowed:example.test', ${sql(FIXTURE_TIME)}, ${sql(FIXTURE_TIME)}),
   (${sql(f.deniedConnectionId)}, ${sql(f.deniedGatewayRouteId)}, 'composition-bridge-denied', '@composition-denied:example.test', '!composition-denied:example.test', ${sql(FIXTURE_TIME)}, ${sql(FIXTURE_TIME)});
@@ -211,6 +213,13 @@ export function postRevocationProjectionEvents() {
       connectionId: FIXTURE.allowedConnectionId,
       conversationId: "conversation_composition_after_revocation",
       observedAt: "2026-09-20T00:00:03.000Z",
+    }),
+    projectionEvent({
+      eventId: "composition_after_platform_revocation_denied",
+      accountId: FIXTURE.deniedAccountId,
+      connectionId: FIXTURE.deniedConnectionId,
+      conversationId: "conversation_composition_after_revocation_denied",
+      observedAt: "2026-09-20T00:00:04.000Z",
     }),
   ];
 }

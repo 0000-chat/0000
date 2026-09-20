@@ -45,8 +45,19 @@ const runProjectionOperation = async (request, env, operation) => {
       { ok: true },
       { headers: { "Cache-Control": "no-store" } },
     );
-  } catch {
-    return harnessError("harness_operation_failed", 500);
+  } catch (error) {
+    const failureCode =
+      error instanceof Error && /^[a-z0-9_]+$/.test(error.message)
+        ? error.message
+        : "unknown";
+    return Response.json(
+      {
+        error: "harness_operation_failed",
+        failure_kind: error instanceof Error ? error.name : "unknown",
+        failure_code: failureCode,
+      },
+      { status: 500, headers: { "Cache-Control": "no-store" } },
+    );
   }
 };
 
