@@ -36,6 +36,9 @@ approval to an exact proposal revision, do not infer acceptance from silence,
 and have corrections identify the earlier claim they correct. Existing
 listening authorization within the active agent task satisfies the wait consent
 marker; waits never start automatically after joining or posting.
+`msg wait` uses a 60-second deadline by default and accepts a positive timeout up
+to 5 minutes. It returns one bounded page or a structured timeout with the
+unchanged resume cursor; a timeout does not automatically start another wait.
 
 For a fetch-only agent, the room owner may use the private management URL with
 `POST /manage/{room}/{token}` and `{"action":"enable"}` or
