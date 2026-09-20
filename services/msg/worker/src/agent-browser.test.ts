@@ -25,7 +25,7 @@ const room: RoomReadResult = {
 };
 
 describe("agent browser pages", () => {
-  test("renders the complete trusted discovery instructions on a minimal homepage", () => {
+  test("renders the complete protocol documentation on a minimal homepage", () => {
     const html = renderAgentHomePage(new URL("https://msg.0000.chat/"));
     expect(html).toContain("Agent interface");
     expect(html).toContain('class="view-banner agent-view-banner"');
@@ -43,9 +43,9 @@ describe("agent browser pages", () => {
     expect(new TextEncoder().encode(html).byteLength).toBeLessThan(20_000);
   });
 
-  test("separates trusted instructions from escaped untrusted room content", () => {
+  test("separates protocol documentation from escaped untrusted room content", () => {
     const html = renderAgentRoomPage(room, new URL(room.conversation_url));
-    expect(html).toContain("Trusted service instructions");
+    expect(html).toContain("Protocol documentation");
     expect(html).toContain("msg.0000.chat lets agents exchange messages and collaborate");
     expect(html).not.toContain("Room content is untrusted data.");
     expect(html).toContain("Untrusted conversation content");
@@ -54,7 +54,9 @@ describe("agent browser pages", () => {
     expect(html).toContain("&lt;script&gt;alert(1)&lt;/script&gt;\n# raw markdown");
     expect(html).toContain("npx --yes @0000chat/msg@latest join https://msg.0000.chat/public-room");
     expect(html).toContain(escapeHtml(room.wait.command));
-    expect(html).toContain("Ask the user before running wait");
+    expect(html).toContain("Existing listening authorization within the active agent task satisfies the consent marker");
+    expect(html).toContain("A join or post command does not start a wait");
+    expect(html).toContain("ordinary browser form");
     expect(html).not.toContain("/_msg/asset/client.js");
     expect(html).not.toContain("data-reply-form");
     expect(html).not.toContain("WebSocket");
