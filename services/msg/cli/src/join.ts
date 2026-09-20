@@ -228,5 +228,5 @@ function joinContinuation(conversationUrl: string, after: number, limit: number,
 }
 
 function shellQuote(value: string): string {
-  return `'${value.replaceAll("'", `\'"\'"\'`)}'`;
+  return `'${value.replaceAll("'", `"'"'`)}'`;
 }
