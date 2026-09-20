@@ -29,6 +29,23 @@ const outputLogPath =
 const keepState = process.env.T11_KEEP_STATE === "1";
 const targetDirectory =
   process.env.CARGO_TARGET_DIR ?? join(runRoot, "cargo-target");
+const startupTimeoutMs = Number(process.env.T11_STARTUP_TIMEOUT_MS ?? "30000");
+const stageTimeoutMs = Number(process.env.T11_STAGE_TIMEOUT_MS ?? "120000");
+const requestTimeoutMs = 5000;
+if (
+  !Number.isInteger(startupTimeoutMs) ||
+  startupTimeoutMs < 1 ||
+  !Number.isInteger(stageTimeoutMs) ||
+  stageTimeoutMs < 1
+) {
+  throw new Error("T11 startup/stage timeouts must be positive integers");
+}
+
+const ownedGroups = new Map();
+const groupStopPromises = new Map();
+const shutdownController = new AbortController();
+let interruptedBy = null;
+let cleanupPromise;
 
 const append = async (line) => {
   await writeFile(internalLogPath, `${line}\n`, { flag: "a", mode: 0o600 });
@@ -57,8 +74,14 @@ function spawnLogged(
   command,
   args,
   environment,
-  { detached = false, cwd = communicatorRoot, logPath = internalLogPath } = {},
+  {
+    detached = false,
+    cwd = communicatorRoot,
+    logPath = internalLogPath,
+    label = command,
+  } = {},
 ) {
+  assertNotInterrupted();
   const output = openSync(logPath, "a");
   const child = spawn(command, args, {
     cwd,
@@ -66,23 +89,132 @@ function spawnLogged(
     env: { ...process.env, ...environment },
     stdio: ["ignore", output, output],
   });
+  if (detached && child.pid !== undefined) {
+    ownedGroups.set(child.pid, { label, pid: child.pid });
+  }
   child.once("exit", () => closeSync(output));
   return child;
 }
 
-function runLogged(command, args, environment = {}) {
+function delay(milliseconds) {
+  return new Promise((resolveDelay) => setTimeout(resolveDelay, milliseconds));
+}
+
+function assertNotInterrupted() {
+  if (interruptedBy !== null) {
+    throw new Error(`runner interrupted by ${interruptedBy}`);
+  }
+}
+
+async function groupExists(pgid) {
+  try {
+    process.kill(-pgid, 0);
+    return true;
+  } catch (error) {
+    return error?.code !== "ESRCH";
+  }
+}
+
+function signalGroup(pgid, signal) {
+  try {
+    process.kill(-pgid, signal);
+    return true;
+  } catch (error) {
+    if (error?.code === "ESRCH") return false;
+    throw error;
+  }
+}
+
+async function stopGroup(pgid) {
+  if (groupStopPromises.has(pgid)) return groupStopPromises.get(pgid);
+  const group = ownedGroups.get(pgid);
+  const stopPromise = (async () => {
+    const termSent = signalGroup(pgid, "SIGTERM");
+    const termDeadline = Date.now() + 1500;
+    while (await groupExists(pgid)) {
+      if (Date.now() >= termDeadline) break;
+      await delay(50);
+    }
+    const killSent = (await groupExists(pgid))
+      ? signalGroup(pgid, "SIGKILL")
+      : false;
+    const killDeadline = Date.now() + 1500;
+    while (await groupExists(pgid)) {
+      if (Date.now() >= killDeadline) break;
+      await delay(50);
+    }
+    return {
+      label: group?.label ?? "unknown",
+      pid: pgid,
+      termSent,
+      killSent,
+      stopped: !(await groupExists(pgid)),
+    };
+  })();
+  groupStopPromises.set(pgid, stopPromise);
+  return stopPromise;
+}
+
+async function stopOwnedGroups() {
+  const groups = await Promise.all(
+    [...ownedGroups.keys()].map((pgid) => stopGroup(pgid)),
+  );
+  return {
+    allStopped: groups.every((group) => group.stopped),
+    groups,
+  };
+}
+
+async function requestShutdown(signal) {
+  interruptedBy ??= signal;
+  shutdownController.abort();
+  cleanupPromise ??= stopOwnedGroups();
+  await cleanupPromise;
+}
+
+process.once("SIGINT", () => void requestShutdown("SIGINT"));
+process.once("SIGTERM", () => void requestShutdown("SIGTERM"));
+
+function runLogged(command, args, environment = {}, label = command) {
   return new Promise((resolveRun, rejectRun) => {
-    const child = spawnLogged(command, args, environment);
-    child.once("error", rejectRun);
-    child.once("exit", (code, signal) =>
-      resolveRun({ code: code ?? 1, signal }),
-    );
+    const stageLogPath = join(runRoot, `${label}.log`);
+    const child = spawnLogged(command, args, environment, {
+      detached: true,
+      label,
+      logPath: stageLogPath,
+    });
+    let settled = false;
+    let timedOut = false;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      resolveRun({ ...value, timedOut, logPath: stageLogPath });
+    };
+    const timer = setTimeout(() => {
+      timedOut = true;
+      void stopGroup(child.pid)
+        .catch(() => {})
+        .finally(() => finish({ code: null, signal: "SIGKILL" }));
+    }, stageTimeoutMs);
+    child.once("error", (error) => {
+      clearTimeout(timer);
+      finish({
+        code: 1,
+        signal: null,
+        spawnError: error instanceof Error ? error.message : String(error),
+      });
+    });
+    child.once("exit", (code, signal) => {
+      clearTimeout(timer);
+      finish({ code: code ?? 1, signal });
+    });
   });
 }
 
-async function waitForJson(path, timeoutMs = 30_000) {
+async function waitForJson(path, timeoutMs = startupTimeoutMs) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
+    assertNotInterrupted();
     try {
       return JSON.parse(await readFile(path, "utf8"));
     } catch {
@@ -92,43 +224,167 @@ async function waitForJson(path, timeoutMs = 30_000) {
   throw new Error(`timed out waiting for ${path}`);
 }
 
-async function waitForHealth(url, timeoutMs = 30_000) {
+async function fetchWithDeadline(url) {
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  const timer = setTimeout(() => controller.abort(), requestTimeoutMs);
+  shutdownController.signal.addEventListener("abort", abort, { once: true });
+  try {
+    return await fetch(url, { signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+    shutdownController.signal.removeEventListener("abort", abort);
+  }
+}
+
+async function waitForHealth(url, timeoutMs = startupTimeoutMs) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
+    assertNotInterrupted();
     try {
-      const response = await fetch(`${url}/healthz`);
+      const response = await fetchWithDeadline(`${url}/healthz`);
       await response.arrayBuffer();
       if (response.ok) return;
     } catch {
       // The local Wrangler process is still starting.
     }
-    await new Promise((resolveWait) => setTimeout(resolveWait, 250));
+    await delay(250);
   }
   throw new Error(`timed out waiting for ${url}`);
 }
 
-async function stop(child) {
-  if (!child || child.exitCode !== null) return;
-  if (child.pid) {
-    try {
-      process.kill(-child.pid, "SIGTERM");
-    } catch {
-      child.kill("SIGTERM");
-    }
-  }
-  await new Promise((resolveWait) => setTimeout(resolveWait, 500));
-  if (child.exitCode === null && child.pid) {
-    try {
-      process.kill(-child.pid, "SIGKILL");
-    } catch {
-      child.kill("SIGKILL");
-    }
+function escapedRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+async function readStageLog(stageResult) {
+  try {
+    return await readFile(stageResult.logPath, "utf8");
+  } catch {
+    return "";
   }
 }
 
-let platformProcess;
-let communicatorProcess;
+async function runCargoStage(label, testName, environment) {
+  const stageResult = await runLogged(
+    "cargo",
+    [
+      "test",
+      "-p",
+      "communicator-matrix-gateway",
+      "--features",
+      "loopback-test",
+      "--test",
+      "t11_issued_live_http",
+      testName,
+      "--",
+      "--exact",
+      "--ignored",
+      "--nocapture",
+    ],
+    environment,
+    label,
+  );
+  const output = await readStageLog(stageResult);
+  const executed =
+    /running 1 test\b/u.test(output) &&
+    new RegExp(`^test ${escapedRegExp(testName)} \\.\\.\\. ok$`, "mu").test(
+      output,
+    ) &&
+    /test result: ok\. 1 passed; 0 failed(?:;|\s)/u.test(output);
+  const observed =
+    label === "before"
+      ? {
+          ingestion: output.includes(
+            "issued Rust ingestion before revocation: Accepted",
+          )
+            ? "Accepted"
+            : null,
+          claim: output.includes("issued Rust claim before revocation: Allowed")
+            ? "Allowed"
+            : null,
+        }
+      : {
+          ingestion: output.includes(
+            "issued Rust ingestion after Platform revocation: class=Paused code=ingestion_unauthorized",
+          )
+            ? "Paused/ingestion_unauthorized"
+            : null,
+          directClaimHttpStatus: output.includes(
+            "revoked issued credential direct claim HTTP status: 401",
+          )
+            ? 401
+            : null,
+          claim: output.includes(
+            "issued Rust claim after Platform revocation: Uncertain",
+          )
+            ? "Uncertain"
+            : null,
+          replacementIngestion: output.includes(
+            "replacement Rust ingestion: Accepted",
+          )
+            ? "Accepted"
+            : null,
+          replacementClaim: output.includes("replacement Rust claim: Allowed")
+            ? "Allowed"
+            : null,
+        };
+  const completeObservation =
+    label === "before"
+      ? observed.ingestion === "Accepted" && observed.claim === "Allowed"
+      : observed.ingestion === "Paused/ingestion_unauthorized" &&
+        observed.directClaimHttpStatus === 401 &&
+        observed.claim === "Uncertain" &&
+        observed.replacementIngestion === "Accepted" &&
+        observed.replacementClaim === "Allowed";
+  const passed = stageResult.code === 0 && !stageResult.timedOut && executed;
+  const value = {
+    code: stageResult.code,
+    signal: stageResult.signal,
+    timedOut: stageResult.timedOut,
+    ran: executed,
+    passed: passed && completeObservation,
+    observed: passed && completeObservation ? { ...observed } : null,
+  };
+  await append(
+    JSON.stringify({
+      stage: label,
+      code: value.code,
+      signal: value.signal,
+      timedOut: value.timedOut,
+      ran: value.ran,
+      passed: value.passed,
+      observed: value.observed,
+    }),
+  );
+  return value;
+}
+
+async function runRevocation(environment) {
+  const stageResult = await runLogged(
+    "bun",
+    [revoker],
+    environment,
+    "revoke-service",
+  );
+  const output = await readStageLog(stageResult);
+  const observed = /\{"status":200,"revoked":true\}/u.test(output)
+    ? { status: 200, revoked: true }
+    : null;
+  const value = {
+    code: stageResult.code,
+    signal: stageResult.signal,
+    timedOut: stageResult.timedOut,
+    passed: stageResult.code === 0 && !stageResult.timedOut && observed !== null,
+    observed,
+  };
+  await append(JSON.stringify({ stage: "revoke-service", ...value }));
+  return value;
+}
+
 let result = { before: null, revoke: null, after: null };
+let cleanupResult = null;
+let stateRemoved = false;
 try {
   const platformPort = Number(
     process.env.T11_PLATFORM_PORT ?? (await freePort()),
@@ -148,7 +404,7 @@ try {
     }),
   );
 
-  platformProcess = spawnLogged(
+  spawnLogged(
     "bun",
     [platformBridge],
     {
@@ -159,6 +415,7 @@ try {
     },
     {
       detached: true,
+      label: "platform-worker",
       cwd: resolve(communicatorRoot, "../platform"),
       logPath: join(runRoot, "platform.log"),
     },
@@ -166,19 +423,30 @@ try {
   const info = await waitForJson(infoPath);
   await waitForHealth(info.baseUrl);
 
-  const issueResult = await runLogged("bun", [issuer], {
-    T11_PLATFORM_INFO_PATH: infoPath,
-    T11_ISSUED_SERVICE_PATH: issuedPath,
-  });
+  const issueResult = await runLogged(
+    "bun",
+    [issuer],
+    {
+      T11_PLATFORM_INFO_PATH: infoPath,
+      T11_ISSUED_SERVICE_PATH: issuedPath,
+    },
+    "issue-service",
+  );
   if (issueResult.code !== 0) {
     throw new Error("Platform service issuance failed");
   }
+  await waitForJson(issuedPath, 5000);
 
-  const seedResult = await runLogged("node", [seeder], {
-    T11_PLATFORM_INFO_PATH: infoPath,
-    T11_ISSUED_SERVICE_PATH: issuedPath,
-    T11_COMMUNICATOR_STATE_PATH: communicatorState,
-  });
+  const seedResult = await runLogged(
+    "node",
+    [seeder],
+    {
+      T11_PLATFORM_INFO_PATH: infoPath,
+      T11_ISSUED_SERVICE_PATH: issuedPath,
+      T11_COMMUNICATOR_STATE_PATH: communicatorState,
+    },
+    "seed-communicator",
+  );
   if (seedResult.code !== 0) {
     throw new Error("Communicator fixture seeding failed");
   }
@@ -219,12 +487,13 @@ try {
     "--var",
     "COMMUNICATOR_INGRESS_ENABLED:true",
   ];
-  communicatorProcess = spawnLogged(
+  spawnLogged(
     "pnpm",
     workerArgs,
     {},
     {
       detached: true,
+      label: "communicator-worker",
       cwd: controlPlaneRoot,
       logPath: join(runRoot, "communicator.log"),
     },
@@ -240,70 +509,88 @@ try {
     T11_RUST_BATCH_TWO: batchPaths[1],
     T11_RUST_BATCH_THREE: batchPaths[2],
   };
-  result.before = await runLogged(
-    "cargo",
-    [
-      "test",
-      "-p",
-      "communicator-matrix-gateway",
-      "--features",
-      "loopback-test",
-      "--test",
-      "t11_issued_live_http",
-      "issued_platform_credential_reaches_live_ingestion_and_claim",
-      "--",
-      "--ignored",
-      "--nocapture",
-    ],
+  result.before = await runCargoStage(
+    "before",
+    "issued_platform_credential_reaches_live_ingestion_and_claim",
     rustEnvironment,
   );
+  if (!result.before.passed) {
+    throw new Error("pre-revocation Rust test did not pass as one exact test");
+  }
 
-  result.revoke = await runLogged("bun", [revoker], {
+  result.revoke = await runRevocation({
     T11_PLATFORM_INFO_PATH: infoPath,
     T11_ISSUED_SERVICE_PATH: issuedPath,
   });
-  if (result.revoke.code !== 0) throw new Error("Platform revocation failed");
+  if (!result.revoke.passed) throw new Error("Platform revocation failed");
 
-  result.after = await runLogged(
-    "cargo",
-    [
-      "test",
-      "-p",
-      "communicator-matrix-gateway",
-      "--features",
-      "loopback-test",
-      "--test",
-      "t11_issued_live_http",
-      "revoked_credential_pauses_and_replacement_credential_recovers_both_callers",
-      "--",
-      "--ignored",
-      "--nocapture",
-    ],
+  result.after = await runCargoStage(
+    "after",
+    "revoked_credential_pauses_and_replacement_credential_recovers_both_callers",
     rustEnvironment,
   );
-  if (result.before.code !== 0 || result.after.code !== 0) {
-    throw new Error("Rust issued-caller assertion failed");
+  if (!result.after.passed) {
+    throw new Error("post-revocation Rust test did not pass as one exact test");
   }
+  result.fixture = { platformPort, communicatorPort };
 } catch (error) {
   result.error = error instanceof Error ? error.message : String(error);
 } finally {
-  await stop(communicatorProcess);
-  await stop(platformProcess);
+  cleanupPromise ??= stopOwnedGroups();
+  cleanupResult = await cleanupPromise.catch((error) => ({
+    allStopped: false,
+    error: error instanceof Error ? error.message : String(error),
+    groups: [],
+  }));
+  await append(
+    JSON.stringify({
+      stage: "cleanup",
+      allStopped: cleanupResult.allStopped,
+      groups: cleanupResult.groups,
+    }),
+  ).catch(() => {});
   await copyFile(internalLogPath, outputLogPath).catch(() => {});
-  if (!keepState) await rm(runRoot, { recursive: true, force: true });
+  if (!keepState) {
+    try {
+      await rm(runRoot, { recursive: true, force: true });
+      stateRemoved = true;
+    } catch {
+      stateRemoved = false;
+    }
+  }
 }
 
 const summary = {
-  ...result,
-  assertions: { before: 2, after: 6 },
-  directRevokedClaimHttpStatus: 401,
-  fixture: "fresh local Platform Worker + fresh local Communicator D1/Worker",
-  cleanup: keepState
-    ? "processes stopped; state retained"
-    : "processes and state removed",
+  before: result.before,
+  revoke: result.revoke,
+  after: result.after,
+  error: result.error ?? null,
+  assertions: {
+    before: result.before?.observed ? 2 : null,
+    after: result.after?.observed ? 6 : null,
+  },
+  directRevokedClaimHttpStatus:
+    result.after?.observed?.directClaimHttpStatus ?? null,
+  fixture: result.fixture ?? null,
+  cleanup: cleanupResult
+    ? {
+        allStopped: cleanupResult.allStopped,
+        groups: cleanupResult.groups,
+        stateRemoved,
+        stateRetained: keepState,
+      }
+    : null,
   logPath: outputLogPath,
 };
 console.log(JSON.stringify(summary));
-if (result.error || result.before?.code !== 0 || result.after?.code !== 0) {
+if (
+  interruptedBy !== null ||
+  result.error ||
+  !result.before?.passed ||
+  !result.revoke?.passed ||
+  !result.after?.passed ||
+  !cleanupResult?.allStopped ||
+  (!keepState && !stateRemoved)
+) {
   process.exitCode = 1;
 }

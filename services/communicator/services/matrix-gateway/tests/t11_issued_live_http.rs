@@ -107,6 +107,8 @@ async fn direct_claim_status(credential: &str, suffix: &str) -> StatusCode {
     });
     reqwest::Client::builder()
         .no_proxy()
+        .connect_timeout(Duration::from_secs(5))
+        .timeout(Duration::from_secs(5))
         .build()
         .expect("direct claim client")
         .post(format!(
