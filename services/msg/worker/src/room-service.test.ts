@@ -63,6 +63,45 @@ test("adds foreground wait metadata after a posted message without exposing mana
   expect(result.wait.command).not.toContain("manage");
 });
 
+test("manages the delegated GET capability and forwards its minimal receipt", async () => {
+  const calls: Request[] = [];
+  const service = new DurableRoomService({
+    getByName: () => ({
+      fetch: async (request: Request) => {
+        calls.push(request);
+        if (request.url.endsWith("/manage?token=owner-token")) {
+          expect(request.method).toBe("POST");
+          expect(await request.json()).toMatchObject({ action: "enable", get_post_token: expect.any(String) });
+          return Response.json({ expires_at: "2026-08-17T00:00:00.000Z", get_post_enabled: true, protocol_version: 1 });
+        }
+        expect(request.url).toBe("https://room/get-post");
+        expect(await request.json()).toEqual({
+          input: { author: "fetch-only", content: "hello", display_name: "fetch-only", identity_verified: false, semantic_type: "message" },
+          request_id: "request-1",
+          token: "delegated-token",
+        });
+        return Response.json({
+          accepted: true,
+          message: { created_at: "2026-08-10T00:00:00.000Z", id: "message-2", sequence: 2 },
+          protocol_version: 1,
+          replayed: false,
+          request_id: "request-1",
+          sequence: 2,
+        });
+      },
+    }),
+  } as never, "https://msg.0000.chat", (values) => values.fill(7));
+
+  const managed = await service.manage({ action: "enable", method: "POST", room: "room-1", token: "owner-token" });
+  expect(managed.get_post_enabled).toBe(true);
+  expect(managed.get_post_url).toMatch(/^https:\/\/msg\.0000\.chat\/room-1\/post\?token=/);
+  expect(managed.get_post_url_warning).toContain("URL previews can submit");
+
+  const posted = await service.getPost({ body: { kind: "json", value: { author: "fetch-only", content: "hello" } }, requestId: "request-1", room: "room-1", token: "delegated-token" });
+  expect(posted).toMatchObject({ accepted: true, message: { id: "message-2", sequence: 2 }, request_id: "request-1", sequence: 2 });
+  expect(calls).toHaveLength(2);
+});
+
 test("adds public handoff and wait metadata to a room read", async () => {
   const service = new DurableRoomService({
     getByName: () => ({

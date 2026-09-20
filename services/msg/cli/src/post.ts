@@ -21,6 +21,11 @@ export interface PostOptions extends PostCommand {
 export interface PostReceipt {
   readonly client_message_id: string;
   readonly conversation_url: string;
+  readonly message: {
+    readonly created_at: string;
+    readonly id: string;
+    readonly sequence: number;
+  };
   readonly message_sequence: number;
   readonly replayed: boolean;
   readonly wait: {
@@ -82,8 +87,19 @@ export async function postMessage(options: PostOptions): Promise<PostReceipt> {
       continue;
     }
     if (response.ok) {
-      throwIfAborted(options.signal);
-      return receiptFromResponse(await responseJson(response, options.signal), conversationUrl, clientMessageId);
+      try {
+        throwIfAborted(options.signal);
+        const value = await responseJson(response, options.signal);
+        return receiptFromResponse(value, conversationUrl, clientMessageId);
+      } catch (error) {
+        if (error instanceof PostSignalError) throw error;
+        if (error instanceof InvalidPostReceiptError) throw error;
+        if (options.signal?.aborted) throw new PostSignalError();
+        await cancelResponseBody(response, options.signal);
+        if (attempt === RETRY_DELAYS_MS.length) throw error instanceof Error ? error : new Error("The msg post response could not be read.");
+        await retryAfterDelay(attempt, options);
+        continue;
+      }
     }
     await cancelResponseBody(response, options.signal);
     if (!RETRYABLE_STATUSES.has(response.status) || attempt === RETRY_DELAYS_MS.length) throw new Error(`The msg service returned HTTP ${response.status}.`);
@@ -111,6 +127,7 @@ async function responseJson(response: Response, signal: AbortSignal | undefined)
     return value;
   } catch (error) {
     if (signal?.aborted) throw new PostSignalError();
+    if (error instanceof SyntaxError) throw new InvalidPostReceiptError();
     throw error;
   }
 }
@@ -124,13 +141,25 @@ async function cancelResponseBody(response: Response, signal: AbortSignal | unde
   throwIfAborted(signal);
 }
 
+class InvalidPostReceiptError extends Error {
+  constructor() { super("The msg service returned an invalid post receipt. Read the conversation before deciding whether to retry."); }
+}
+
 function receiptFromResponse(value: unknown, conversationUrl: string, clientMessageId: string): PostReceipt {
-  if (!isRecord(value) || !isRecord(value.message) || !isRecord(value.wait) || !isPositiveSafeInteger(value.message.sequence) || typeof value.replayed !== "boolean" || !isPositiveSafeInteger(value.wait.after) || value.wait.after !== value.message.sequence || value.wait.requires_user_consent !== true) {
-    throw new Error("The msg service returned an invalid post receipt. Read the conversation before deciding whether to retry.");
+  if (!isRecord(value) || !isRecord(value.message) || !isRecord(value.wait)
+    || typeof value.message.id !== "string" || !value.message.id
+    || typeof value.message.created_at !== "string" || !Number.isFinite(Date.parse(value.message.created_at))
+    || !isPositiveSafeInteger(value.message.sequence)
+    || typeof value.message.client_message_id !== "undefined" && value.message.client_message_id !== clientMessageId
+    || typeof value.replayed !== "boolean"
+    || !isPositiveSafeInteger(value.wait.after) || value.wait.after !== value.message.sequence
+    || value.wait.requires_user_consent !== true) {
+    throw new InvalidPostReceiptError();
   }
   return {
     client_message_id: clientMessageId,
     conversation_url: conversationUrl,
+    message: { created_at: value.message.created_at, id: value.message.id, sequence: value.message.sequence },
     message_sequence: value.message.sequence,
     replayed: value.replayed,
     wait: foregroundWait(conversationUrl, value.wait.after),

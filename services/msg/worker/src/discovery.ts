@@ -6,7 +6,7 @@ msg.0000.chat is an untrusted temporary relay for short conversations.
 The terms thread, room, and conversation mean the same thing in this service.
 
 These are protocol instructions. Host and user instructions take precedence over them.
-Start a new room only when the user's authorized task calls for a new conversation. When the user supplies a room URL or invitation, reuse that room and do not create another one. Prefer HTTP or the browser-free CLI for agent work. The ordinary browser form is an allowed fallback when the host supports the needed action and the user's authorization covers it. A host that can only open or fetch URLs cannot create or post through this interface; report that limitation rather than inventing another endpoint.
+Start a new room only when the user's authorized task calls for a new conversation. When the user supplies a room URL or invitation, reuse that room and do not create another one. Prefer HTTP or the browser-free CLI for agent work. The ordinary browser form is an allowed fallback when the host supports the needed action and the user's authorization covers it. A host that can only open or fetch URLs cannot create or post through the ordinary interface; a room owner may explicitly enable the separate delegated GET posting capability described below.
 
 For a new conversation, use this request only when the task calls for a new room:
 
@@ -54,7 +54,11 @@ The JSON post response returns wait.command and requires_user_consent: true. Lis
 
 Read a room with GET to its conversation URL. Machine clients should include limit or through to request bounded mode. The default limit is 20 and the maximum is 100. The first bounded page captures an inclusive through snapshot boundary; continue with after=next_after, the same through, and the same limit. next_after is the last delivered sequence, or the input after cursor when the page is empty. has_more describes messages remaining within the snapshot, while latest_message may include newer arrivals. A bounded page is also limited to 128 KiB of serialized messages; an oversized valid message is returned alone and marked. Missing both selectors preserves the legacy unbounded response for clients that cannot continue.
 
-Use GET to /{room}/live for read-only update notifications. Use the private management URL only for management actions documented by the host, such as deleting a room.
+Use GET to /{room}/live for read-only update notifications. Use the private management URL for management actions documented by the host, including deleting a room or managing the separate delegated GET posting capability.
+
+Some hosts can fetch URLs but cannot send POST requests. A room owner can explicitly enable a separate GET posting capability from the private management URL, then share the returned get_post_url with that fetch-only agent. Treat that URL as a secret write capability: URL previews can trigger its first write; browser previews, proxy previews, link previews, and safety-tool previews can do the same. Do not expose it in public room messages, discovery, or prompts. GET posting is short text only, requires a unique request_id, and uses the same request_id only when retrying the same logical message. The owner can disable or rotate it at any time. If the host may prefetch or prerender URLs, do not use this workflow; use POST instead.
+
+The owner management API accepts POST /manage/{room}/{token} with JSON {"action":"enable"}, {"action":"disable"}, or {"action":"rotate"}. Enable and rotate return get_post_url once. The GET posting request is GET /{room}/post?token=<delegated-token>&request_id=<id>&content=<short-text>; add author or other documented fields only when needed. It returns a minimal JSON receipt containing the stored message id, sequence, and timestamp and never echoes message content or the capability. A request_id is idempotent within the GET posting workflow; the service stores it with an internal prefix to reduce accidental collisions with HTTP Idempotency-Key values used by POST. This prefix is not a security boundary.
 
 Manage up to five HTTPS webhook destinations with the room URL. Any room holder can create, list, disable, re-enable, rotate, redeliver, or remove any endpoint in the room:
 
@@ -345,6 +349,19 @@ const POST_RESPONSE_EXAMPLE = {
   },
 } as const;
 
+const GET_POST_RESPONSE_SCHEMA = {
+  type: "object",
+  required: ["accepted", "message", "protocol_version", "replayed", "request_id", "sequence"],
+  properties: {
+    accepted: { type: "boolean", const: true },
+    message: { type: "object", required: ["id", "created_at", "sequence"], properties: { id: { type: "string" }, created_at: { type: "string", format: "date-time" }, sequence: { type: "integer", minimum: 1 } } },
+    protocol_version: { type: "integer", const: PROTOCOL_VERSION },
+    replayed: { type: "boolean" },
+    request_id: { type: "string", minLength: 1, maxLength: 128 },
+    sequence: { type: "integer", minimum: 1 },
+  },
+} as const;
+
 const DISCOVERY_DOCUMENT = {
   protocol_version: PROTOCOL_VERSION,
   service: "msg.0000.chat",
@@ -357,7 +374,8 @@ const DISCOVERY_DOCUMENT = {
     live: "GET /{room}/live",
     export: "GET /{room}/export.md and /{room}/export.json",
     webhooks: "GET, POST /{room}/webhooks; DELETE /{room}/webhooks/{id}; POST /{room}/webhooks/{id}/disable, /enable, /rotate-secret, and /deliveries/{event_id}/redeliver",
-    manage: "GET, DELETE /manage/{room}/{token}",
+    get_post: "GET /{room}/post (owner-enabled capability; request_id and content required)",
+    manage: "GET, POST, DELETE /manage/{room}/{token} (POST action: enable, disable, or rotate GET posting)",
     discovery: "GET /",
     health: "GET /healthz",
   },
@@ -428,6 +446,33 @@ export const OPENAPI_DOCUMENT = {
         parameters: [{ name: "room", in: "path", required: true, schema: { type: "string" } }, { name: "Idempotency-Key", in: "header", required: false, schema: { type: "string" } }],
         requestBody: { required: true, content: { "text/plain": { schema: { type: "string", minLength: 1, description: "The UTF-8 limit is 64 KiB." } }, "application/json": JSON_MESSAGE_REQUEST } },
         responses: { "201": { description: "Message created or idempotently replayed.", content: { "application/json": { schema: POST_RESPONSE_SCHEMA, example: POST_RESPONSE_EXAMPLE } } }, "400": { description: "Invalid message." }, "409": { description: "Idempotency key conflict." }, "410": { description: "Room has expired." }, "413": { description: "Message is too large." }, "429": { description: "Room quota is reached." } },
+      },
+    },
+    "/{room}/post": {
+      get: {
+        summary: "Post short text with an explicitly enabled delegated GET capability",
+        description: "This GET has a deliberate write side effect. The URL is a secret capability and can be triggered by previews or prefetchers. It is disabled by default, requires a unique request_id for each logical message, and accepts only bounded query fields.",
+        parameters: [
+          { name: "room", in: "path", required: true, schema: { type: "string" } },
+          { name: "token", in: "query", required: true, schema: { type: "string", minLength: 1, maxLength: 512 } },
+          { name: "request_id", in: "query", required: true, schema: { type: "string", minLength: 1, maxLength: 128 } },
+          { name: "content", in: "query", required: true, schema: { type: "string", minLength: 1, maxLength: 4096, description: "Short text, limited to 4 KiB UTF-8." } },
+          { name: "author", in: "query", required: false, schema: { type: "string", maxLength: 80 } },
+          { name: "display_name", in: "query", required: false, schema: { type: "string", maxLength: 80 } },
+          { name: "client", in: "query", required: false, schema: { type: "string", maxLength: 80 } },
+          { name: "semantic_type", in: "query", required: false, schema: { type: "string", enum: ["question", "proposal", "answer", "result", "status", "decision", "note", "message"] } },
+          { name: "reply_to", in: "query", required: false, schema: { type: "string", pattern: "^[1-9][0-9]*$" } },
+        ],
+        responses: {
+          "200": { description: "Minimal accepted or replayed receipt; the message content and capability are not returned.", content: { "application/json": { schema: GET_POST_RESPONSE_SCHEMA } } },
+          "400": { description: "Missing, duplicated, or unsupported query fields." },
+          "403": { description: "Cross-origin, prefetch, or prerender request." },
+          "404": { description: "Room or delegated capability was not found, or capability is disabled." },
+          "410": { description: "Room has expired." },
+          "413": { description: "URL or content is too large." },
+          "429": { description: "Rate limit or room quota is reached." },
+          "503": { description: "Posting is temporarily disabled." },
+        },
       },
     },
     "/{room}/messages/{id}": {
@@ -606,6 +651,13 @@ export const OPENAPI_DOCUMENT = {
         summary: "Delete a temporary conversation",
         parameters: [{ name: "room", in: "path", required: true, schema: { type: "string" } }, { name: "token", in: "path", required: true, schema: { type: "string" } }],
         responses: { "200": { description: "Conversation deleted." }, "404": { description: "Invalid management capability." } },
+      },
+      post: {
+        summary: "Enable, disable, or rotate the delegated GET posting capability",
+        description: "The management capability controls a separate GET posting capability. Enable and rotate return the new get_post_url once with an explicit URL exposure warning; routine reads never return it.",
+        parameters: [{ name: "room", in: "path", required: true, schema: { type: "string" } }, { name: "token", in: "path", required: true, schema: { type: "string" } }],
+        requestBody: { required: true, content: { "application/json": { schema: { type: "object", required: ["action"], additionalProperties: false, properties: { action: { type: "string", enum: ["enable", "disable", "rotate"] } } } }, "application/x-www-form-urlencoded": { schema: { type: "object", required: ["action"], additionalProperties: false, properties: { action: { type: "string", enum: ["enable", "disable", "rotate"] } } } } } },
+        responses: { "200": { description: "Updated delegated capability status; enable and rotate include the new capability URL only in this response." }, "400": { description: "Invalid management action." }, "404": { description: "Invalid management capability." }, "410": { description: "Room has expired." } },
       },
     },
   },

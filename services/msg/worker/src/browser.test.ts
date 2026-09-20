@@ -369,8 +369,7 @@ test("renders stored-ID and reply citation links in the served browser client", 
   }
   let render: () => void = () => {};
   const rendered = new Promise<void>((resolve) => { render = resolve; });
-  let box: FakeElement;
-  box = new FakeElement();
+  const box = new FakeElement();
   const append = box.append.bind(box);
   box.append = (...nodes: FakeElement[]) => { append(...nodes); render(); };
   const field = new FakeElement();

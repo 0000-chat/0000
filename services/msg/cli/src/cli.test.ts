@@ -96,6 +96,7 @@ test("posts inline content from a TTY without reading stdin and writes one JSON 
   expect(stdout).toEqual([`${JSON.stringify({
     client_message_id: "generated-id",
     conversation_url: "https://msg.0000.chat/room-1",
+    message: { created_at: "2026-08-10T00:00:00.000Z", id: "message-5", sequence: 5 },
     message_sequence: 5,
     replayed: false,
     wait: { after: 5, command: "npx --yes @0000chat/msg@latest wait 'https://msg.0000.chat/room-1' --after 5", requires_user_consent: true },
@@ -406,7 +407,7 @@ function silentDeps(stdout: string[], stderr: string[]) {
 
 function postReceipt({ replayed = false }: { replayed?: boolean } = {}) {
   return {
-    message: { sequence: 5 },
+    message: { created_at: "2026-08-10T00:00:00.000Z", id: "message-5", sequence: 5 },
     replayed,
     wait: { after: 5, requires_user_consent: true },
   };

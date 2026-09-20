@@ -1073,6 +1073,59 @@ test("negotiates room post errors", async () => {
   }
 });
 
+test("routes the delegated GET posting capability with strict query and preview guards", async () => {
+  const received: Array<{ requestId: string; room: string; token: string; value: unknown }> = [];
+  const worker = createWorker({
+    create: async () => createdRoom,
+    getPost: async ({ body, requestId, room, token }) => {
+      received.push({ requestId, room, token, value: body.kind === "json" ? body.value : undefined });
+      return {
+        accepted: true,
+        message: { created_at: "2026-08-10T00:00:00.000Z", id: "message-2", sequence: 2 },
+        protocol_version: 1,
+        replayed: false,
+        request_id: requestId,
+        sequence: 2,
+      };
+    },
+  });
+  const url = "https://msg.0000.chat/example/post?token=delegated-token&request_id=request-1&content=hello&author=fetch-only";
+  const response = await worker.fetch(new Request(url, { headers: { accept: "application/json" } }));
+
+  expect(response.status).toBe(200);
+  expect(response.headers.get("cache-control")).toBe("private, no-store, no-transform");
+  expect(response.headers.get("referrer-policy")).toBe("no-referrer");
+  expect(await response.json()).toEqual({
+    accepted: true,
+    message: { created_at: "2026-08-10T00:00:00.000Z", id: "message-2", sequence: 2 },
+    protocol_version: 1,
+    replayed: false,
+    request_id: "request-1",
+    sequence: 2,
+  });
+  expect(received).toEqual([{
+    requestId: "request-1",
+    room: "example",
+    token: "delegated-token",
+    value: { author: "fetch-only", content: "hello" },
+  }]);
+
+  for (const [suffix, status] of [
+    ["&content=again", 400],
+    ["&unknown=value", 400],
+  ] as const) {
+    const rejected = await worker.fetch(new Request(`${url}${suffix}`));
+    expect(rejected.status).toBe(status);
+  }
+  const crossOrigin = await worker.fetch(new Request(url, { headers: { origin: "https://other.example" } }));
+  expect(crossOrigin.status).toBe(403);
+  const prefetch = await worker.fetch(new Request(url, { headers: { purpose: "prefetch" } }));
+  expect(prefetch.status).toBe(403);
+  const oversized = await worker.fetch(new Request(`https://msg.0000.chat/example/post?token=delegated-token&request_id=request-2&content=${"x".repeat(4 * 1024 + 1)}`));
+  expect(oversized.status).toBe(413);
+  expect(received).toHaveLength(1);
+});
+
 test("rejects an empty idempotency key", async () => {
   let received: string | undefined;
   const worker = createWorker({

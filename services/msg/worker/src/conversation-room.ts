@@ -1,7 +1,7 @@
 import { DurableObject } from "cloudflare:workers";
 
 import { ERROR_CODES, ProtocolError } from "./errors";
-import { byteLength, compareCapabilities, DEFAULT_READ_LIMIT, MAX_READ_MESSAGE_BYTES, messageStorageBytes, ROOM_LIMITS, validateBoundedCursor, validateCursor, validateReadLimit, validateThrough } from "./room-domain";
+import { byteLength, compareCapabilities, DEFAULT_READ_LIMIT, MAX_READ_MESSAGE_BYTES, messageStorageBytes, ROOM_LIMITS, validateBoundedCursor, validateCursor, validateReadLimit, validateRequestId, validateThrough } from "./room-domain";
 import type { MessageInput } from "./room-domain";
 import { PROTOCOL_VERSION, type CreateWebhookResponse, type ManageWebhookResponse, type RedeliverWebhookResponse, type RotateWebhookSecretResponse, type WebhookAttemptMetadata, type WebhookDeliveryMetadata, type WebhookSummary } from "./protocol";
 import { CURRENT_ROOM_SCHEMA_VERSION, migrateRoomSchema } from "./room-schema";
@@ -39,6 +39,8 @@ interface RoomState {
   readonly inactivity_expires_at: number;
   readonly last_message_at: number;
   readonly management_hash: string | null;
+  readonly get_post_enabled: number;
+  readonly get_post_hash: string | null;
   readonly message_count: number;
   readonly next_sequence: number;
   readonly notification_id: string;
@@ -208,6 +210,8 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
       if (request.method === "POST" && url.pathname === "/messages") return await this.post(request);
       if (request.method === "GET" && url.pathname === "/manage") return await this.manage(request, false);
       if (request.method === "DELETE" && url.pathname === "/manage") return await this.manage(request, true);
+      if (request.method === "POST" && url.pathname === "/manage") return await this.managePost(request);
+      if (request.method === "POST" && url.pathname === "/get-post") return await this.getPost(request);
       if (request.method === "GET" && url.pathname === "/live") return await this.live(url);
       if (request.method === "GET" && (url.pathname === "/export.md" || url.pathname === "/export.json")) return await this.export(url.pathname === "/export.json");
       return this.error(ERROR_CODES.notFound, "The requested resource was not found.", 404);
@@ -298,7 +302,7 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
       const bytes = messageStorageBytes(input.initial, undefined, id);
       const inactivity = now + this.limits.inactivityTtlMs;
       this.ctx.storage.sql.exec(
-        "INSERT INTO room_state (singleton, schema_version, protocol_version, created_at, last_message_at, inactivity_expires_at, absolute_expires_at, next_sequence, message_count, total_bytes, status, tombstone_expires_at, management_hash, notification_id) VALUES (1, ?, ?, ?, ?, ?, ?, 2, 1, ?, 'active', NULL, ?, ?)",
+        "INSERT INTO room_state (singleton, schema_version, protocol_version, created_at, last_message_at, inactivity_expires_at, absolute_expires_at, next_sequence, message_count, total_bytes, status, tombstone_expires_at, management_hash, notification_id, get_post_hash, get_post_enabled) VALUES (1, ?, ?, ?, ?, ?, ?, 2, 1, ?, 'active', NULL, ?, ?, NULL, 0)",
         CURRENT_ROOM_SCHEMA_VERSION, PROTOCOL_VERSION, now, now, inactivity, inactivity, bytes, input.management_hash, notificationId,
       );
       this.insertMessage({ ...input.initial, byte_count: bytes, created_at: now, id, sequence: 1, source_browser_id: null });
@@ -377,35 +381,8 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
       throw new ProtocolError(ERROR_CODES.serviceUnavailable, "New messages are temporarily unavailable.", 503);
     }
     const input = await request.json() as { browser_id?: string; input: MessageInput; idempotency_key?: string };
-    const key = input.idempotency_key ?? input.input.client_message_id;
     const now = this.now();
-    const result = this.ctx.storage.transactionSync(() => {
-      const state = this.requireState();
-      if (state.status !== "active" || now >= state.inactivity_expires_at) return { expired: true as const };
-      const byHeader = input.idempotency_key ? this.messageByIdempotencyKey(input.idempotency_key) : undefined;
-      const byClient = input.input.client_message_id ? this.messageByClientMessageId(input.input.client_message_id) : undefined;
-      if (byHeader && byClient && byHeader.sequence !== byClient.sequence) throw new ProtocolError(ERROR_CODES.conflict, "The idempotency keys identify different messages.", 409);
-      const previous = byHeader ?? byClient;
-      if (previous) {
-        if (!sameInput(previous, input.input)) throw new ProtocolError(ERROR_CODES.conflict, "The idempotency key is already used for another message.", 409);
-        return { expired: false as const, message: previous, state, replayed: true };
-      }
-      if (input.input.reply_to !== undefined && !this.messageBySequenceOptional(Number(input.input.reply_to))) {
-        throw new ProtocolError(ERROR_CODES.notFound, "The replied-to message was not found.", 404);
-      }
-      const id = crypto.randomUUID();
-      const bytes = messageStorageBytes(input.input, key, id);
-      if (state.message_count >= this.limits.maxMessages || state.total_bytes + bytes > this.limits.maxRoomBytes) {
-        throw new ProtocolError(ERROR_CODES.rateLimited, "The room storage limit is reached.", 429);
-      }
-      const message: StoredMessage = { ...input.input, ...(key ? { idempotency_key: key } : {}), byte_count: bytes, created_at: now, id, sequence: state.next_sequence, source_browser_id: input.browser_id ?? null };
-      this.insertMessage(message);
-      this.queueWebhookDeliveries(message, now);
-      this.queuePushDeliveries(message, now);
-      const inactivity = now + this.limits.inactivityTtlMs;
-      this.ctx.storage.sql.exec("UPDATE room_state SET last_message_at = ?, inactivity_expires_at = ?, next_sequence = ?, message_count = ?, total_bytes = ? WHERE singleton = 1", now, inactivity, state.next_sequence + 1, state.message_count + 1, state.total_bytes + bytes);
-      return { expired: false as const, message, replayed: false, state: this.requireState() };
-    });
+    const result = this.commitMessage(input.input, { idempotencyKey: input.idempotency_key, sourceBrowserId: input.browser_id ?? null }, now);
     if (result.expired) {
       await this.expire(now, "Conversation expired");
       throw new ProtocolError(ERROR_CODES.gone, "The conversation has expired.", 410);
@@ -413,6 +390,92 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
     await this.schedule();
     if (!result.replayed) this.broadcast({ protocol_version: PROTOCOL_VERSION, type: "message.created", sequence: result.message.sequence, latest_message: result.state.next_sequence - 1, expires_at: iso(result.state.inactivity_expires_at) });
     return this.json({ protocol_version: PROTOCOL_VERSION, message: this.toMessage(result.message), expires_at: iso(result.state.inactivity_expires_at), replayed: result.replayed });
+  }
+
+  private async getPost(request: Request): Promise<Response> {
+    if (this.config.MSG_POST_DISABLED === "1") {
+      throw new ProtocolError(ERROR_CODES.serviceUnavailable, "New messages are temporarily unavailable.", 503);
+    }
+    const input = await request.json() as { input: MessageInput; request_id: string; token: string };
+    const token = typeof input.token === "string" ? input.token : "";
+    const requestId = validateRequestId(typeof input.request_id === "string" ? input.request_id : "");
+    const tokenHash = await hashToken(token);
+    const now = this.now();
+    const result = this.commitMessage(
+      input.input,
+      {
+        idempotencyKey: `get:${requestId}`,
+        sourceBrowserId: null,
+        authorize: (state) => {
+          if (state.get_post_enabled !== 1 || !state.get_post_hash || !compareCapabilities(tokenHash, state.get_post_hash)) {
+            throw new ProtocolError(ERROR_CODES.notFound, "The requested resource was not found.", 404);
+          }
+        },
+      },
+      now,
+    );
+    if (result.expired) {
+      await this.expire(now, "Conversation expired");
+      throw new ProtocolError(ERROR_CODES.gone, "The conversation has expired.", 410);
+    }
+    await this.schedule();
+    if (!result.replayed) this.broadcast({ protocol_version: PROTOCOL_VERSION, type: "message.created", sequence: result.message.sequence, latest_message: result.state.next_sequence - 1, expires_at: iso(result.state.inactivity_expires_at) });
+    return this.json({
+      accepted: true,
+      message: { created_at: iso(result.message.created_at), id: result.message.id, sequence: result.message.sequence },
+      protocol_version: PROTOCOL_VERSION,
+      replayed: result.replayed,
+      request_id: requestId,
+      sequence: result.message.sequence,
+    });
+  }
+
+  private commitMessage(
+    input: MessageInput,
+    options: {
+      readonly authorize?: (state: RoomState) => void;
+      /** An explicitly supplied idempotency key, such as a POST header or GET request ID. */
+      readonly idempotencyKey?: string;
+      readonly sourceBrowserId: string | null;
+    },
+    now: number,
+  ) {
+    return this.ctx.storage.transactionSync(() => {
+      const state = this.requireState();
+      if (this.config.MSG_POST_DISABLED === "1") {
+        throw new ProtocolError(ERROR_CODES.serviceUnavailable, "New messages are temporarily unavailable.", 503);
+      }
+      options.authorize?.(state);
+      if (state.status !== "active" || now >= state.inactivity_expires_at) return { expired: true as const };
+
+      // Header and client IDs are independent retry namespaces. A client ID is
+      // also retained as the legacy idempotency_key value when no header was
+      // supplied, but it must never be looked up as an explicit header key.
+      const byHeader = options.idempotencyKey === undefined ? undefined : this.messageByIdempotencyKey(options.idempotencyKey);
+      const byClient = input.client_message_id ? this.messageByClientMessageId(input.client_message_id) : undefined;
+      if (byHeader && byClient && byHeader.sequence !== byClient.sequence) throw new ProtocolError(ERROR_CODES.conflict, "The idempotency keys identify different messages.", 409);
+      const previous = byHeader ?? byClient;
+      if (previous) {
+        if (!sameInput(previous, input)) throw new ProtocolError(ERROR_CODES.conflict, "The idempotency key is already used for another message.", 409);
+        return { expired: false as const, message: previous, state, replayed: true };
+      }
+      if (input.reply_to !== undefined && !this.messageBySequenceOptional(Number(input.reply_to))) {
+        throw new ProtocolError(ERROR_CODES.notFound, "The replied-to message was not found.", 404);
+      }
+      const id = crypto.randomUUID();
+      const key = options.idempotencyKey ?? input.client_message_id;
+      const bytes = messageStorageBytes(input, key, id);
+      if (state.message_count >= this.limits.maxMessages || state.total_bytes + bytes > this.limits.maxRoomBytes) {
+        throw new ProtocolError(ERROR_CODES.rateLimited, "The room storage limit is reached.", 429);
+      }
+      const message: StoredMessage = { ...input, ...(key ? { idempotency_key: key } : {}), byte_count: bytes, created_at: now, id, sequence: state.next_sequence, source_browser_id: options.sourceBrowserId };
+      this.insertMessage(message);
+      this.queueWebhookDeliveries(message, now);
+      this.queuePushDeliveries(message, now);
+      const inactivity = now + this.limits.inactivityTtlMs;
+      this.ctx.storage.sql.exec("UPDATE room_state SET last_message_at = ?, inactivity_expires_at = ?, next_sequence = ?, message_count = ?, total_bytes = ? WHERE singleton = 1", now, inactivity, state.next_sequence + 1, state.message_count + 1, state.total_bytes + bytes);
+      return { expired: false as const, message, replayed: false, state: this.requireState() };
+    });
   }
 
   private async manage(request: Request, deleteRoom: boolean): Promise<Response> {
@@ -427,7 +490,41 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
       await this.schedule();
       return this.json({ protocol_version: PROTOCOL_VERSION, deleted: true, expires_at: iso(deleted.tombstone_expires_at!) });
     }
-    return this.json({ protocol_version: PROTOCOL_VERSION, expires_at: iso(state.inactivity_expires_at) });
+    return this.json({ protocol_version: PROTOCOL_VERSION, expires_at: iso(state.inactivity_expires_at), get_post_enabled: state.get_post_enabled === 1 });
+  }
+
+  private async managePost(request: Request): Promise<Response> {
+    const url = new URL(request.url);
+    const token = url.searchParams.get("token") ?? "";
+    const input: unknown = await request.json();
+    if (!isRecord(input) || (input.action !== "enable" && input.action !== "disable" && input.action !== "rotate")) {
+      throw new ProtocolError(ERROR_CODES.invalidBody, "The management action must be enable, disable, or rotate.", 400);
+    }
+    const delegatedToken = input.action === "disable" ? undefined : input.get_post_token;
+    if (input.action !== "disable" && (typeof delegatedToken !== "string" || !delegatedToken)) {
+      throw new ProtocolError(ERROR_CODES.invalidBody, "The delegated posting capability is required.", 400);
+    }
+    const managementHash = await hashToken(token);
+    const delegatedHash = typeof delegatedToken === "string" ? await hashToken(delegatedToken) : null;
+    const now = this.now();
+    const result = this.ctx.storage.transactionSync(() => {
+      const state = this.requireState();
+      if (!state.management_hash || !compareCapabilities(managementHash, state.management_hash)) {
+        throw new ProtocolError(ERROR_CODES.notFound, "The requested resource was not found.", 404);
+      }
+      if (state.status !== "active" || now >= state.inactivity_expires_at) return { expired: true as const };
+      if (input.action === "disable") {
+        this.ctx.storage.sql.exec("UPDATE room_state SET get_post_hash = NULL, get_post_enabled = 0 WHERE singleton = 1");
+      } else {
+        this.ctx.storage.sql.exec("UPDATE room_state SET get_post_hash = ?, get_post_enabled = 1 WHERE singleton = 1", delegatedHash);
+      }
+      return { expired: false as const, state: this.requireState() };
+    });
+    if (result.expired) {
+      await this.expire(now, "Conversation expired");
+      throw new ProtocolError(ERROR_CODES.gone, "The conversation has expired.", 410);
+    }
+    return this.json({ protocol_version: PROTOCOL_VERSION, expires_at: iso(result.state.inactivity_expires_at), get_post_enabled: result.state.get_post_enabled === 1 });
   }
 
   private async createWebhook(request: Request): Promise<Response> {
@@ -842,7 +939,7 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
       this.ctx.storage.sql.exec("DELETE FROM webhook_endpoints");
       this.ctx.storage.sql.exec("DELETE FROM push_deliveries");
       this.ctx.storage.sql.exec("DELETE FROM push_subscriptions");
-      this.ctx.storage.sql.exec("UPDATE room_state SET status = 'deleted', tombstone_expires_at = ?, management_hash = NULL, message_count = 0, total_bytes = 0 WHERE singleton = 1", now + this.limits.tombstoneTtlMs);
+      this.ctx.storage.sql.exec("UPDATE room_state SET status = 'deleted', tombstone_expires_at = ?, management_hash = NULL, get_post_hash = NULL, get_post_enabled = 0, message_count = 0, total_bytes = 0 WHERE singleton = 1", now + this.limits.tombstoneTtlMs);
       return true;
     });
   }

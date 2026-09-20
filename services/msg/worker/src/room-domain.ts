@@ -106,6 +106,12 @@ export function validateIdempotencyKey(value: string): string {
   return value;
 }
 
+export function validateRequestId(value: string): string {
+  validateBoundedString(value, "request_id", maxClientMessageIdChars, maxClientMessageIdBytes);
+  if (!value) throw invalidMessage("The request_id field is required.");
+  return value;
+}
+
 export function messageStorageBytes(input: MessageInput, idempotencyKey?: string, generatedId?: string): number {
   return recordOverheadBytes + [input.author, input.client, input.client_message_id, input.content, input.display_name, input.reply_to, input.semantic_type, idempotencyKey, generatedId]
     .filter((value): value is string => typeof value === "string")

@@ -332,6 +332,53 @@ test("hides invalid management tokens and deletes valid rooms", async () => {
   expect((await durable.fetch(new Request("https://room/read?after=0"))).status).toBe(410);
 });
 
+test("supports delegated GET posting with replay receipts and owner revocation", async () => {
+  let now = 1_000;
+  const managementToken = "management-token";
+  const delegatedToken = "delegated-token";
+  const rotatedToken = "rotated-token";
+  const { room: durable } = await room(undefined, () => now);
+  await durable.fetch(request("/initialize", {
+    now,
+    management_hash: await hashCapability(managementToken),
+    initial: { content: "first", author: "a", display_name: "a", semantic_type: "message" },
+  }));
+
+  const enabled = await durable.fetch(request(`/manage?token=${managementToken}`, { action: "enable", get_post_token: delegatedToken }));
+  expect(enabled.status).toBe(200);
+  expect(await enabled.json()).toMatchObject({ get_post_enabled: true });
+
+  const getPost = (requestId: string, content: string, token = delegatedToken) => durable.fetch(request("/get-post", {
+    input: { author: "fetch-only", content, display_name: "fetch-only", semantic_type: "message" },
+    request_id: requestId,
+    token,
+  }));
+  const first = await getPost("request-1", "second");
+  expect(first.status).toBe(200);
+  const firstValue = await first.json() as Record<string, unknown> & { message: Record<string, unknown> };
+  expect(firstValue).toMatchObject({ accepted: true, protocol_version: 1, replayed: false, request_id: "request-1", sequence: 2, message: { sequence: 2, id: expect.any(String), created_at: expect.any(String) } });
+  expect(firstValue).not.toHaveProperty("content");
+  expect(JSON.stringify(firstValue)).not.toContain("delegated-token");
+
+  now += 1;
+  const replay = await getPost("request-1", "second");
+  expect(await replay.json()).toMatchObject({ accepted: true, replayed: true, request_id: "request-1", sequence: 2, message: firstValue.message });
+  expect((await getPost("request-1", "changed")).status).toBe(409);
+
+  now += 1;
+  const normal = await durable.fetch(request("/messages", { input: { content: "third", author: "a", display_name: "a", semantic_type: "message" } }));
+  expect((await normal.json()).message.sequence).toBe(3);
+
+  const disabled = await durable.fetch(request(`/manage?token=${managementToken}`, { action: "disable" }));
+  expect(await disabled.json()).toMatchObject({ get_post_enabled: false });
+  expect((await getPost("request-1", "second")).status).toBe(404);
+
+  const rotated = await durable.fetch(request(`/manage?token=${managementToken}`, { action: "rotate", get_post_token: rotatedToken }));
+  expect(await rotated.json()).toMatchObject({ get_post_enabled: true });
+  expect((await getPost("request-2", "fourth")).status).toBe(404);
+  expect((await getPost("request-2", "fourth", rotatedToken)).status).toBe(200);
+});
+
 test("rejects idempotency key reuse with changed body or client message id", async () => {
   const { room: durable } = await room();
   const now = Date.now();

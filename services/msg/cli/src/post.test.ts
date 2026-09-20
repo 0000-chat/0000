@@ -57,6 +57,47 @@ test("retries an ambiguous transport failure with one generated client message I
   expect(delays).toEqual([250]);
 });
 
+test("retries an accepted response whose body read fails and keeps the committed message ID", async () => {
+  const bodies: Array<{ author: string; client_message_id: string; content: string }> = [];
+  const committed = new Set<string>();
+  const cancelled: number[] = [];
+  const delays: number[] = [];
+  let attempts = 0;
+
+  const receipt = await postMessage({
+    author: "Agent A",
+    content: "Hello",
+    conversationUrl,
+    fetch: async (_input, init) => {
+      const body = JSON.parse(String(init?.body)) as { author: string; client_message_id: string; content: string };
+      bodies.push(body);
+      committed.add(body.client_message_id);
+      attempts += 1;
+      if (attempts === 1) {
+        return {
+          body: { cancel: async () => { cancelled.push(attempts); } },
+          json: async () => { throw new TypeError("response stream reset after commit"); },
+          ok: true,
+          status: 201,
+        } as unknown as Response;
+      }
+      return Response.json(successReceipt({ replayed: true }), { status: 201 });
+    },
+    generatedClientMessageId: () => "generated-id",
+    sleep: async (delay) => { delays.push(delay); },
+  });
+
+  expect(receipt).toEqual(publicReceipt("generated-id", true));
+  expect(attempts).toBe(2);
+  expect(committed).toEqual(new Set(["generated-id"]));
+  expect(bodies).toEqual([
+    { author: "Agent A", client_message_id: "generated-id", content: "Hello" },
+    { author: "Agent A", client_message_id: "generated-id", content: "Hello" },
+  ]);
+  expect(cancelled).toEqual([1]);
+  expect(delays).toEqual([250]);
+});
+
 test("preserves an explicit client message ID", async () => {
   let body: unknown;
   const receipt = await postMessage({
@@ -295,7 +336,7 @@ test("quotes a generated wait command as exact shell arguments", async () => {
 function successReceipt({ replayed }: { replayed: boolean }) {
   return {
     manage_url: "https://msg.0000.chat/manage/room-1/private",
-    message: { content: "Hello", sequence: 2 },
+    message: { content: "Hello", created_at: "2026-08-10T00:00:00.000Z", id: "message-2", sequence: 2 },
     replayed,
     wait: { after: 2, command: "npx --yes @0000chat/msg@latest wait 'https://msg.0000.chat/room-1' --after 2", requires_user_consent: true },
   };
@@ -305,6 +346,7 @@ function publicReceipt(clientMessageId: string, replayed: boolean) {
   return {
     client_message_id: clientMessageId,
     conversation_url: conversationUrl,
+    message: { created_at: "2026-08-10T00:00:00.000Z", id: "message-2", sequence: 2 },
     message_sequence: 2,
     replayed,
     wait: { after: 2, command: "npx --yes @0000chat/msg@latest wait 'https://msg.0000.chat/room-1' --after 2", requires_user_consent: true },

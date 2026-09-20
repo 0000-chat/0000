@@ -1428,6 +1428,84 @@ test.serial("replays exact idempotent posts and rejects changed retries", { time
   });
 });
 
+test.serial("creates, replays, rotates, and disables delegated GET posts through the real Worker and Durable Object", { timeout: 20_000 }, async () => {
+  await withRuntime(async (miniflare) => {
+    const created = await createRoom(miniflare, "first");
+    const room = created.room.id;
+    const enable = await miniflare.dispatchFetch(created.manage_url, {
+      body: JSON.stringify({ action: "enable" }),
+      headers: jsonHeaders,
+      method: "POST",
+    });
+    expect(enable.status).toBe(200);
+    const enabled = await enable.json() as { get_post_enabled: boolean; get_post_url: string; get_post_url_warning: string };
+    const getPostUrl = enabled.get_post_url;
+    expect(enabled.get_post_enabled).toBe(true);
+    expect(typeof getPostUrl).toBe("string");
+    expect(enabled.get_post_url_warning).toContain("URL previews");
+
+    const getUrl = (base: string, values: Record<string, string>) => {
+      const url = new URL(base);
+      for (const [name, value] of Object.entries(values)) url.searchParams.set(name, value);
+      return url.toString();
+    };
+    const request = (base: string, requestId: string, content: string, extra: Record<string, string> = {}) => miniflare.dispatchFetch(getUrl(base, { content, request_id: requestId, ...extra }), { headers: { accept: "application/json" } });
+
+    const invalidReply = await request(getPostUrl, "invalid-reply", "must not store", { reply_to: "999" });
+    expect(invalidReply.status).toBe(404);
+    const first = await request(getPostUrl, "get-1", "delegated message", { author: "fetch-only" });
+    expect(first.status).toBe(200);
+    const firstValue = await first.json() as { message: { created_at: string; id: string; sequence: number }; replayed: boolean; sequence: number };
+    expect(firstValue.replayed).toBe(false);
+    expect(firstValue.sequence).toBe(2);
+    expect(firstValue.message.sequence).toBe(2);
+    expect(typeof firstValue.message.id).toBe("string");
+    expect(typeof firstValue.message.created_at).toBe("string");
+
+    const lookup = await miniflare.dispatchFetch(`https://msg.0000.chat/${room}/messages/${encodeURIComponent(firstValue.message.id)}`, { headers: { accept: "application/json" } });
+    expect(await lookup.json()).toMatchObject({ message: firstValue.message });
+    const normal = await post(miniflare, room, "normal post", "post-3");
+    const normalValue = await normal.json() as { message: { created_at: string; id: string; sequence: number } };
+    expect(normalValue.message.sequence).toBe(3);
+
+    const replay = await request(getPostUrl, "get-1", "delegated message", { author: "fetch-only" });
+    expect(await replay.json()).toMatchObject({ message: firstValue.message, replayed: true, sequence: 2 });
+    expect((await request(getPostUrl, "get-1", "changed message", { author: "fetch-only" })).status).toBe(409);
+    const transcript = await miniflare.dispatchFetch(`https://msg.0000.chat/${room}`, { headers: { accept: "application/json" } });
+    expect((await transcript.json() as { latest_message: number; messages: unknown[] }).latest_message).toBe(3);
+
+    const other = await createRoom(miniflare, "other room");
+    const otherEnable = await miniflare.dispatchFetch(other.manage_url, {
+      body: JSON.stringify({ action: "enable" }),
+      headers: jsonHeaders,
+      method: "POST",
+    });
+    expect(otherEnable.status).toBe(200);
+    const wrongRoomUrl = new URL(getPostUrl);
+    wrongRoomUrl.pathname = `/${other.room.id}/post`;
+    expect((await request(wrongRoomUrl.toString(), "wrong-room", "must not store")).status).toBe(404);
+
+    const rotate = await miniflare.dispatchFetch(created.manage_url, {
+      body: JSON.stringify({ action: "rotate" }),
+      headers: jsonHeaders,
+      method: "POST",
+    });
+    expect(rotate.status).toBe(200);
+    const rotated = await rotate.json() as { get_post_url: string };
+    expect(rotated.get_post_url).not.toBe(getPostUrl);
+    expect((await request(getPostUrl, "get-1", "delegated message", { author: "fetch-only" })).status).toBe(404);
+    expect((await request(rotated.get_post_url, "get-4", "rotated message")).status).toBe(200);
+
+    const disable = await miniflare.dispatchFetch(created.manage_url, {
+      body: JSON.stringify({ action: "disable" }),
+      headers: jsonHeaders,
+      method: "POST",
+    });
+    expect(await disable.json()).toMatchObject({ get_post_enabled: false });
+    expect((await request(rotated.get_post_url, "get-4", "rotated message")).status).toBe(404);
+  });
+});
+
 test.serial("renders Durable Object export errors in the negotiated public representation", { timeout: 15_000 }, async () => {
   await withRuntime(async (miniflare) => {
     const deleted = await createRoom(miniflare);

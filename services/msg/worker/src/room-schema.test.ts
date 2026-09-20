@@ -59,6 +59,28 @@ test("leaves an existing current schema unchanged", () => {
   expect(database.query("SELECT version FROM room_schema").get()).toEqual({ version: CURRENT_ROOM_SCHEMA_VERSION });
 });
 
+test("upgrades v7 rooms while retaining messages and notification state with delegated posting disabled", () => {
+  const database = new Database(":memory:");
+  const roomStorage = storage(database);
+  migrateRoomSchema(roomStorage);
+  database.query("INSERT INTO room_state (singleton, schema_version, protocol_version, created_at, last_message_at, inactivity_expires_at, absolute_expires_at, next_sequence, message_count, total_bytes, status, tombstone_expires_at, management_hash, notification_id, get_post_hash, get_post_enabled) VALUES (1, 8, 1, 1000, 1000, 7000, 7000, 2, 1, 5, 'active', NULL, 'management-hash', 'notification-1', 'delegated-hash', 1)").run();
+  database.query("INSERT INTO messages (sequence, id, content, author, display_name, client, semantic_type, reply_to, created_at, client_message_id, byte_count, idempotency_key, source_browser_id) VALUES (1, 'message-1', 'hello', 'agent', 'Agent', NULL, 'message', NULL, 1000, NULL, 5, NULL, NULL)").run();
+  database.query("UPDATE room_schema SET version = 7 WHERE singleton = 1").run();
+  database.query("UPDATE room_state SET schema_version = 7 WHERE singleton = 1").run();
+  database.exec("ALTER TABLE room_state DROP COLUMN get_post_hash; ALTER TABLE room_state DROP COLUMN get_post_enabled;");
+
+  migrateRoomSchema(roomStorage);
+
+  expect(database.query("SELECT version FROM room_schema").get()).toEqual({ version: CURRENT_ROOM_SCHEMA_VERSION });
+  expect(database.query("SELECT schema_version, notification_id, get_post_hash, get_post_enabled FROM room_state").get()).toEqual({
+    schema_version: CURRENT_ROOM_SCHEMA_VERSION,
+    notification_id: "notification-1",
+    get_post_hash: null,
+    get_post_enabled: 0,
+  });
+  expect(database.query("SELECT id, content, sequence FROM messages").get()).toEqual({ id: "message-1", content: "hello", sequence: 1 });
+});
+
 test("fails closed when durable storage has a future schema", () => {
   const database = new Database(":memory:");
   const roomStorage = storage(database);
