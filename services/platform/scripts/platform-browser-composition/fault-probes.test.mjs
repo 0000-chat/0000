@@ -6,7 +6,9 @@ import { test } from "node:test";
 
 import { fetchBodyWithDeadline } from "./http.mjs";
 import {
+  acquireResourceWithShutdownCleanup,
   assertCloseCode,
+  evaluateWithDeadline,
   processGroupExists,
   runBoundedCleanup,
   terminateProcessGroup,
@@ -69,6 +71,40 @@ test("shutdown aborts an in-flight response body", async () => {
   }
 });
 
+test("page evaluation is bounded independently of Playwright action timeout", async () => {
+  const startedAt = Date.now();
+  await assert.rejects(
+    evaluateWithDeadline(
+      { evaluate: () => new Promise(() => {}) },
+      () => undefined,
+      undefined,
+      { label: "stalled_page_evaluate", timeoutMs: 100 },
+    ),
+    /stalled_page_evaluate_timeout/,
+  );
+  assert.ok(Date.now() - startedAt < 2000);
+});
+
+test("late acquired browser-like resource is closed after shutdown", async () => {
+  const shuttingDown = true;
+  let closeCount = 0;
+  const resource = await acquireResourceWithShutdownCleanup(
+    Promise.resolve({
+      async close() {
+        closeCount += 1;
+      },
+    }),
+    {
+      isShutdown: () => shuttingDown,
+      dispose: (lateResource) => lateResource.close(),
+      label: "late_browser_close",
+      timeoutMs: 100,
+    },
+  );
+  assert.equal(resource, null);
+  assert.equal(closeCount, 1);
+});
+
 test("process-group cleanup handles an exited leader and kills descendants", async () => {
   const leader = spawn(
     process.execPath,
@@ -117,10 +153,15 @@ test("process-group cleanup escalates from TERM to KILL", async () => {
     await once(child, "spawn");
     child.stdout.resume();
     await new Promise((resolve) => setTimeout(resolve, 100));
-    const result = await terminateProcessGroup(child, {
-      termTimeoutMs: 100,
-      killTimeoutMs: 1000,
-    });
+    const result = await runBoundedCleanup(
+      "child_stop",
+      () =>
+        terminateProcessGroup(child, {
+          termTimeoutMs: 100,
+          killTimeoutMs: 1000,
+        }),
+      1500,
+    );
     assert.equal(result.termSent, true);
     assert.equal(result.killSent, true);
     assert.equal(result.groupGone, true);

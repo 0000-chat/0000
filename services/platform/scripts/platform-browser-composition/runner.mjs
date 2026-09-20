@@ -33,7 +33,9 @@ import {
 } from "./fixture.mjs";
 import { fetchBodyWithDeadline, fetchJsonWithDeadline } from "./http.mjs";
 import {
+  acquireResourceWithShutdownCleanup,
   assertCloseCode,
+  evaluateWithDeadline,
   runBoundedCleanup,
   terminateProcessGroup,
 } from "./lifecycle.mjs";
@@ -50,6 +52,7 @@ const operationTimeoutMs = 30_000;
 const httpTimeoutMs = 5_000;
 const startupTimeoutMs = 120_000;
 const cleanupTimeoutMs = 8_000;
+const processCleanupTimeoutMs = cleanupTimeoutMs * 2 + 1_000;
 const compatibilityDate = "2026-09-18";
 const authority = "platform-composition-browser-authority";
 const service = {
@@ -82,6 +85,7 @@ const state = {
   shutdownController: new AbortController(),
   shuttingDown: false,
   cleanupFailures: [],
+  pendingResources: new Set(),
 };
 
 function stage(name) {
@@ -92,6 +96,16 @@ function stage(name) {
 function assertActive() {
   if (state.shuttingDown || state.shutdownController.signal.aborted)
     throw new Error("harness_interrupted");
+}
+
+function trackPendingResource(promise) {
+  state.pendingResources.add(promise);
+  promise.then(
+    () => state.pendingResources.delete(promise),
+    () => state.pendingResources.delete(promise),
+  );
+  promise.catch(() => {});
+  return promise;
 }
 
 function record(event, fields = {}) {
@@ -860,6 +874,17 @@ async function postJson(url, body, headers = {}) {
   );
 }
 
+async function pageEvaluate(page, label, pageFunction, arg) {
+  return within(
+    label,
+    evaluateWithDeadline(page, pageFunction, arg, {
+      label,
+      timeoutMs: operationTimeoutMs,
+    }),
+    operationTimeoutMs,
+  );
+}
+
 async function safeJson(response) {
   try {
     return await within("playwright_response_body", response.json());
@@ -884,19 +909,35 @@ function cookieMetadata(cookie) {
 
 async function platformLogin(page, platformOrigin, callbackOrigin) {
   await page.goto(`${platformOrigin}/login`, { waitUntil: "domcontentloaded" });
-  const start = await page.evaluate(async (callbackURL) => {
-    const response = await fetch("/api/auth/sign-in/social", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        provider: "github",
-        callbackURL,
-        disableRedirect: true,
-      }),
-    });
-    const body = await response.json().catch(() => ({}));
-    return { status: response.status, url: body.url };
-  }, callbackOrigin);
+  const start = await pageEvaluate(
+    page,
+    "platform_login_start_evaluate",
+    async ({ callbackURL, requestTimeoutMs }) => {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), requestTimeoutMs);
+      try {
+        const response = await fetch("/api/auth/sign-in/social", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            provider: "github",
+            callbackURL,
+            disableRedirect: true,
+          }),
+          signal: controller.signal,
+        });
+        const text = await response.text();
+        let body = {};
+        try {
+          body = text.length > 0 ? JSON.parse(text) : {};
+        } catch {}
+        return { status: response.status, url: body.url };
+      } finally {
+        clearTimeout(timer);
+      }
+    },
+    { callbackURL: callbackOrigin, requestTimeoutMs: httpTimeoutMs },
+  );
   assert.equal(start.status, 200);
   assert.equal(typeof start.url, "string");
   const stateValue = new URL(start.url).searchParams.get("state");
@@ -905,23 +946,43 @@ async function platformLogin(page, platformOrigin, callbackOrigin) {
     `${platformOrigin}/api/auth/callback/github?code=composition-browser-callback&state=${encodeURIComponent(stateValue)}`,
     { waitUntil: "domcontentloaded" },
   );
-  const account = await page.evaluate(async () => {
-    const session = await fetch("/api/auth/get-session");
-    const me = await fetch("/api/me");
-    const sessionBody = await session.json().catch(() => ({}));
-    const meBody = await me.json().catch(() => ({}));
-    return {
-      sessionStatus: session.status,
-      authenticated: Boolean(sessionBody?.user),
-      meStatus: me.status,
-      hasUserId: typeof meBody?.userId === "string",
-      hasOrganizationId: typeof meBody?.organizationId === "string",
-      hasMembershipId: typeof meBody?.membershipId === "string",
-      userId: meBody?.userId,
-      organizationId: meBody?.organizationId,
-      membershipId: meBody?.membershipId,
-    };
-  });
+  const account = await pageEvaluate(
+    page,
+    "platform_login_account_evaluate",
+    async ({ requestTimeoutMs }) => {
+      const fetchJson = async (input) => {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), requestTimeoutMs);
+        try {
+          const response = await fetch(input, { signal: controller.signal });
+          const text = await response.text();
+          let body = {};
+          try {
+            body = text.length > 0 ? JSON.parse(text) : {};
+          } catch {}
+          return { status: response.status, body };
+        } finally {
+          clearTimeout(timer);
+        }
+      };
+      const [session, me] = await Promise.all([
+        fetchJson("/api/auth/get-session"),
+        fetchJson("/api/me"),
+      ]);
+      return {
+        sessionStatus: session.status,
+        authenticated: Boolean(session.body?.user),
+        meStatus: me.status,
+        hasUserId: typeof me.body?.userId === "string",
+        hasOrganizationId: typeof me.body?.organizationId === "string",
+        hasMembershipId: typeof me.body?.membershipId === "string",
+        userId: me.body?.userId,
+        organizationId: me.body?.organizationId,
+        membershipId: me.body?.membershipId,
+      };
+    },
+    { requestTimeoutMs: httpTimeoutMs },
+  );
   assert.equal(account.sessionStatus, 200);
   assert.equal(account.authenticated, true);
   assert.equal(account.meStatus, 200);
@@ -1202,8 +1263,34 @@ async function runBrowserComposition(
     } catch {}
   }
   if (!playwrightModule) throw new Error("playwright_module_missing");
-  const browser = await playwrightModule.chromium.launch({ headless: true });
-  state.browser = browser;
+  const browserAcquisition = acquireResourceWithShutdownCleanup(
+    playwrightModule.chromium.launch({ headless: true }),
+    {
+      isShutdown: () =>
+        state.shuttingDown || state.shutdownController.signal.aborted,
+      dispose: (browser) => browser.close(),
+      label: "late_browser_close",
+      timeoutMs: cleanupTimeoutMs,
+    },
+  )
+    .then((browser) => {
+      if (browser) state.browser = browser;
+      return browser;
+    })
+    .catch((error) => {
+      if (state.shuttingDown || state.shutdownController.signal.aborted) {
+        state.cleanupFailures.push("late_browser_close");
+        throw new Error("late_browser_close_failed");
+      }
+      throw error;
+    });
+  trackPendingResource(browserAcquisition);
+  const browser = await within(
+    "browser_launch",
+    browserAcquisition,
+    startupTimeoutMs,
+  );
+  if (!browser) throw new Error("harness_interrupted");
   assertActive();
   const context = await browser.newContext({ ignoreHTTPSErrors: true });
   assertActive();
@@ -1824,12 +1911,16 @@ async function cleanup() {
   state.shutdownController.abort();
   if (cleanupPromise) return cleanupPromise;
   cleanupPromise = (async () => {
-    const cleanupResource = async (label, operation) => {
+    const cleanupResource = async (
+      label,
+      operation,
+      timeoutMs = cleanupTimeoutMs,
+    ) => {
       try {
         const result = await runBoundedCleanup(
           label,
           operation,
-          cleanupTimeoutMs,
+          timeoutMs,
         );
         return { ok: true, result };
       } catch {
@@ -1837,6 +1928,13 @@ async function cleanup() {
         return { ok: false, result: null };
       }
     };
+
+    for (const pending of [...state.pendingResources])
+      await cleanupResource(
+        "pending_resource",
+        () => pending,
+        processCleanupTimeoutMs,
+      );
 
     if (state.browser)
       await cleanupResource("browser_close", () => state.browser.close());
@@ -1846,7 +1944,11 @@ async function cleanup() {
     const childResults = [];
     for (const child of children)
       childResults.push(
-        await cleanupResource("child_stop", () => stopProcess(child)),
+        await cleanupResource(
+          "child_stop",
+          () => stopProcess(child),
+          processCleanupTimeoutMs,
+        ),
       );
     if (state.communicator?.logFile)
       await cleanupResource("communicator_log_close", () =>
@@ -1962,7 +2064,6 @@ async function main() {
     { harnessToken, commBase, platformOrigin: platform.proxyOrigin },
     process.env.COMPOSITION_PHASE ?? "full",
   );
-  record("complete", { safeLogPath });
 }
 
 for (const [signal, exitCode] of [
@@ -1996,6 +2097,13 @@ try {
       failures: [...state.cleanupFailures],
     };
   }
+  if (cleanupResult.ok && state.cleanupFailures.length > 0) {
+    cleanupResult = {
+      ...cleanupResult,
+      ok: false,
+      failures: [...state.cleanupFailures],
+    };
+  }
   if (!cleanupResult.ok) {
     state.failed = true;
     record("cleanup_failure", {
@@ -2011,6 +2119,7 @@ try {
       childGroupsGone: cleanupResult.childGroupsGone,
       stateRemoved: cleanupResult.stateRemoved,
     });
+    if (!state.failed) record("complete", { safeLogPath: state.safeLogPath });
   }
   if (state.safeLogPath)
     await writePrivate(state.safeLogPath, `${safeLog.join("\n")}\n`).catch(

@@ -68,6 +68,45 @@ export async function runBoundedCleanup(label, operation, timeoutMs = 8000) {
   }
 }
 
+export async function evaluateWithDeadline(
+  page,
+  pageFunction,
+  arg,
+  { label = "page_evaluate", timeoutMs = 5000 } = {},
+) {
+  let timer;
+  try {
+    return await Promise.race([
+      Promise.resolve().then(() => page.evaluate(pageFunction, arg)),
+      new Promise((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error(`${label}_timeout`)),
+          timeoutMs,
+        );
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+export function acquireResourceWithShutdownCleanup(
+  acquisition,
+  { isShutdown, dispose, label = "late_resource_close", timeoutMs = 8000 },
+) {
+  return Promise.resolve(acquisition).then(
+    async (resource) => {
+      if (!isShutdown()) return resource;
+      await runBoundedCleanup(label, () => dispose(resource), timeoutMs);
+      return null;
+    },
+    (error) => {
+      if (isShutdown()) return null;
+      throw error;
+    },
+  );
+}
+
 export function assertCloseCode(observation, expectedCode) {
   if (observation?.closeSeen !== true)
     throw new Error("realtime_close_event_missing");
