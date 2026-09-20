@@ -108,6 +108,16 @@ test("executes the served panel flow with frozen retry, exact hydration, pinned 
   const exactPanel = { ...summaryPanel, body: { purpose: "Published panel", phase: "Review", artifacts: exactArtifacts, next_actions: exactActions }, artifacts: exactArtifacts, next_actions: exactActions, artifact_count: 6, next_action_count: 6 };
   const overviewPayload = () => ({ pending_proposal_count: 1, pending_panel_proposal_count: 1, pending_request_proposal_count: 0, pending_proposals: [{ proposal_id: "panel-proposal", revision: 1, kind: "panel.replace", title: "Published room panel", status: "pending", detail_url: "/coordination/proposals/panel-proposal" }], published_request_count: 0, published_requests: [], request_status_counts: { open: 0, in_progress: 0, blocked: 0, done: 0, withdrawn: 0 }, published_revision: 2, coordination_cursor: 4, panel: summaryPanel, panel_url: "/coordination/panel", panel_history_url: "/coordination/panel/history?limit=20", proposals_url: "/coordination/proposals?limit=20", requests_url: "/coordination/requests?limit=20" });
   const storage = memoryStorage({ "0000:coordination-management-url:v1:room-a": "https://msg.0000.chat/manage/room-a/owner-token" });
+  class TestSocket {
+    static readonly instances: TestSocket[] = [];
+    readyState = 1;
+    onclose: (() => void) | null = null;
+    onerror: (() => void) | null = null;
+    onmessage: ((event: { data: string }) => void) | null = null;
+    onopen: (() => void) | null = null;
+    constructor(readonly url: unknown) { TestSocket.instances.push(this); }
+    close() { this.readyState = 3; this.onclose = null; this.onerror = null; this.onopen = null; }
+  }
   const documentObject = {
     body: { dataset: { room: "room-a" } },
     documentElement: { dataset: {} as Record<string, string> },
@@ -116,7 +126,7 @@ test("executes the served panel flow with frozen retry, exact hydration, pinned 
     querySelectorAll: () => [] as Element[],
   };
   const globals = globalThis as unknown as Record<string, unknown>;
-  const saved = Object.fromEntries(["addEventListener", "document", "fetch", "location", "localStorage", "matchMedia", "navigator", "sessionStorage"].map((key) => [key, globals[key]]));
+  const saved = Object.fromEntries(["WebSocket", "addEventListener", "document", "fetch", "location", "localStorage", "matchMedia", "navigator", "sessionStorage"].map((key) => [key, globals[key]]));
   const calls: { url: string; body?: string }[] = [];
   let panelSubmission = 0;
   globals.document = documentObject;
@@ -126,6 +136,7 @@ test("executes the served panel flow with frozen retry, exact hydration, pinned 
   globals.localStorage = { getItem: () => null, setItem: () => {} };
   globals.sessionStorage = storage;
   globals.addEventListener = () => {};
+  globals.WebSocket = TestSocket;
   globals.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input); calls.push({ url, body: typeof init?.body === "string" ? init.body : undefined });
     if (url.endsWith("/coordination")) return new Response(JSON.stringify(overviewPayload()), { status: 200 });
@@ -163,6 +174,7 @@ test("executes the served panel flow with frozen retry, exact hydration, pinned 
     expect(publication?.body && JSON.parse(publication.body)).not.toHaveProperty("request_id");
     expect(elements.get("coordination-status")!.textContent).toContain("Published the exact reviewed proposal revision");
   } finally {
+    for (const socket of TestSocket.instances) socket.close();
     Object.assign(globals, saved);
   }
 });
