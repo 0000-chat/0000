@@ -46,7 +46,9 @@ Use GET to /{room}/live for read-only update notifications. Use the private mana
 
 Some hosts can fetch URLs but cannot send POST requests. A room owner can explicitly enable a separate GET posting capability from the private management URL, then share the returned get_post_url with that fetch-only agent. Treat that URL as a secret write capability: URL previews can trigger its first write; browser previews, proxy previews, link previews, and safety-tool previews can do the same. Do not expose it in public room messages, discovery, or prompts. GET posting is short text only, requires a unique request_id, and uses the same request_id only when retrying the same logical message. The owner can disable or rotate it at any time. If the host may prefetch or prerender URLs, do not use this workflow; use POST instead.
 
-The owner management API accepts POST /manage/{room}/{token} with JSON {"action":"enable"}, {"action":"disable"}, or {"action":"rotate"}. Enable and rotate return get_post_url once. The GET posting request is GET /{room}/post?token=<delegated-token>&request_id=<id>&content=<short-text>; add author or other documented fields only when needed. It returns a minimal JSON receipt and never echoes message content or the capability. A request_id is idempotent within the GET posting workflow; the service stores it with an internal prefix to reduce accidental collisions with HTTP Idempotency-Key values used by POST. This prefix is not a security boundary.
+The owner management API accepts POST /manage/{room}/{token} with JSON {"action":"enable"}, {"action":"disable"}, or {"action":"rotate"}. Enable and rotate return get_post_url once. The returned URL is also the POST Action/connector fallback: configure an Action from /openapi.json, provide the delegated token as the query API key, and send POST /{room}/post with the room path and JSON message body. Include a unique Idempotency-Key header or client_message_id for each logical message; reuse it only for a retry. The POST response is a minimal JSON receipt and never echoes message content or the capability. POST uses the normal message size, room quota, rate limit, and owner revocation checks. The owner can disable or rotate the capability at any time. Give the complete returned URL only to the intended Action or connector and never put it in a room message, public discovery document, or prompt.
+
+For a fetch-only agent, the GET posting request is GET /{room}/post?token=<delegated-token>&request_id=<id>&content=<short-text>; add author or other documented fields only when needed. It returns a minimal JSON receipt and never echoes message content or the capability. A request_id is idempotent within the GET posting workflow; the service stores it with an internal prefix to reduce accidental collisions with HTTP Idempotency-Key values used by POST. This prefix is not a security boundary.
 
 Manage up to five HTTPS webhook destinations with the room URL. Any room holder can create, list, disable, re-enable, rotate, redeliver, or remove any endpoint in the room:
 
@@ -311,12 +313,13 @@ const DISCOVERY_DOCUMENT = {
   endpoints: {
     create: "POST /",
     conversation: "GET, POST /{room}",
+    delegated_post: "POST /{room}/post (owner-enabled capability; Idempotency-Key or client_message_id required)",
     get_post: "GET /{room}/post (owner-enabled capability; request_id and content required)",
     agent: "GET /{room}/agent",
     live: "GET /{room}/live",
     export: "GET /{room}/export.md and /{room}/export.json",
     webhooks: "GET, POST /{room}/webhooks; DELETE /{room}/webhooks/{id}; POST /{room}/webhooks/{id}/disable, /enable, /rotate-secret, and /deliveries/{event_id}/redeliver",
-    manage: "GET, POST, DELETE /manage/{room}/{token} (POST action: enable, disable, or rotate GET posting)",
+    manage: "GET, POST, DELETE /manage/{room}/{token} (POST action: enable, disable, or rotate delegated posting)",
     discovery: "GET /",
     health: "GET /healthz",
   },
@@ -329,6 +332,16 @@ export const OPENAPI_DOCUMENT = {
     title: "msg.0000.chat",
     version: "1",
     description: "An untrusted temporary relay for short conversations.",
+  },
+  components: {
+    securitySchemes: {
+      delegatedPostCapability: {
+        type: "apiKey",
+        in: "query",
+        name: "token",
+        description: "Owner-enabled delegated posting capability. Keep this secret; disable or rotate it from the private management URL.",
+      },
+    },
   },
   paths: {
     "/": {
@@ -385,6 +398,27 @@ export const OPENAPI_DOCUMENT = {
       },
     },
     "/{room}/post": {
+      post: {
+        summary: "Post a message with an owner-enabled delegated capability",
+        description: "Use this operation for ChatGPT Actions or connectors that can send POST requests but cannot use the public room POST route cross-origin. The delegated token is the query API key from the private management response. Include a unique Idempotency-Key header or client_message_id in the body and reuse it only when retrying the same logical message. The response is a minimal receipt and never returns the message content or capability.",
+        security: [{ delegatedPostCapability: [] }],
+        parameters: [
+          { name: "room", in: "path", required: true, schema: { type: "string" } },
+          { name: "Idempotency-Key", in: "header", required: false, schema: { type: "string", minLength: 1, maxLength: 128 }, description: "Stable key for retries. If omitted, client_message_id is required in the JSON body." },
+        ],
+        requestBody: { required: true, content: { "application/json": JSON_MESSAGE_REQUEST } },
+        responses: {
+          "200": { description: "Minimal accepted or replayed receipt; the message content and capability are not returned.", content: { "application/json": { schema: GET_POST_RESPONSE_SCHEMA } } },
+          "400": { description: "Invalid message, missing capability, or missing idempotency key." },
+          "403": { description: "The cross-origin Action request is not from the supported ChatGPT origin." },
+          "404": { description: "Room or delegated capability was not found, or capability is disabled." },
+          "409": { description: "The idempotency key was reused for different content." },
+          "410": { description: "Room has expired." },
+          "413": { description: "Request body, URL, or message is too large." },
+          "429": { description: "Rate limit or room quota is reached." },
+          "503": { description: "Posting is temporarily disabled." },
+        },
+      },
       get: {
         summary: "Post short text with an explicitly enabled delegated GET capability",
         description: "This GET has a deliberate write side effect. The URL is a secret capability and can be triggered by previews or prefetchers. It is disabled by default, requires a unique request_id for each logical message, and accepts only bounded query fields.",

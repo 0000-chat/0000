@@ -59,6 +59,9 @@ Accept: application/json
   expect(AGENT_INSTRUCTIONS).toContain("HMAC-SHA256");
   expect(AGENT_INSTRUCTIONS).toContain("fetch-only agent");
   expect(AGENT_INSTRUCTIONS).toContain("URL previews can trigger its first write");
+  expect(AGENT_INSTRUCTIONS).toContain("POST Action/connector fallback");
+  expect(AGENT_INSTRUCTIONS).toContain("Idempotency-Key");
+  expect(AGENT_INSTRUCTIONS).toContain("disable or rotate the capability");
   expect(AGENT_INSTRUCTIONS).toContain("request_id");
 });
 
@@ -82,6 +85,8 @@ test("publishes a compact OpenAPI document", () => {
   expect(OPENAPI_DOCUMENT.openapi).toBe("3.1.0");
   expect(OPENAPI_DOCUMENT.paths["/"].post).toBeDefined();
   expect(OPENAPI_DOCUMENT.paths["/healthz"].get).toBeDefined();
+  expect(OPENAPI_DOCUMENT.components.securitySchemes.delegatedPostCapability).toMatchObject({ type: "apiKey", in: "query", name: "token" });
+  expect(OPENAPI_DOCUMENT.paths["/{room}/post"].post.security).toEqual([{ delegatedPostCapability: [] }]);
 });
 
 test("publishes a complete JSON message contract and create example", () => {
@@ -165,6 +170,8 @@ test("documents responses for every OpenAPI operation", () => {
   expect(OPENAPI_DOCUMENT.paths["/"].post.responses["400"]).toBeDefined();
   expect(OPENAPI_DOCUMENT.paths["/{room}"].get.responses["200"]).toBeDefined();
   expect(OPENAPI_DOCUMENT.paths["/{room}/post"].get.responses["200"]).toBeDefined();
+  expect(OPENAPI_DOCUMENT.paths["/{room}/post"].post.responses["200"]).toBeDefined();
+  expect(OPENAPI_DOCUMENT.paths["/{room}/post"].post.responses["409"]).toBeDefined();
   expect(OPENAPI_DOCUMENT.paths["/{room}/post"].get.parameters.find((parameter) => parameter.name === "request_id")).toMatchObject({ required: true });
   expect(OPENAPI_DOCUMENT.paths["/manage/{room}/{token}"].delete.responses["200"]).toBeDefined();
   expect(OPENAPI_DOCUMENT.paths["/manage/{room}/{token}"].post.responses["200"]).toBeDefined();
