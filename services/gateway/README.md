@@ -19,9 +19,15 @@ channels, or define the hosted user experience. No hard dependency on another
 0000 service is confirmed.
 
 This directory is the Gateway subtree in the `0000` monorepo. Its root
-`package.json` is the private `@0000/gateway` workspace wrapper. Original
-pnpm-based quality tooling and its lockfile remain isolated under `tooling/`.
-The service is still scaffold-only and has no application code.
+`package.json` is the private `@0000/gateway` workspace. The Worker serves a
+public `GET /health` liveness endpoint that returns `{"status":"ok","service":"gateway"}`.
+The endpoint makes no downstream calls and reads no product data. It reports
+Worker liveness only and is not a Gateway Capability.
+
+The Worker uses Hono and has an explicit Wrangler compatibility date and
+`nodejs_compat` flag. Its application test dispatches through a real
+Miniflare/workerd runtime. Original pnpm-based quality tooling and its
+lockfile remain isolated under `tooling/`.
 
 From the monorepo root, run `bun run check`, `bun run check:turbo`, and
 `bun run check:turbo:dry`. For Gateway checks, run

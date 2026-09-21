@@ -22,15 +22,26 @@ required = {
     "AGENTS.md",
     "README.md",
     "biome.json",
+    "CONTEXT.md",
     "docs/README.md",
+    "docs/adr/0001-curated-gateway-capabilities.md",
     "docs/agents/domain.md",
     "docs/agents/issue-tracker.md",
     "docs/agents/triage-labels.md",
+    "docs/specs/gateway-foundation.md",
     "package.json",
     "scripts/check",
     "tooling/package.json",
     "tooling/pnpm-lock.yaml",
     "docs/migration/2026-09-17-monorepo-import.md",
+    "docs/plans/2026-09-19-gateway-foundation.md",
+    "src/app.ts",
+    "src/mcp-use-client-unavailable.ts",
+    "src/worker.ts",
+    "test/health.test.ts",
+    "test/miniflare-runtime.mjs",
+    "tsconfig.json",
+    "wrangler.jsonc",
 }
 tracked_all = subprocess.check_output(
     ["git", "-C", str(repo), "ls-files", "--", prefix], text=True
@@ -43,8 +54,8 @@ if tracked != required:
 metadata = json.loads((root / "0000-product.json").read_text(encoding="utf-8"))
 if metadata.get("schema_version") != 1 or metadata.get("name") != "0000-gateway":
     raise SystemExit("invalid canonical gateway product metadata")
-if metadata.get("status") != "scaffold-only" or metadata.get("application_code") is not False:
-    raise SystemExit("gateway must remain marked scaffold-only")
+if metadata.get("status") != "active-development" or metadata.get("application_code") is not True:
+    raise SystemExit("gateway must be marked as an active application")
 if metadata.get("license_selected") is not False:
     raise SystemExit("scaffold must not select a license")
 wrapper = json.loads((root / "package.json").read_text(encoding="utf-8"))
@@ -53,8 +64,14 @@ if wrapper.get("name") != "@0000/gateway" or wrapper.get("private") is not True:
 readme = (root / "README.md").read_text(encoding="utf-8")
 if "`0000-gateway` aims" not in readme or "No hard dependency" not in readme:
     raise SystemExit("README must preserve the gateway purpose and dependency status")
+if "GET /health" not in readme or "Miniflare/workerd" not in readme:
+    raise SystemExit("README must document the Worker health endpoint and runtime test")
 PY
 git -C "$repo_root" diff --check
 pnpm --dir "$root/tooling" run lint
 pnpm --dir "$root/tooling" run format:check
+cd "$root"
+bun run typecheck
+bun run test
+bun run build
 echo "0000-gateway service and tooling checks passed"

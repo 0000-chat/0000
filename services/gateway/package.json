@@ -2,10 +2,26 @@
   "name": "@0000/gateway",
   "private": true,
   "version": "0.0.0",
-  "description": "Monorepo workspace wrapper for the 0000 gateway scaffold.",
+  "description": "The 0000 Gateway Cloudflare Worker.",
+  "type": "module",
   "scripts": {
     "check": "bun ../../scripts/check-workspace.mjs --workspace @0000/gateway",
-    "check:application": "./scripts/check"
+    "check:application": "./scripts/check",
+    "build": "wrangler deploy --dry-run --config wrangler.jsonc",
+    "dev": "wrangler dev --config wrangler.jsonc",
+    "test": "bun test test",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "hono": "4.13.5",
+    "mcp-use": "2.5.0",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/client": "2.0.0",
+    "miniflare": "4.20260730.0",
+    "typescript": "6.0.3",
+    "wrangler": "4.133.0"
   },
   "packageManager": "pnpm@10.14.0"
 }

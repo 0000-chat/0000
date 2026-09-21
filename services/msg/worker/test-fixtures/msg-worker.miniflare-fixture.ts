@@ -11,6 +11,8 @@ const appDirectory = fileURLToPath(new URL("../", import.meta.url));
 const temporaryDirectory = join(appDirectory, ".miniflare-tests");
 const workerEntry = fileURLToPath(new URL("../src/worker-entry.ts", import.meta.url));
 const nodeRuntimeEntry = fileURLToPath(new URL("./msg-worker.node-runtime.mjs", import.meta.url));
+const NODE_RUNTIME_START_ATTEMPTS = 3;
+const NODE_RUNTIME_START_TIMEOUT_MS = 10_000;
 let workerScriptPromise: Promise<string> | undefined;
 
 export const TEST_ROOM_LIMITS = {
@@ -62,6 +64,13 @@ interface NodeRuntimeReadyMessage {
   dispatchUrl: string;
   type: "ready";
   workerUrl: string;
+}
+
+class NodeRuntimeStartupTimeoutError extends Error {
+  constructor() {
+    super(`Node-owned Miniflare did not become ready within ${NODE_RUNTIME_START_TIMEOUT_MS}ms.`);
+    this.name = "NodeRuntimeStartupTimeoutError";
+  }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -160,11 +169,17 @@ async function startNodeRuntime(configurationPath: string): Promise<NodeRuntimeP
   });
   const readyMessage = await new Promise<NodeRuntimeReadyMessage>((resolve, reject) => {
     let settled = false;
+    let startupTimer: ReturnType<typeof setTimeout> | undefined;
     const lines = createInterface({ input: child.stdout });
-    const fail = (error: unknown) => {
-      if (settled) return;
+    const settle = () => {
+      if (settled) return false;
       settled = true;
+      if (startupTimer !== undefined) clearTimeout(startupTimer);
       lines.close();
+      return true;
+    };
+    const fail = (error: unknown) => {
+      if (!settle()) return;
       reject(error instanceof Error ? error : new Error(String(error)));
     };
     child.once("error", fail);
@@ -187,11 +202,10 @@ async function startNodeRuntime(configurationPath: string): Promise<NodeRuntimeP
         fail(new Error(typeof message.message === "string" ? message.message : "Node-owned Miniflare failed to start."));
         return;
       }
-      if (message.type !== "ready" || typeof message.dispatchUrl !== "string" || typeof message.workerUrl !== "string" || settled) return;
-      settled = true;
-      lines.close();
+      if (message.type !== "ready" || typeof message.dispatchUrl !== "string" || typeof message.workerUrl !== "string" || !settle()) return;
       resolve({ type: "ready", dispatchUrl: message.dispatchUrl, workerUrl: message.workerUrl });
     });
+    startupTimer = setTimeout(() => fail(new NodeRuntimeStartupTimeoutError()), NODE_RUNTIME_START_TIMEOUT_MS);
     child.stdin.write(startupLine, (error) => {
       if (error) fail(error);
     });
@@ -307,6 +321,16 @@ async function startNodeRuntime(configurationPath: string): Promise<NodeRuntimeP
   };
 }
 
+async function startNodeRuntimeWithRetry(configurationPath: string): Promise<NodeRuntimeProcess> {
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      return await startNodeRuntime(configurationPath);
+    } catch (error) {
+      if (!(error instanceof NodeRuntimeStartupTimeoutError) || attempt >= NODE_RUNTIME_START_ATTEMPTS) throw error;
+    }
+  }
+}
+
 async function startNodeRuntimeWithConfiguration(configuration: NodeRuntimeConfiguration): Promise<NodeRuntimeProcess> {
   const configurationDirectory = await createMsgMiniflareTempDirectory("node-runtime-config");
   const configurationPath = join(configurationDirectory, "configuration.json");
@@ -315,7 +339,7 @@ async function startNodeRuntimeWithConfiguration(configuration: NodeRuntimeConfi
   let failure: unknown;
   try {
     await writeFile(configurationPath, JSON.stringify(configuration), { encoding: "utf8", flag: "wx", mode: 0o600 });
-    runtime = await startNodeRuntime(configurationPath);
+    runtime = await startNodeRuntimeWithRetry(configurationPath);
   } catch (error) {
     failed = true;
     failure = error;
