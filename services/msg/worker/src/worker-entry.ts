@@ -1,5 +1,6 @@
 export { ConversationRoom } from "./conversation-room";
 export { ChatGroup } from "./chat-group";
+export { ChatConnection } from "./chat-connection";
 import { OrganizationService } from "./organization-service";
 import { D1OperationStore, type D1DatabaseLike } from "./operations";
 import { DurableRoomService, type RoomNamespace } from "./room-service";
@@ -7,6 +8,7 @@ import { createWorker, type MsgEnvironment, type MsgRateLimit } from "./worker";
 
 export interface MsgProductionEnvironment extends MsgEnvironment {
   readonly ChatGroup?: RoomNamespace;
+  readonly ChatConnection?: RoomNamespace;
   readonly MSG_CREATE_DISABLED?: string;
   readonly MSG_DATA_ENCRYPTION_KEY_V1?: string;
   readonly MSG_DB?: D1DatabaseLike;
@@ -34,7 +36,7 @@ export default {
       : undefined;
     const pushConfigured = Boolean(env.MSG_VAPID_PUBLIC_KEY && env.MSG_VAPID_PRIVATE_KEY && env.MSG_VAPID_SUBJECT);
     return createWorker(roomService, {
-      organization: env.ConversationRoom && env.ChatGroup ? new OrganizationService(env.ConversationRoom, env.ChatGroup, env.MSG_PUBLIC_ORIGIN ?? "https://msg.0000.chat") : undefined,
+      organization: env.ConversationRoom && env.ChatGroup && env.ChatConnection ? new OrganizationService(env.ConversationRoom, env.ChatGroup, env.MSG_PUBLIC_ORIGIN ?? "https://msg.0000.chat", env.ChatConnection) : undefined,
       assets: env.ASSETS,
       createDisabled: env.MSG_CREATE_DISABLED === "1",
       operations,

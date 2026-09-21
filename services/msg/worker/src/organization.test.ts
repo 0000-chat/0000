@@ -27,12 +27,23 @@ class Context {
   waitUntil() {}
 }
 
+class ConnectionContext {
+  private pending = Promise.resolve();
+  blockConcurrencyWhile<T>(callback: () => Promise<T>): Promise<T> {
+    const result = this.pending.then(callback);
+    this.pending = result.then(() => undefined, () => undefined);
+    return result;
+  }
+}
+
 async function setup() {
   const { ConversationRoom } = await import("./conversation-room");
   const { ChatGroup } = await import("./chat-group");
+  const { ChatConnection } = await import("./chat-connection");
   let now = Date.now();
   const rooms = new Map<string, RoomStub>();
   const groups = new Map<string, RoomStub>();
+  const connections = new Map<string, RoomStub>();
   const roomNamespace = { getByName(name: string) {
     if (!rooms.has(name)) rooms.set(name, new ConversationRoom(new Context() as never, {}, () => now));
     return rooms.get(name)!;
@@ -42,9 +53,13 @@ async function setup() {
     return groups.get(name)!;
   } };
   const roomService = new DurableRoomService(roomNamespace, "http://localhost:8791");
-  const service = new OrganizationService(roomNamespace, groupNamespace, "http://localhost:8791");
+  const connectionNamespace = { getByName(name: string) {
+    if (!connections.has(name)) connections.set(name, new ChatConnection(new ConnectionContext() as never, { ConversationRoom: roomNamespace }));
+    return connections.get(name)!;
+  } };
+  const service = new OrganizationService(roomNamespace, groupNamespace, "http://localhost:8791", connectionNamespace);
   const create = (title: string) => roomService.create({ body: { kind: "json", value: { content: `${title} first message`, title } } });
-  return { service, create, roomService, rooms, roomNamespace, advance: (ms: number) => { now += ms; } };
+  return { service, create, roomService, rooms, roomNamespace, connectionNamespace, advance: (ms: number) => { now += ms; } };
 }
 
 test("shared groups deduplicate membership without exposing groups from a room", async () => {
@@ -99,6 +114,115 @@ test("a retry repairs a partial reciprocal write without duplicates", async () =
   await service.link(a.room.id, { conversation_url: b.conversation_url });
   expect((await service.readLinks(a.room.id)).links).toHaveLength(1);
   expect((await service.readLinks(b.room.id)).links).toHaveLength(1);
+});
+
+function deferred() {
+  let resolve!: () => void;
+  const promise = new Promise<void>(complete => { resolve = complete; });
+  return { promise, resolve };
+}
+
+// Room stubs use only synchronous SQLite and microtasks. Advancing one turn lets
+// every unblocked operation reach the deliberately held room response.
+function nextTurn(): Promise<void> { return new Promise(resolve => setTimeout(resolve, 0)); }
+
+test("concurrent linking and unlinking leave both rooms disconnected", async () => {
+  const { service, create, rooms } = await setup();
+  const a = await create("A"), b = await create("B");
+  const written = deferred(), release = deferred(), original = rooms.get(a.room.id)!;
+  rooms.set(a.room.id, { fetch: async request => {
+    const response = await original.fetch(request);
+    if (request.method === "PUT") { written.resolve(); await release.promise; }
+    return response;
+  } });
+  const linking = service.link(a.room.id, { conversation_url: b.conversation_url });
+  await written.promise;
+  const unlinking = service.unlink(a.room.id, b.room.id);
+  await nextTurn();
+  release.resolve();
+  await Promise.all([linking, unlinking]);
+  expect((await service.readLinks(a.room.id)).links).toEqual([]);
+  expect((await service.readLinks(b.room.id)).links).toEqual([]);
+});
+
+test("opposite concurrent branches choose one reciprocal relationship", async () => {
+  const { service, create, rooms } = await setup();
+  const a = await create("A"), b = await create("B");
+  const checked = deferred(), releaseCheck = deferred(), releaseReverseWrite = deferred();
+  const originalA = rooms.get(a.room.id)!, originalB = rooms.get(b.room.id)!;
+  let heldCheck = false;
+  rooms.set(a.room.id, { fetch: async request => {
+    const response = await originalA.fetch(request);
+    if (!heldCheck && new URL(request.url).pathname === "/links/check") {
+      heldCheck = true; checked.resolve(); await releaseCheck.promise;
+    }
+    return response;
+  } });
+  rooms.set(b.room.id, { fetch: async request => {
+    const input = request.method === "PUT" ? await request.clone().json() as { kind: string } : undefined;
+    const response = await originalB.fetch(request);
+    if (input?.kind === "branch") await releaseReverseWrite.promise;
+    return response;
+  } });
+  const first = service.link(a.room.id, { conversation_url: b.conversation_url, source_message: 1 });
+  await checked.promise;
+  const reverse = service.link(b.room.id, { conversation_url: a.conversation_url, source_message: 1 });
+  // Attach handlers before either conflicting write can reject.
+  const results = Promise.allSettled([first, reverse]);
+  await nextTurn();
+  releaseCheck.resolve();
+  await nextTurn();
+  releaseReverseWrite.resolve();
+  expect((await results).map(result => result.status)).toEqual(["fulfilled", "rejected"]);
+  expect((await service.readLinks(a.room.id)).links).toEqual([expect.objectContaining({ kind: "branch", source_message: 1 })]);
+  expect((await service.readLinks(b.room.id)).links).toEqual([expect.objectContaining({ kind: "source", source_message: 1 })]);
+  await service.link(a.room.id, { conversation_url: b.conversation_url, source_message: 1 });
+});
+
+test("a failed unlink can be retried through the same coordinator", async () => {
+  const { service, create, rooms } = await setup();
+  const a = await create("A"), b = await create("B");
+  await service.link(a.room.id, { conversation_url: b.conversation_url });
+  const original = rooms.get(b.room.id)!;
+  rooms.set(b.room.id, { fetch: async request => request.method === "DELETE" ? new Response("{}", { status: 503 }) : original.fetch(request) });
+  await expect(service.unlink(a.room.id, b.room.id)).rejects.toMatchObject({ status: 503 });
+  rooms.set(b.room.id, original);
+  await service.unlink(a.room.id, b.room.id);
+  expect((await service.readLinks(a.room.id)).links).toEqual([]);
+  expect((await service.readLinks(b.room.id)).links).toEqual([]);
+});
+
+test("unlink removes a reference to an expired target without extending room life", async () => {
+  const { service, create, advance, roomService } = await setup();
+  const target = await create("Older target");
+  advance(6 * 86400000);
+  const source = await create("Newer source");
+  await service.link(source.room.id, { conversation_url: target.conversation_url });
+  advance(2 * 86400000);
+  await service.unlink(source.room.id, target.room.id);
+  expect((await service.readLinks(source.room.id)).links).toEqual([]);
+  expect((await roomService.read({ room: source.room.id, after: 0 })).expires_at).toBe(source.expires_at!);
+  await expect(roomService.read({ room: target.room.id, after: 0 })).rejects.toMatchObject({ status: 410 });
+});
+
+test("the coordinator rejects invalid capabilities and source sequences before writing", async () => {
+  const { connectionNamespace, create, service } = await setup();
+  const a = await create("A"), b = await create("B");
+  const coordinator = connectionNamespace.getByName([a.room.id, b.room.id].sort().join(":"));
+  for (const body of [
+    null,
+    { room: "invalid", target: b.room.id },
+    { room: a.room.id, target: "invalid" },
+    { room: a.room.id, target: a.room.id },
+    { room: a.room.id, target: b.room.id, source_message: 0 },
+    { room: a.room.id, target: b.room.id, source_message: "1" },
+    { room: a.room.id, target: b.room.id, source_message: 999 },
+  ]) {
+    const response = await coordinator.fetch(new Request("https://internal/link", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }));
+    expect(response.status).toBe(400);
+  }
+  expect((await service.readLinks(a.room.id)).links).toEqual([]);
+  expect((await service.readLinks(b.room.id)).links).toEqual([]);
 });
 
 test("expired rooms become unavailable in groups; group reads do not extend group expiry", async () => {

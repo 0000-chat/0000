@@ -3,18 +3,25 @@ import { buildAgentRepresentation, renderAgentText } from "./agent-representatio
 import { agentBrowserAsset, renderAgentHomePage, renderAgentRoomPage, renderAgentStatusPage } from "./agent-browser";
 import { browserAsset, browserIcon, MERMAID_ASSET_PATH, renderBrowserDocument } from "./browser";
 import { browserViewRedirect, selectBrowserView } from "./browser-view";
-import { ERROR_CODES, ProtocolError, type ErrorCode } from "./errors";
+import { ERROR_CODES, isStaleRevisionDetails, isStaleSequenceDetails, ProtocolError, type ErrorCode, type StaleRevisionDetails, type StaleSequenceDetails } from "./errors";
 import {
   foregroundWaitForConversation,
+  messageCitationUrl,
   PROTOCOL_VERSION,
+  sequenceCitationUrl,
   stripLegacyAbsoluteExpiry,
   type CreateRoomResponse,
+  type GetPostMessageResponse,
+  type ReadMessageResponse,
   type RequestBody,
   type ManageRoomResponse,
   type ReadRoomResponse,
+  type RetentionExtensionResponse,
   type RoomService,
 } from "./protocol";
-import { compareCapabilities, MAX_ROOM_REQUEST_BYTES, roomEtag, validateCursor, validateIdempotencyKey } from "./room-domain";
+import { byteLength, compareCapabilities, DEFAULT_READ_LIMIT, MAX_ROOM_REQUEST_BYTES, parseBasedOnSequence, roomEtag, validateBasedOnSequenceQuery, validateBoundedCursor, validateCursor, validateIdempotencyKey, validateReadLimit, validateRequestId, validateThrough } from "./room-domain";
+import { coordinationEtag } from "./room-domain";
+import { parseCoordinationClaimPath, parseCoordinationListSelectors } from "./coordination-domain";
 import {
   negotiateCreateRepresentation,
   negotiateRepresentation,
@@ -95,6 +102,10 @@ const MAX_REPORT_DESCRIPTION_BYTES = 4 * 1024;
 const MAX_REPORT_DESCRIPTION_CHARS = 2_000;
 const MAX_WEBHOOK_REQUEST_BYTES = 4 * 1024;
 const MAX_PUSH_SUBSCRIPTION_REQUEST_BYTES = 4 * 1024;
+const MAX_GET_POST_URL_BYTES = 8 * 1024;
+const MAX_GET_POST_CONTENT_BYTES = 4 * 1024;
+const MAX_GET_POST_TOKEN_CHARS = 512;
+const MAX_GET_POST_TOKEN_BYTES = 2 * 1024;
 const RATE_LIMIT_PERIOD_SECONDS = 60;
 
 export function createWorker(service: RoomService, options: MsgWorkerOptions = {}): MsgWorker {
@@ -112,8 +123,8 @@ export function createWorker(service: RoomService, options: MsgWorkerOptions = {
         const response =
           error instanceof ProtocolError
             ? agentHtml
-              ? htmlResponse(renderAgentStatusPage(error.status, error.code, error.message, requestUrl), error.status)
-              : errorResponse(error.code, error.message, error.status, representation)
+              ? htmlResponse(renderAgentStatusPage(error.status, error.code, renderedErrorMessage(error.message, isStaleSequenceDetails(error.details) ? error.details : undefined, isStaleRevisionDetails(error.details) ? error.details : undefined), requestUrl), error.status)
+              : errorResponse(error.code, error.message, error.status, representation, error.details)
             : errorResponse(
                 ERROR_CODES.internal,
                 "The relay could not complete the request.",
@@ -409,18 +420,265 @@ async function route(request: Request, service: RoomService, options: MsgWorkerO
     return service.exportRoom({ format: exportMatch[2] === "json" ? "json" : "markdown", room: exportMatch[1] });
   }
 
+  const coordinationOverviewMatch = /^\/([^/]+)\/coordination$/u.exec(url.pathname);
+  if (coordinationOverviewMatch && request.method === "GET") {
+    if (!service.coordinationOverview) return notFound();
+    await enforceRateLimit(request, options.rateLimits?.reads);
+    const result = await service.coordinationOverview({ room: coordinationOverviewMatch[1]! });
+    const etag = coordinationEtag(result.coordination_cursor, result.published_revision, result.expires_at);
+    if (request.headers.get("if-none-match") === etag) return new Response(null, { headers: { etag, "retry-after": "5" }, status: 304 });
+    const response = jsonResponse(result);
+    response.headers.set("etag", etag);
+    response.headers.set("retry-after", "5");
+    return response;
+  }
+  const coordinationPublicationMatch = /^\/([^/]+)\/coordination\/publications\/([1-9][0-9]*)$/u.exec(url.pathname);
+  if (coordinationPublicationMatch && request.method === "GET") {
+    if (!service.readCoordinationPublication) return notFound();
+    await enforceRateLimit(request, options.rateLimits?.reads);
+    return jsonResponse(await service.readCoordinationPublication({ room: coordinationPublicationMatch[1]!, publishedRevision: Number(coordinationPublicationMatch[2]!) }));
+  }
+  const coordinationCorrectionCollection = /^\/([^/]+)\/coordination\/corrections$/u.exec(url.pathname);
+  if (coordinationCorrectionCollection && request.method === "GET") {
+    if (!service.listCoordinationCorrections) return notFound();
+    await enforceRateLimit(request, options.rateLimits?.reads);
+    const selectors = parseCoordinationListSelectors(url);
+    const targetType = url.searchParams.get("target_type");
+    if (targetType !== null && targetType !== "message" && targetType !== "publication") throw new ProtocolError(ERROR_CODES.invalidBody, "The correction target_type is not supported.", 400);
+    const targetPublishedRevisionValue = url.searchParams.get("target_published_revision");
+    const targetPublishedRevision = targetPublishedRevisionValue === null ? undefined : parsePositiveCoordinationRevision(targetPublishedRevisionValue);
+    const targetClaimPath = parseCoordinationClaimPathSelector(url.searchParams.get("target_claim_path"));
+    if (targetClaimPath !== undefined && targetType === "message") throw new ProtocolError(ERROR_CODES.invalidBody, "A message correction target cannot have a claim_path filter.", 400);
+    return jsonResponse(await service.listCoordinationCorrections({
+      room: coordinationCorrectionCollection[1]!,
+      after: selectors.after,
+      limit: selectors.limit,
+      ...(targetType === null ? {} : { targetType }),
+      ...(targetClaimPath === undefined ? {} : { targetClaimPath }),
+      ...(url.searchParams.get("target_message_id") === null ? {} : { targetMessageId: url.searchParams.get("target_message_id")! }),
+      ...(targetPublishedRevision === undefined ? {} : { targetPublishedRevision }),
+      ...(selectors.through === undefined ? {} : { through: selectors.through }),
+    }));
+  }
+  const coordinationCorrectionDetail = /^\/([^/]+)\/coordination\/corrections\/([^/]+)$/u.exec(url.pathname);
+  if (coordinationCorrectionDetail && request.method === "GET") {
+    if (!service.readCoordinationCorrection) return notFound();
+    await enforceRateLimit(request, options.rateLimits?.reads);
+    return jsonResponse(await service.readCoordinationCorrection({ correctionId: decodePathSegment(coordinationCorrectionDetail[2]!), room: coordinationCorrectionDetail[1]! }));
+  }
+  const coordinationDisputeCollection = /^\/([^/]+)\/coordination\/disputes$/u.exec(url.pathname);
+  if (coordinationDisputeCollection && request.method === "GET") {
+    if (!service.listCoordinationDisputes) return notFound();
+    await enforceRateLimit(request, options.rateLimits?.reads);
+    const selectors = parseCoordinationListSelectors(url);
+    const kind = parseCoordinationDisputeKind(url.searchParams.get("kind"));
+    return jsonResponse(await service.listCoordinationDisputes({
+      room: coordinationDisputeCollection[1]!,
+      after: selectors.after,
+      limit: selectors.limit,
+      ...(url.searchParams.get("accepted_record_id") === null ? {} : { acceptedRecordId: url.searchParams.get("accepted_record_id")! }),
+      ...(kind === undefined ? {} : { kind }),
+      ...(selectors.through === undefined ? {} : { through: selectors.through }),
+    }));
+  }
+  if (coordinationDisputeCollection && request.method === "POST") {
+    if (!service.submitCoordinationDispute) return notFound();
+    await enforceRateLimit(request, options.rateLimits?.posts);
+    return jsonResponse(await service.submitCoordinationDispute({ body: await parseRequestBody(request, { maxBytes: MAX_ROOM_REQUEST_BYTES }), room: coordinationDisputeCollection[1]! }), 201);
+  }
+  const coordinationSupersessionCollection = /^\/([^/]+)\/coordination\/supersessions$/u.exec(url.pathname);
+  if (coordinationSupersessionCollection && request.method === "GET") {
+    if (!service.listCoordinationSupersessions) return notFound();
+    await enforceRateLimit(request, options.rateLimits?.reads);
+    const selectors = parseCoordinationListSelectors(url);
+    return jsonResponse(await service.listCoordinationSupersessions({
+      room: coordinationSupersessionCollection[1]!,
+      after: selectors.after,
+      limit: selectors.limit,
+      ...(url.searchParams.get("predecessor_accepted_record_id") === null ? {} : { predecessorAcceptedRecordId: url.searchParams.get("predecessor_accepted_record_id")! }),
+      ...(url.searchParams.get("successor_decision_id") === null ? {} : { successorDecisionId: url.searchParams.get("successor_decision_id")! }),
+      ...(selectors.through === undefined ? {} : { through: selectors.through }),
+    }));
+  }
+  const coordinationDisputeReviewMatch = /^\/manage\/([^/]+)\/([^/]+)\/coordination\/disputes\/([^/]+)\/review$/u.exec(url.pathname);
+  if (coordinationDisputeReviewMatch && request.method === "POST") {
+    if (!service.reviewCoordinationDispute) return notFound();
+    await enforceRateLimit(request, options.rateLimits?.posts);
+    return jsonResponse(await service.reviewCoordinationDispute({ body: await parseRequestBody(request, { maxBytes: MAX_ROOM_REQUEST_BYTES }), ownerToken: decodePathSegment(coordinationDisputeReviewMatch[2]!), reportId: decodePathSegment(coordinationDisputeReviewMatch[3]!), room: coordinationDisputeReviewMatch[1]! }), 201);
+  }
+  const coordinationDisputeDetail = /^\/([^/]+)\/coordination\/disputes\/([^/]+)$/u.exec(url.pathname);
+  if (coordinationDisputeDetail && request.method === "GET") {
+    if (!service.readCoordinationDispute) return notFound();
+    await enforceRateLimit(request, options.rateLimits?.reads);
+    const selectors = parseCoordinationListSelectors(url);
+    return jsonResponse(await service.readCoordinationDispute({ reportId: decodePathSegment(coordinationDisputeDetail[2]!), room: coordinationDisputeDetail[1]!, after: selectors.after, limit: selectors.limit, ...(selectors.through === undefined ? {} : { through: selectors.through }) }));
+  }
+  const coordinationPanelHistoryMatch = /^\/([^/]+)\/coordination\/panel\/history$/u.exec(url.pathname);
+  if (coordinationPanelHistoryMatch && request.method === "GET") {
+    if (!service.listCoordinationPanelHistory) return notFound();
+    await enforceRateLimit(request, options.rateLimits?.reads);
+    const selectors = parseCoordinationListSelectors(url);
+    const result = await service.listCoordinationPanelHistory({ room: coordinationPanelHistoryMatch[1]!, after: selectors.after, limit: selectors.limit, ...(selectors.through === undefined ? {} : { through: selectors.through }) });
+    const etag = coordinationPanelHistoryEtag(result, selectors);
+    if (request.headers.get("if-none-match") === etag) return new Response(null, { headers: { etag, "retry-after": "5" }, status: 304 });
+    const response = jsonResponse(result);
+    response.headers.set("etag", etag);
+    response.headers.set("retry-after", "5");
+    return response;
+  }
+  const coordinationPanelMatch = /^\/([^/]+)\/coordination\/panel$/u.exec(url.pathname);
+  if (coordinationPanelMatch && request.method === "GET") {
+    if (!service.readCoordinationPanel) return notFound();
+    await enforceRateLimit(request, options.rateLimits?.reads);
+    const revisionValue = url.searchParams.get("revision");
+    const revision = revisionValue === null ? undefined : parsePositiveCoordinationRevision(revisionValue);
+    const result = await service.readCoordinationPanel({ room: coordinationPanelMatch[1]!, ...(revision === undefined ? {} : { revision }) });
+    const etag = coordinationPanelEtag(result, revision);
+    if (request.headers.get("if-none-match") === etag) return new Response(null, { headers: { etag, "retry-after": "5" }, status: 304 });
+    const response = jsonResponse(result);
+    response.headers.set("etag", etag);
+    response.headers.set("retry-after", "5");
+    return response;
+  }
+  const coordinationDecisionCollection = /^\/([^/]+)\/coordination\/decisions$/u.exec(url.pathname);
+  if (coordinationDecisionCollection && request.method === "GET") {
+    if (!service.listCoordinationDecisions) return notFound();
+    await enforceRateLimit(request, options.rateLimits?.reads);
+    const selectors = parseCoordinationListSelectors(url);
+    const result = await service.listCoordinationDecisions({ room: coordinationDecisionCollection[1]!, after: selectors.after, limit: selectors.limit, ...(selectors.through === undefined ? {} : { through: selectors.through }) });
+    const etag = coordinationDecisionListEtag(result, selectors);
+    if (request.headers.get("if-none-match") === etag) return new Response(null, { headers: { etag, "retry-after": "5" }, status: 304 });
+    const response = jsonResponse(result);
+    response.headers.set("etag", etag);
+    response.headers.set("retry-after", "5");
+    return response;
+  }
+  const coordinationAcceptedRecordMatch = /^\/([^/]+)\/coordination\/decisions\/([^/]+)\/records\/([^/]+)$/u.exec(url.pathname);
+  if (coordinationAcceptedRecordMatch && request.method === "GET") {
+    if (!service.readCoordinationAcceptedRecord) return notFound();
+    await enforceRateLimit(request, options.rateLimits?.reads);
+    return jsonResponse(await service.readCoordinationAcceptedRecord({ acceptedRecordId: decodePathSegment(coordinationAcceptedRecordMatch[3]!), decisionId: decodePathSegment(coordinationAcceptedRecordMatch[2]!), room: coordinationAcceptedRecordMatch[1]! }));
+  }
+  const coordinationDecisionDetail = /^\/([^/]+)\/coordination\/decisions\/([^/]+)$/u.exec(url.pathname);
+  if (coordinationDecisionDetail && request.method === "GET") {
+    if (!service.readCoordinationDecision) return notFound();
+    await enforceRateLimit(request, options.rateLimits?.reads);
+    const selectors = parseCoordinationListSelectors(url);
+    const result = await service.readCoordinationDecision({ decisionId: decodePathSegment(coordinationDecisionDetail[2]!), room: coordinationDecisionDetail[1]!, after: selectors.after, limit: selectors.limit, ...(selectors.through === undefined ? {} : { through: selectors.through }) });
+    const etag = coordinationDecisionDetailEtag(result, selectors);
+    if (request.headers.get("if-none-match") === etag) return new Response(null, { headers: { etag, "retry-after": "5" }, status: 304 });
+    const response = jsonResponse(result);
+    response.headers.set("etag", etag);
+    response.headers.set("retry-after", "5");
+    return response;
+  }
+  const coordinationProposalCollection = /^\/([^/]+)\/coordination\/proposals$/u.exec(url.pathname);
+  if (coordinationProposalCollection && request.method === "GET") {
+    if (!service.listCoordinationProposals) return notFound();
+    await enforceRateLimit(request, options.rateLimits?.reads);
+    const selectors = parseCoordinationListSelectors(url);
+    return jsonResponse(await service.listCoordinationProposals({ room: coordinationProposalCollection[1]!, after: selectors.after, limit: selectors.limit, ...(selectors.through === undefined ? {} : { through: selectors.through }) }));
+  }
+  if (coordinationProposalCollection && request.method === "POST") {
+    if (!service.submitCoordinationProposal) return notFound();
+    await enforceRateLimit(request, options.rateLimits?.posts);
+    return jsonResponse(await service.submitCoordinationProposal({ body: await parseRequestBody(request, { maxBytes: MAX_ROOM_REQUEST_BYTES }), room: coordinationProposalCollection[1]! }), 201);
+  }
+  const coordinationRevisionMatch = /^\/([^/]+)\/coordination\/proposals\/([^/]+)\/revisions$/u.exec(url.pathname);
+  if (coordinationRevisionMatch && request.method === "POST") {
+    if (!service.submitCoordinationRevision) return notFound();
+    await enforceRateLimit(request, options.rateLimits?.posts);
+    return jsonResponse(await service.submitCoordinationRevision({ body: await parseRequestBody(request, { maxBytes: MAX_ROOM_REQUEST_BYTES }), proposalId: decodePathSegment(coordinationRevisionMatch[2]!), room: coordinationRevisionMatch[1]! }), 201);
+  }
+  const coordinationRevisionDetailMatch = /^\/([^/]+)\/coordination\/proposals\/([^/]+)\/revisions\/([1-9][0-9]*)$/u.exec(url.pathname);
+  if (coordinationRevisionDetailMatch && request.method === "GET") {
+    if (!service.readCoordinationProposalRevision) return notFound();
+    await enforceRateLimit(request, options.rateLimits?.reads);
+    return jsonResponse(await service.readCoordinationProposalRevision({ proposalId: decodePathSegment(coordinationRevisionDetailMatch[2]!), revision: Number(coordinationRevisionDetailMatch[3]!), room: coordinationRevisionDetailMatch[1]! }));
+  }
+  const coordinationProposalDetail = /^\/([^/]+)\/coordination\/proposals\/([^/]+)$/u.exec(url.pathname);
+  if (coordinationProposalDetail && request.method === "GET") {
+    if (!service.readCoordinationProposal) return notFound();
+    await enforceRateLimit(request, options.rateLimits?.reads);
+    return jsonResponse(await service.readCoordinationProposal({ proposalId: decodePathSegment(coordinationProposalDetail[2]!), room: coordinationProposalDetail[1]! }));
+  }
+  const coordinationRequestCollection = /^\/([^/]+)\/coordination\/requests$/u.exec(url.pathname);
+  if (coordinationRequestCollection && request.method === "GET") {
+    if (!service.listCoordinationRequests) return notFound();
+    await enforceRateLimit(request, options.rateLimits?.reads);
+    const selectors = parseCoordinationListSelectors(url);
+    const result = await service.listCoordinationRequests({ room: coordinationRequestCollection[1]!, after: selectors.after, limit: selectors.limit, ...(selectors.owner_label === undefined ? {} : { owner_label: selectors.owner_label }), ...(selectors.status === undefined ? {} : { status: selectors.status }), ...(selectors.through === undefined ? {} : { through: selectors.through }) });
+    const etag = coordinationListEtag("requests", result, selectors);
+    if (request.headers.get("if-none-match") === etag) return new Response(null, { headers: { etag, "retry-after": "5" }, status: 304 });
+    const response = jsonResponse(result);
+    response.headers.set("etag", etag);
+    response.headers.set("retry-after", "5");
+    return response;
+  }
+  const coordinationRequestDetail = /^\/([^/]+)\/coordination\/requests\/([^/]+)$/u.exec(url.pathname);
+  if (coordinationRequestDetail && request.method === "GET") {
+    if (!service.readCoordinationRequest) return notFound();
+    await enforceRateLimit(request, options.rateLimits?.reads);
+    const selectors = parseCoordinationListSelectors(url);
+    return jsonResponse(await service.readCoordinationRequest({ requestId: decodePathSegment(coordinationRequestDetail[2]!), room: coordinationRequestDetail[1]!, after: selectors.after, limit: selectors.limit, ...(selectors.owner_label === undefined ? {} : { owner_label: selectors.owner_label }), ...(selectors.status === undefined ? {} : { status: selectors.status }), ...(selectors.through === undefined ? {} : { through: selectors.through }) }));
+  }
+  const coordinationPublishMatch = /^\/manage\/([^/]+)\/([^/]+)\/coordination\/publish$/u.exec(url.pathname);
+  if (coordinationPublishMatch && request.method === "POST") {
+    if (!service.publishCoordinationRequest) return notFound();
+    await enforceRateLimit(request, options.rateLimits?.posts);
+    return jsonResponse(await service.publishCoordinationRequest({ body: await parseRequestBody(request, { maxBytes: MAX_ROOM_REQUEST_BYTES }), ownerToken: decodePathSegment(coordinationPublishMatch[2]!), room: coordinationPublishMatch[1]! }), 201);
+  }
+
+  const messageMatch = /^\/([^/]+)\/messages\/([^/]+)$/u.exec(url.pathname);
+  if (messageMatch && request.method === "GET") {
+    if (!service.readMessage) return notFound();
+    await enforceRateLimit(request, options.rateLimits?.reads);
+    const result = stripLegacyAbsoluteExpiry(await service.readMessage({ id: decodePathSegment(messageMatch[2]!), room: messageMatch[1]! })) as unknown as ReadMessageResponse;
+    const etag = coordinationMessageEtag(result);
+    if (request.headers.get("if-none-match") === etag) return new Response(null, { headers: { etag, "retry-after": "5" }, status: 304 });
+    const response = messageResponse(result, negotiateRepresentation(request.headers.get("accept")));
+    response.headers.set("etag", etag);
+    response.headers.set("retry-after", "5");
+    return response;
+  }
+
   const agentMatch = /^\/([^/]+)\/agent$/.exec(url.pathname);
   if (agentMatch && request.method === "GET") {
     if (!service.read) return notFound();
     await enforceRateLimit(request, options.rateLimits?.reads);
+    const selectors = parseReadSelectors(url);
     const result = stripLegacyAbsoluteExpiry(await service.read({
-      after: validateCursor(url.searchParams.get("after")),
+      after: selectors.after,
+      ...(selectors.limit === undefined ? {} : { limit: selectors.limit }),
       room: agentMatch[1],
+      ...(selectors.through === undefined ? {} : { through: selectors.through }),
     })) as unknown as ReadRoomResponse;
-    const document = buildAgentRepresentation(result);
+    const document = buildAgentRepresentation(result, selectors.bounded ? { limit: selectors.limit ?? DEFAULT_READ_LIMIT } : undefined);
     return request.headers.get("accept")?.toLowerCase().includes("application/json")
       ? jsonResponse(document)
       : textResponse(renderAgentText(document));
+  }
+
+  const getPostMatch = /^\/([^/]+)\/post$/.exec(url.pathname);
+  if (getPostMatch && request.method === "GET") {
+    if (!service.getPost) return notFound();
+    if (options.postDisabled) {
+      throw new ProtocolError(ERROR_CODES.serviceUnavailable, "New messages are temporarily unavailable.", 503);
+    }
+    if (!isSameOrigin(request, url)) {
+      throw new ProtocolError(ERROR_CODES.forbidden, "Cross-origin state changes are not allowed.", 403);
+    }
+    rejectGetPostPrefetch(request);
+    const getPost = parseGetPostQuery(request, url);
+    await enforceRateLimit(request, options.rateLimits?.posts);
+    const result = stripLegacyAbsoluteExpiry(await service.getPost({
+      body: { kind: "json", value: getPost.input },
+      ...(getPost.basedOnSequence === undefined ? {} : { basedOnSequence: getPost.basedOnSequence }),
+      requestId: getPost.requestId,
+      room: getPostMatch[1]!,
+      token: getPost.token,
+    })) as unknown as GetPostMessageResponse;
+    return getPostResponse(result);
   }
 
   const roomMatch = /^\/([^/]+)$/.exec(url.pathname);
@@ -429,8 +687,13 @@ async function route(request: Request, service: RoomService, options: MsgWorkerO
     if (request.method === "GET") {
       if (!service.read) return notFound();
       await enforceRateLimit(request, options.rateLimits?.reads);
-      const after = validateCursor(url.searchParams.get("after"));
-      const result = stripLegacyAbsoluteExpiry(await service.read({ after, room })) as unknown as ReadRoomResponse;
+      const selectors = parseReadSelectors(url);
+      const result = stripLegacyAbsoluteExpiry(await service.read({
+        after: selectors.after,
+        ...(selectors.limit === undefined ? {} : { limit: selectors.limit }),
+        room,
+        ...(selectors.through === undefined ? {} : { through: selectors.through }),
+      })) as unknown as ReadRoomResponse;
       if (negotiateRepresentation(request.headers.get("accept")) === "html") {
         if (selectBrowserView(url, request.headers.get("cookie")) === "agent") {
           return htmlResponse(renderAgentRoomPage(result, url));
@@ -438,7 +701,11 @@ async function route(request: Request, service: RoomService, options: MsgWorkerO
         const page = renderBrowserDocument({ pushPublicKey: options.pushConfigured ? options.pushVapidPublicKey : undefined, room, title: result.title ?? "Temporary conversation", url });
         return htmlResponse(page.html, 200, page.styleNonce);
       }
-      const etag = roomEtag(result.latest_message, after);
+      const etag = selectors.bounded
+        ? roomEtag(result.latest_message, selectors.after, { expiresAt: result.expires_at, mode: "bounded", limit: selectors.limit ?? DEFAULT_READ_LIMIT, through: result.through, ...(result.coordination_cursor === undefined ? {} : { coordinationCursor: result.coordination_cursor }), ...(result.published_revision === undefined ? {} : { publishedRevision: result.published_revision }), ...(result.retention === undefined ? {} : { inactivityWindowMs: result.retention.inactivity_window_ms, retentionMode: result.retention.mode, retentionPolicy: result.retention.policy }) })
+        : result.coordination_cursor === undefined && result.published_revision === undefined
+          ? roomEtag(result.latest_message, selectors.after)
+          : roomEtag(result.latest_message, selectors.after, { coordinationCursor: result.coordination_cursor, expiresAt: result.expires_at, mode: "unbounded", publishedRevision: result.published_revision, ...(result.retention === undefined ? {} : { inactivityWindowMs: result.retention.inactivity_window_ms, retentionMode: result.retention.mode, retentionPolicy: result.retention.policy }) });
       if (request.headers.get("if-none-match") === etag) {
         return new Response(null, { headers: { etag, "retry-after": "5" }, status: 304 });
       }
@@ -450,8 +717,11 @@ async function route(request: Request, service: RoomService, options: MsgWorkerO
         throw new ProtocolError(ERROR_CODES.serviceUnavailable, "New messages are temporarily unavailable.", 503);
       }
       await enforceRateLimit(request, options.rateLimits?.posts);
+      const body = await parseRequestBody(request, { maxBytes: MAX_ROOM_REQUEST_BYTES });
+      const basedOnSequence = parseBasedOnSequence(body);
       const result = stripLegacyAbsoluteExpiry(await service.post({
-        body: await parseRequestBody(request, { maxBytes: MAX_ROOM_REQUEST_BYTES }),
+        body,
+        ...(basedOnSequence === undefined ? {} : { basedOnSequence }),
         browserId: parseOptionalPushBrowserId(request.headers.get("x-msg-browser-id")),
         idempotencyKey: request.headers.has("idempotency-key") ? validateIdempotencyKey(request.headers.get("idempotency-key") ?? "") : undefined,
         room,
@@ -471,10 +741,19 @@ async function route(request: Request, service: RoomService, options: MsgWorkerO
   }
 
   const manageMatch = /^\/manage\/([^/]+)\/([^/]+)$/.exec(url.pathname);
-  if (manageMatch && (request.method === "GET" || request.method === "DELETE")) {
+  const retentionMatch = /^\/manage\/([^/]+)\/([^/]+)\/retention$/.exec(url.pathname);
+  if (retentionMatch && request.method === "POST") {
+    if (!service.extendRetention) return notFound();
+    await enforceRateLimit(request, options.rateLimits?.posts);
+    const result = await service.extendRetention({ body: await parseRequestBody(request, { maxBytes: 4 * 1024 }), room: retentionMatch[1]!, token: decodePathSegment(retentionMatch[2]!) });
+    return retentionResponse(result, negotiateRepresentation(request.headers.get("accept")));
+  }
+  if (manageMatch && (request.method === "GET" || request.method === "DELETE" || request.method === "POST")) {
     if (!service.manage) return notFound();
-    const result = await service.manage({ method: request.method, room: manageMatch[1], token: manageMatch[2] });
-    return manageResponse(result, request.method, negotiateRepresentation(request.headers.get("accept")));
+    if (request.method === "POST") await enforceRateLimit(request, options.rateLimits?.posts);
+    const action = request.method === "POST" ? await parseManagementAction(request) : undefined;
+    const result = await service.manage({ action, method: request.method, room: manageMatch[1]!, token: manageMatch[2]! });
+    return manageResponse(result, request.method, negotiateRepresentation(request.headers.get("accept")), url);
   }
 
   return errorResponse(
@@ -483,6 +762,165 @@ async function route(request: Request, service: RoomService, options: MsgWorkerO
     404,
     negotiateRepresentation(request.headers.get("accept")),
   );
+}
+
+const GET_POST_QUERY_FIELDS = new Set(["author", "based_on_sequence", "client", "content", "display_name", "reply_to", "request_id", "semantic_type", "token"]);
+
+interface GetPostQuery {
+  readonly basedOnSequence?: number;
+  readonly input: Record<string, string>;
+  readonly requestId: string;
+  readonly token: string;
+}
+
+function parseGetPostQuery(request: Request, url: URL): GetPostQuery {
+  if (byteLength(request.url) > MAX_GET_POST_URL_BYTES) {
+    throw new ProtocolError(ERROR_CODES.bodyTooLarge, "The GET posting URL is too large.", 413);
+  }
+  const counts = new Map<string, number>();
+  for (const [name] of url.searchParams) {
+    if (!GET_POST_QUERY_FIELDS.has(name)) throw new ProtocolError(ERROR_CODES.invalidBody, "The GET posting query contains an unsupported field.", 400);
+    counts.set(name, (counts.get(name) ?? 0) + 1);
+  }
+  for (const [name, count] of counts) {
+    if (count !== 1) throw new ProtocolError(ERROR_CODES.invalidBody, `The ${name} query field must appear once.`, 400);
+  }
+
+  const token = boundedQueryValue(url.searchParams.get("token"), "token", MAX_GET_POST_TOKEN_CHARS, MAX_GET_POST_TOKEN_BYTES);
+  const requestId = validateRequestId(requiredQueryValue(url.searchParams.get("request_id"), "request_id"));
+  const basedOnSequence = validateBasedOnSequenceQuery(url.searchParams.get("based_on_sequence"));
+  const content = requiredQueryValue(url.searchParams.get("content"), "content");
+  if (byteLength(content) > MAX_GET_POST_CONTENT_BYTES) {
+    throw new ProtocolError(ERROR_CODES.bodyTooLarge, "The GET posting content is too large.", 413);
+  }
+  const input: Record<string, string> = { content };
+  for (const field of ["author", "display_name", "client", "semantic_type", "reply_to"] as const) {
+    const value = url.searchParams.get(field);
+    if (value !== null) input[field] = value;
+  }
+  return { input, ...(basedOnSequence === undefined ? {} : { basedOnSequence }), requestId, token };
+}
+
+function requiredQueryValue(value: string | null, field: string): string {
+  if (value === null || value === "") throw new ProtocolError(ERROR_CODES.invalidBody, `The ${field} query field is required.`, 400);
+  return value;
+}
+
+function boundedQueryValue(value: string | null, field: string, maxChars: number, maxBytes: number): string {
+  const result = requiredQueryValue(value, field);
+  if (Array.from(result).length > maxChars || byteLength(result) > maxBytes) {
+    throw new ProtocolError(ERROR_CODES.bodyTooLarge, `The ${field} query field is too large.`, 413);
+  }
+  return result;
+}
+
+function rejectGetPostPrefetch(request: Request): void {
+  if (request.headers.get("sec-fetch-site")?.toLowerCase() === "cross-site") {
+    throw new ProtocolError(ERROR_CODES.forbidden, "GET posting URLs cannot be used by cross-site browser requests.", 403);
+  }
+  const prefetchHeaders = ["purpose", "sec-purpose", "x-moz"].map((name) => request.headers.get(name)?.toLowerCase() ?? "");
+  if (prefetchHeaders.some((value) => value.includes("prefetch") || value.includes("prerender"))) {
+    throw new ProtocolError(ERROR_CODES.forbidden, "GET posting URLs cannot be used by prefetch or prerender requests.", 403);
+  }
+}
+
+async function parseManagementAction(request: Request): Promise<"disable" | "enable" | "rotate"> {
+  const body = await parseRequestBody(request, { maxBytes: 512 });
+  let action: unknown;
+  if (body.kind === "json") {
+    if (body.value === null || Array.isArray(body.value) || typeof body.value !== "object") {
+      throw new ProtocolError(ERROR_CODES.invalidBody, "The management action must be a JSON object.", 400);
+    }
+    const fields = Object.keys(body.value);
+    if (fields.length !== 1 || fields[0] !== "action") {
+      throw new ProtocolError(ERROR_CODES.invalidBody, "The management action must contain only action.", 400);
+    }
+    action = body.value.action;
+  } else {
+    const values = new URLSearchParams(body.value);
+    const fields = [...values.keys()];
+    if (fields.length !== 1 || fields[0] !== "action") {
+      throw new ProtocolError(ERROR_CODES.invalidBody, "The management action must contain only action.", 400);
+    }
+    action = values.get("action");
+  }
+  if (action !== "enable" && action !== "disable" && action !== "rotate") {
+    throw new ProtocolError(ERROR_CODES.invalidBody, "The management action must be enable, disable, or rotate.", 400);
+  }
+  return action;
+}
+
+interface ReadSelectors {
+  readonly after: number;
+  readonly bounded: boolean;
+  readonly limit?: number;
+  readonly through?: number;
+}
+
+function parseReadSelectors(url: URL): ReadSelectors {
+  const bounded = url.searchParams.has("limit") || url.searchParams.has("through");
+  const limit = validateReadLimit(url.searchParams.get("limit"));
+  const through = validateThrough(url.searchParams.get("through"));
+  return {
+    after: bounded ? validateBoundedCursor(url.searchParams.get("after"), "after") : validateCursor(url.searchParams.get("after")),
+    bounded,
+    ...(limit === undefined ? {} : { limit }),
+    ...(through === undefined ? {} : { through }),
+  };
+}
+
+function coordinationListEtag(kind: "requests", result: unknown, selectors: { readonly after: number; readonly limit: number; readonly owner_label?: string; readonly status?: string; readonly through?: number }): string {
+  const value = result && typeof result === "object" && !Array.isArray(result) ? result as { coordination_cursor?: unknown; expires_at?: unknown; published_revision?: unknown; through?: unknown } : {};
+  return `W/"coordination-${kind}-${String(value.coordination_cursor ?? "")}-${String(value.published_revision ?? "")}-after-${selectors.after}-limit-${selectors.limit}-through-${String(selectors.through ?? value.through ?? "")}-owner-${encodeURIComponent(selectors.owner_label ?? "")}-status-${selectors.status ?? ""}-expires-${String(value.expires_at ?? "")}"`;
+}
+
+function coordinationDecisionListEtag(result: unknown, selectors: { readonly after: number; readonly limit: number; readonly through?: number }): string {
+  const value = result && typeof result === "object" && !Array.isArray(result) ? result as { coordination_cursor?: unknown; expires_at?: unknown; published_revision?: unknown; through?: unknown } : {};
+  return `W/"coordination-decisions-${String(value.coordination_cursor ?? "")}-${String(value.published_revision ?? "")}-after-${selectors.after}-limit-${selectors.limit}-through-${String(selectors.through ?? value.through ?? "")}-expires-${String(value.expires_at ?? "")}"`;
+}
+
+function coordinationDecisionDetailEtag(result: unknown, selectors: { readonly after: number; readonly limit: number; readonly through?: number }): string {
+  const value = result && typeof result === "object" && !Array.isArray(result) ? result as { coordination_cursor?: unknown; expires_at?: unknown; published_revision?: unknown; history_through?: unknown; decision?: { decision_id?: unknown; latest_proposal_revision?: unknown; state?: unknown; accepted_record_id?: unknown } } : {};
+  const decision = value.decision ?? {};
+  return `W/"coordination-decision-${String(decision.decision_id ?? "")}-${String(decision.latest_proposal_revision ?? "")}-${String(decision.state ?? "")}-${String(decision.accepted_record_id ?? "")}-${String(value.coordination_cursor ?? "")}-${String(value.published_revision ?? "")}-after-${selectors.after}-limit-${selectors.limit}-through-${String(selectors.through ?? value.history_through ?? "")}-expires-${String(value.expires_at ?? "")}"`;
+}
+
+function parsePositiveCoordinationRevision(value: string): number {
+  if (!/^[1-9][0-9]*$/u.test(value)) throw new ProtocolError(ERROR_CODES.invalidBody, "The panel revision must be a positive safe integer.", 400);
+  const revision = Number(value);
+  if (!Number.isSafeInteger(revision)) throw new ProtocolError(ERROR_CODES.invalidBody, "The panel revision must be a positive safe integer.", 400);
+  return revision;
+}
+
+function parseCoordinationDisputeKind(value: string | null): "dispute" | "approval_withdrawal" | undefined {
+  if (value === null) return undefined;
+  if (value !== "dispute" && value !== "approval_withdrawal") throw new ProtocolError(ERROR_CODES.invalidBody, "The coordination report kind is not supported.", 400);
+  return value;
+}
+
+function parseCoordinationClaimPathSelector(value: string | null): readonly (string | number)[] | undefined {
+  if (value === null) return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    throw new ProtocolError(ERROR_CODES.invalidBody, "The correction target_claim_path must be JSON.", 400);
+  }
+  return parseCoordinationClaimPath(parsed);
+}
+
+function coordinationPanelEtag(result: unknown, revision: number | undefined): string {
+  const value = result && typeof result === "object" && !Array.isArray(result) ? result as { coordination_cursor?: unknown; expires_at?: unknown; panel_published_revision?: unknown; published_revision?: unknown } : {};
+  return `W/"coordination-panel-${String(value.coordination_cursor ?? "")}-${String(value.published_revision ?? "")}-${String(value.panel_published_revision ?? "")}-revision-${String(revision ?? "latest")}-expires-${String(value.expires_at ?? "")}"`;
+}
+
+function coordinationPanelHistoryEtag(result: unknown, selectors: { readonly after: number; readonly limit: number; readonly through?: number }): string {
+  const value = result && typeof result === "object" && !Array.isArray(result) ? result as { coordination_cursor?: unknown; expires_at?: unknown; published_revision?: unknown; history_through?: unknown } : {};
+  return `W/"coordination-panel-history-${String(value.coordination_cursor ?? "")}-${String(value.published_revision ?? "")}-after-${selectors.after}-limit-${selectors.limit}-through-${String(selectors.through ?? value.history_through ?? "")}-expires-${String(value.expires_at ?? "")}"`;
+}
+
+function coordinationMessageEtag(result: ReadMessageResponse): string {
+  return `W/"message-${result.message.id}-coordination-${result.coordination_cursor}-published-${result.published_revision}-corrections-${result.correction_count}-expires-${result.expires_at}-retention-window-${result.retention?.inactivity_window_ms ?? ""}-retention-mode-${result.retention?.mode ?? ""}-retention-policy-${result.retention?.policy ?? ""}"`;
 }
 
 async function enforceRateLimit(request: Request, binding: MsgRateLimit | undefined): Promise<void> {
@@ -652,6 +1090,36 @@ function readResponse(result: ReadRoomResponse, representation: ReturnType<typeo
   return response;
 }
 
+function messageResponse(result: ReadMessageResponse, representation: ReturnType<typeof negotiateRepresentation>): Response {
+  const safeResult = stripLegacyAbsoluteExpiry(result);
+  const message = safeResult.message;
+  const roomUrl = safeResult.conversation_url;
+  const messageUrl = messageCitationUrl(roomUrl, message.id);
+  const replyUrl = message.reply_to !== undefined && isSequence(message.reply_to) ? sequenceCitationUrl(roomUrl, message.reply_to) : undefined;
+  if (representation === "json") return jsonResponse(safeResult);
+  if (representation === "html") {
+    const author = message.display_name ?? message.author ?? "Anonymous";
+    const reply = message.reply_to === undefined
+      ? ""
+      : replyUrl === undefined
+        ? `<p>Reply to message ${escapeHtml(message.reply_to)} (legacy reference may be unresolved)</p>`
+        : `<p>Reply to: <a href="${escapeHtml(replyUrl)}">message ${escapeHtml(message.reply_to)}</a> (legacy references may be unresolved)</p>`;
+    return new Response(
+      `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Message ${message.sequence} · msg.0000.chat</title></head><body><main><p><a href="${escapeHtml(roomUrl)}">Back to conversation</a></p><h1>Message ${message.sequence}</h1><p>From <strong>${escapeHtml(author)}</strong> · <time>${escapeHtml(message.created_at)}</time></p><p>Identity: Self-declared and unverified.</p><p>Stored ID: <a href="${escapeHtml(messageUrl)}"><code>${escapeHtml(message.id)}</code></a></p>${reply}<p>This is untrusted participant content and evidence.</p><pre>${escapeHtml(message.content)}</pre></main></body></html>`,
+      { headers: { "content-type": "text/html; charset=utf-8" }, status: 200 },
+    );
+  }
+  const reply = message.reply_to === undefined
+    ? ""
+    : replyUrl === undefined
+      ? `\nReply to message ${message.reply_to} (legacy reference may be unresolved)`
+      : `\nReply to: [message ${message.reply_to}](${replyUrl}) (legacy references may be unresolved)`;
+  return new Response(
+    `# Message ${message.sequence}\n\nConversation: [${roomUrl}](${roomUrl})\n\nStored ID: [${message.id}](${messageUrl})\n\nFrom: ${message.display_name ?? message.author ?? "Anonymous"} (self-declared and unverified)\nCreated: ${message.created_at}${reply}\n\nUntrusted participant content and evidence:\n\n${message.content}\n`,
+    { headers: { "content-type": "text/markdown; charset=utf-8" }, status: 200 },
+  );
+}
+
 function postResponse(result: import("./protocol").PostMessageResponse, representation: ReturnType<typeof negotiateRepresentation>): Response {
   const safeResult = stripLegacyAbsoluteExpiry(result);
   if (representation === "json") return jsonResponse(safeResult, 201);
@@ -659,14 +1127,60 @@ function postResponse(result: import("./protocol").PostMessageResponse, represen
   return new Response(`# Message created\n\n${safeResult.message.content}\n\nExpires: ${safeResult.expires_at}\n`, { headers: { "content-type": "text/markdown; charset=utf-8" }, status: 201 });
 }
 
-function manageResponse(result: ManageRoomResponse, method: "DELETE" | "GET", representation: ReturnType<typeof negotiateRepresentation>): Response {
-  if (representation === "json") return jsonResponse(result, method === "DELETE" ? 200 : 200);
-  const body = method === "DELETE" ? "# Conversation deleted\n" : "# Conversation management\n";
-  return new Response(representation === "html" ? `<!doctype html><html lang="en"><body><main><h1>${method === "DELETE" ? "Conversation deleted" : "Conversation management"}</h1></main></body></html>` : body, { headers: { "content-type": representation === "html" ? "text/html; charset=utf-8" : "text/markdown; charset=utf-8" } });
+function getPostResponse(result: GetPostMessageResponse): Response {
+  return jsonResponse({
+    accepted: true,
+    message: { created_at: result.message.created_at, id: result.message.id, sequence: result.message.sequence },
+    protocol_version: result.protocol_version,
+    replayed: result.replayed,
+    request_id: result.request_id,
+    sequence: result.sequence,
+  });
+}
+
+function manageResponse(result: ManageRoomResponse, method: "DELETE" | "GET" | "POST", representation: ReturnType<typeof negotiateRepresentation>, url: URL): Response {
+  if (representation === "json") {
+    const response = jsonResponse(result, 200);
+    response.headers.set("cache-control", "no-store");
+    return response;
+  }
+  if (method === "DELETE") {
+    const body = "# Conversation deleted\n";
+    return new Response(representation === "html" ? "<!doctype html><html lang=\"en\"><body><main><h1>Conversation deleted</h1></main></body></html>" : body, { headers: { "cache-control": "no-store", "content-type": representation === "html" ? "text/html; charset=utf-8" : "text/markdown; charset=utf-8" } });
+  }
+  const enabled = result.get_post_enabled === true;
+  const delegated = result.get_post_url ? `<section><h2>GET posting capability</h2><p>${escapeHtml(result.get_post_url_warning ?? "Treat this URL as a secret write capability.")}</p><pre>${escapeHtml(result.get_post_url)}</pre></section>` : "";
+  const controls = `<section><h2>GET posting capability</h2><p>Status: ${enabled ? "enabled" : "disabled"}.</p><form method="post" action="${escapeHtml(url.toString())}"><button name="action" value="enable" type="submit">Enable</button> <button name="action" value="rotate" type="submit">Rotate</button> <button name="action" value="disable" type="submit">Disable</button></form><p>This capability lets a fetch-only agent write short text. URL previews can trigger a write, so keep the URL secret.</p></section>`;
+  const body = method === "POST" && result.get_post_url ? `${delegated}${controls}` : controls;
+  if (representation === "html") return new Response(`<!doctype html><html lang="en"><body><main><h1>Conversation management</h1>${body}</main></body></html>`, { headers: { "cache-control": "no-store", "content-type": "text/html; charset=utf-8", "x-msg-management-forms": "1" } });
+  return new Response(`# Conversation management\n\nGET posting: ${enabled ? "enabled" : "disabled"}.\n\n${result.get_post_url ? `${result.get_post_url_warning ?? "Treat this URL as a secret write capability."}\n\n${result.get_post_url}\n` : "Use the management URL to enable or rotate the GET posting capability.\n"}`, { headers: { "cache-control": "no-store", "content-type": "text/markdown; charset=utf-8" } });
+}
+
+function retentionResponse(result: RetentionExtensionResponse, representation: ReturnType<typeof negotiateRepresentation>): Response {
+  const status = result.replayed ? 200 : 201;
+  if (representation === "json") {
+    const response = jsonResponse(result, status);
+    response.headers.set("cache-control", "no-store");
+    return response;
+  }
+  const summary = `Retention ${result.replayed ? "replayed" : "extended"}.\n\nOld expiry: ${result.old_expires_at}\nRequested expiry: ${result.requested_expires_at}\nResult expiry: ${result.result_expires_at}\nCoordination cursor: ${result.coordination_cursor}\nEvent: ${result.event_id}\n`;
+  return new Response(representation === "html" ? `<!doctype html><html lang="en"><body><main><h1>Retention ${result.replayed ? "replay" : "extended"}</h1><dl><dt>Old expiry</dt><dd>${escapeHtml(result.old_expires_at)}</dd><dt>Requested expiry</dt><dd>${escapeHtml(result.requested_expires_at)}</dd><dt>Result expiry</dt><dd>${escapeHtml(result.result_expires_at)}</dd><dt>Coordination cursor</dt><dd>${result.coordination_cursor}</dd><dt>Event</dt><dd>${escapeHtml(result.event_id)}</dd></dl></main></body></html>` : summary, { headers: { "cache-control": "no-store", "content-type": representation === "html" ? "text/html; charset=utf-8" : "text/markdown; charset=utf-8" }, status });
 }
 
 function escapeHtml(value: string): string {
   return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+}
+
+function decodePathSegment(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    throw new ProtocolError(ERROR_CODES.notFound, "The requested resource was not found.", 404);
+  }
+}
+
+function isSequence(value: string): boolean {
+  return /^(?:0|[1-9][0-9]*)$/u.test(value) && Number.isSafeInteger(Number(value)) && Number(value) > 0;
 }
 
 function errorResponse(
@@ -674,23 +1188,38 @@ function errorResponse(
   message: string,
   status: number,
   representation: ErrorRepresentation,
+  details?: StaleSequenceDetails | StaleRevisionDetails,
 ): Response {
+  const safeDetails = code === ERROR_CODES.staleSequence && isStaleSequenceDetails(details) ? details : undefined;
+  const safeRevisionDetails = code === ERROR_CODES.staleRevision && isStaleRevisionDetails(details) ? details : undefined;
   if (representation === "json") {
-    return jsonResponse({ error: { code, message } }, status);
+    return jsonResponse({ error: {
+      code,
+      message,
+      ...(safeDetails === undefined ? {} : { latest_message: safeDetails.latest_message, review_after: safeDetails.review_after }),
+      ...(safeRevisionDetails === undefined ? {} : { current_revision: safeRevisionDetails.current_revision, submitted_base_revision: safeRevisionDetails.submitted_base_revision }),
+    } }, status);
   }
+  const displayMessage = renderedErrorMessage(message, safeDetails, safeRevisionDetails);
   if (representation === "html") {
     return new Response(
-      `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Request failed</title></head><body><main><h1>Request failed</h1><p>Code: ${code}</p><p>${message}</p></main></body></html>`,
+      `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Request failed</title></head><body><main><h1>Request failed</h1><p>Code: ${escapeHtml(code)}</p><p>${escapeHtml(displayMessage)}</p></main></body></html>`,
       { headers: { "content-type": "text/html; charset=utf-8" }, status },
     );
   }
   if (representation === "markdown") {
-    return new Response(`# Request failed\n\nCode: \`${code}\`\n\n${message}\n`, {
+    return new Response(`# Request failed\n\nCode: \`${code}\`\n\n${displayMessage}\n`, {
       headers: { "content-type": "text/markdown; charset=utf-8" },
       status,
     });
   }
-  return textResponse(`${code}: ${message}\n`, status);
+  return textResponse(`${code}: ${displayMessage}\n`, status);
+}
+
+function renderedErrorMessage(message: string, details?: StaleSequenceDetails, revisionDetails?: StaleRevisionDetails): string {
+  if (details !== undefined) return `${message} Current latest sequence: ${details.latest_message}. Review after sequence: ${details.review_after}.`;
+  if (revisionDetails !== undefined) return `${message} Current published revision: ${revisionDetails.current_revision}. Submitted base revision: ${revisionDetails.submitted_base_revision}.`;
+  return message;
 }
 
 type ErrorRepresentation = "plain" | ReturnType<typeof negotiateRepresentation>;
@@ -709,7 +1238,9 @@ function secure(response: Response): Response {
   if (response.status === 101) return response;
   const styleNonce = response.headers.get("x-msg-style-nonce") ?? undefined;
   response.headers.delete("x-msg-style-nonce");
-  applySecurityHeaders(response.headers, styleNonce);
+  const allowSameOriginForms = response.headers.get("x-msg-management-forms") === "1";
+  response.headers.delete("x-msg-management-forms");
+  applySecurityHeaders(response.headers, styleNonce, allowSameOriginForms);
   return response;
 }
 

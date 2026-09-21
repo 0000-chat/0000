@@ -59,6 +59,49 @@ test("leaves an existing current schema unchanged", () => {
   expect(database.query("SELECT version FROM room_schema").get()).toEqual({ version: CURRENT_ROOM_SCHEMA_VERSION });
 });
 
+test("upgrades v12 rooms with connected chats while preserving coordination and ownership", () => {
+  const database = new Database(":memory:");
+  const roomStorage = storage(database);
+  migrateRoomSchema(roomStorage);
+  database.exec("DROP TABLE chat_links; ALTER TABLE room_state DROP COLUMN title;");
+  database.query("UPDATE room_schema SET version = 12").run();
+  database.query("INSERT INTO room_state (singleton, schema_version, protocol_version, created_at, last_message_at, inactivity_expires_at, absolute_expires_at, next_sequence, message_count, total_bytes, status, tombstone_expires_at, management_hash, notification_id, get_post_hash, get_post_enabled, coordination_cursor, published_revision) VALUES (1, 12, 1, 1000, 1000, 7000, 7000, 2, 1, 5, 'active', NULL, 'owner-hash', 'notification-id', 'delegated-hash', 1, 7, 3)").run();
+  database.query("INSERT INTO messages (sequence, id, content, author, display_name, semantic_type, created_at, byte_count) VALUES (1, 'message-1', 'Original context', 'Agent', 'Agent', 'message', 1000, 16)").run();
+
+  migrateRoomSchema(roomStorage);
+  database.query("INSERT INTO chat_links (room, kind, source_message) VALUES (?, 'branch', 1)").run("a".repeat(43));
+  database.query("UPDATE room_state SET title = 'Original discussion'").run();
+  migrateRoomSchema(roomStorage);
+
+  expect(database.query("SELECT version FROM room_schema").get()).toEqual({ version: 13 });
+  expect(database.query("SELECT title, schema_version, management_hash, get_post_hash, get_post_enabled, coordination_cursor, published_revision, inactivity_expires_at FROM room_state").get()).toEqual({ title: "Original discussion", schema_version: 13, management_hash: "owner-hash", get_post_hash: "delegated-hash", get_post_enabled: 1, coordination_cursor: 7, published_revision: 3, inactivity_expires_at: 7000 });
+  expect(database.query("SELECT content FROM messages").get()).toEqual({ content: "Original context" });
+  expect(database.query("SELECT kind, source_message FROM chat_links").get()).toEqual({ kind: "branch", source_message: 1 });
+  expect(database.query("SELECT name FROM sqlite_master WHERE name = 'coordination_events'").get()).toEqual({ name: "coordination_events" });
+});
+
+test("upgrades v7 rooms while retaining messages and notification state with delegated posting disabled", () => {
+  const database = new Database(":memory:");
+  const roomStorage = storage(database);
+  migrateRoomSchema(roomStorage);
+  database.query("INSERT INTO room_state (singleton, schema_version, protocol_version, created_at, last_message_at, inactivity_expires_at, absolute_expires_at, next_sequence, message_count, total_bytes, status, tombstone_expires_at, management_hash, notification_id, get_post_hash, get_post_enabled) VALUES (1, 8, 1, 1000, 1000, 7000, 7000, 2, 1, 5, 'active', NULL, 'management-hash', 'notification-1', 'delegated-hash', 1)").run();
+  database.query("INSERT INTO messages (sequence, id, content, author, display_name, client, semantic_type, reply_to, created_at, client_message_id, byte_count, idempotency_key, source_browser_id) VALUES (1, 'message-1', 'hello', 'agent', 'Agent', NULL, 'message', NULL, 1000, NULL, 5, NULL, NULL)").run();
+  database.query("UPDATE room_schema SET version = 7 WHERE singleton = 1").run();
+  database.query("UPDATE room_state SET schema_version = 7 WHERE singleton = 1").run();
+  database.exec("ALTER TABLE room_state DROP COLUMN get_post_hash; ALTER TABLE room_state DROP COLUMN get_post_enabled;");
+
+  migrateRoomSchema(roomStorage);
+
+  expect(database.query("SELECT version FROM room_schema").get()).toEqual({ version: CURRENT_ROOM_SCHEMA_VERSION });
+  expect(database.query("SELECT schema_version, notification_id, get_post_hash, get_post_enabled FROM room_state").get()).toEqual({
+    schema_version: CURRENT_ROOM_SCHEMA_VERSION,
+    notification_id: "notification-1",
+    get_post_hash: null,
+    get_post_enabled: 0,
+  });
+  expect(database.query("SELECT id, content, sequence FROM messages").get()).toEqual({ id: "message-1", content: "hello", sequence: 1 });
+});
+
 test("fails closed when durable storage has a future schema", () => {
   const database = new Database(":memory:");
   const roomStorage = storage(database);

@@ -5,7 +5,7 @@ import type { RoomNamespace, RoomStub } from "./room-service";
 
 export class OrganizationService {
   private readonly origin: string;
-  constructor(private readonly rooms: RoomNamespace, private readonly groups: RoomNamespace, origin: string) { this.origin = new URL(origin).origin; }
+  constructor(private readonly rooms: RoomNamespace, private readonly groups: RoomNamespace, origin: string, private readonly connections: RoomNamespace) { this.origin = new URL(origin).origin; }
 
   async createGroup(value: unknown): Promise<GroupDocument> {
     const name = organizationName(organizationObject(value).name), group = randomCapability();
@@ -39,23 +39,16 @@ export class OrganizationService {
     if (target === room) invalidOrganization("Choose a different conversation.");
     const source = input.source_message;
     if (source !== undefined && (!Number.isSafeInteger(source) || (source as number) < 1)) invalidOrganization("Choose an existing source message.");
-    const [parent] = await Promise.all([this.overview(room), this.overview(target)]);
-    if (source !== undefined && (source as number) > parent.latest_message) invalidOrganization("The source message does not exist.");
-    const outgoing: ChatLink = { room: target, kind: source === undefined ? "related" : "branch", source_message: source as number ?? null };
-    const incoming: ChatLink = { room, kind: source === undefined ? "related" : "source", source_message: source as number ?? null };
-    // Validate both ends before writing. Repeating the same pair repairs a partial
-    // write; do not report success until both Durable Objects have acknowledged.
-    await Promise.all([call(this.rooms.getByName(room), "/links/check", "POST", outgoing), call(this.rooms.getByName(target), "/links/check", "POST", incoming)]);
-    await call(this.rooms.getByName(room), "/links", "PUT", outgoing);
-    await call(this.rooms.getByName(target), "/links", "PUT", incoming);
+    await call(this.connection(room, target), "/link", "POST", { room, target, ...(source === undefined ? {} : { source_message: source }) });
     return this.readLinks(room);
   }
   async unlink(room: string, target: string): Promise<{ links: LinkedChat[] }> {
-    await this.overview(room);
-    await call(this.rooms.getByName(room), `/links/${target}`, "DELETE");
-    try { await call(this.rooms.getByName(target), `/links/${room}`, "DELETE"); }
-    catch (error) { if (!(error instanceof ProtocolError) || ![404, 410].includes(error.status)) throw error; }
+    await call(this.connection(room, target), "/unlink", "POST", { room, target });
     return this.readLinks(room);
+  }
+  private connection(room: string, target: string): RoomStub {
+    if (!CAPABILITY_PATTERN.test(room) || !CAPABILITY_PATTERN.test(target) || room === target) invalidOrganization("Choose two different conversations.");
+    return this.connections.getByName([room, target].sort().join(":"));
   }
   private roomFromUrl(value: unknown): string {
     let url: URL;

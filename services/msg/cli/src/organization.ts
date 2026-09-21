@@ -1,4 +1,5 @@
 import { cliPrefix, PRODUCTION_ORIGIN, sameOrigin, shellQuote, validateChatUrl, validateGroupUrl, validateOrigin } from "./urls.js";
+import { validateManagementUrl } from "./retention.js";
 
 export const ORGANIZATION_USAGE = [
   "Usage: msg create --author <author> [--title <title>] [--content <content>] [--origin <origin>] [--idempotency-key <key>]",
@@ -7,6 +8,7 @@ export const ORGANIZATION_USAGE = [
   "Usage: msg groups create --name <name> [--origin <origin>]",
   "Usage: msg groups <group-url> list | add <conversation-url> | remove <conversation-url> | rename <name>",
   "Create and branch accept content on stdin. Links share both chats; groups share member chats. No command starts listening or another harness session.",
+  "Creation receipts may contain a private manage_url. Keep it private; share only conversation_url, share_message or join_command with collaborators.",
 ].join("\n");
 
 type Creation = { readonly action: "create" | "branch"; readonly origin: string; readonly author: string; readonly title?: string; readonly content?: string; readonly key?: string; readonly source?: string; readonly from?: number };
@@ -19,7 +21,7 @@ export interface OrganizationRuntime {
   readonly stdinIsTTY?: boolean;
   readonly readStdin?: (signal?: AbortSignal) => Promise<string>;
 }
-export class OrganizationSignalError extends Error { constructor() { super("The msg command was interrupted."); } }
+export class OrganizationSignalError extends Error { constructor(message = "The msg command was interrupted.") { super(message); } }
 export class IncompleteBranchError extends Error {
   constructor(readonly receipt: Record<string, unknown>) { super("The chat was created, but linking did not complete. Use recovery_command from the JSON receipt; do not create another chat."); }
 }
@@ -80,18 +82,30 @@ export async function runOrganization(command: OrganizationCommand, runtime: Org
   if (key === undefined) throw Error("The creation runtime is unavailable. Supply --idempotency-key.");
   validateKey(key);
   if (command.action === "branch") {
-    const source = await request(runtime, command.source!);
-    if (source.conversation_url !== command.source || !Number.isSafeInteger(source.latest_message) || (source.latest_message as number) < command.from!) throw Error("The source message does not exist. No new chat was created.");
+    const sourceUrl = new URL(command.source!);
+    sourceUrl.searchParams.set("after", String(command.from! - 1));
+    sourceUrl.searchParams.set("through", String(command.from));
+    sourceUrl.searchParams.set("limit", "1");
+    const source = await request(runtime, sourceUrl.href);
+    if (source.protocol_version !== 1 || source.conversation_url !== command.source
+      || !Number.isSafeInteger(source.latest_message) || (source.latest_message as number) < command.from!
+      || source.through !== command.from || source.next_after !== command.from || source.has_more !== false
+      || !Array.isArray(source.messages) || source.messages.length !== 1
+      || !isRecord(source.messages[0]) || source.messages[0].sequence !== command.from) {
+      throw Error("The source message could not be verified in its bounded page. No new chat was created.");
+    }
   }
   let created: Record<string, unknown>;
   try {
-    const response = await request(runtime, command.origin + "/", "POST", { author: command.author, content, ...(command.title ? { title: command.title } : {}) }, key);
+    const response = await request(runtime, command.origin + "/", "POST", { author: command.author, content, ...(command.title ? { title: command.title } : {}) }, key, true);
     if (typeof response.conversation_url !== "string") throw Error("The creation response did not contain a conversation URL.");
     const url = validateChatUrl(response.conversation_url); sameOrigin(command.origin, url);
-    created = { protocol_version: 1, conversation_url: url, idempotency_key: key, ...(typeof response.share_message === "string" ? { share_message: response.share_message } : {}), join_command: `${cliPrefix(url)} join ${shellQuote(url)}` };
+    const manageUrl = response.manage_url === undefined ? undefined : creationManagementUrl(response.manage_url, url);
+    created = { protocol_version: 1, conversation_url: url, idempotency_key: key, ...(manageUrl === undefined ? {} : { manage_url: manageUrl }), ...(typeof response.share_message === "string" ? { share_message: response.share_message } : {}), join_command: `${cliPrefix(url)} join ${shellQuote(url)}` };
   } catch (error) {
-    if (runtime.signal?.aborted) throw new OrganizationSignalError();
-    throw Error(`Creation did not return a usable receipt (idempotency key: ${key}). Check the service before retrying; creation is not automatically retried. ${message(error)}`);
+    const guidance = `Creation did not return a usable receipt (idempotency key: ${key}). Check the service before retrying; creation is not automatically retried.`;
+    if (runtime.signal?.aborted) throw new OrganizationSignalError(`${guidance} The msg command was interrupted.`);
+    throw Error(`${guidance} ${message(error)}`);
   }
   if (command.action === "create") return created;
   const recovery = `${cliPrefix(command.source!)} links ${shellQuote(command.source!)} add ${shellQuote(created.conversation_url as string)} --from ${command.from}`;
@@ -115,16 +129,25 @@ export async function readContent(inline: string | undefined, runtime: Organizat
   return runtime.readStdin(runtime.signal);
 }
 
-async function request(runtime: OrganizationRuntime, url: string, method = "GET", body?: unknown, key?: string): Promise<Record<string, unknown>> {
+async function request(runtime: OrganizationRuntime, url: string, method = "GET", body?: unknown, key?: string, preserveSuccessfulReceipt = false): Promise<Record<string, unknown>> {
   aborted(runtime);
   try {
     const response = await runtime.fetch(url, { method, redirect: "error", signal: runtime.signal, headers: { accept: "application/json", ...(body === undefined ? {} : { "content-type": "application/json" }), ...(key ? { "idempotency-key": key } : {}) }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
     const value: unknown = await response.json();
-    aborted(runtime);
+    // A successful creation body proves the new room exists even if cancellation arrived while parsing it.
+    if (!preserveSuccessfulReceipt || !response.ok) aborted(runtime);
     if (!response.ok) throw Error(isRecord(value) && isRecord(value.error) && typeof value.error.message === "string" ? value.error.message : `The msg service returned HTTP ${response.status}.`);
     if (!isRecord(value)) throw Error("The msg service returned an invalid response.");
     return value;
   } catch (error) { if (runtime.signal?.aborted) throw new OrganizationSignalError(); throw error; }
+}
+
+function creationManagementUrl(value: unknown, conversationUrl: string): string {
+  if (typeof value !== "string") throw Error("The creation management URL is invalid.");
+  const managementUrl = validateManagementUrl(value);
+  sameOrigin(managementUrl, conversationUrl);
+  if (new URL(managementUrl).pathname.split("/")[2] !== new URL(conversationUrl).pathname.slice(1)) throw Error("The creation management URL belongs to a different room.");
+  return managementUrl;
 }
 
 export function validateListedChats(value: unknown, origin: string, links = false): readonly Record<string, unknown>[] {

@@ -58,7 +58,10 @@ test("built binary reports package version and parser help", () => {
   expect(version.status, version.stderr).toBe(0);
   expect(version.stdout.trim()).toBe(manifest.version);
   expect(help.status, help.stderr).toBe(0);
-  expect(help.stdout).toContain("Usage: msg join");
-  expect(help.stdout).toContain("Usage: msg wait");
-  expect(help.stdout).toContain("Usage: msg post");
+  for (const command of ["join", "wait", "post", "message", "export", "retention", "coordination", "webhooks", "create", "branch", "links", "groups"]) {
+    expect(help.stdout).toContain(`Usage: msg ${command}`);
+  }
+  expect(help.stdout).toContain("--based-on-sequence");
+  expect(help.stdout).toContain("--reply-to");
+  expect(help.stdout).toContain("--type");
 });

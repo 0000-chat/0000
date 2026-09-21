@@ -1,7 +1,7 @@
 import { ROOM_LIMITS } from "./room-domain";
 import { WEBHOOK_RETRY_INITIAL_DELAY_MS, WEBHOOK_RETRY_WINDOW_MS } from "./webhook-policy";
 
-export const CURRENT_ROOM_SCHEMA_VERSION = 8;
+export const CURRENT_ROOM_SCHEMA_VERSION = 13;
 
 interface SqlStorage {
   exec(query: string, ...values: unknown[]): Iterable<unknown>;
@@ -34,7 +34,7 @@ export function migrateRoomSchema(storage: TransactionalStorage, inactivityTtlMs
 }
 
 function applyMigration(sql: SqlStorage, version: number, inactivityTtlMs: number): void {
-  if (version === 8) {
+  if (version === 13) {
     if (!rows<{ name: string }>(sql.exec("PRAGMA table_info(room_state)")).some(column => column.name === "title")) sql.exec("ALTER TABLE room_state ADD COLUMN title TEXT");
     sql.exec("CREATE TABLE IF NOT EXISTS chat_links (room TEXT PRIMARY KEY, kind TEXT NOT NULL CHECK(kind IN ('related', 'source', 'branch')), source_message INTEGER)");
     sql.exec("UPDATE room_state SET schema_version = ? WHERE singleton = 1", CURRENT_ROOM_SCHEMA_VERSION);
@@ -231,6 +231,209 @@ function applyMigration(sql: SqlStorage, version: number, inactivityTtlMs: numbe
       CREATE INDEX push_deliveries_due ON push_deliveries(status, due_at, retry_expires_at, created_at);
       CREATE INDEX push_deliveries_subscription ON push_deliveries(subscription_id, created_at DESC);
       CREATE INDEX push_deliveries_retention ON push_deliveries(created_at);
+    `);
+    sql.exec("UPDATE room_state SET schema_version = ? WHERE singleton = 1", CURRENT_ROOM_SCHEMA_VERSION);
+    return;
+  }
+  if (version === 8) {
+    const columns = new Set(rows<{ name: string }>(sql.exec("PRAGMA table_info(room_state)")).map((column) => column.name));
+    if (!columns.has("get_post_hash")) sql.exec("ALTER TABLE room_state ADD COLUMN get_post_hash TEXT");
+    if (!columns.has("get_post_enabled")) sql.exec("ALTER TABLE room_state ADD COLUMN get_post_enabled INTEGER NOT NULL DEFAULT 0");
+    sql.exec("UPDATE room_state SET schema_version = ? WHERE singleton = 1", CURRENT_ROOM_SCHEMA_VERSION);
+    return;
+  }
+  if (version === 9) {
+    const columns = new Set(rows<{ name: string }>(sql.exec("PRAGMA table_info(room_state)")).map((column) => column.name));
+    if (!columns.has("coordination_cursor")) sql.exec("ALTER TABLE room_state ADD COLUMN coordination_cursor INTEGER NOT NULL DEFAULT 0");
+    if (!columns.has("published_revision")) sql.exec("ALTER TABLE room_state ADD COLUMN published_revision INTEGER NOT NULL DEFAULT 0");
+    sql.exec(`
+      CREATE TABLE IF NOT EXISTS coordination_proposals (
+        proposal_id TEXT NOT NULL, revision INTEGER NOT NULL, request_id TEXT,
+        kind TEXT NOT NULL, actor_label TEXT NOT NULL, authority_class TEXT NOT NULL CHECK(authority_class IN ('participant', 'management')),
+        base_revision INTEGER NOT NULL, source_message_ids TEXT NOT NULL, body TEXT NOT NULL,
+        created_at INTEGER NOT NULL, byte_count INTEGER NOT NULL,
+        PRIMARY KEY (proposal_id, revision)
+      );
+      CREATE INDEX IF NOT EXISTS coordination_proposals_cursor ON coordination_proposals(created_at, proposal_id, revision);
+      CREATE INDEX IF NOT EXISTS coordination_proposals_request ON coordination_proposals(request_id, revision);
+      CREATE TABLE IF NOT EXISTS coordination_requests (
+        request_id TEXT PRIMARY KEY, published_revision INTEGER NOT NULL,
+        purpose TEXT NOT NULL, title TEXT NOT NULL, owner_label TEXT NOT NULL,
+        requested_output TEXT NOT NULL, unknowns TEXT NOT NULL, completion_criteria TEXT NOT NULL,
+        decision_impact TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('open', 'in_progress', 'blocked', 'done', 'withdrawn')),
+        created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, byte_count INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS coordination_requests_revision ON coordination_requests(published_revision, request_id);
+      CREATE TABLE IF NOT EXISTS coordination_events (
+        cursor INTEGER PRIMARY KEY, event_id TEXT NOT NULL UNIQUE, operation TEXT NOT NULL,
+        proposal_id TEXT, proposal_revision INTEGER, request_id TEXT,
+        kind TEXT NOT NULL, actor_label TEXT NOT NULL, authority_class TEXT NOT NULL CHECK(authority_class IN ('participant', 'management')),
+        source_message_ids TEXT NOT NULL, base_revision INTEGER NOT NULL, resulting_revision INTEGER,
+        body TEXT NOT NULL, created_at INTEGER NOT NULL, byte_count INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS coordination_events_request ON coordination_events(request_id, cursor);
+      CREATE TABLE IF NOT EXISTS coordination_retries (
+        operation TEXT NOT NULL, retry_id TEXT NOT NULL, fingerprint TEXT NOT NULL,
+        receipt TEXT NOT NULL, created_at INTEGER NOT NULL, byte_count INTEGER NOT NULL,
+        PRIMARY KEY (operation, retry_id)
+      );
+    `);
+    sql.exec("UPDATE room_state SET schema_version = ? WHERE singleton = 1", CURRENT_ROOM_SCHEMA_VERSION);
+    return;
+  }
+  if (version === 10) {
+    sql.exec(`
+      CREATE TABLE IF NOT EXISTS coordination_panel (
+        singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+        published_revision INTEGER NOT NULL,
+        proposal_id TEXT NOT NULL,
+        proposal_revision INTEGER NOT NULL,
+        purpose TEXT,
+        phase TEXT,
+        artifacts TEXT NOT NULL,
+        next_actions TEXT NOT NULL,
+        source_message_ids TEXT NOT NULL,
+        owner_label TEXT NOT NULL,
+        published_at INTEGER NOT NULL,
+        byte_count INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS coordination_events_panel ON coordination_events(operation, resulting_revision, cursor);
+    `);
+    sql.exec("UPDATE room_state SET schema_version = ? WHERE singleton = 1", CURRENT_ROOM_SCHEMA_VERSION);
+    return;
+  }
+  if (version === 11) {
+    sql.exec(`
+      CREATE TABLE IF NOT EXISTS coordination_decisions (
+        decision_id TEXT PRIMARY KEY,
+        latest_proposal_revision INTEGER NOT NULL,
+        title TEXT NOT NULL,
+        proposal_text TEXT NOT NULL,
+        required_approver_labels TEXT NOT NULL,
+        state TEXT NOT NULL CHECK(state IN ('recommended', 'accepted')),
+        recommendation_cursor INTEGER NOT NULL,
+        recommendation_published_revision INTEGER NOT NULL,
+        accepted_record_id TEXT,
+        updated_at INTEGER NOT NULL,
+        byte_count INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS coordination_decisions_state ON coordination_decisions(state, recommendation_published_revision, decision_id);
+      CREATE TABLE IF NOT EXISTS coordination_decision_positions (
+        position_id TEXT PRIMARY KEY,
+        decision_id TEXT NOT NULL,
+        decision_revision INTEGER NOT NULL,
+        participant_label TEXT NOT NULL,
+        reporter_label TEXT NOT NULL,
+        statement TEXT NOT NULL,
+        source_message_ids TEXT NOT NULL,
+        published_cursor INTEGER NOT NULL,
+        published_revision INTEGER NOT NULL,
+        created_at INTEGER NOT NULL,
+        byte_count INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS coordination_decision_positions_decision ON coordination_decision_positions(decision_id, published_cursor, position_id);
+      CREATE TABLE IF NOT EXISTS coordination_decision_accepted_records (
+        accepted_record_id TEXT PRIMARY KEY,
+        decision_id TEXT NOT NULL,
+        decision_revision INTEGER NOT NULL,
+        proposal_snapshot TEXT NOT NULL,
+        required_approver_labels TEXT NOT NULL,
+        owner_label TEXT NOT NULL,
+        owner_attestation INTEGER NOT NULL CHECK(owner_attestation = 1),
+        publication_cursor INTEGER NOT NULL,
+        publication_revision INTEGER NOT NULL,
+        created_at INTEGER NOT NULL,
+        byte_count INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS coordination_decision_accepted_records_decision ON coordination_decision_accepted_records(decision_id, publication_revision, accepted_record_id);
+      CREATE TABLE IF NOT EXISTS coordination_decision_approval_evidence (
+        approval_record_id TEXT PRIMARY KEY,
+        accepted_record_id TEXT NOT NULL,
+        decision_id TEXT NOT NULL,
+        decision_revision INTEGER NOT NULL,
+        participant_label TEXT NOT NULL,
+        source_message_id TEXT NOT NULL,
+        source_author TEXT NOT NULL,
+        source_display_name TEXT NOT NULL,
+        source_sequence INTEGER NOT NULL,
+        source_created_at INTEGER NOT NULL,
+        byte_count INTEGER NOT NULL,
+        UNIQUE (accepted_record_id, participant_label),
+        UNIQUE (accepted_record_id, source_message_id)
+      );
+      CREATE INDEX IF NOT EXISTS coordination_decision_approval_evidence_source ON coordination_decision_approval_evidence(source_message_id);
+    `);
+    sql.exec("UPDATE room_state SET schema_version = ? WHERE singleton = 1", CURRENT_ROOM_SCHEMA_VERSION);
+    return;
+  }
+  if (version === 12) {
+    sql.exec(`
+      CREATE TABLE IF NOT EXISTS coordination_corrections (
+        correction_id TEXT PRIMARY KEY,
+        proposal_id TEXT NOT NULL,
+        proposal_revision INTEGER NOT NULL,
+        target TEXT NOT NULL,
+        correction_text TEXT NOT NULL,
+        reporter_label TEXT NOT NULL,
+        owner_label TEXT NOT NULL,
+        source_message_ids TEXT NOT NULL,
+        publication_cursor INTEGER NOT NULL,
+        publication_revision INTEGER NOT NULL,
+        created_at INTEGER NOT NULL,
+        byte_count INTEGER NOT NULL,
+        UNIQUE (proposal_id, proposal_revision)
+      );
+      CREATE INDEX IF NOT EXISTS coordination_corrections_publication ON coordination_corrections(publication_revision, correction_id);
+      CREATE INDEX IF NOT EXISTS coordination_corrections_target_message ON coordination_corrections(json_extract(target, '$.message_id'));
+      CREATE INDEX IF NOT EXISTS coordination_corrections_target_publication ON coordination_corrections(json_extract(target, '$.published_revision'));
+      CREATE TABLE IF NOT EXISTS coordination_disputes (
+        report_id TEXT PRIMARY KEY,
+        accepted_record_id TEXT NOT NULL,
+        decision_id TEXT NOT NULL,
+        decision_revision INTEGER NOT NULL,
+        kind TEXT NOT NULL CHECK(kind IN ('dispute', 'approval_withdrawal')),
+        actor_label TEXT NOT NULL,
+        statement TEXT NOT NULL,
+        source_message_ids TEXT NOT NULL,
+        approval_record_id TEXT,
+        cursor INTEGER NOT NULL,
+        created_at INTEGER NOT NULL,
+        byte_count INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS coordination_disputes_record ON coordination_disputes(accepted_record_id, cursor, report_id);
+      CREATE TABLE IF NOT EXISTS coordination_dispute_reviews (
+        review_id TEXT PRIMARY KEY,
+        report_id TEXT NOT NULL,
+        owner_label TEXT NOT NULL,
+        base_revision INTEGER NOT NULL,
+        disposition TEXT NOT NULL CHECK(disposition IN ('acknowledged', 'rejected')),
+        rationale TEXT NOT NULL,
+        source_message_ids TEXT NOT NULL,
+        cursor INTEGER NOT NULL,
+        publication_revision INTEGER NOT NULL,
+        created_at INTEGER NOT NULL,
+        byte_count INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS coordination_dispute_reviews_report ON coordination_dispute_reviews(report_id, cursor, review_id);
+      CREATE TABLE IF NOT EXISTS coordination_supersessions (
+        supersession_id TEXT PRIMARY KEY,
+        proposal_id TEXT NOT NULL,
+        proposal_revision INTEGER NOT NULL,
+        predecessor_accepted_record_id TEXT NOT NULL,
+        successor_decision_id TEXT NOT NULL,
+        successor_decision_revision INTEGER NOT NULL,
+        predecessor_publication_revision INTEGER NOT NULL,
+        reporter_label TEXT NOT NULL,
+        owner_label TEXT NOT NULL,
+        source_message_ids TEXT NOT NULL,
+        publication_cursor INTEGER NOT NULL,
+        publication_revision INTEGER NOT NULL,
+        created_at INTEGER NOT NULL,
+        byte_count INTEGER NOT NULL,
+        UNIQUE (predecessor_accepted_record_id),
+        UNIQUE (proposal_id, proposal_revision)
+      );
+      CREATE INDEX IF NOT EXISTS coordination_supersessions_successor ON coordination_supersessions(successor_decision_id, successor_decision_revision, publication_revision);
     `);
     sql.exec("UPDATE room_state SET schema_version = ? WHERE singleton = 1", CURRENT_ROOM_SCHEMA_VERSION);
     return;

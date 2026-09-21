@@ -78,7 +78,7 @@ interface NodeRuntimeConfiguration {
     MSG_VAPID_SUBJECT: string;
   };
   compatibilityDate: string;
-  durableObjects: { ConversationRoom: { className: string; useSQLite: boolean }; ChatGroup: { className: string; useSQLite: boolean } };
+  durableObjects: { ConversationRoom: { className: string; useSQLite: boolean }; ChatGroup: { className: string; useSQLite: boolean }; ChatConnection: { className: string; useSQLite: boolean } };
   persistenceDirectory: string;
   script: string;
 }
@@ -366,6 +366,7 @@ export async function startMsgMiniflare(
       durableObjects: {
         ConversationRoom: { className: "ConversationRoom", useSQLite: true },
         ChatGroup: { className: "ChatGroup", useSQLite: true },
+        ChatConnection: { className: "ChatConnection", useSQLite: true },
       },
       persistenceDirectory,
       script,

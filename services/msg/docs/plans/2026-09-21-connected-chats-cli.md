@@ -43,3 +43,21 @@ Validation completed:
   timeouts in differing D1 tests; stopping the competing preview runtime let all
   eight isolated D1 tests and the full check pass without application changes.
 - `git diff --check` passed. The npm package and Worker remain unpublished.
+
+PR integration validation (2026-09-21):
+- Integrated origin/main at 4ea2343, preserving bounded reads, finite waits,
+  stale-post guards, coordination, retention, and current authority guidance.
+- Moved connected-chat storage to schema v13; regression verifies upgrading v12
+  preserves messages, owner/delegated capabilities, revision cursors and expiry.
+- Added ChatConnection to serialize both mutations for an unordered room pair.
+  Deterministic link/unlink and opposite-branch regressions failed before the fix
+  and pass afterward; real workerd verifies both scenarios too.
+- Preserved private management receipts and parsed creation results across
+  cancellation. Browser connected creation retains owner access or exposes an
+  explicit private-save fallback if session storage is unavailable.
+- Merged full service check passed: 364 Worker, 18 tooling, 124 CLI, 3 final
+  package checks. Existing constant-condition and this-alias lint warnings remain.
+- A final join-guidance clarification allows user-requested separate discussions;
+  all 11 join tests and the CLI rebuild passed afterward.
+- Local preview data was backed up before adapting its unpublished v8 migration
+  marker to run the newly merged migrations; no production data was touched.
