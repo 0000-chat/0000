@@ -3,5 +3,8 @@
   "name": "0000-gateway",
   "main": "src/worker.ts",
   "compatibility_date": "2026-08-06",
-  "compatibility_flags": ["nodejs_compat"]
+  "compatibility_flags": ["nodejs_compat"],
+  "alias": {
+    "@mcp-use/client": "./src/mcp-use-client-unavailable.ts"
+  }
 }
