@@ -1191,18 +1191,41 @@ test("supports the opt-in GET posting route with a minimal receipt", async () =>
   expect(response.headers.get("cache-control")).toBe("private, no-store, no-transform");
 });
 
-test("rejects malformed, duplicate, cross-origin, and prefetch GET posting requests without calling the service", async () => {
+test("allows a valid cross-site fetch GET posting request without an Origin header", async () => {
+  let calls = 0;
+  const worker = createWorker({
+    create: async () => createdRoom,
+    getPost: async (input) => {
+      calls += 1;
+      return { accepted: true, protocol_version: 1, replayed: false, request_id: input.requestId, sequence: 2 };
+    },
+  });
+
+  const response = await worker.fetch(new Request("https://msg.0000.chat/example/post?token=t&request_id=r&content=hello", {
+    headers: { accept: "application/json", "sec-fetch-site": "cross-site" },
+  }));
+
+  expect(response.status).toBe(200);
+  expect(await response.json()).toEqual({ accepted: true, protocol_version: 1, replayed: false, request_id: "r", sequence: 2 });
+  expect(calls).toBe(1);
+});
+
+test("rejects malformed, duplicate, unknown, cross-origin, and speculative GET posting requests without calling the service", async () => {
   let calls = 0;
   const worker = createWorker({ create: async () => createdRoom, getPost: async () => { calls += 1; return { accepted: true, protocol_version: 1, replayed: false, request_id: "r", sequence: 2 }; } });
-  const requests = [
-    new Request("https://msg.0000.chat/example/post?token=t&content=hello"),
-    new Request("https://msg.0000.chat/example/post?token=t&request_id=r&content=hello&content=again"),
-    new Request("https://msg.0000.chat/example/post?token=t&request_id=r&content=hello", { headers: { origin: "https://evil.example" } }),
-    new Request("https://msg.0000.chat/example/post?token=t&request_id=r&content=hello", { headers: { purpose: "prefetch" } }),
-    new Request("https://msg.0000.chat/example/post?token=t&request_id=r&content=hello", { headers: { "sec-fetch-site": "cross-site" } }),
+  const requests: Array<{ readonly request: Request; readonly status: number }> = [
+    { request: new Request("https://msg.0000.chat/example/post?token=t&content=hello"), status: 400 },
+    { request: new Request("https://msg.0000.chat/example/post?request_id=r&content=hello"), status: 400 },
+    { request: new Request("https://msg.0000.chat/example/post?token=t&request_id=r"), status: 400 },
+    { request: new Request("https://msg.0000.chat/example/post?token=t&request_id=r&content=hello&content=again"), status: 400 },
+    { request: new Request("https://msg.0000.chat/example/post?token=t&request_id=r&content=hello&unexpected=x"), status: 400 },
+    { request: new Request("https://msg.0000.chat/example/post?token=t&request_id=r&content=hello", { headers: { origin: "https://evil.example" } }), status: 403 },
+    { request: new Request("https://msg.0000.chat/example/post?token=t&request_id=r&content=hello", { headers: { purpose: "prefetch" } }), status: 403 },
+    { request: new Request("https://msg.0000.chat/example/post?token=t&request_id=r&content=hello", { headers: { "sec-purpose": "prefetch" } }), status: 403 },
+    { request: new Request("https://msg.0000.chat/example/post?token=t&request_id=r&content=hello", { headers: { "sec-purpose": "prerender" } }), status: 403 },
   ];
 
-  for (const request of requests) expect((await worker.fetch(request)).status).toBe(request.headers.has("origin") || request.headers.has("purpose") || request.headers.has("sec-fetch-site") ? 403 : 400);
+  for (const { request, status } of requests) expect((await worker.fetch(request)).status).toBe(status);
   expect(calls).toBe(0);
 });
 
