@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 
-import { browserFailureState, copyText, createLiveController, createPushEnrollmentController, createThemeController, handleAgentPromptCopy, readPushBrowserId } from "./browser-controller";
+import { browserFailureState, copyText, createLiveController, createOwnerControlsController, createPushEnrollmentController, createThemeController, handleAgentPromptCopy, readPushBrowserId } from "./browser-controller";
 
 const pushBrowserId = "123e4567-e89b-42d3-a456-426614174000";
 const pushPublicKey = btoa(String.fromCharCode(4, ...Array.from({ length: 64 }, (_, index) => index + 1)))
@@ -176,6 +176,52 @@ test("opens and selects the agent prompt when Clipboard API is missing", async (
 
   expect(copied).toBe(false);
   expect(events).toEqual(["open", "focus", "select", "Select and copy the prompt"]);
+});
+
+test("keeps owner controls in memory and rotates, disables, and copies the delegated invitation", async () => {
+  const requests: Array<{ body: string; headers: Headers }> = [];
+  const states: string[] = [];
+  const responses = [
+    { get_post_enabled: true, get_post_url: "https://msg.0000.chat/room/post?token=first-token", protocol_version: 1 },
+    { get_post_enabled: true, get_post_url: "https://msg.0000.chat/room/post?token=rotated-token", protocol_version: 1 },
+    { get_post_enabled: false, protocol_version: 1 },
+  ];
+  const controller = createOwnerControlsController({
+    fetch: async (_input, init) => {
+      requests.push({ body: String(init?.body), headers: new Headers(init?.headers) });
+      return new Response(JSON.stringify(responses.shift()), { headers: { "content-type": "application/json" }, status: 200 });
+    },
+    manageUrl: "https://msg.0000.chat/manage/room/owner-token",
+    onState: (state) => states.push(`${state.status}:${state.enabled}`),
+    openApiUrl: "https://msg.0000.chat/openapi.json",
+    publicRoomId: "room",
+    publicRoomUrl: "https://msg.0000.chat/room",
+  });
+
+  expect(controller.state()).toMatchObject({ enabled: false, invitationAvailable: false, status: "disabled" });
+  await controller.enable();
+  expect(controller.state()).toMatchObject({ enabled: true, invitationAvailable: true, status: "enabled" });
+  let copied = "";
+  await controller.copyInvitation(async (value) => { copied = value; });
+  expect(copied).toContain("Public room ID: room");
+  expect(copied).toContain("OpenAPI import URL: https://msg.0000.chat/openapi.json");
+  expect(copied).toContain("X-0000-Post-Token");
+  expect(copied).toContain("Authentication value: first-token");
+  expect(copied).toContain("Idempotency-Key");
+  expect(copied).toContain("<write your message here>");
+  expect(copied).not.toContain("/post?token=");
+
+  await controller.rotate();
+  expect(copied).toContain("first-token");
+  await controller.copyInvitation(async (value) => { copied = value; });
+  expect(copied).toContain("Authentication value: rotated-token");
+  await controller.disable();
+  expect(controller.state()).toMatchObject({ enabled: false, invitationAvailable: false, status: "disabled" });
+  await expect(controller.copyInvitation(async () => {})).rejects.toThrow("Enable agent posting");
+  expect(requests.map((request) => JSON.parse(request.body).action)).toEqual(["enable", "rotate", "disable"]);
+  expect(requests.every((request) => request.headers.get("content-type") === "application/json")).toBe(true);
+  expect(states).toContain("enabled:true");
+  expect(states).toContain("disabled:false");
 });
 
 test("waits for an active room-scope service worker before creating and registering a native subscription", async () => {

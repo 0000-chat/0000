@@ -569,3 +569,128 @@ export function readPushBrowserId(storage: { getItem(key: string): string | null
     return undefined;
   }
 }
+
+export interface OwnerPostingState {
+  readonly busy: boolean;
+  readonly enabled: boolean;
+  readonly invitationAvailable: boolean;
+  readonly message: string;
+  readonly status: "disabled" | "enabled" | "error";
+}
+
+export interface OwnerControlsControllerOptions {
+  readonly fetch: (input: string, init?: RequestInit) => Promise<Response>;
+  readonly manageUrl: string;
+  readonly onBusyChange?: (busy: boolean) => void;
+  readonly onState: (state: OwnerPostingState) => void;
+  readonly openApiUrl: string;
+  readonly publicRoomId: string;
+  readonly publicRoomUrl: string;
+}
+
+/** Keeps the owner capability and delegated posting token in page memory only. */
+export function createOwnerControlsController(options: OwnerControlsControllerOptions) {
+  const publicRoom = new URL(options.publicRoomUrl);
+  const management = new URL(options.manageUrl, publicRoom);
+  if (management.origin !== publicRoom.origin || !/^\/manage\/[^/]+\/[^/]+$/u.test(management.pathname) || management.search || management.hash) {
+    throw new Error("The service returned an invalid private owner link.");
+  }
+  let busy = false;
+  let delegatedToken: string | undefined;
+  let currentState: OwnerPostingState = {
+    busy: false,
+    enabled: false,
+    invitationAvailable: false,
+    message: "Agent posting is disabled.",
+    status: "disabled",
+  };
+  const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
+  const setState = (state: OwnerPostingState) => {
+    currentState = state;
+    options.onState(state);
+    return state;
+  };
+  const setBusy = (next: boolean) => {
+    busy = next;
+    options.onBusyChange?.(next);
+  };
+
+  function delegatedTokenFromUrl(value: unknown): string {
+    if (typeof value !== "string") throw new Error("The service did not return an agent posting capability.");
+    let parsed: URL;
+    try { parsed = new URL(value, options.publicRoomUrl); } catch { throw new Error("The service returned an invalid agent posting capability."); }
+    if (parsed.origin !== publicRoom.origin || parsed.pathname !== `${publicRoom.pathname}/post` || parsed.hash || [...parsed.searchParams.keys()].some((key) => key !== "token")) {
+      throw new Error("The service returned an invalid agent posting capability.");
+    }
+    const values = parsed.searchParams.getAll("token");
+    if (values.length !== 1 || !/^[A-Za-z0-9_-]+$/u.test(values[0] ?? "")) throw new Error("The service returned an invalid agent posting capability.");
+    return values[0]!;
+  }
+
+  function invitation(): string {
+    if (!delegatedToken) throw new Error("Enable agent posting before copying its invitation.");
+    return [
+      "Configure one GPT Action or connector for this 0000 conversation.",
+      "",
+      `Public room ID: ${options.publicRoomId}`,
+      `Public room URL: ${options.publicRoomUrl}`,
+      `OpenAPI import URL: ${options.openApiUrl}`,
+      "",
+      "Authentication: API key in the custom header X-0000-Post-Token",
+      `Authentication value: ${delegatedToken}`,
+      "",
+      `POST endpoint: ${options.publicRoomUrl}/post`,
+      "Use a unique Idempotency-Key header or client_message_id as the request ID for each new message; reuse it only when retrying that same message.",
+      "",
+      "Message to send:",
+      "<write your message here>",
+      "",
+      "Anyone holding this posting capability can write to the conversation. Keep it secret and rotate or disable it from the owner link.",
+    ].join("\n");
+  }
+
+  async function request(action: "disable" | "enable" | "rotate"): Promise<OwnerPostingState> {
+    if (busy) return currentState;
+    setBusy(true);
+    setState({ ...currentState, busy: true, message: action === "disable" ? "Disabling agent posting…" : action === "rotate" ? "Rotating agent posting…" : "Enabling agent posting…" });
+    try {
+      const response = await options.fetch(options.manageUrl, {
+        body: JSON.stringify({ action }),
+        headers: { accept: "application/json", "content-type": "application/json" },
+        method: "POST",
+      });
+      let value: unknown;
+      try { value = await response.json(); } catch { value = undefined; }
+      if (!response.ok) {
+        const message = isRecord(value) && isRecord(value.error) && typeof value.error.message === "string"
+          ? value.error.message
+          : `The owner request failed with HTTP ${response.status}.`;
+        throw new Error(message);
+      }
+      if (!isRecord(value) || typeof value.get_post_enabled !== "boolean") throw new Error("The service returned an invalid owner control response.");
+      if (action === "disable" || value.get_post_enabled !== true) {
+        delegatedToken = undefined;
+        return setState({ busy: false, enabled: false, invitationAvailable: false, message: "Agent posting is disabled.", status: "disabled" });
+      }
+      delegatedToken = delegatedTokenFromUrl(value.get_post_url);
+      return setState({ busy: false, enabled: true, invitationAvailable: true, message: action === "rotate" ? "Agent posting was rotated. Copy the new invitation for the agent." : "Agent posting is enabled. Copy the invitation for the agent.", status: "enabled" });
+    } catch (error) {
+      return setState({ ...currentState, busy: false, message: error instanceof Error ? error.message : "The owner control request failed.", status: "error" });
+    } finally {
+      setBusy(false);
+      if (currentState.busy) setState({ ...currentState, busy: false });
+    }
+  }
+
+  setState(currentState);
+  return {
+    copyInvitation: async (copy: (value: string) => Promise<void>): Promise<void> => {
+      await copy(invitation());
+    },
+    disable: async () => await request("disable"),
+    enable: async () => await request("enable"),
+    invitation,
+    rotate: async () => await request("rotate"),
+    state: () => currentState,
+  };
+}

@@ -220,6 +220,131 @@ test("renders the creation home for an HTML root request", () => {
   expect(html).toContain("I'm an agent");
 });
 
+test("renders a private creation receipt shell without capability values", async () => {
+  const html = renderBrowserPage({ title: "Start a temporary conversation" });
+  const source = await browserAsset("client.js")?.text();
+
+  expect(html).toContain('id="creation-receipt"');
+  expect(html).toContain("Public thread");
+  expect(html).toContain("Private owner link");
+  expect(html).toContain("Save the private owner link now");
+  expect(html).toContain("Enable agent posting");
+  expect(html).toContain("Copy agent invitation");
+  expect(html).toContain("Anyone holding an agent posting capability can write");
+  expect(html).not.toContain("/manage/");
+  expect(html).not.toContain("post?token=");
+  expect(source).toContain("createOwnerControlsController");
+  expect(source).toContain("data.manage_url");
+  expect(source).toContain("owner-post-rotate");
+  expect(source).toContain("owner-post-disable");
+  expect(source).toContain("X-0000-Post-Token");
+  expect(source).not.toContain("localStorage.setItem('manage");
+  expect(source).not.toContain("sessionStorage.setItem('manage");
+});
+
+test("does not render private creation controls on a public room page", () => {
+  const html = renderBrowserPage({ room: "public-room", title: "Temporary conversation" });
+
+  expect(html).not.toContain('id="creation-receipt"');
+  expect(html).not.toContain("Private owner link");
+  expect(html).not.toContain("Enable agent posting");
+  expect(html).not.toContain("post?token=");
+});
+
+test("keeps the creation receipt private in page memory and enables clipboard setup", async () => {
+  const source = await browserAsset("client.js")?.text();
+  const globals = globalThis as Record<string, unknown>;
+  const saved = Object.fromEntries(["WebSocket", "addEventListener", "document", "fetch", "innerHeight", "localStorage", "location", "matchMedia", "navigator", "scrollTo", "scrollY"].map((key) => [key, globals[key]]));
+  let submit: ((event: { preventDefault(): void }) => Promise<void>) | undefined;
+  let copied = "";
+  let managerCalls = 0;
+  const createForm = { hidden: false, addEventListener: (_event: string, callback: (event: { preventDefault(): void }) => Promise<void>) => { submit = callback; }, querySelector: () => null };
+  const field = { value: "first message", focus: () => {} };
+  const receipt = { hidden: true };
+  const publicLink = { href: "", textContent: "" };
+  const ownerLink = { href: "", textContent: "" };
+  const continueLink = { href: "", textContent: "" };
+  const ownerStatus = { textContent: "" };
+  const enable = { disabled: false, onclick: undefined as (() => void) | undefined, addEventListener: (_event: string, callback: () => void) => { enable.onclick = callback; } };
+  const rotate = { disabled: true, onclick: undefined as (() => void) | undefined, addEventListener: (_event: string, callback: () => void) => { rotate.onclick = callback; } };
+  const disable = { disabled: true, onclick: undefined as (() => void) | undefined, addEventListener: (_event: string, callback: () => void) => { disable.onclick = callback; } };
+  const copy = { disabled: true, onclick: undefined as (() => void) | undefined, addEventListener: (_event: string, callback: () => void) => { copy.onclick = callback; } };
+  const notice = { textContent: "", className: "", hidden: true };
+  const map: Record<string, unknown> = {
+    "#create-room": createForm,
+    "#creation-receipt": receipt,
+    "#initial-message": field,
+    "#owner-post-copy": copy,
+    "#owner-post-disable": disable,
+    "#owner-post-enable": enable,
+    "#owner-post-rotate": rotate,
+    "#owner-post-status": ownerStatus,
+    "#receipt-continue": continueLink,
+    "#receipt-owner-link": ownerLink,
+    "#receipt-public-link": publicLink,
+    "#state-notice": notice,
+  };
+  try {
+    globals.document = {
+      body: { dataset: {} },
+      documentElement: { dataset: {}, scrollHeight: 0 },
+      querySelector: (selector: string) => map[selector] ?? null,
+      querySelectorAll: () => [],
+    };
+    globals.fetch = async (input: string, init?: RequestInit) => {
+      if (input === "/") return Response.json({ conversation_url: "https://msg.0000.chat/room", manage_url: "https://msg.0000.chat/manage/room/owner", room: { id: "room" } });
+      managerCalls += 1;
+      expect(init?.method).toBe("POST");
+      expect(JSON.parse(String(init?.body))).toEqual({ action: "enable" });
+      return Response.json({ get_post_enabled: true, get_post_url: "https://msg.0000.chat/room/post?token=delegated", protocol_version: 1 });
+    };
+    globals.WebSocket = class { onclose = null; onerror = null; onmessage = null; onopen = null; readyState = 0; close() {} };
+    globals.addEventListener = () => {};
+    globals.localStorage = { getItem: () => null, setItem: () => {} };
+    globals.location = { href: "https://msg.0000.chat/", origin: "https://msg.0000.chat", pathname: "/", protocol: "https:" };
+    globals.matchMedia = () => ({ matches: false, addEventListener: () => {} });
+    globals.navigator = { onLine: true, clipboard: { writeText: async (value: string) => { copied = value; } } };
+    globals.innerHeight = 800;
+    globals.scrollTo = () => {};
+    globals.scrollY = 0;
+
+    new Function(source ?? "")();
+    await submit?.({ preventDefault: () => {} });
+    expect(receipt.hidden).toBe(false);
+    expect(createForm.hidden).toBe(true);
+    expect(publicLink.href).toBe("https://msg.0000.chat/room");
+    expect(ownerLink.href).toBe("https://msg.0000.chat/manage/room/owner");
+    expect(ownerLink.textContent).toBe("https://msg.0000.chat/manage/room/owner");
+    expect(ownerLink.href).not.toContain("post?token=");
+    expect(managerCalls).toBe(0);
+
+    enable.onclick?.();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(managerCalls).toBe(1);
+    expect(copy.disabled).toBe(false);
+    copy.onclick?.();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(copied).toContain("Public room URL: https://msg.0000.chat/room");
+    expect(copied).toContain("X-0000-Post-Token");
+    expect(copied).toContain("Authentication value: delegated");
+    expect(ownerLink.textContent).not.toContain("delegated");
+  } finally {
+    Object.assign(globals, saved);
+  }
+});
+
+test("a fresh home render loses the private receipt by design", () => {
+  const created = renderBrowserPage({ title: "Start a temporary conversation" });
+  const refreshed = renderBrowserPage({ title: "Start a temporary conversation" });
+
+  expect(created).toContain('id="creation-receipt"');
+  expect(refreshed).toContain('id="creation-receipt" aria-labelledby="creation-receipt-title" hidden');
+  expect(refreshed).not.toContain("/manage/room/owner");
+  expect(refreshed).not.toContain("delegated");
+});
+
 test("styles the human view banner with responsive focus-visible controls", async () => {
   const css = await browserAsset("client.css")?.text();
 
