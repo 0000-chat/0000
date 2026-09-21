@@ -1,3 +1,5 @@
+import { isLocalHttpUrl } from "./protocol";
+
 export type BrowserView = "agent" | "human";
 
 const VIEW_COOKIE = "msg_view";
@@ -31,7 +33,7 @@ export function browserViewRedirect(url: URL): Response | undefined {
     status: 303,
     headers: {
       location: `${destination.pathname}${destination.search}${destination.hash}`,
-      "set-cookie": `msg_view=${match[1]}; Path=/; Max-Age=31536000; SameSite=Lax; Secure`,
+      "set-cookie": `msg_view=${match[1]}; Path=/; Max-Age=31536000; SameSite=Lax${isLocalHttpUrl(url) ? "" : "; Secure"}`,
     },
   });
 }

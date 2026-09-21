@@ -1,4 +1,5 @@
 import { ERROR_CODES, ProtocolError } from "./errors";
+import { chatTitle } from "./organization-domain";
 import { hashCapability, parseMessageInput, randomCapability, validateIdempotencyKey } from "./room-domain";
 import { buildShareMessage, foregroundWait, PROTOCOL_VERSION, stripLegacyAbsoluteExpiry, type CreateRoomInput, type CreateRoomResponse, type CreateWebhookInput, type CreateWebhookResponse, type EnrollPushInput, type ExportRoomInput, type ListWebhooksInput, type ListWebhooksResponse, type LiveRoomInput, type ManageRoomInput, type ManageRoomResponse, type ManageWebhookInput, type ManageWebhookResponse, type PostMessageInput, type PostMessageResponse, type PushEnrollmentInput, type PushEnrollmentResponse, type ReadRoomInput, type ReadRoomResponse, type RedeliverWebhookInput, type RedeliverWebhookResponse, type RemovePushEnrollmentResponse, type RemoveWebhookInput, type RemoveWebhookResponse, type RotateWebhookSecretResponse, type RoomService } from "./protocol";
 
@@ -21,8 +22,10 @@ export class DurableRoomService implements RoomService {
     const room = input.plan?.room ?? randomCapability(this.random);
     const management = input.plan?.management ?? randomCapability(this.random);
     const initial = parseMessageInput(input.body);
+    const valueBody = input.body.kind === "json" && typeof input.body.value === "object" && input.body.value !== null && !Array.isArray(input.body.value) ? input.body.value : {};
     const response = await this.room(room).fetch(jsonRequest("/initialize", {
       initial,
+      title: chatTitle(valueBody.title, initial.content),
       management_hash: await hashCapability(management),
     }));
     const value = stripLegacyAbsoluteExpiry(await responseJson(response));
@@ -47,6 +50,7 @@ export class DurableRoomService implements RoomService {
     return {
       ...value,
       conversation_url,
+      links_url: `${conversation_url}/links`,
       share_message: buildShareMessage(conversation_url),
       wait: foregroundWait(this.origin, input.room, latest),
     } as unknown as ReadRoomResponse;

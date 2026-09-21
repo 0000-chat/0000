@@ -1,6 +1,7 @@
 import { DurableObject } from "cloudflare:workers";
 
 import { ERROR_CODES, ProtocolError } from "./errors";
+import { CAPABILITY_PATTERN, chatTitle, invalidOrganization, MAX_CHAT_CONNECTIONS, organizationObject, type ChatLink } from "./organization-domain";
 import { compareCapabilities, messageStorageBytes, ROOM_LIMITS } from "./room-domain";
 import type { MessageInput } from "./room-domain";
 import { PROTOCOL_VERSION, type CreateWebhookResponse, type ManageWebhookResponse, type RedeliverWebhookResponse, type RotateWebhookSecretResponse, type WebhookAttemptMetadata, type WebhookDeliveryMetadata, type WebhookSummary } from "./protocol";
@@ -35,6 +36,7 @@ export interface ConversationRoomEnv {
 type RoomLimits = { -readonly [Key in keyof typeof ROOM_LIMITS]: number };
 
 interface RoomState {
+  readonly title: string | null;
   readonly created_at: number;
   readonly inactivity_expires_at: number;
   readonly last_message_at: number;
@@ -203,6 +205,7 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
         return this.json({ triggered: true });
       }
       if (request.method === "GET" && url.pathname === "/read") return await this.read(url);
+      if (url.pathname === "/overview" || url.pathname === "/links" || url.pathname.startsWith("/links/")) return await this.organization(request, url);
       if (request.method === "POST" && url.pathname === "/messages") return await this.post(request);
       if (request.method === "GET" && url.pathname === "/manage") return await this.manage(request, false);
       if (request.method === "DELETE" && url.pathname === "/manage") return await this.manage(request, true);
@@ -223,6 +226,7 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
       if (state.tombstone_expires_at !== null && now >= state.tombstone_expires_at) {
         this.ctx.storage.transactionSync(() => {
           this.ctx.storage.sql.exec("DELETE FROM messages");
+          this.ctx.storage.sql.exec("DELETE FROM chat_links");
           this.ctx.storage.sql.exec("DELETE FROM webhook_delivery_attempts");
           this.ctx.storage.sql.exec("DELETE FROM webhook_deliveries");
           this.ctx.storage.sql.exec("DELETE FROM webhook_endpoints");
@@ -283,7 +287,7 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
   async webSocketClose(): Promise<void> {}
 
   private async initialize(request: Request): Promise<Response> {
-    const input = await request.json() as { initial: MessageInput; management_hash: string };
+    const input = await request.json() as { initial: MessageInput; management_hash: string; title?: string };
     const now = this.now();
     const result = this.ctx.storage.transactionSync(() => {
       const prior = this.state();
@@ -297,6 +301,7 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
         CURRENT_ROOM_SCHEMA_VERSION, PROTOCOL_VERSION, now, now, inactivity, inactivity, bytes, input.management_hash, notificationId,
       );
       this.insertMessage({ ...input.initial, byte_count: bytes, created_at: now, id, sequence: 1, source_browser_id: null });
+      this.ctx.storage.sql.exec("UPDATE room_state SET title = ? WHERE singleton = 1", chatTitle(input.title, input.initial.content));
       return { created: true, message: this.messageBySequence(1), state: this.requireState() };
     });
     await this.schedule();
@@ -307,7 +312,39 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
     const state = await this.requireActive(this.now());
     const after = Number(url.searchParams.get("after") ?? 0);
     const messages = rows<StoredMessage>(this.ctx.storage.sql.exec("SELECT * FROM messages WHERE sequence > ? ORDER BY sequence ASC", after)).map((message) => this.toMessage(message));
-    return this.json({ protocol_version: PROTOCOL_VERSION, messages, latest_message: state.next_sequence - 1, expires_at: iso(state.inactivity_expires_at), access_warning: "All authors and display names are self-declared and unverified." });
+    return this.json({ protocol_version: PROTOCOL_VERSION, title: state.title ?? chatTitle(undefined, this.messageBySequence(1).content), messages, latest_message: state.next_sequence - 1, expires_at: iso(state.inactivity_expires_at), access_warning: "All authors and display names are self-declared and unverified." });
+  }
+
+  private async organization(request: Request, url: URL): Promise<Response> {
+    const input = request.method === "PUT" || request.method === "POST" ? organizationObject(await request.json()) : undefined;
+    await this.requireActive(this.now());
+    // Alarm scheduling yields; deletion may have completed during that await.
+    const state = this.requireState();
+    if (state.status !== "active" || this.now() >= state.inactivity_expires_at) throw new ProtocolError(ERROR_CODES.gone, "The conversation has expired.", 410);
+    if (request.method === "GET" && url.pathname === "/overview") return this.json({ title: state.title ?? chatTitle(undefined, this.messageBySequence(1).content), latest_message: state.next_sequence - 1, expires_at: iso(state.inactivity_expires_at) });
+    if (request.method === "GET" && url.pathname === "/links") return this.json({ links: rows<ChatLink>(this.ctx.storage.sql.exec("SELECT room, kind, source_message FROM chat_links ORDER BY rowid")) });
+    if (this.config.MSG_POST_DISABLED === "1") throw new ProtocolError(ERROR_CODES.serviceUnavailable, "Conversation changes are temporarily unavailable.", 503);
+    if (input && ((request.method === "PUT" && url.pathname === "/links") || (request.method === "POST" && url.pathname === "/links/check"))) {
+      const room = input.room, kind = input.kind, source = input.source_message;
+      if (typeof room !== "string" || !CAPABILITY_PATTERN.test(room) || !["related", "branch", "source"].includes(String(kind)) || (kind === "related" ? source !== null : !Number.isSafeInteger(source) || (source as number) < 1)) invalidOrganization("Invalid conversation link.");
+      this.ctx.storage.transactionSync(() => {
+        const existing = rows<ChatLink>(this.ctx.storage.sql.exec("SELECT room, kind, source_message FROM chat_links WHERE room = ?", room))[0];
+        if (existing && (existing.kind !== kind || existing.source_message !== source)) throw new ProtocolError(ERROR_CODES.conflict, "These conversations already have a different connection. Remove that connection first.", 409);
+        const count = rows<{ count: number }>(this.ctx.storage.sql.exec("SELECT COUNT(*) AS count FROM chat_links"))[0].count;
+        if (!existing && count >= MAX_CHAT_CONNECTIONS) throw new ProtocolError(ERROR_CODES.conflict, "A conversation can have up to 50 connections.", 409);
+        if (kind === "branch" && !rows(this.ctx.storage.sql.exec("SELECT sequence FROM messages WHERE sequence = ?", source as number)).length) invalidOrganization("The source message does not exist.");
+        if (request.method === "PUT") this.ctx.storage.sql.exec("INSERT OR IGNORE INTO chat_links (room, kind, source_message) VALUES (?, ?, ?)", room, kind as string, source as number | null);
+      });
+      if (request.method === "PUT") this.broadcast({ protocol_version: PROTOCOL_VERSION, type: "conversation.updated" });
+      return this.json({ connected: true });
+    }
+    const removal = /^\/links\/([A-Za-z0-9_-]{43})$/u.exec(url.pathname);
+    if (removal && request.method === "DELETE") {
+      this.ctx.storage.sql.exec("DELETE FROM chat_links WHERE room = ?", removal[1]);
+      this.broadcast({ protocol_version: PROTOCOL_VERSION, type: "conversation.updated" });
+      return this.json({ removed: true });
+    }
+    throw new ProtocolError(ERROR_CODES.notFound, "Connection route not found.", 404);
   }
 
   private async post(request: Request): Promise<Response> {
@@ -772,12 +809,13 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
       const state = this.requireState();
       if (state.status === "deleted") return false;
       this.ctx.storage.sql.exec("DELETE FROM messages");
+      this.ctx.storage.sql.exec("DELETE FROM chat_links");
       this.ctx.storage.sql.exec("DELETE FROM webhook_delivery_attempts");
       this.ctx.storage.sql.exec("DELETE FROM webhook_deliveries");
       this.ctx.storage.sql.exec("DELETE FROM webhook_endpoints");
       this.ctx.storage.sql.exec("DELETE FROM push_deliveries");
       this.ctx.storage.sql.exec("DELETE FROM push_subscriptions");
-      this.ctx.storage.sql.exec("UPDATE room_state SET status = 'deleted', tombstone_expires_at = ?, management_hash = NULL, message_count = 0, total_bytes = 0 WHERE singleton = 1", now + this.limits.tombstoneTtlMs);
+      this.ctx.storage.sql.exec("UPDATE room_state SET status = 'deleted', title = NULL, tombstone_expires_at = ?, management_hash = NULL, message_count = 0, total_bytes = 0 WHERE singleton = 1", now + this.limits.tombstoneTtlMs);
       return true;
     });
   }

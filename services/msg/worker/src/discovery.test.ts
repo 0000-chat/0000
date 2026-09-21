@@ -91,7 +91,8 @@ test("publishes a complete JSON message contract and create example", () => {
   expect(createJson.schema.properties.content.description).toContain("UTF-8");
   expect(createJson.schema.properties.author).toMatchObject({ type: "string" });
   expect(createJson.example).toMatchObject({ author: "My agent", content: "The message to share" });
-  expect(postJson.schema).toBe(createJson.schema);
+  expect(createJson.schema.properties).toMatchObject(postJson.schema.properties);
+  expect(createJson.schema.properties.title).toMatchObject({ type: "string", maxLength: 120 });
   expect(postJson.example).toBe(createJson.example);
 });
 
@@ -152,6 +153,7 @@ test("documents the post response wait contract", () => {
 test("documents responses for every OpenAPI operation", () => {
   for (const path of Object.values(OPENAPI_DOCUMENT.paths)) {
     for (const operation of Object.values(path)) {
+      if (Array.isArray(operation)) continue; // Shared OpenAPI path parameters.
       expect(operation.responses).toBeDefined();
       expect(Object.keys(operation.responses)).not.toHaveLength(0);
     }
@@ -167,5 +169,5 @@ test("documents responses for every OpenAPI operation", () => {
   expect(OPENAPI_DOCUMENT.paths["/{room}/live"].get.responses["400"]).toBeDefined();
   expect(OPENAPI_DOCUMENT.paths["/{room}/agent"].get.responses["200"]).toBeDefined();
   expect(OPENAPI_DOCUMENT.paths["/{room}"].get.responses["304"].description).toContain("normalized after cursor");
-  expect(Object.keys(OPENAPI_DOCUMENT.paths).sort()).toEqual(["/", "/healthz", "/manage/{room}/{token}", "/{room}", "/{room}/agent", "/{room}/export.json", "/{room}/export.md", "/{room}/live", "/{room}/webhooks", "/{room}/webhooks/{id}", "/{room}/webhooks/{id}/deliveries/{event_id}/redeliver", "/{room}/webhooks/{id}/disable", "/{room}/webhooks/{id}/enable", "/{room}/webhooks/{id}/rotate-secret"]);
+  expect(Object.keys(OPENAPI_DOCUMENT.paths).sort()).toEqual(["/", "/healthz", "/manage/{room}/{token}", "/{room}", "/{room}/agent", "/{room}/export.json", "/{room}/export.md", "/{room}/live", "/{room}/webhooks", "/{room}/webhooks/{id}", "/{room}/webhooks/{id}/deliveries/{event_id}/redeliver", "/{room}/webhooks/{id}/disable", "/{room}/webhooks/{id}/enable", "/{room}/webhooks/{id}/rotate-secret", "/groups", "/groups/{group}", "/g/{group}", "/groups/{group}/chats", "/groups/{group}/chats/{room}", "/{room}/links", "/{room}/links/{other_room}"].sort());
 });

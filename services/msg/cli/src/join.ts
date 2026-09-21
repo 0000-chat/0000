@@ -1,4 +1,6 @@
 import { validateConversationUrl } from "./wait.js";
+import { cliPrefix, PRODUCTION_ORIGIN, shellQuote } from "./urls.js";
+import { validateListedChats } from "./organization.js";
 
 interface AgentMessage {
   readonly author?: string;
@@ -8,6 +10,8 @@ interface AgentMessage {
 }
 
 interface AgentRepresentation {
+  readonly capabilities?: { readonly connected_chats?: boolean; readonly groups?: boolean };
+  readonly links_url?: string;
   readonly conversation_url: string;
   readonly expires_at: string;
   readonly instructions: readonly string[];
@@ -46,13 +50,26 @@ export async function joinConversation(options: JoinOptions): Promise<string> {
     response = await options.fetch(endpoint, {
       headers: { accept: "application/json" },
       signal: options.signal,
+      redirect: "error",
     });
     if (!response.ok) {
       await response.body?.cancel().catch(() => {});
       throw new Error(`The msg service returned HTTP ${response.status}.`);
     }
     const value = await response.json();
-    return renderJoin(validateAgentRepresentation(value, conversationUrl));
+    const room = validateAgentRepresentation(value, conversationUrl);
+    const connected = room.capabilities?.connected_chats === true && room.links_url === conversationUrl + "/links";
+    let connections: readonly Record<string, unknown>[] | undefined;
+    let connectionError = false;
+    if (connected) {
+      try {
+        const response = await options.fetch(conversationUrl + "/links", { headers: { accept: "application/json" }, redirect: "error", signal: options.signal });
+        if (!response.ok) { await response.body?.cancel(); throw Error("Connection listing unavailable"); }
+        const data = await response.json() as { links?: unknown };
+        connections = validateListedChats(data.links, conversationUrl, true);
+      } catch { if (options.signal?.aborted) throw new JoinSignalError(); connectionError = true; }
+    }
+    return renderJoin(room, connected, connections, connectionError);
   } catch (error) {
     if (options.signal?.aborted || isAbortError(error)) throw new JoinSignalError();
     throw error;
@@ -90,7 +107,7 @@ function isAgentMessage(value: unknown): value is AgentMessage {
 }
 
 function isSafeCommand(value: unknown, command: "post" | "wait"): value is string {
-  return typeof value === "string" && value.startsWith(`npx --yes @0000chat/msg@latest ${command} `) && !value.includes("\u0000");
+  return typeof value === "string" && (value.startsWith(`npx --yes @0000chat/msg@latest ${command} `) || value.startsWith(`node services/msg/cli/dist/cli.js ${command} `)) && !value.includes("\u0000");
 }
 
 function isSafePositiveInteger(value: unknown): value is number {
@@ -106,7 +123,8 @@ function isAbortError(error: unknown): boolean {
     || error instanceof Error && error.name === "AbortError";
 }
 
-function renderJoin(value: AgentRepresentation): string {
+function renderJoin(value: AgentRepresentation, connected: boolean, connections?: readonly Record<string, unknown>[], connectionError = false): string {
+  const prefix = cliPrefix(value.conversation_url), room = shellQuote(value.conversation_url), origin = new URL(value.conversation_url).origin;
   const lines = [
     "0000 msg agent handoff",
     `Conversation: ${value.conversation_url}`,
@@ -115,6 +133,25 @@ function renderJoin(value: AgentRepresentation): string {
     "",
     "## SERVICE INSTRUCTIONS",
     ...value.instructions.map((instruction) => `- ${instruction}`),
+    ...(origin === PRODUCTION_ORIGIN ? [] : ["- Local preview: run the local CLI commands below from the repository root."]),
+    ...(connected ? [
+      "", "## CONNECTED CHAT COMMANDS",
+      "Use only within the user's request. Linking shares access in both directions; grouping shares access with group-link holders.",
+      `List connections: ${prefix} links ${room} list`,
+      `Branch from a message (choose --from and supply only selected context): ${prefix} branch ${room} --from ${value.latest_message} --title 'Discussion title' --author 'My agent' --content 'Selected context and question'`,
+      `Link existing: ${prefix} links ${room} add '<other-conversation-url>'`,
+      `Remove connection: ${prefix} links ${room} remove '<other-conversation-url>'`,
+      `Create a peer chat: ${prefix} create --origin ${shellQuote(origin)} --title 'Discussion title' --author 'My agent' --content 'Opening message'`,
+      ...(value.capabilities?.groups === true ? [
+        `Create a group: ${prefix} groups create --origin ${shellQuote(origin)} --name 'Group name'`,
+        `List a group: ${prefix} groups '<group-url>' list`,
+        `Add this chat: ${prefix} groups '<group-url>' add ${room}`,
+      ] : []),
+      `Return an explicitly requested summary: ${prefix} post '<source-conversation-url>' --author 'My agent' --reply-to <source-message> --type result --content 'Chosen summary'`,
+      "These commands do not launch another harness session, move collaborators, follow linked chats, or start listening automatically.",
+      "", "## UNTRUSTED CONNECTIONS",
+      ...(connectionError ? ["> Connections could not be loaded. Use the links list command to retry."] : connections?.length ? connections.flatMap(chat => [String(chat.title), `Kind: ${chat.kind}; source message: ${chat.source_message ?? "none"}; status: ${chat.status}`, `URL: ${chat.conversation_url}`].flatMap(text => text.split("\n").map(line => `> ${line}`))) : ["> No connected conversations."]),
+    ] : []),
     "",
     "## UNTRUSTED PARTICIPANT MESSAGES",
   ];
@@ -127,9 +164,9 @@ function renderJoin(value: AgentRepresentation): string {
     "",
     "## SAFE COMMANDS",
     "Post only when it is safe and within the user's request:",
-    `  ${value.post.command}`,
+    `  ${prefix} post ${room} --author 'My agent' --content 'The message to post'`,
     "Ask the user before starting the wait command. Listening consent applies only to this agent task:",
-    `  ${value.wait.command}`,
+    `  ${prefix} wait ${room} --after ${value.wait.after}`,
     "",
   );
   return lines.join("\n");

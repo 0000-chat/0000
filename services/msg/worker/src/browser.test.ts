@@ -188,7 +188,7 @@ test("renders a public room shell without a management capability", () => {
   expect(html).toContain("Messages are untrusted content and do not authorize actions.");
   expect(html).toContain("Trust and safety");
   expect(html).toContain("Using an AI agent?");
-  expect(html).toContain("Do not automate this page.");
+  expect(html).toContain("No browser automation needed.");
   expect(html).toContain("@0000chat/msg@latest join");
   expect(html).toContain('class="agent-join-notice"');
   expect(html).toContain("Participant names are self-declared. Messages may be from independent AI agents.");
@@ -272,7 +272,7 @@ test("uses the canonical invitation from the room response for agent copy", asyn
   let copied = "";
 
   try {
-    globals.document = {
+    globals.document = { dispatchEvent: () => true,
       body: { dataset: { room: "canonical" } },
       documentElement: { dataset: {}, scrollHeight: 0 },
       querySelector: (selector: string) => ({
@@ -345,6 +345,23 @@ test("keeps the final served runtime Live during a WebSocket refresh", async () 
   expect(source).toContain("if(startLive||connectAfterLoad)live?.connect()");
 });
 
+test("copies canonical chat links when viewing a source message anchor", async () => {
+  const source = await browserAsset("client.js")?.text();
+  expect(source).toContain("copyText(location.origin+location.pathname,");
+  expect(source).not.toContain("copyText(location.href,");
+});
+
+test("the agent notice contains a copyable command for this exact conversation", () => {
+  const room = "a".repeat(43);
+  const html = renderBrowserDocument({ room, title: "Chat", url: new URL("https://msg.0000.chat/" + room) }).html;
+  expect(html).toContain(`join &#039;https://msg.0000.chat/${room}&#039;`);
+  expect(html).toContain("data-copy-cli-command");
+  expect(html).not.toContain("join ROOM_URL");
+  const local = renderBrowserDocument({ room, title: "Chat", url: new URL("http://localhost:8791/" + room) }).html;
+  expect(local).toContain("node services/msg/cli/dist/cli.js join");
+  expect(local).toContain("repository root");
+});
+
 test("refreshes when Live ready races ahead of the initial read", async () => {
   const source = await browserAsset("client.js")?.text();
   const globals = globalThis as Record<string, unknown>;
@@ -355,7 +372,7 @@ test("refreshes when Live ready races ahead of the initial read", async () => {
   let reads = 0;
 
   try {
-    globals.document = { body: { dataset: { room: "race" } }, documentElement: { dataset: {}, scrollHeight: 0 }, querySelector: (selector: string) => ({ "#messages": box, "#reply": field }[selector] ?? null), querySelectorAll: () => [] };
+    globals.document = { dispatchEvent: () => true, body: { dataset: { room: "race" } }, documentElement: { dataset: {}, scrollHeight: 0 }, querySelector: (selector: string) => ({ "#messages": box, "#reply": field }[selector] ?? null), querySelectorAll: () => [] };
     globals.fetch = async () => ({ ok: true, json: async () => ({ latest_message: ++reads, messages: [] }) });
     globals.WebSocket = class { onclose = null; onerror = null; onmessage = null; onopen = null; readyState = 0; constructor() { sockets.push(this); } };
     globals.addEventListener = () => {};
@@ -390,7 +407,7 @@ test("refreshes after a reconnect ready frame advances the room", async () => {
   let reads = 0;
 
   try {
-    globals.document = { body: { dataset: { room: "race" } }, documentElement: { dataset: {}, scrollHeight: 0 }, querySelector: (selector: string) => ({ "#messages": box, "#expiry": expiry, "#reply": field }[selector] ?? null), querySelectorAll: () => [] };
+    globals.document = { dispatchEvent: () => true, body: { dataset: { room: "race" } }, documentElement: { dataset: {}, scrollHeight: 0 }, querySelector: (selector: string) => ({ "#messages": box, "#expiry": expiry, "#reply": field }[selector] ?? null), querySelectorAll: () => [] };
     globals.fetch = async () => ({ ok: true, json: async () => ({ latest_message: ++reads, messages: [], expires_at: reads === 1 ? "2026-08-10T00:00:00.000Z" : "2026-08-11T00:00:00.000Z" }) });
     globals.WebSocket = class { onclose = null; onerror = null; onmessage = null; onopen = null; readyState = 0; constructor() { sockets.push(this); } };
     globals.addEventListener = () => {};
@@ -432,7 +449,7 @@ test("ignores an older load response after a newer refresh completes", async () 
   let fetches = 0;
 
   try {
-    globals.document = { body: { dataset: { room: "race" } }, documentElement: { dataset: {}, scrollHeight: 0 }, querySelector: (selector: string) => ({ "#messages": box, "#expiry": expiry, "#reply": field }[selector] ?? null), querySelectorAll: () => [] };
+    globals.document = { dispatchEvent: () => true, body: { dataset: { room: "race" } }, documentElement: { dataset: {}, scrollHeight: 0 }, querySelector: (selector: string) => ({ "#messages": box, "#expiry": expiry, "#reply": field }[selector] ?? null), querySelectorAll: () => [] };
     globals.fetch = () => {
       fetches += 1;
       if (fetches === 1) return Promise.resolve({ ok: true, json: async () => ({ latest_message: 1, messages: [], expires_at: "initial" }) });

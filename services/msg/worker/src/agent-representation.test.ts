@@ -38,3 +38,12 @@ test("builds an agent representation with separated untrusted messages", () => {
 test("preserves the consent marker on the wait command", () => {
   expect(buildAgentRepresentation(room).wait.requires_user_consent).toBe(true);
 });
+
+test("advertises CLI organization actions in instructions that existing join clients display", () => {
+  const result = buildAgentRepresentation({ ...room, links_url: room.conversation_url + "/links" });
+  expect(result.capabilities).toEqual({ connected_chats: true, groups: true });
+  expect(result.instructions.join("\n")).toContain("branch");
+  expect(result.instructions.join("\n")).toContain("links");
+  expect(result.instructions.join("\n")).toContain("groups");
+  expect(result.instructions.join("\n")).toContain("selected context");
+});

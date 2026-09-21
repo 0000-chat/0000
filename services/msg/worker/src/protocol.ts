@@ -48,6 +48,11 @@ export interface WaitMetadata {
   readonly requires_user_consent: true;
 }
 
+/** Plain HTTP is supported only for previews on the local machine. */
+export function isLocalHttpUrl(url: URL): boolean {
+  return url.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname);
+}
+
 /** Validates and normalizes a public room URL without accepting management capabilities. */
 export function publicConversationUrl(value: string): string {
   let conversation: URL;
@@ -57,7 +62,7 @@ export function publicConversationUrl(value: string): string {
     throw new Error("The public conversation URL is invalid.");
   }
   if (
-    conversation.protocol !== "https:" ||
+    (conversation.protocol !== "https:" && !isLocalHttpUrl(conversation)) ||
     conversation.username ||
     conversation.password ||
     conversation.search ||
@@ -79,7 +84,8 @@ export function buildShareMessage(conversationUrl: string): string {
     "",
     "```",
     "Do not open or automate the web page.",
-    `Run \`npx --yes @0000chat/msg@latest join ${url}\` and follow the instructions it returns.`,
+    ...(cliCommandPrefix(url).startsWith("node ") ? ["Local preview: run this command from the repository root using the built CLI."] : []),
+    `Run \`${cliCommandPrefix(url)} join ${url}\` and follow the instructions it returns.`,
     "```",
   ].join("\n");
 }
@@ -96,12 +102,16 @@ export function foregroundWaitForConversation(conversationUrl: string, after: nu
   const canonicalUrl = publicConversationUrl(conversationUrl);
   return {
     after,
-    command: `npx --yes @0000chat/msg@latest wait ${shellQuote(canonicalUrl)} --after ${after}`,
+    command: `${cliCommandPrefix(canonicalUrl)} wait ${shellQuote(canonicalUrl)} --after ${after}`,
     requires_user_consent: true,
   };
 }
 
-function shellQuote(value: string): string {
+export function cliCommandPrefix(value: string): string {
+  return ["localhost", "127.0.0.1", "[::1]"].includes(new URL(value).hostname) ? "node services/msg/cli/dist/cli.js" : "npx --yes @0000chat/msg@latest";
+}
+
+export function shellQuote(value: string): string {
   return `'${value.replaceAll("'", `'"'"'`)}'`;
 }
 
@@ -143,6 +153,8 @@ export interface RoomMessage extends Message {
 }
 
 export interface RoomReadResult {
+  readonly title?: string;
+  readonly links_url?: string;
   readonly access_warning?: string;
   readonly conversation_url: string;
   readonly expires_at: string;

@@ -22,7 +22,7 @@ test("returns the first read result when messages already exist", async () => {
     conversationUrl: "https://msg.0000.chat/room-1",
     fetch: async (input, init) => {
       expect(input).toBe("https://msg.0000.chat/room-1?after=4");
-      expect(init).toEqual({ headers: { accept: "application/json" }, signal: controller.signal });
+      expect(init).toEqual({ headers: { accept: "application/json" }, signal: controller.signal, redirect: "error" });
       return Response.json({ latest_message: 5, messages: [{ content: "hello", id: "m5", sequence: 5 }] });
     },
     signal: controller.signal,
@@ -32,17 +32,20 @@ test("returns the first read result when messages already exist", async () => {
   expect(result).toEqual({ latest_message: 5, messages: [{ content: "hello", id: "m5", sequence: 5 }] });
 });
 
-test("reads again after a ready frame closes the read-to-live race", async () => {
+test.each([
+  ["https://msg.0000.chat/room-1", "wss://msg.0000.chat/room-1/live?after=4"],
+  ["http://localhost:8791/room-1", "ws://localhost:8791/room-1/live?after=4"],
+])("reads again after a ready frame closes the read-to-live race at %s", async (conversationUrl, socketUrl) => {
   const socket = new FakeSocket();
   let reads = 0;
   const pending = waitForMessages({
     after: 4,
-    conversationUrl: "https://msg.0000.chat/room-1",
+    conversationUrl,
     fetch: async () => Response.json(reads++ === 0
       ? { latest_message: 4, messages: [] }
       : { latest_message: 5, messages: [{ content: "later", id: "m5", sequence: 5 }] }),
     websocket: (url) => {
-      expect(url).toBe("wss://msg.0000.chat/room-1/live?after=4");
+      expect(url).toBe(socketUrl);
       return socket;
     },
   });

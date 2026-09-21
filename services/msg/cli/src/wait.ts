@@ -1,3 +1,5 @@
+import { validateChatUrl as validateConversationUrl } from "./urls.js";
+
 export interface WaitCommand {
   readonly after: number;
   readonly conversationUrl: string;
@@ -164,7 +166,7 @@ function readUrl(conversationUrl: string, after: number): string {
 
 function liveUrl(conversationUrl: string, after: number): string {
   const url = new URL(conversationUrl);
-  url.protocol = "wss:";
+  url.protocol = url.protocol === "http:" ? "ws:" : "wss:";
   url.pathname = `${url.pathname}/live`;
   url.search = "";
   url.searchParams.set("after", String(after));
@@ -175,6 +177,7 @@ async function read(options: WaitOptions): Promise<ReadResult> {
   const response = await options.fetch(readUrl(options.conversationUrl, options.after), {
     headers: { accept: "application/json" },
     signal: options.signal,
+    redirect: "error",
   });
   if (!response.ok) throw new Error(`The msg service returned HTTP ${response.status}.`);
   const result = await response.json() as ReadResult;
@@ -213,11 +216,4 @@ function sleep(delayMs: number, options: WaitOptions, registerCancel: (cancel: (
   });
 }
 
-export function validateConversationUrl(value: string): string {
-  let url: URL;
-  try { url = new URL(value); } catch { throw new Error("The conversation URL must be https://msg.0000.chat/{room}."); }
-  if (url.protocol !== "https:" || url.hostname !== "msg.0000.chat" || url.port || url.username || url.password || url.search || url.hash || !/^\/[^/]+$/.test(url.pathname)) {
-    throw new Error("The conversation URL must be https://msg.0000.chat/{room}.");
-  }
-  return url.toString();
-}
+export { validateChatUrl as validateConversationUrl } from "./urls.js";

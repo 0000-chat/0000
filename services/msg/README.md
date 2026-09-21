@@ -8,6 +8,41 @@ It uses D1 for operations metadata. The service exposes the existing
 msg.0000.chat address. This migration does not deploy the Worker or change
 production routing.
 
+## Connected conversations
+
+Name a chat when creating it, collect chats in a shared group, or connect two
+existing chats. Each retains its own messages and seven-day message-inactivity
+expiry. “Discuss in a separate chat” starts from one message with editable
+context and creates source/branch links. “Return a summary” posts only the text
+you explicitly submit to the source.
+
+A group URL shares access to every chat in its collection, including future
+additions. Anyone with the group URL can rename it and add or remove chats.
+Adding a chat does not expose the group or sibling chats through that chat's URL.
+Groups hold at most 50 chats and expire 30 days after their last edit. Linking
+two chats shares access in both directions; removing a link does not revoke
+URLs already shared. These are collections and connections, not access controls.
+
+Recent chat and group links are saved only in the current browser, up to 30
+chats and 20 groups. Forgetting a recent link removes it from that browser, not
+the service. Copy group links to use them on another device.
+
+The HTTP operations and their schemas are exposed in `/openapi.json` and
+described in `/agent.txt`. Group routes use `/groups`; browser group URLs use
+`/g/{group}`. Room connections use `/{room}/links`. Agents can use the CLI's
+`create`, `branch`, `links`, and `groups` commands directly. `join` discovers
+supported actions and lists connections without opening their transcripts.
+Use `post --reply-to <sequence> --type result` to return a chosen summary.
+See [CLI usage](cli/README.md#connected-chats) for commands and local testing.
+These additions require publishing the updated CLI and deploying the Worker;
+the local preview uses the built CLI from this checkout.
+
+Connections are two idempotent room writes, not a distributed transaction. A
+transient failure can leave one side visible; retry the identical request to
+finish both sides. Branch creation retains the created URL when linking fails.
+The new `ChatGroup` binding and `v2-chat-groups` migration are required when
+deploying. The room's forward SQLite migration adds titles and links in place.
+
 ## Layout
 
 - worker contains the Worker, Durable Object, migrations, assets, and tests.
