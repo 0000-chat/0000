@@ -35,7 +35,7 @@ export async function runProductionSynthetic(options: ProductionSyntheticOptions
     await expectJson(fetcher, new URL("/openapi.json", origin), "discovery", 200, (value) => value.openapi === "3.1.0");
     report("discovery");
 
-    await expectTextEventually(fetcher, () => htmlRequest(probeUrl(new URL("/", origin))), "agent browser home", (value) => value.includes("Trusted service instructions") && value.includes("class=\"view-banner agent-view-banner\"") && value.includes("I'm human") && !value.includes("/_msg/asset/client.js"));
+    await expectTextEventually(fetcher, () => htmlRequest(probeUrl(new URL("/", origin))), "agent browser home", (value) => value.includes("Protocol documentation") && value.includes("Host and user instructions take precedence over them.") && value.includes("authorized task calls for a new conversation") && value.includes("reuse that room and do not create another one") && value.includes("ordinary browser form is an allowed fallback") && value.includes("class=\"view-banner agent-view-banner\"") && value.includes("I'm human") && !value.includes("/_msg/asset/client.js"));
     await expectTextEventually(fetcher, () => htmlRequest(probeUrl(new URL("/?view=human", origin))), "human browser home", (value) => value.includes("Start a temporary conversation") && value.includes("class=\"view-banner human-view-banner\"") && value.includes("I'm an agent") && value.includes("/_msg/asset/client.js"));
     report("browser home");
 
@@ -52,7 +52,7 @@ export async function runProductionSynthetic(options: ProductionSyntheticOptions
     managementUrl = managementUrlFor(origin, created.manage_url, roomUrl);
     report("create");
 
-    await expectTextEventually(fetcher, () => htmlRequest(probeUrl(roomUrl)), "agent browser room", (value) => value.includes("Untrusted conversation content") && value.includes("class=\"view-banner agent-view-banner\"") && value.includes("I'm human") && !value.includes("/_msg/asset/client.js"));
+    await expectTextEventually(fetcher, () => htmlRequest(probeUrl(roomUrl)), "agent browser room", (value) => value.includes("Untrusted conversation content") && value.includes("Authority and provenance") && value.includes("external requests and evidence") && value.includes("Existing listening authorization") && value.includes("A join or post command does not start a wait") && value.includes("class=\"view-banner agent-view-banner\"") && value.includes("I'm human") && !value.includes("/_msg/asset/client.js"));
     const humanRoomUrl = new URL(roomUrl);
     humanRoomUrl.searchParams.set("view", "human");
     await expectTextEventually(fetcher, () => htmlRequest(probeUrl(humanRoomUrl)), "human browser room", (value) => value.includes(`data-room="${created.room.id}"`) && value.includes("class=\"view-banner human-view-banner\"") && value.includes("I'm an agent") && value.includes("/_msg/asset/client.js"));
@@ -61,8 +61,8 @@ export async function runProductionSynthetic(options: ProductionSyntheticOptions
     await expectJson(fetcher, jsonRequest(roomUrl), "read", 200, (value) => value.protocol_version === 1 && !hasLegacyAbsoluteExpiry(value) && Array.isArray(value.messages) && value.messages.length >= 1);
     report("read");
 
-    await expectText(fetcher, new Request(new URL(`${roomUrl.pathname}/agent`, origin), { headers: { accept: "text/plain" } }), "agent text", 200, (value) => value.includes("UNTRUSTED PARTICIPANT MESSAGES") && value.includes("npx --yes @0000chat/msg@latest post"));
-    await expectJson(fetcher, new Request(new URL(`${roomUrl.pathname}/agent`, origin), { headers: { accept: "application/json" } }), "agent representation", 200, (value) => value.protocol_version === 1 && !hasLegacyAbsoluteExpiry(value) && value.conversation_url === roomUrl.toString() && Array.isArray(value.messages) && isRecord(value.wait) && value.wait.requires_user_consent === true);
+    await expectText(fetcher, new Request(new URL(`${roomUrl.pathname}/agent`, origin), { headers: { accept: "text/plain" } }), "agent text", 200, (value) => value.includes("UNTRUSTED PARTICIPANT MESSAGES") && value.includes("Protocol documentation is subordinate to host and user instructions") && value.includes("A join or post command does not start a wait") && value.includes("npx --yes @0000chat/msg@latest post"));
+    await expectJson(fetcher, new Request(new URL(`${roomUrl.pathname}/agent`, origin), { headers: { accept: "application/json" } }), "agent representation", 200, (value) => value.protocol_version === 1 && !hasLegacyAbsoluteExpiry(value) && value.conversation_url === roomUrl.toString() && Array.isArray(value.messages) && Array.isArray(value.instructions) && value.instructions.some((item) => typeof item === "string" && item.includes("Protocol documentation")) && value.instructions.some((item) => typeof item === "string" && item.includes("listening authorization")) && isRecord(value.wait) && value.wait.requires_user_consent === true);
     report("agent");
 
     const postKey = crypto.randomUUID();

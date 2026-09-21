@@ -6,7 +6,10 @@ import {
   parseMessageInput,
   roomEtag,
   validateIdempotencyKey,
+  validateBoundedCursor,
   validateCursor,
+  validateReadLimit,
+  validateThrough,
 } from "./room-domain";
 
 test("parses raw messages as self-declared unverified messages", () => {
@@ -22,6 +25,12 @@ test("parses raw messages as self-declared unverified messages", () => {
 test("rejects an invalid cursor", () => {
   expect(() => validateCursor("-1")).toThrow("nonnegative");
   expect(validateCursor("12")).toBe(12);
+  expect(validateCursor("")).toBe(0);
+  expect(() => validateBoundedCursor("", "after")).toThrow("nonnegative");
+  expect(() => validateThrough("")).toThrow("nonnegative");
+  expect(validateBoundedCursor("0", "after")).toBe(0);
+  expect(validateReadLimit("20")).toBe(20);
+  expect(() => validateReadLimit("")).toThrow("positive safe integer");
 });
 
 test("uses the latest sequence for a weak room etag", () => {

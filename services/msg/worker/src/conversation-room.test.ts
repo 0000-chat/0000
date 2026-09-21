@@ -77,6 +77,103 @@ test("stores ordered messages and idempotent replay in SQLite", async () => {
   } finally { Date.now = originalNow; }
 });
 
+test("looks up a stored message only inside the room and preserves its sequence", async () => {
+  const { room: durable } = await room();
+  const initialized = await durable.fetch(request("/initialize", { management_hash: "hash", initial: { content: "first", author: "a", display_name: "a", semantic_type: "message" } }));
+  const id = (await initialized.json() as { id: string }).id;
+
+  const found = await durable.fetch(new Request(`https://room/messages/${id}`));
+  expect(found.status).toBe(200);
+  expect(await found.json()).toMatchObject({ message: { id, content: "first", sequence: 1 }, latest_message: 1 });
+  expect((await durable.fetch(new Request("https://room/messages/missing"))).status).toBe(404);
+  expect((await durable.fetch(new Request("https://room/messages/%"))).status).toBe(404);
+});
+
+test("rejects missing reply targets without consuming state or retry keys", async () => {
+  const database = new Database(":memory:");
+  let now = 1_000;
+  const { context, room: durable } = await room(database, () => now);
+  await durable.fetch(request("/initialize", { now, management_hash: "hash", initial: { content: "first", author: "a", display_name: "a", semantic_type: "message" } }));
+  expect((await durable.fetch(new Request("https://room/live?after=1"))).status).toBe(101);
+  const before = await (await durable.fetch(new Request("https://room/read?after=0"))).json() as { expires_at: string; latest_message: number; messages: readonly unknown[] };
+  expect(context.sockets[0]?.sent).toHaveLength(1);
+
+  const rejected = await durable.fetch(request("/messages", { now: now + 1, idempotency_key: "retry-after-rejection", input: { content: "reply", author: "b", display_name: "b", semantic_type: "message", reply_to: "999" } }));
+  expect(rejected.status).toBe(404);
+  const afterRejected = await (await durable.fetch(new Request("https://room/read?after=0"))).json() as { expires_at: string; latest_message: number; messages: readonly unknown[] };
+  expect(afterRejected).toMatchObject({ expires_at: before.expires_at, latest_message: before.latest_message });
+  expect(afterRejected.messages).toHaveLength(1);
+  expect(context.sockets[0]?.sent).toHaveLength(1);
+
+  now += 2;
+  const accepted = await durable.fetch(request("/messages", { now: now, idempotency_key: "retry-after-rejection", input: { content: "reply", author: "b", display_name: "b", semantic_type: "message", reply_to: "1" } }));
+  expect(accepted.status).toBe(200);
+  expect(await accepted.json()).toMatchObject({ replayed: false, message: { sequence: 2, reply_to: "1" } });
+  expect(JSON.parse(context.sockets[0]!.sent.at(-1)!)).toMatchObject({ type: "message.created", sequence: 2 });
+  const afterAccepted = await (await durable.fetch(new Request("https://room/read?after=0"))).json() as { expires_at: string; latest_message: number; messages: readonly unknown[] };
+  expect(afterAccepted.latest_message).toBe(2);
+  expect(afterAccepted.messages).toHaveLength(2);
+  expect(afterAccepted.expires_at).toBe(new Date(now + ROOM_LIMITS.inactivityTtlMs).toISOString());
+  expect(context.alarmAt).toBe(now + ROOM_LIMITS.inactivityTtlMs);
+  database.close();
+});
+
+test("rejects stale writes without touching expiry, message count, or notifications", async () => {
+  const database = new Database(":memory:");
+  let now = 1_000;
+  const { context, room: durable } = await room(database, () => now);
+  await durable.fetch(request("/initialize", { now, management_hash: "hash", initial: { content: "first", author: "a", display_name: "a", semantic_type: "message" } }));
+  await durable.fetch(new Request("https://room/live?after=1"));
+
+  now += 1;
+  const accepted = await durable.fetch(request("/messages", {
+    based_on_sequence: 1,
+    idempotency_key: "accepted-message",
+    input: { content: "accepted", author: "b", display_name: "b", semantic_type: "message" },
+  }));
+  expect(accepted.status).toBe(200);
+  const acceptedValue = await accepted.json() as { expires_at: string; message: { sequence: number } };
+  const sentAfterAccepted = context.sockets[0]?.sent.length;
+  const beforeStale = await (await durable.fetch(new Request("https://room/read?after=0"))).json() as { expires_at: string; latest_message: number; messages: unknown[] };
+  expect(acceptedValue.expires_at).toBe(beforeStale.expires_at);
+
+  now += 1;
+  const stale = await durable.fetch(request("/messages", {
+    based_on_sequence: 1,
+    idempotency_key: "stale-message",
+    input: { content: "stale", author: "b", display_name: "b", semantic_type: "message" },
+  }));
+  expect(stale.status).toBe(409);
+  expect(await stale.json()).toMatchObject({ error: { code: "stale_sequence", latest_message: 2, review_after: 1 } });
+  const afterStale = await (await durable.fetch(new Request("https://room/read?after=0"))).json() as { expires_at: string; latest_message: number; messages: unknown[] };
+  expect(acceptedValue.message.sequence).toBe(2);
+  expect(afterStale).toMatchObject({ expires_at: beforeStale.expires_at, latest_message: 2 });
+  expect(afterStale.messages).toHaveLength(beforeStale.messages.length);
+  expect(context.sockets[0]?.sent.length).toBe(sentAfterAccepted);
+
+  const retried = await durable.fetch(request("/messages", {
+    based_on_sequence: 2,
+    idempotency_key: "stale-message",
+    input: { content: "stale", author: "b", display_name: "b", semantic_type: "message" },
+  }));
+  expect(retried.status).toBe(200);
+  expect(await retried.json()).toMatchObject({ replayed: false, message: { sequence: 3 } });
+  database.close();
+});
+
+test("rejects an initial reply before room creation but preserves prior initialization replay", async () => {
+  const empty = await room();
+  expect((await empty.room.fetch(request("/initialize", { management_hash: "hash", initial: { content: "invalid", author: "a", display_name: "a", semantic_type: "message", reply_to: "1" } }))).status).toBe(404);
+  expect((await empty.room.fetch(new Request("https://room/read?after=0"))).status).toBe(404);
+  expect((await empty.room.fetch(request("/initialize", { management_hash: "hash", initial: { content: "first", author: "a", display_name: "a", semantic_type: "message" } }))).status).toBe(200);
+
+  const existing = await room();
+  await existing.room.fetch(request("/initialize", { management_hash: "hash", initial: { content: "first", author: "a", display_name: "a", semantic_type: "message" } }));
+  const replay = await existing.room.fetch(request("/initialize", { management_hash: "hash", initial: { content: "ignored", author: "b", display_name: "b", semantic_type: "message", reply_to: "999" } }));
+  expect(replay.status).toBe(200);
+  expect(await replay.json()).toMatchObject({ created: false, sequence: 1, content: "first" });
+});
+
 test("rejects room writes while the post kill switch is enabled", async () => {
   const { room: durable } = await room(undefined, Date.now, { MSG_POST_DISABLED: "1" });
   await durable.fetch(request("/initialize", { management_hash: "hash", initial: { content: "first", author: "a", display_name: "a", semantic_type: "message" } }));
@@ -210,13 +307,17 @@ test("migrates a capped legacy room before its old alarm can expire it", async (
   database.exec("DROP TABLE webhook_delivery_attempts; DROP TABLE webhook_deliveries; DROP TABLE webhook_endpoints;");
   database.query("UPDATE room_schema SET version = 2").run();
   database.query("INSERT INTO room_state (singleton, schema_version, protocol_version, created_at, last_message_at, inactivity_expires_at, absolute_expires_at, next_sequence, message_count, total_bytes, status, tombstone_expires_at, management_hash) VALUES (1, 2, 1, ?, ?, ?, ?, 2, 1, 5, 'active', NULL, 'hash')").run(start, lastMessageAt, oldAbsolute, oldAbsolute);
-  database.query("INSERT INTO messages (sequence, id, content, author, display_name, client, semantic_type, reply_to, created_at, client_message_id, byte_count, idempotency_key) VALUES (1, 'legacy-message', 'first', 'a', 'a', NULL, 'message', NULL, ?, NULL, 5, NULL)").run(lastMessageAt);
+  database.query("INSERT INTO messages (sequence, id, content, author, display_name, client, semantic_type, reply_to, created_at, client_message_id, byte_count, idempotency_key) VALUES (1, 'legacy-message', 'first', 'a', 'a', NULL, 'message', '999', ?, 'legacy-client', 5, NULL)").run(lastMessageAt);
 
   now = oldAbsolute + 1;
   const restarted = await room(database, () => now);
   await restarted.room.alarm();
 
   expect((await restarted.room.fetch(new Request("https://room/read?after=0"))).status).toBe(200);
+  expect(await (await restarted.room.fetch(new Request("https://room/messages/legacy-message"))).json()).toMatchObject({ message: { id: "legacy-message", reply_to: "999" } });
+  const replay = await restarted.room.fetch(request("/messages", { input: { content: "first", author: "a", display_name: "a", semantic_type: "message", client_message_id: "legacy-client", reply_to: "999" } }));
+  expect(replay.status).toBe(200);
+  expect(await replay.json()).toMatchObject({ replayed: true, message: { id: "legacy-message", reply_to: "999" } });
   expect(restarted.context.alarmAt).toBe(lastMessageAt + ROOM_LIMITS.inactivityTtlMs);
 });
 
@@ -272,6 +373,119 @@ test("hides invalid management tokens and deletes valid rooms", async () => {
   expect((await durable.fetch(new Request(`https://room/manage?token=${token}`))).status).toBe(200);
   expect((await durable.fetch(new Request(`https://room/manage?token=${token}`, { method: "DELETE" })).then(async (response) => response)).status).toBe(200);
   expect((await durable.fetch(new Request("https://room/read?after=0"))).status).toBe(410);
+});
+
+test("supports delegated GET posting with replay receipts and owner revocation", async () => {
+  let now = 1_000;
+  const managementToken = "management-token";
+  const delegatedToken = "delegated-token";
+  const rotatedToken = "rotated-token";
+  const { context, room: durable } = await room(undefined, () => now);
+  await durable.fetch(request("/initialize", {
+    now,
+    management_hash: await hashCapability(managementToken),
+    initial: { content: "first", author: "a", display_name: "a", semantic_type: "message" },
+  }));
+
+  const live = await durable.fetch(new Request("https://room/live?after=0"));
+  expect(live.status).toBe(101);
+  const socket = context.sockets[0]!;
+  const messageCreatedCount = () => socket.sent.filter((frame) => (JSON.parse(frame) as { type?: string }).type === "message.created").length;
+  const readExpiry = async () => {
+    const response = await durable.fetch(new Request("https://room/read?after=0"));
+    expect(response.status).toBe(200);
+    return (await response.json() as { expires_at: string }).expires_at;
+  };
+  const initialExpiry = await readExpiry();
+  expect(socket.sent).toHaveLength(1);
+  expect(messageCreatedCount()).toBe(0);
+
+  const enabled = await durable.fetch(request(`/manage?token=${managementToken}`, { action: "enable", get_post_token: delegatedToken }));
+  expect(enabled.status).toBe(200);
+  expect(await enabled.json()).toMatchObject({ get_post_enabled: true });
+  expect(await readExpiry()).toBe(initialExpiry);
+  expect(messageCreatedCount()).toBe(0);
+
+  const getPost = (requestId: string, content: string, token = delegatedToken, replyTo?: string) => durable.fetch(request("/get-post", {
+    input: { author: "fetch-only", content, display_name: "fetch-only", semantic_type: "message", ...(replyTo === undefined ? {} : { reply_to: replyTo }) },
+    request_id: requestId,
+    token,
+  }));
+  const invalidReply = await getPost("invalid-reply", "must not store", delegatedToken, "999");
+  expect(invalidReply.status).toBe(404);
+  expect(await readExpiry()).toBe(initialExpiry);
+  expect(messageCreatedCount()).toBe(0);
+
+  now = 2_000;
+  const first = await getPost("request-1", "second");
+  expect(first.status).toBe(200);
+  const firstValue = await first.json() as Record<string, unknown> & { message: Record<string, unknown> };
+  expect(firstValue.accepted).toBe(true);
+  expect(firstValue.protocol_version).toBe(1);
+  expect(firstValue.replayed).toBe(false);
+  expect(firstValue.request_id).toBe("request-1");
+  expect(firstValue.sequence).toBe(2);
+  expect(firstValue.message.sequence).toBe(2);
+  expect(typeof firstValue.message.id).toBe("string");
+  expect(typeof firstValue.message.created_at).toBe("string");
+  expect(firstValue).not.toHaveProperty("content");
+  expect(JSON.stringify(firstValue)).not.toContain("delegated-token");
+  const delegatedExpiry = new Date(now + ROOM_LIMITS.inactivityTtlMs).toISOString();
+  expect(await readExpiry()).toBe(delegatedExpiry);
+  expect(messageCreatedCount()).toBe(1);
+
+  now = 3_000;
+  const replay = await getPost("request-1", "second");
+  expect(await replay.json()).toMatchObject({ accepted: true, replayed: true, request_id: "request-1", sequence: 2, message: firstValue.message });
+  expect(await readExpiry()).toBe(delegatedExpiry);
+  expect(messageCreatedCount()).toBe(1);
+
+  const conflict = await getPost("request-1", "changed");
+  expect(conflict.status).toBe(409);
+  expect(await readExpiry()).toBe(delegatedExpiry);
+  expect(messageCreatedCount()).toBe(1);
+
+  now = 4_000;
+  const normal = await durable.fetch(request("/messages", { input: { content: "third", author: "a", display_name: "a", semantic_type: "message" } }));
+  expect((await normal.json()).message.sequence).toBe(3);
+  const normalExpiry = new Date(now + ROOM_LIMITS.inactivityTtlMs).toISOString();
+  expect(await readExpiry()).toBe(normalExpiry);
+  expect(messageCreatedCount()).toBe(2);
+
+  now = 5_000;
+  const replayAfterNormal = await getPost("request-1", "second");
+  expect(await replayAfterNormal.json()).toMatchObject({ accepted: true, replayed: true, request_id: "request-1", sequence: 2, message: firstValue.message });
+  expect(await readExpiry()).toBe(normalExpiry);
+  expect(messageCreatedCount()).toBe(2);
+
+  const disabled = await durable.fetch(request(`/manage?token=${managementToken}`, { action: "disable" }));
+  expect(await disabled.json()).toMatchObject({ get_post_enabled: false });
+  expect(await readExpiry()).toBe(normalExpiry);
+  expect(messageCreatedCount()).toBe(2);
+  expect((await getPost("request-1", "second")).status).toBe(404);
+  expect(await readExpiry()).toBe(normalExpiry);
+  expect(messageCreatedCount()).toBe(2);
+
+  const rotated = await durable.fetch(request(`/manage?token=${managementToken}`, { action: "rotate", get_post_token: rotatedToken }));
+  expect(await rotated.json()).toMatchObject({ get_post_enabled: true });
+  expect(await readExpiry()).toBe(normalExpiry);
+  expect(messageCreatedCount()).toBe(2);
+  expect((await getPost("request-1", "second")).status).toBe(404);
+  expect(await readExpiry()).toBe(normalExpiry);
+  expect(messageCreatedCount()).toBe(2);
+
+  now = 8_000;
+  const rotatedPost = await getPost("request-2", "fourth", rotatedToken);
+  expect(rotatedPost.status).toBe(200);
+  expect((await rotatedPost.json()).sequence).toBe(4);
+  const rotatedExpiry = new Date(now + ROOM_LIMITS.inactivityTtlMs).toISOString();
+  expect(await readExpiry()).toBe(rotatedExpiry);
+  expect(messageCreatedCount()).toBe(3);
+
+  const finalDisabled = await durable.fetch(request(`/manage?token=${managementToken}`, { action: "disable" }));
+  expect(await finalDisabled.json()).toMatchObject({ get_post_enabled: false });
+  expect(await readExpiry()).toBe(rotatedExpiry);
+  expect(messageCreatedCount()).toBe(3);
 });
 
 test("rejects idempotency key reuse with changed body or client message id", async () => {
@@ -386,6 +600,51 @@ test("purges a tombstone and safely repeats alarm delivery", async () => {
   await durable.alarm();
   await durable.alarm();
   expect((await durable.fetch(new Request("https://room/read?after=0"))).status).toBe(404);
+});
+
+test.serial("keeps an earlier delivery deadline when retention extends room lifetime", async () => {
+  const database = new Database(":memory:");
+  let now = 10_000;
+  const limits = { MSG_TEST_MODE: "1", MSG_TEST_ROOM_LIMITS: JSON.stringify({ inactivityTtlMs: 1_000 }) };
+  const { context, room: durable } = await room(database, () => now, limits);
+  const management = "owner-token";
+  const originalFetch = globalThis.fetch;
+  try {
+    await durable.fetch(request("/initialize", { management_hash: await hashCapability(management), initial: { content: "source", author: "a", display_name: "A", semantic_type: "message" } }));
+    const endpointResponse = await durable.fetch(request("/webhooks", { url: "https://receiver.example.com/retention-deadline" }));
+    const endpointId = (await endpointResponse.json() as { webhook: { id: string } }).webhook.id;
+    const posted = await durable.fetch(request("/messages", { input: { content: "queued", author: "b", display_name: "B", semantic_type: "message" } }));
+    const messageId = (await posted.json() as { message: { id: string } }).message.id;
+    const delivery = database.query("SELECT id FROM webhook_deliveries WHERE endpoint_id = ? AND message_id = ?").get(endpointId, messageId) as { id: string };
+    database.query("UPDATE webhook_deliveries SET due_at = ?, retry_expires_at = ? WHERE id = ?").run(10_999, 100_000, delivery.id);
+
+    now = 10_500;
+    const extension = await durable.fetch(new Request(`https://room/manage/retention?token=${management}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ client_retry_id: "retention-deadline", expires_at: new Date(11_500).toISOString() }) }));
+    expect(extension.status).toBe(201);
+    expect(context.alarmAt).toBe(10_999);
+
+    globalThis.fetch = (async () => new Response(null, { status: 500 })) as typeof fetch;
+    now = 11_000;
+    await durable.alarm();
+    expect(database.query("SELECT status, inactivity_expires_at FROM room_state WHERE singleton = 1").get()).toEqual({ status: "active", inactivity_expires_at: 11_500 });
+    expect(database.query("SELECT status FROM webhook_deliveries WHERE id = ?").get(delivery.id)).toEqual({ status: "retrying" });
+    expect(database.query("SELECT COUNT(*) AS count FROM coordination_events").get()).toEqual({ count: 1 });
+    expect(database.query("SELECT COUNT(*) AS count FROM coordination_retries").get()).toEqual({ count: 1 });
+
+    now = 11_501;
+    await durable.alarm();
+    expect(database.query("SELECT status FROM room_state WHERE singleton = 1").get()).toEqual({ status: "deleted" });
+    expect(database.query("SELECT COUNT(*) AS count FROM webhook_deliveries").get()).toEqual({ count: 0 });
+    expect(database.query("SELECT COUNT(*) AS count FROM coordination_events").get()).toEqual({ count: 0 });
+    expect(database.query("SELECT COUNT(*) AS count FROM coordination_retries").get()).toEqual({ count: 0 });
+
+    now = 11_500 + ROOM_LIMITS.tombstoneTtlMs + 1;
+    await durable.alarm();
+    expect(database.query("SELECT singleton FROM room_state WHERE singleton = 1").get()).toBeNull();
+  } finally {
+    globalThis.fetch = originalFetch;
+    database.close();
+  }
 });
 
 test("limits live sockets and emits only metadata frames", async () => {
