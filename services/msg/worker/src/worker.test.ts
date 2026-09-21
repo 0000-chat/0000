@@ -1216,6 +1216,26 @@ test("probes a delegated GET posting capability through an opaque path", async (
   expect(response.headers.get("cache-control")).toBe("private, no-store, no-transform");
 });
 
+test("uses the posts limiter for a delegated GET posting probe", async () => {
+  const posts = rateLimit();
+  let calls = 0;
+  const worker = createWorker({
+    create: async () => createdRoom,
+    getPostProbe: async () => {
+      calls += 1;
+      return { active: true, get_post_enabled: true, protocol_version: 1 };
+    },
+  }, { rateLimits: { posts } });
+
+  const response = await worker.fetch(new Request("https://msg.0000.chat/example/post-probe/delegated", {
+    headers: { "cf-connecting-ip": "2001:db8::1" },
+  }));
+
+  expect(response.status).toBe(200);
+  expect(posts.calls).toEqual(["2001:db8::1"]);
+  expect(calls).toBe(1);
+});
+
 test("allows a valid cross-site fetch GET posting request without an Origin header", async () => {
   let calls = 0;
   const worker = createWorker({

@@ -361,8 +361,8 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
     const now = this.now();
     const result = this.ctx.storage.transactionSync(() => {
       const state = this.requireState();
-      if (state.status !== "active" || now >= state.inactivity_expires_at) return "expired" as const;
       if (state.get_post_enabled !== 1 || !state.get_post_hash || !compareCapabilities(tokenHash, state.get_post_hash)) return "missing" as const;
+      if (state.status !== "active" || now >= state.inactivity_expires_at) return "expired" as const;
       return "ready" as const;
     });
     if (result === "expired") throw new ProtocolError(ERROR_CODES.gone, "The conversation has expired.", 410);

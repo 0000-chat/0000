@@ -108,16 +108,25 @@ test("keeps GET posting off by default and manages a separate delegated capabili
 test("probes delegated GET posting without mutating room state", async () => {
   const database = new Database(":memory:");
   let now = 4_000_000_000_000;
-  const { room: durable } = await room(database, () => now);
+  const { context, room: durable } = await room(database, () => now);
+  context.sockets.push(new FakeSocket());
   const management = "management-token";
   const delegated = "delegated-token";
   await durable.fetch(request("/initialize", { management_hash: await hashCapability(management), initial: { content: "first", author: "a", display_name: "a", semantic_type: "message" } }));
   await durable.fetch(new Request(`https://room/manage?token=${management}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "enable", get_post_token: delegated }) }));
+  await durable.fetch(request("/webhooks", { url: "https://receiver.example.com/probe" }));
+  database.query("INSERT INTO push_subscriptions (id, source_browser_id, endpoint, p256dh, auth, created_at) VALUES (?, ?, ?, ?, ?, ?)")
+    .run("push-probe", "browser-probe", "https://push.example.com/probe", "p256dh", "auth", now);
 
   const snapshot = () => ({
     messages: database.query("SELECT * FROM messages").all(),
     room: database.query("SELECT * FROM room_state").all(),
     webhookDeliveries: database.query("SELECT * FROM webhook_deliveries").all(),
+    webhookDeliveryAttempts: database.query("SELECT * FROM webhook_delivery_attempts").all(),
+    pushDeliveries: database.query("SELECT * FROM push_deliveries").all(),
+    pushSubscriptions: database.query("SELECT * FROM push_subscriptions").all(),
+    alarmAt: context.alarmAt,
+    sockets: context.sockets.map((socket) => ({ sent: [...socket.sent], closed: socket.closed })),
   });
   const before = snapshot();
   const ready = await durable.fetch(request("/get-post-probe", { token: delegated }));
@@ -140,8 +149,18 @@ test("probes delegated GET posting without mutating room state", async () => {
   const expiryBefore = snapshot();
   now += 8 * DAY_MS;
   const expired = await durable.fetch(request("/get-post-probe", { token: delegated }));
+  const expiredInvalid = await durable.fetch(request("/get-post-probe", { token: "wrong-token" }));
   expect(expired.status).toBe(410);
+  expect(expiredInvalid.status).toBe(404);
   expect(snapshot()).toEqual(expiryBefore);
+
+  await durable.fetch(new Request(`https://room/manage?token=${management}`, { method: "DELETE" }));
+  const deletedBefore = snapshot();
+  const deletedValid = await durable.fetch(request("/get-post-probe", { token: delegated }));
+  const deletedInvalid = await durable.fetch(request("/get-post-probe", { token: "wrong-token" }));
+  expect(deletedValid.status).toBe(404);
+  expect(deletedInvalid.status).toBe(404);
+  expect(snapshot()).toEqual(deletedBefore);
 });
 
 test("revokes and rotates GET posting capabilities before the next write transaction", async () => {
