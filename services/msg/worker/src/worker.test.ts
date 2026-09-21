@@ -1191,6 +1191,31 @@ test("supports the opt-in GET posting route with a minimal receipt", async () =>
   expect(response.headers.get("cache-control")).toBe("private, no-store, no-transform");
 });
 
+test("probes a delegated GET posting capability through an opaque path", async () => {
+  let received: { room: string; token: string } | undefined;
+  const worker = createWorker({
+    create: async () => createdRoom,
+    getPostProbe: async (input) => {
+      received = input;
+      return { active: true, get_post_enabled: true, protocol_version: 1 };
+    },
+  });
+
+  const response = await worker.fetch(new Request("https://msg.0000.chat/example/post-probe/delegated", {
+    headers: { accept: "text/html" },
+  }));
+
+  expect(response.status).toBe(200);
+  expect(response.headers.get("content-type")).toContain("text/plain");
+  expect(await response.text()).toBe("GET posting capability is valid.\n");
+  expect(received).toEqual({ room: "example", token: "delegated" });
+  expect((await worker.fetch(new Request("https://msg.0000.chat/example/post-probe/delegated?check=1"))).status).toBe(400);
+  expect((await worker.fetch(new Request("https://msg.0000.chat/example/post-probe/delegated", { method: "HEAD" }))).status).toBe(404);
+  expect((await worker.fetch(new Request("https://msg.0000.chat/example/post-probe/delegated", { method: "OPTIONS" }))).status).toBe(404);
+  expect(received).toEqual({ room: "example", token: "delegated" });
+  expect(response.headers.get("cache-control")).toBe("private, no-store, no-transform");
+});
+
 test("allows a valid cross-site fetch GET posting request without an Origin header", async () => {
   let calls = 0;
   const worker = createWorker({

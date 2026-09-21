@@ -76,6 +76,23 @@ test("creates a delegated GET posting URL only for owner management actions", as
   expect(JSON.stringify(result)).not.toContain("owner-token");
 });
 
+test("probes a delegated GET posting capability without putting the token in a query", async () => {
+  const calls: Request[] = [];
+  const service = new DurableRoomService({
+    getByName: () => ({ fetch: async (request: Request) => {
+      calls.push(request);
+      return Response.json({ active: true, get_post_enabled: true, protocol_version: 1 });
+    } }),
+  } as never, "https://msg.0000.chat");
+
+  const result = await service.getPostProbe({ room: "public-room", token: "delegated-token" });
+
+  expect(result).toEqual({ active: true, get_post_enabled: true, protocol_version: 1 });
+  expect(calls[0]?.method).toBe("POST");
+  expect(calls[0]?.url).toBe("https://room/get-post-probe");
+  expect(await calls[0]?.clone().json()).toEqual({ token: "delegated-token" });
+});
+
 test("adds public handoff and wait metadata to a room read", async () => {
   const service = new DurableRoomService({
     getByName: () => ({

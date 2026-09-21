@@ -108,6 +108,7 @@ function shellQuote(value: string): string {
 export interface RoomService {
   create(input: CreateRoomInput): Promise<CreateRoomResponse>;
   getPost?(input: GetPostMessageInput): Promise<GetPostMessageResponse>;
+  getPostProbe?(input: GetPostProbeInput): Promise<GetPostProbeResponse>;
   read?(input: ReadRoomInput): Promise<ReadRoomResponse>;
   post?(input: PostMessageInput): Promise<PostMessageResponse>;
   manage?(input: ManageRoomInput): Promise<ManageRoomResponse>;
@@ -208,6 +209,17 @@ export interface GetPostMessageResponse {
   readonly replayed: boolean;
   readonly request_id: string;
   readonly sequence: number;
+}
+
+export interface GetPostProbeInput {
+  readonly room: string;
+  readonly token: string;
+}
+
+export interface GetPostProbeResponse {
+  readonly active: true;
+  readonly get_post_enabled: true;
+  readonly protocol_version: typeof PROTOCOL_VERSION;
 }
 
 export interface ManageRoomInput {

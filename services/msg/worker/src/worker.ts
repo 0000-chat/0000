@@ -10,6 +10,7 @@ import {
   stripLegacyAbsoluteExpiry,
   type CreateRoomResponse,
   type GetPostMessageResponse,
+  type GetPostProbeResponse,
   type RequestBody,
   type ManageRoomResponse,
   type ReadRoomResponse,
@@ -431,6 +432,24 @@ async function route(request: Request, service: RoomService, options: MsgWorkerO
     return getPostResponse(result);
   }
 
+  const getPostProbeMatch = /^\/([^/]+)\/post-probe\/([^/]+)$/.exec(url.pathname);
+  if (getPostProbeMatch && request.method === "GET") {
+    if (!service.getPostProbe) return notFound();
+    if (options.postDisabled) {
+      throw new ProtocolError(ERROR_CODES.serviceUnavailable, "New messages are temporarily unavailable.", 503);
+    }
+    if (url.search) {
+      throw new ProtocolError(ERROR_CODES.invalidBody, "The GET posting probe does not accept a query.", 400);
+    }
+    if (!isSameOrigin(request, url)) {
+      throw new ProtocolError(ERROR_CODES.forbidden, "Cross-origin state changes are not allowed.", 403);
+    }
+    const token = boundedPathValue(getPostProbeMatch[2]!, "token", MAX_GET_POST_TOKEN_CHARS, MAX_GET_POST_TOKEN_BYTES);
+    await enforceRateLimit(request, options.rateLimits?.posts);
+    const result = stripLegacyAbsoluteExpiry(await service.getPostProbe({ room: getPostProbeMatch[1]!, token })) as unknown as GetPostProbeResponse;
+    return getPostProbeResponse(result);
+  }
+
   const roomMatch = /^\/([^/]+)$/.exec(url.pathname);
   if (roomMatch) {
     const room = roomMatch[1];
@@ -540,6 +559,13 @@ function boundedQueryValue(value: string | null, field: string, maxChars: number
     throw new ProtocolError(ERROR_CODES.bodyTooLarge, `The ${field} query field is too large.`, 413);
   }
   return result;
+}
+
+function boundedPathValue(value: string, field: string, maxChars: number, maxBytes: number): string {
+  if (!value || Array.from(value).length > maxChars || byteLength(value) > maxBytes) {
+    throw new ProtocolError(ERROR_CODES.bodyTooLarge, `The ${field} path value is too large.`, 413);
+  }
+  return value;
 }
 
 function rejectGetPostPrefetch(request: Request): void {
@@ -788,6 +814,13 @@ function getPostResponse(result: GetPostMessageResponse): Response {
     request_id: result.request_id,
     sequence: result.sequence,
   });
+}
+
+function getPostProbeResponse(result: GetPostProbeResponse): Response {
+  if (result.active !== true || result.get_post_enabled !== true) {
+    throw new ProtocolError(ERROR_CODES.internal, "The GET posting probe returned an invalid result.", 500);
+  }
+  return textResponse("GET posting capability is valid.\n");
 }
 
 function manageResponse(result: ManageRoomResponse, method: "DELETE" | "GET" | "POST", representation: ReturnType<typeof negotiateRepresentation>, url: URL): Response {

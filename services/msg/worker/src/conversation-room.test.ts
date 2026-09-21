@@ -105,6 +105,45 @@ test("keeps GET posting off by default and manages a separate delegated capabili
   expect(await (await durable.fetch(new Request("https://room/read?after=0"))).text()).toContain("second");
 });
 
+test("probes delegated GET posting without mutating room state", async () => {
+  const database = new Database(":memory:");
+  let now = 4_000_000_000_000;
+  const { room: durable } = await room(database, () => now);
+  const management = "management-token";
+  const delegated = "delegated-token";
+  await durable.fetch(request("/initialize", { management_hash: await hashCapability(management), initial: { content: "first", author: "a", display_name: "a", semantic_type: "message" } }));
+  await durable.fetch(new Request(`https://room/manage?token=${management}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "enable", get_post_token: delegated }) }));
+
+  const snapshot = () => ({
+    messages: database.query("SELECT * FROM messages").all(),
+    room: database.query("SELECT * FROM room_state").all(),
+    webhookDeliveries: database.query("SELECT * FROM webhook_deliveries").all(),
+  });
+  const before = snapshot();
+  const ready = await durable.fetch(request("/get-post-probe", { token: delegated }));
+  expect(ready.status).toBe(200);
+  expect(await ready.json()).toEqual({ active: true, get_post_enabled: true, protocol_version: 1 });
+  expect(snapshot()).toEqual(before);
+
+  const invalid = await durable.fetch(request("/get-post-probe", { token: "wrong-token" }));
+  expect(invalid.status).toBe(404);
+  expect(snapshot()).toEqual(before);
+
+  const manage = (action: string) => new Request(`https://room/manage?token=${management}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action, ...(action === "enable" ? { get_post_token: delegated } : {}) }) });
+  await durable.fetch(manage("disable"));
+  const disabledBefore = snapshot();
+  const disabled = await durable.fetch(request("/get-post-probe", { token: delegated }));
+  expect(disabled.status).toBe(404);
+  expect(snapshot()).toEqual(disabledBefore);
+  await durable.fetch(manage("enable"));
+
+  const expiryBefore = snapshot();
+  now += 8 * DAY_MS;
+  const expired = await durable.fetch(request("/get-post-probe", { token: delegated }));
+  expect(expired.status).toBe(410);
+  expect(snapshot()).toEqual(expiryBefore);
+});
+
 test("revokes and rotates GET posting capabilities before the next write transaction", async () => {
   const { room: durable } = await room();
   const management = "management-token";

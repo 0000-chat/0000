@@ -210,6 +210,7 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
       if (request.method === "DELETE" && url.pathname === "/manage") return await this.manage(request, true);
       if (request.method === "POST" && url.pathname === "/manage") return await this.managePost(request);
       if (request.method === "POST" && url.pathname === "/get-post") return await this.getPost(request);
+      if (request.method === "POST" && url.pathname === "/get-post-probe") return await this.getPostProbe(request);
       if (request.method === "GET" && url.pathname === "/live") return await this.live(url);
       if (request.method === "GET" && (url.pathname === "/export.md" || url.pathname === "/export.json")) return await this.export(url.pathname === "/export.json");
       return this.error(ERROR_CODES.notFound, "The requested resource was not found.", 404);
@@ -351,6 +352,22 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
     await this.schedule();
     if (!result.replayed) this.broadcast({ protocol_version: PROTOCOL_VERSION, type: "message.created", sequence: result.message.sequence, latest_message: result.state.next_sequence - 1, expires_at: iso(result.state.inactivity_expires_at) });
     return this.json({ accepted: true, protocol_version: PROTOCOL_VERSION, replayed: result.replayed, request_id: requestId, sequence: result.message.sequence });
+  }
+
+  private async getPostProbe(request: Request): Promise<Response> {
+    const input = await request.json() as { token?: unknown };
+    const token = typeof input.token === "string" ? input.token : "";
+    const tokenHash = await hashToken(token);
+    const now = this.now();
+    const result = this.ctx.storage.transactionSync(() => {
+      const state = this.requireState();
+      if (state.status !== "active" || now >= state.inactivity_expires_at) return "expired" as const;
+      if (state.get_post_enabled !== 1 || !state.get_post_hash || !compareCapabilities(tokenHash, state.get_post_hash)) return "missing" as const;
+      return "ready" as const;
+    });
+    if (result === "expired") throw new ProtocolError(ERROR_CODES.gone, "The conversation has expired.", 410);
+    if (result === "missing") throw new ProtocolError(ERROR_CODES.notFound, "The requested resource was not found.", 404);
+    return this.json({ active: true, get_post_enabled: true, protocol_version: PROTOCOL_VERSION });
   }
 
   private commitMessage(

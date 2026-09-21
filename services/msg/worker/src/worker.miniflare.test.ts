@@ -1358,6 +1358,40 @@ test.serial("runs the delegated GET posting lifecycle through Worker and Durable
   });
 });
 
+test.serial("probes delegated GET posting through a read-only path without mutating the room", { timeout: 15_000 }, async () => {
+  await withRuntime(async (miniflare) => {
+    const created = await createRoom(miniflare);
+    const enabled = await miniflare.dispatchFetch(created.manage_url, {
+      body: JSON.stringify({ action: "enable" }),
+      headers: jsonHeaders,
+      method: "POST",
+    });
+    const enabledValue = await enabled.json() as { get_post_url: string };
+    const token = new URL(enabledValue.get_post_url).searchParams.get("token");
+    expect(token).toBeTruthy();
+    await registerWebhook(miniflare, created.room.id, "https://receiver.example.com/probe");
+
+    const beforeResponse = await miniflare.dispatchFetch(created.conversation_url, { headers: jsonHeaders });
+    const before = await beforeResponse.json() as { expires_at: string; latest_message: number; messages: readonly unknown[] };
+    const probe = await miniflare.dispatchFetch(`https://msg.0000.chat/${created.room.id}/post-probe/${encodeURIComponent(token!)}`, { headers: { accept: "text/html" } });
+    const body = await probe.text();
+    expect(probe.status).toBe(200);
+    expect(probe.headers.get("content-type")).toContain("text/plain");
+    expect(body).toBe("GET posting capability is valid.\n");
+    expect(body).not.toContain(token!);
+
+    const afterResponse = await miniflare.dispatchFetch(created.conversation_url, { headers: jsonHeaders });
+    const after = await afterResponse.json() as { expires_at: string; latest_message: number; messages: readonly unknown[] };
+    expect(after).toEqual(before);
+    const listing = await readWebhookList(miniflare, created.room.id);
+    expect(listing.webhooks[0]?.deliveries).toHaveLength(0);
+
+    expect((await miniflare.dispatchFetch(`https://msg.0000.chat/${created.room.id}/post-probe/${encodeURIComponent(token!)}?check=1`)).status).toBe(400);
+    expect((await miniflare.dispatchFetch(`https://msg.0000.chat/${created.room.id}/post-probe/${encodeURIComponent(token!)}`, { method: "HEAD" })).status).toBe(404);
+    expect((await miniflare.dispatchFetch(`https://msg.0000.chat/${created.room.id}/post-probe/${encodeURIComponent(token!)}`, { method: "OPTIONS" })).status).toBe(404);
+  });
+});
+
 test.serial("renders Durable Object export errors in the negotiated public representation", { timeout: 15_000 }, async () => {
   await withRuntime(async (miniflare) => {
     const deleted = await createRoom(miniflare);
