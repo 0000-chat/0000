@@ -33,3 +33,12 @@ From the monorepo root, run `bun run check`, `bun run check:turbo`, and
 `bun run check:turbo:dry`. For Gateway checks, run
 `pnpm --dir services/gateway/tooling install --frozen-lockfile` followed by
 `pnpm --dir services/gateway run check:application`.
+
+## Production deployment
+
+A push to `main` runs the Gateway deployment workflow after the full workspace
+and application checks pass. Configure the repository secret
+`CLOUDFLARE_API_TOKEN` with permission to deploy Workers in account
+`d8f2eee5aab20d72439aabdfbb221bb7`; the workflow supplies the account ID,
+verifies that `main` still points at the commit being built, and smoke-tests
+`https://gateway.0000.chat/health` after deployment.
