@@ -22,15 +22,19 @@ required = {
     "AGENTS.md",
     "README.md",
     "biome.json",
+    "CONTEXT.md",
     "docs/README.md",
+    "docs/adr/0001-curated-gateway-capabilities.md",
     "docs/agents/domain.md",
     "docs/agents/issue-tracker.md",
     "docs/agents/triage-labels.md",
+    "docs/specs/gateway-foundation.md",
     "package.json",
     "scripts/check",
     "tooling/package.json",
     "tooling/pnpm-lock.yaml",
     "docs/migration/2026-09-17-monorepo-import.md",
+    "docs/plans/2026-09-19-gateway-foundation.md",
 }
 tracked_all = subprocess.check_output(
     ["git", "-C", str(repo), "ls-files", "--", prefix], text=True
