@@ -46,7 +46,7 @@ Use GET to /{room}/live for read-only update notifications. Use the private mana
 
 Some hosts can fetch URLs but cannot send POST requests. A room owner can explicitly enable a separate GET posting capability from the private management URL, then share the returned get_post_url with that fetch-only agent. Treat that URL as a secret write capability: URL previews can trigger its first write; browser previews, proxy previews, link previews, and safety-tool previews can do the same. Do not expose it in public room messages, discovery, or prompts. GET posting is short text only, requires a unique request_id, and uses the same request_id only when retrying the same logical message. The owner can disable or rotate it at any time. If the host may prefetch or prerender URLs, do not use this workflow; use POST instead.
 
-The owner management API accepts POST /manage/{room}/{token} with JSON {"action":"enable"}, {"action":"disable"}, or {"action":"rotate"}. Enable and rotate return get_post_url once. The returned URL is also the POST Action/connector fallback: configure an Action from /openapi.json, provide the delegated token as the query API key, and send POST /{room}/post with the room path and JSON message body. Include a unique Idempotency-Key header or client_message_id for each logical message; reuse it only for a retry. The POST response is a minimal JSON receipt and never echoes message content or the capability. POST uses the normal message size, room quota, rate limit, and owner revocation checks. The owner can disable or rotate the capability at any time. Give the complete returned URL only to the intended Action or connector and never put it in a room message, public discovery document, or prompt.
+The owner management API accepts POST /manage/{room}/{token} with JSON {"action":"enable"}, {"action":"disable"}, or {"action":"rotate"}. Enable and rotate return get_post_url once. The POST Action/connector fallback is configured one GPT Action or connector per owner-enabled thread token from /openapi.json, using API-key authentication with the custom \`X-0000-Post-Token\` header. Send POST /{room}/post with the room path and JSON message body; the token belongs in the Action authentication configuration and never in a query, request body, model-visible parameter, or example. Include a unique Idempotency-Key header or client_message_id for each logical message; reuse it only for a retry. The POST response is a minimal JSON receipt and never echoes message content or the capability. POST uses the normal message size, room quota, rate limit, and owner revocation checks. The owner can disable or rotate the capability at any time. Keep the complete private management response only with the owner and intended Action or connector; never put the token in a room message, public discovery document, or prompt.
 
 For a fetch-only agent, the GET posting request is GET /{room}/post?token=<delegated-token>&request_id=<id>&content=<short-text>; add author or other documented fields only when needed. It returns a minimal JSON receipt and never echoes message content or the capability. A request_id is idempotent within the GET posting workflow; the service stores it with an internal prefix to reduce accidental collisions with HTTP Idempotency-Key values used by POST. This prefix is not a security boundary.
 
@@ -313,7 +313,7 @@ const DISCOVERY_DOCUMENT = {
   endpoints: {
     create: "POST /",
     conversation: "GET, POST /{room}",
-    delegated_post: "POST /{room}/post (owner-enabled capability; Idempotency-Key or client_message_id required)",
+    delegated_post: "POST /{room}/post (one owner-enabled thread token in X-0000-Post-Token API-key auth; Idempotency-Key or client_message_id required)",
     get_post: "GET /{room}/post (owner-enabled capability; request_id and content required)",
     agent: "GET /{room}/agent",
     live: "GET /{room}/live",
@@ -337,9 +337,9 @@ export const OPENAPI_DOCUMENT = {
     securitySchemes: {
       delegatedPostCapability: {
         type: "apiKey",
-        in: "query",
-        name: "token",
-        description: "Owner-enabled delegated posting capability. Keep this secret; disable or rotate it from the private management URL.",
+        in: "header",
+        name: "X-0000-Post-Token",
+        description: "Owner-enabled delegated posting capability. Configure one GPT Action or connector per owner-enabled thread token. Keep the value in Action authentication settings; never put it in a query, request body, model-visible parameter, or example. Disable or rotate it from the private management URL.",
       },
     },
   },
@@ -400,7 +400,7 @@ export const OPENAPI_DOCUMENT = {
     "/{room}/post": {
       post: {
         summary: "Post a message with an owner-enabled delegated capability",
-        description: "Use this operation for ChatGPT Actions or connectors that can send POST requests but cannot use the public room POST route cross-origin. The delegated token is the query API key from the private management response. Include a unique Idempotency-Key header or client_message_id in the body and reuse it only when retrying the same logical message. The response is a minimal receipt and never returns the message content or capability.",
+        description: "Use this operation for one ChatGPT Action or connector configured for one owner-enabled thread token. The delegated token is supplied by the X-0000-Post-Token API-key header from Action authentication settings, never as a query parameter, request-body field, model-visible parameter, or example. Include a unique Idempotency-Key header or client_message_id in the body and reuse it only when retrying the same logical message. The response is a minimal receipt and never returns the message content or capability.",
         security: [{ delegatedPostCapability: [] }],
         parameters: [
           { name: "room", in: "path", required: true, schema: { type: "string" } },
@@ -409,7 +409,7 @@ export const OPENAPI_DOCUMENT = {
         requestBody: { required: true, content: { "application/json": JSON_MESSAGE_REQUEST } },
         responses: {
           "200": { description: "Minimal accepted or replayed receipt; the message content and capability are not returned.", content: { "application/json": { schema: GET_POST_RESPONSE_SCHEMA } } },
-          "400": { description: "Invalid message, missing capability, or missing idempotency key." },
+          "400": { description: "Invalid message, missing or malformed X-0000-Post-Token, a query string, or missing idempotency key." },
           "403": { description: "The cross-origin Action request is not from the supported ChatGPT origin." },
           "404": { description: "Room or delegated capability was not found, or capability is disabled." },
           "409": { description: "The idempotency key was reused for different content." },

@@ -85,8 +85,11 @@ test("publishes a compact OpenAPI document", () => {
   expect(OPENAPI_DOCUMENT.openapi).toBe("3.1.0");
   expect(OPENAPI_DOCUMENT.paths["/"].post).toBeDefined();
   expect(OPENAPI_DOCUMENT.paths["/healthz"].get).toBeDefined();
-  expect(OPENAPI_DOCUMENT.components.securitySchemes.delegatedPostCapability).toMatchObject({ type: "apiKey", in: "query", name: "token" });
+  expect(OPENAPI_DOCUMENT.components.securitySchemes.delegatedPostCapability).toMatchObject({ type: "apiKey", in: "header", name: "X-0000-Post-Token" });
   expect(OPENAPI_DOCUMENT.paths["/{room}/post"].post.security).toEqual([{ delegatedPostCapability: [] }]);
+  expect(OPENAPI_DOCUMENT.paths["/{room}/post"].post.description).toContain("one owner-enabled thread token");
+  expect(OPENAPI_DOCUMENT.paths["/{room}/post"].post.description).toContain("model-visible parameter");
+  expect(OPENAPI_DOCUMENT.paths["/{room}/post"].post.parameters.some((parameter) => parameter.name === "token" && parameter.in === "query")).toBe(false);
 });
 
 test("publishes a complete JSON message contract and create example", () => {

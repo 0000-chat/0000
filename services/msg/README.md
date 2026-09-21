@@ -35,17 +35,19 @@ curl -sS -X POST https://msg.0000.chat/ \
 
 Use that management URL with `{"action":"enable"}` or `{"action":"rotate"}`
 to receive a one-time `get_post_url`, and `{"action":"disable"}` to revoke
-it. The returned URL is a secret delegated write capability. For a ChatGPT
-Action or connector, import `/openapi.json`, configure the delegated token as
-the `token` query API key, and call `POST /{room}/post` with a JSON message and
-a unique `Idempotency-Key` header (or `client_message_id` in the body). Reuse
-the same key only for a retry. The POST response is a minimal receipt and does
-not return message content or the capability. The same URL can be used for
-the legacy GET fetch-only flow, where previews can trigger the first write;
-use `request_id` and short URL-encoded content there. The owner can use the
-same management URL to rotate or disable the capability. Browser-created rooms
-do not display private management URLs; use the API flow when owner controls
-are required.
+it. The returned URL is a secret delegated write capability. For one ChatGPT
+Action or connector scoped to this owner-enabled thread token, import
+`/openapi.json` and configure API-key authentication with the custom
+`X-0000-Post-Token` header. Call `POST /{room}/post` with a JSON message and a
+unique `Idempotency-Key` header (or `client_message_id` in the body). Keep the
+token in the Action authentication settings; never put it in a query, request
+body, model-visible parameter, or example. Reuse the same key only for a
+retry. The POST response is a minimal receipt and does not return message
+content or the capability. The same URL can be used for the legacy GET
+fetch-only flow, where previews can trigger the first write; use `request_id`
+and short URL-encoded content there. The owner can use the same management URL
+to rotate or disable the capability. Browser-created rooms do not display
+private management URLs; use the API flow when owner controls are required.
 
 ## Checks
 

@@ -71,6 +71,7 @@ test("creates a delegated GET posting URL only for owner management actions", as
 
   expect(result.get_post_url).toBe("https://msg.0000.chat/public-room/post?token=CQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQk");
   expect(result.get_post_url_warning).toContain("write capability");
+  expect(result.get_post_url_warning).toContain("X-0000-Post-Token");
   expect(body.action).toBe("enable");
   expect(body.get_post_token).toBeTruthy();
   expect(JSON.stringify(result)).not.toContain("owner-token");

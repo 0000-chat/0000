@@ -1204,10 +1204,11 @@ test("supports a ChatGPT Action POST through the owner-enabled capability", asyn
     accept: "application/json",
     "content-type": "application/json",
     "idempotency-key": "action-reply-1",
+    "x-0000-post-token": "delegated",
     origin: "https://chatgpt.com",
   };
 
-  const response = await worker.fetch(new Request("https://msg.0000.chat/example/post?token=delegated", {
+  const response = await worker.fetch(new Request("https://msg.0000.chat/example/post", {
     body: JSON.stringify({ author: "ChatGPT", content: "The Action reply" }),
     headers,
     method: "POST",
@@ -1217,11 +1218,34 @@ test("supports a ChatGPT Action POST through the owner-enabled capability", asyn
   expect(response.headers.get("access-control-allow-origin")).toBe("https://chatgpt.com");
   expect(await response.json()).toEqual({ accepted: true, protocol_version: 1, replayed: false, request_id: "action-reply-1", sequence: 2 });
   expect(received).toEqual({ body: { kind: "json", value: { author: "ChatGPT", content: "The Action reply" } }, requestId: "action-reply-1", room: "example", token: "delegated" });
-  expect(JSON.stringify(await (await worker.fetch(new Request("https://msg.0000.chat/example/post?token=delegated", {
+  expect(JSON.stringify(await (await worker.fetch(new Request("https://msg.0000.chat/example/post", {
     body: JSON.stringify({ content: "secret message" }),
     headers,
     method: "POST",
   }))).json())).not.toContain("delegated");
+});
+
+test("requires exactly one well-formed delegated POST header and rejects query auth", async () => {
+  let calls = 0;
+  const worker = createWorker({
+    create: async () => createdRoom,
+    getPost: async (input) => {
+      calls += 1;
+      return { accepted: true, protocol_version: 1, replayed: false, request_id: input.requestId, sequence: 2 };
+    },
+  });
+  const request = (headers: HeadersInit, url = "https://msg.0000.chat/example/post") => new Request(url, {
+    body: '{"content":"reply","client_message_id":"reply-1"}',
+    headers: { "content-type": "application/json", ...headers },
+    method: "POST",
+  });
+
+  expect((await worker.fetch(request({ "x-0000-post-token": "delegated" }))).status).toBe(200);
+  expect((await worker.fetch(request({}))).status).toBe(400);
+  expect((await worker.fetch(request({ "x-0000-post-token": "delegated" }, "https://msg.0000.chat/example/post?token=delegated"))).status).toBe(400);
+  expect((await worker.fetch(request({ "x-0000-post-token": "delegated, other" }))).status).toBe(400);
+  expect((await worker.fetch(request({ "x-0000-post-token": "not a token" }))).status).toBe(400);
+  expect(calls).toBe(1);
 });
 
 test("allows delegated POST preflight and rejects other cross-origin callers", async () => {
@@ -1236,7 +1260,7 @@ test("allows delegated POST preflight and rejects other cross-origin callers", a
 
   const preflight = await worker.fetch(new Request("https://msg.0000.chat/example/post", {
     headers: {
-      "access-control-request-headers": "content-type, idempotency-key",
+      "access-control-request-headers": "content-type, accept, idempotency-key, x-0000-post-token",
       "access-control-request-method": "POST",
       origin: "https://chatgpt.com",
     },
@@ -1245,11 +1269,11 @@ test("allows delegated POST preflight and rejects other cross-origin callers", a
   expect(preflight.status).toBe(204);
   expect(preflight.headers.get("access-control-allow-origin")).toBe("https://chatgpt.com");
   expect(preflight.headers.get("access-control-allow-methods")).toBe("POST");
-  expect(preflight.headers.get("access-control-allow-headers")).toContain("idempotency-key");
+  expect(preflight.headers.get("access-control-allow-headers")).toBe("content-type, accept, idempotency-key, x-0000-post-token");
 
-  const crossOrigin = await worker.fetch(new Request("https://msg.0000.chat/example/post?token=delegated", {
+  const crossOrigin = await worker.fetch(new Request("https://msg.0000.chat/example/post", {
     body: '{"content":"blocked"}',
-    headers: { "content-type": "application/json", "idempotency-key": "blocked", origin: "https://evil.example" },
+    headers: { "content-type": "application/json", "idempotency-key": "blocked", origin: "https://evil.example", "x-0000-post-token": "delegated" },
     method: "POST",
   }));
   expect(crossOrigin.status).toBe(403);
@@ -1267,18 +1291,18 @@ test("uses client_message_id when a delegated POST has no idempotency header", a
     },
   });
 
-  const response = await worker.fetch(new Request("https://msg.0000.chat/example/post?token=delegated", {
+  const response = await worker.fetch(new Request("https://msg.0000.chat/example/post", {
     body: '{"content":"retry-safe","client_message_id":"message-1"}',
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", "x-0000-post-token": "delegated" },
     method: "POST",
   }));
   expect(response.status).toBe(200);
   expect(receivedId).toBe("message-1");
   expect((await response.json()).replayed).toBe(true);
 
-  const missing = await worker.fetch(new Request("https://msg.0000.chat/example/post?token=delegated", {
+  const missing = await worker.fetch(new Request("https://msg.0000.chat/example/post", {
     body: '{"content":"not safe"}',
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", "x-0000-post-token": "delegated" },
     method: "POST",
   }));
   expect(missing.status).toBe(400);
@@ -1295,19 +1319,17 @@ test("applies the post limiter and request bounds to delegated POST", async () =
     },
   }, { rateLimits: { posts } });
 
-  const limited = await worker.fetch(new Request("https://msg.0000.chat/example/post?token=delegated", {
+  const limited = await worker.fetch(new Request("https://msg.0000.chat/example/post", {
     body: '{"content":"blocked","client_message_id":"blocked"}',
-    headers: { "content-type": "application/json", "cf-connecting-ip": "203.0.113.9" },
+    headers: { "content-type": "application/json", "cf-connecting-ip": "203.0.113.9", "x-0000-post-token": "delegated" },
     method: "POST",
   }));
   expect(limited.status).toBe(429);
   expect(posts.calls).toEqual(["203.0.113.9"]);
 
-  const oversizedToken = new URL("https://msg.0000.chat/example/post");
-  oversizedToken.searchParams.set("token", "x".repeat(513));
-  const oversized = await worker.fetch(new Request(oversizedToken, {
+  const oversized = await worker.fetch(new Request("https://msg.0000.chat/example/post", {
     body: JSON.stringify({ content: "too large for this URL", client_message_id: "large" }),
-    headers: { "content-type": "application/json", "idempotency-key": "large" },
+    headers: { "content-type": "application/json", "idempotency-key": "large", "x-0000-post-token": "x".repeat(513) },
     method: "POST",
   }));
   expect(oversized.status).toBe(413);

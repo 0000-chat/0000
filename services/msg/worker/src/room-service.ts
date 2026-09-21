@@ -166,7 +166,7 @@ function jsonRequest(path: string, value: unknown): Request {
   return new Request(`https://room${path}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(value) });
 }
 
-const GET_POST_URL_WARNING = "This URL is a delegated write capability. Use POST for ChatGPT Actions or connectors; GET URL previews can submit the first message. Treat it as a secret, and reuse Idempotency-Key or request_id only when retrying the same message.";
+const GET_POST_URL_WARNING = "This URL is a delegated GET write capability for one owner-enabled thread token; URL previews can submit the first message. For a ChatGPT Action or connector, configure X-0000-Post-Token API-key authentication and send POST without a token query. Keep the token out of POST request bodies, model-visible parameters, examples, and room content. Reuse Idempotency-Key or request_id only when retrying the same message.";
 
 async function responseJson(response: Response): Promise<Record<string, unknown>> {
   if (!response.ok) throw await responseError(response);

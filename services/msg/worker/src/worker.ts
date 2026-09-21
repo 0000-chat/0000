@@ -101,9 +101,11 @@ const MAX_GET_POST_TOKEN_CHARS = 512;
 const MAX_GET_POST_TOKEN_BYTES = 2 * 1024;
 const RATE_LIMIT_PERIOD_SECONDS = 60;
 const CHATGPT_ORIGIN = "https://chatgpt.com";
-const CHATGPT_PREFLIGHT_HEADERS = "content-type, accept, idempotency-key";
+const DELEGATED_POST_TOKEN_HEADER = "x-0000-post-token";
+const CHATGPT_CREATE_PREFLIGHT_HEADERS = "content-type, accept, idempotency-key";
+const CHATGPT_DELEGATED_POST_PREFLIGHT_HEADERS = `${CHATGPT_CREATE_PREFLIGHT_HEADERS}, ${DELEGATED_POST_TOKEN_HEADER}`;
 
-type ChatGptCorsMode = "create" | "delegated-post" | "preflight" | undefined;
+type ChatGptCorsMode = "create" | "delegated-post" | "preflight" | "delegated-post-preflight" | undefined;
 
 export function createWorker(service: RoomService, options: MsgWorkerOptions = {}): MsgWorker {
   return {
@@ -200,10 +202,12 @@ async function route(request: Request, service: RoomService, options: MsgWorkerO
     return notFound();
   }
   const corsMode = chatGptCorsMode(request, url);
-  if (corsMode === "preflight") {
+  if (corsMode === "preflight" || corsMode === "delegated-post-preflight") {
     return new Response(null, {
       headers: {
-        "access-control-allow-headers": CHATGPT_PREFLIGHT_HEADERS,
+        "access-control-allow-headers": corsMode === "delegated-post-preflight"
+          ? CHATGPT_DELEGATED_POST_PREFLIGHT_HEADERS
+          : CHATGPT_CREATE_PREFLIGHT_HEADERS,
         "access-control-allow-methods": "POST",
       },
       status: 204,
@@ -420,7 +424,7 @@ async function route(request: Request, service: RoomService, options: MsgWorkerO
     if (!isSameOrigin(request, url) && corsMode !== "delegated-post") {
       throw new ProtocolError(ERROR_CODES.forbidden, "Cross-origin state changes are not allowed.", 403);
     }
-    const token = parseDelegatedPostToken(url);
+    const token = parseDelegatedPostToken(request, url);
     const body = await parseRequestBody(request, { maxBytes: MAX_ROOM_REQUEST_BYTES });
     const requestId = delegatedPostRequestId(request, body);
     await enforceRateLimit(request, options.rateLimits?.posts);
@@ -568,15 +572,24 @@ function parseGetPostQuery(request: Request, url: URL): GetPostQuery {
   return { input, requestId, token };
 }
 
-function parseDelegatedPostToken(url: URL): string {
-  if (byteLength(url.toString()) > MAX_GET_POST_URL_BYTES) {
+function parseDelegatedPostToken(request: Request, url: URL): string {
+  if (byteLength(request.url) > MAX_GET_POST_URL_BYTES) {
     throw new ProtocolError(ERROR_CODES.bodyTooLarge, "The delegated posting URL is too large.", 413);
   }
-  const names = [...url.searchParams.keys()];
-  if (names.length !== 1 || names[0] !== "token") {
-    throw new ProtocolError(ERROR_CODES.invalidBody, "The delegated posting URL must contain only token.", 400);
+  if (url.search) {
+    throw new ProtocolError(ERROR_CODES.invalidBody, "The delegated POST URL must not contain a query.", 400);
   }
-  return boundedQueryValue(url.searchParams.get("token"), "token", MAX_GET_POST_TOKEN_CHARS, MAX_GET_POST_TOKEN_BYTES);
+  const values = request.headers.get(DELEGATED_POST_TOKEN_HEADER);
+  if (values === null || values === "") {
+    throw new ProtocolError(ERROR_CODES.invalidBody, `The ${DELEGATED_POST_TOKEN_HEADER} header is required.`, 400);
+  }
+  if (values !== values.trim() || values.includes(",") || !/^[A-Za-z0-9_-]+$/u.test(values)) {
+    throw new ProtocolError(ERROR_CODES.invalidBody, `The ${DELEGATED_POST_TOKEN_HEADER} header is malformed or duplicated.`, 400);
+  }
+  if (Array.from(values).length > MAX_GET_POST_TOKEN_CHARS || byteLength(values) > MAX_GET_POST_TOKEN_BYTES) {
+    throw new ProtocolError(ERROR_CODES.bodyTooLarge, `The ${DELEGATED_POST_TOKEN_HEADER} header is too large.`, 413);
+  }
+  return values;
 }
 
 function delegatedPostRequestId(request: Request, body: RequestBody): string {
@@ -758,17 +771,20 @@ function chatGptCorsMode(request: Request, url: URL): ChatGptCorsMode {
   if (request.method === "POST" && mediaType(request.headers.get("content-type")) === "application/json") return delegatedPost ? "delegated-post" : "create";
   if (request.method === "OPTIONS"
     && request.headers.get("access-control-request-method") === "POST"
-    && allowedChatGptPreflightHeaders(request.headers.get("access-control-request-headers"))) {
-    return "preflight";
+    && allowedChatGptPreflightHeaders(request.headers.get("access-control-request-headers"), delegatedPost)) {
+    return delegatedPost ? "delegated-post-preflight" : "preflight";
   }
   return undefined;
 }
 
-function allowedChatGptPreflightHeaders(value: string | null): boolean {
+function allowedChatGptPreflightHeaders(value: string | null, delegatedPost: boolean): boolean {
   if (value === null || value.trim() === "") return true;
   return value.split(",").every((header) => {
     const normalized = header.trim().toLowerCase();
-    return normalized === "content-type" || normalized === "accept" || normalized === "idempotency-key";
+    return normalized === "content-type"
+      || normalized === "accept"
+      || normalized === "idempotency-key"
+      || (delegatedPost && normalized === DELEGATED_POST_TOKEN_HEADER);
   });
 }
 
