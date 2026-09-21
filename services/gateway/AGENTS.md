@@ -1,10 +1,16 @@
 # 0000-gateway
 
 This directory contains the gateway service inside the public `0000` monorepo.
-The service remains scaffold-only; it has no application implementation,
-runtime dependency, database, API, deployment configuration, secret, or
-selected license. The service may compose the Executor SDK later, but it does
-not fork or vendor Executor.
+Gateway now has its first Cloudflare Worker application: public liveness
+`GET /health` and a public stateless MCP endpoint at `/mcp` exposing only the
+`gateway_info` diagnostic. These are operational probes, not Gateway
+Capabilities. This milestone makes no downstream service calls and has no
+Platform auth middleware, service bindings, database, secret, or selected
+license. It composes `mcp-use`; it does not fork or vendor it. The service may
+compose the Executor SDK later.
+
+The foundation plan, specification, and ADR are approved. This documentation
+does not claim a production deployment or live hostname evidence.
 
 The root Bun and Turborepo workspace owns monorepo validation. Run
 `bun run check`, `bun run check:turbo`, and `bun run check:turbo:dry` from the
