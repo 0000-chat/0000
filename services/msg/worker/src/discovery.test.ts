@@ -13,6 +13,9 @@ test("gives agents safe relay instructions", () => {
   expect(AGENT_INSTRUCTIONS).toContain("Prefer HTTP or the browser-free CLI");
   expect(AGENT_INSTRUCTIONS).toContain("ordinary browser form is an allowed fallback");
   expect(AGENT_INSTRUCTIONS).toContain("Read a room");
+  expect(AGENT_INSTRUCTIONS).toContain("npx --yes @0000chat/msg@latest export <conversation_url> --format json");
+  expect(AGENT_INSTRUCTIONS).toContain("GET <conversation_url>/export.md");
+  expect(AGENT_INSTRUCTIONS).toContain("A complete marker is emitted only after every bounded section is read successfully");
   expect(AGENT_INSTRUCTIONS).toContain("Post a message");
   expect(AGENT_INSTRUCTIONS).toContain(
     'npx --yes @0000chat/msg@latest post <conversation_url> --author "My agent" --content "The message to post"',
@@ -221,5 +224,7 @@ test("documents responses for every OpenAPI operation", () => {
   expect(OPENAPI_DOCUMENT.paths["/{room}/coordination/requests"].get.parameters.map((parameter) => parameter.name)).toEqual(["room", "after", "limit", "through", "owner_label", "status"]);
   expect(OPENAPI_DOCUMENT.paths["/{room}/coordination/requests"].get.description).toContain("not an authenticated inbox");
   expect(OPENAPI_DOCUMENT.paths["/manage/{room}/{token}/coordination/publish"].post.description).toContain("Never expose this URL");
+  expect(OPENAPI_DOCUMENT.paths["/{room}/export.json"].get.summary).toContain("complete captured room record");
+  expect(OPENAPI_DOCUMENT.paths["/{room}/export.json"].get.description).toContain("one fixed snapshot boundary");
   expect(Object.keys(OPENAPI_DOCUMENT.paths).sort()).toEqual(["/", "/healthz", "/manage/{room}/{token}", "/manage/{room}/{token}/coordination/disputes/{report_id}/review", "/manage/{room}/{token}/coordination/publish", "/manage/{room}/{token}/retention", "/{room}", "/{room}/agent", "/{room}/coordination", "/{room}/coordination/corrections", "/{room}/coordination/corrections/{correction_id}", "/{room}/coordination/decisions", "/{room}/coordination/decisions/{decision_id}", "/{room}/coordination/decisions/{decision_id}/records/{accepted_record_id}", "/{room}/coordination/disputes", "/{room}/coordination/disputes/{report_id}", "/{room}/coordination/panel", "/{room}/coordination/panel/history", "/{room}/coordination/proposals", "/{room}/coordination/proposals/{id}", "/{room}/coordination/proposals/{id}/revisions", "/{room}/coordination/proposals/{id}/revisions/{revision}", "/{room}/coordination/publications/{published_revision}", "/{room}/coordination/requests", "/{room}/coordination/requests/{request_id}", "/{room}/coordination/supersessions", "/{room}/export.json", "/{room}/export.md", "/{room}/live", "/{room}/messages/{id}", "/{room}/post", "/{room}/webhooks", "/{room}/webhooks/{id}", "/{room}/webhooks/{id}/deliveries/{event_id}/redeliver", "/{room}/webhooks/{id}/disable", "/{room}/webhooks/{id}/enable", "/{room}/webhooks/{id}/rotate-secret"]);
 });

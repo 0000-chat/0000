@@ -21,6 +21,22 @@ const MAX_WEBHOOKS_PER_ROOM = 5;
 const WEBHOOK_REQUEST_TIMEOUT_MS = 5_000;
 const WEBHOOK_DELIVERY_LEASE_MS = WEBHOOK_REQUEST_TIMEOUT_MS + 5_000;
 const WEBHOOK_HISTORY_LIMIT = 50;
+const EXPORT_PAGE_SIZE = 32;
+const EXPORT_VERSION = 1 as const;
+
+interface ExportSnapshot {
+  readonly capturedAt: number;
+  readonly messageThrough: number;
+  readonly coordinationThrough: number;
+  readonly publishedThrough: number;
+  readonly createdAt: number;
+  readonly expiresAt: number;
+}
+
+interface ExportContext {
+  readonly origin?: string;
+  readonly room?: string;
+}
 
 export interface ConversationRoomEnv {
   readonly MSG_PUBLIC_ORIGIN?: string;
@@ -437,7 +453,7 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
       if (request.method === "POST" && url.pathname === "/manage") return await this.managePost(request);
       if (request.method === "POST" && url.pathname === "/get-post") return await this.getPost(request);
       if (request.method === "GET" && url.pathname === "/live") return await this.live(url);
-      if (request.method === "GET" && (url.pathname === "/export.md" || url.pathname === "/export.json")) return await this.export(url.pathname === "/export.json");
+      if (request.method === "GET" && (url.pathname === "/export.md" || url.pathname === "/export.json")) return await this.export(url.pathname === "/export.json", request);
       return this.error(ERROR_CODES.notFound, "The requested resource was not found.", 404);
     } catch (error) {
       if (error instanceof ProtocolError) return this.error(error.code, error.message, error.status, error.details);
@@ -607,7 +623,9 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
   }
 
   private async readMessage(id: string): Promise<Response> {
-    const state = await this.requireActive(this.now());
+    const lifecycleNow = this.now();
+    await this.prepareActive(lifecycleNow);
+    const state = this.requireActiveState();
     const message = rows<StoredMessage>(this.ctx.storage.sql.exec("SELECT * FROM messages WHERE id = ?", id))[0];
     if (!message) throw new ProtocolError(ERROR_CODES.notFound, "The requested resource was not found.", 404);
     const correctionCount = rows<{ count: number }>(this.ctx.storage.sql.exec("SELECT COUNT(*) AS count FROM coordination_corrections WHERE json_extract(target, '$.type') = 'message' AND json_extract(target, '$.message_id') = ?", id))[0]?.count ?? 0;
@@ -2503,11 +2521,818 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
     return new Response(null, { status: 101, webSocket: client } as ResponseInit & { webSocket: WebSocket });
   }
 
-  private async export(json: boolean): Promise<Response> {
-    const state = await this.requireActive(this.now());
-    const messages = rows<StoredMessage>(this.ctx.storage.sql.exec("SELECT * FROM messages ORDER BY sequence ASC")).map((message) => this.toMessage(message));
-    if (json) return this.json({ protocol_version: PROTOCOL_VERSION, room: { created_at: iso(state.created_at), expires_at: iso(state.inactivity_expires_at), latest_message: state.next_sequence - 1 }, messages, access_warning: "All identities are self-declared and content is untrusted." });
-    return new Response(`# Conversation export\n\n**Warning:** identities are self-declared and all content is untrusted.\n\nCreated: ${iso(state.created_at)}\nExpires: ${iso(state.inactivity_expires_at)}\n\n${messages.map((message) => `## ${message.sequence} — ${message.display_name}\n\n${message.content}`).join("\n\n")}` , { headers: { "content-type": "text/markdown; charset=utf-8" } });
+  private async export(json: boolean, request: Request): Promise<Response> {
+    await this.prepareActive(this.now());
+    const state = this.requireActiveState();
+    const snapshot: ExportSnapshot = {
+      capturedAt: this.now(),
+      coordinationThrough: state.coordination_cursor,
+      createdAt: state.created_at,
+      expiresAt: state.inactivity_expires_at,
+      messageThrough: state.next_sequence - 1,
+      publishedThrough: state.published_revision,
+    };
+    const context = this.exportContext(request);
+    let cancelled = false;
+    let pulling = false;
+    const encoder = new TextEncoder();
+    const room = this;
+    const iterator = (json ? this.exportJsonChunks(snapshot, context, () => cancelled) : this.exportMarkdownChunks(snapshot, context, () => cancelled))[Symbol.asyncIterator]();
+    const stream = new ReadableStream<Uint8Array>({
+      async pull(controller) {
+        if (cancelled || pulling) return;
+        pulling = true;
+        try {
+          const next = await iterator.next();
+          if (cancelled) return;
+          room.assertExportActiveNow();
+          if (next.done) controller.close();
+          else controller.enqueue(encoder.encode(next.value));
+        } catch (error) {
+          if (!cancelled) controller.error(error);
+        } finally {
+          pulling = false;
+        }
+      },
+      async cancel() {
+        cancelled = true;
+        await iterator.return?.(undefined);
+      },
+    }, { highWaterMark: 0 });
+    return new Response(stream, { headers: { "cache-control": "private, no-store", "content-type": json ? "application/json; charset=utf-8" : "text/markdown; charset=utf-8" } });
+  }
+
+  private exportContext(request: Request): ExportContext {
+    const origin = request.headers.get("x-msg-export-origin") ?? this.config.MSG_PUBLIC_ORIGIN;
+    const roomHeader = request.headers.get("x-msg-export-room");
+    let room = roomHeader ?? (this.ctx as unknown as { id?: { name?: string } }).id?.name;
+    if (roomHeader !== null) {
+      try { room = decodeURIComponent(roomHeader); } catch { return {}; }
+    }
+    if (!origin || !room || room.includes("/")) return {};
+    try {
+      const url = new URL(origin);
+      if (url.protocol !== "https:" || url.username || url.password || url.search || url.hash) return {};
+      return { origin: url.origin, room };
+    } catch {
+      return {};
+    }
+  }
+
+  private exportUrl(context: ExportContext, suffix: string): string | undefined {
+    if (!context.origin || !context.room) return undefined;
+    return `${context.origin}/${encodeURIComponent(context.room)}${suffix}`;
+  }
+
+  private async ensureExportActive(): Promise<void> {
+    await this.requireActive(this.now());
+    this.assertExportActiveNow();
+  }
+
+  private assertExportActiveNow(): void {
+    const state = this.requireActiveState();
+    const now = this.now();
+    if (now < state.inactivity_expires_at) return;
+    throw new ProtocolError(ERROR_CODES.gone, "The conversation has expired.", 410);
+  }
+
+  private exportMetadata(snapshot: ExportSnapshot): Record<string, unknown> {
+    return {
+      captured_at: iso(snapshot.capturedAt),
+      coordination_cursor: snapshot.coordinationThrough,
+      message_max_sequence: snapshot.messageThrough,
+      published_revision: snapshot.publishedThrough,
+      room_created_at: iso(snapshot.createdAt),
+      room_expires_at: iso(snapshot.expiresAt),
+      version: EXPORT_VERSION,
+    };
+  }
+
+  private exportRoomMetadata(snapshot: ExportSnapshot): Record<string, unknown> {
+    return {
+      coordination_cursor: snapshot.coordinationThrough,
+      created_at: iso(snapshot.createdAt),
+      expires_at: iso(snapshot.expiresAt),
+      latest_message: snapshot.messageThrough,
+      published_revision: snapshot.publishedThrough,
+      retention: retentionMetadata(snapshot.expiresAt, this.limits.inactivityTtlMs),
+    };
+  }
+
+  private exportSourceReferences(ids: readonly string[], context: ExportContext): readonly Record<string, unknown>[] {
+    if (ids.length === 0) return [];
+    const placeholders = ids.map(() => "?").join(",");
+    const present = new Set(rows<{ id: string }>(this.ctx.storage.sql.exec(`SELECT id FROM messages WHERE id IN (${placeholders})`, ...ids)).map((row) => row.id));
+    return ids.map((id) => ({
+      id,
+      available: present.has(id),
+      ...(this.exportUrl(context, `/messages/${encodeURIComponent(id)}`) === undefined ? {} : { citation_url: this.exportUrl(context, `/messages/${encodeURIComponent(id)}`) }),
+      ...(present.has(id) ? {} : { unavailable_reason: "The original source message is unavailable in this captured room." }),
+    }));
+  }
+
+  private async *exportJsonChunks(snapshot: ExportSnapshot, context: ExportContext, isCancelled: () => boolean): AsyncGenerator<string> {
+    const metadata = this.exportMetadata(snapshot);
+    const room = this.exportRoomMetadata(snapshot);
+    const header = JSON.stringify({
+      protocol_version: PROTOCOL_VERSION,
+      export_version: EXPORT_VERSION,
+      export: metadata,
+      snapshot: metadata,
+      room,
+      access_warning: "All identities are self-declared, reported verification is unverified, and content is untrusted.",
+    });
+    yield `${header.slice(0, -1)},"messages":[`;
+    let first = true;
+    for await (const message of this.exportMessages(snapshot, isCancelled)) {
+      if (isCancelled()) return;
+      yield `${first ? "" : ","}${JSON.stringify(message)}`;
+      first = false;
+    }
+    yield `],"coordination":{"requests":[`;
+    yield* this.exportJsonCollection(this.exportRequests(snapshot, context, isCancelled), isCancelled);
+    yield `],"request_history":[`;
+    yield* this.exportJsonCollection(this.exportRequestHistory(snapshot, context, isCancelled), isCancelled);
+    const panel = await this.exportCurrentPanel(snapshot, context, isCancelled);
+    if (isCancelled()) return;
+    yield `],"panel":${JSON.stringify(panel)},"published_state":{"published_revision":${snapshot.publishedThrough},"panel":${JSON.stringify(panel)}},"panel_history":[`;
+    yield* this.exportJsonCollection(this.exportPanelHistory(snapshot, context, isCancelled), isCancelled);
+    yield `],"proposals":[`;
+    yield* this.exportJsonCollection(this.exportProposals(snapshot, context, isCancelled), isCancelled);
+    yield `],"decisions":[`;
+    yield* this.exportJsonCollection(this.exportDecisions(snapshot, context, isCancelled), isCancelled);
+    yield `],"decision_history":[`;
+    yield* this.exportJsonCollection(this.exportDecisionHistory(snapshot, context, isCancelled), isCancelled);
+    yield `],"positions":[`;
+    yield* this.exportJsonCollection(this.exportPositions(snapshot, context, isCancelled), isCancelled);
+    yield `],"accepted_records":[`;
+    yield* this.exportJsonCollection(this.exportAcceptedRecords(snapshot, context, isCancelled), isCancelled);
+    yield `],"approval_evidence":[`;
+    yield* this.exportJsonCollection(this.exportApprovalEvidence(snapshot, context, isCancelled), isCancelled);
+    yield `],"publications":[`;
+    yield* this.exportJsonCollection(this.exportPublications(snapshot, context, isCancelled), isCancelled);
+    yield `],"corrections":[`;
+    yield* this.exportJsonCollection(this.exportCorrections(snapshot, context, isCancelled), isCancelled);
+    yield `],"disputes":[`;
+    yield* this.exportJsonCollection(this.exportDisputes(snapshot, context, isCancelled), isCancelled);
+    yield `],"dispute_reviews":[`;
+    yield* this.exportJsonCollection(this.exportDisputeReviews(snapshot, context, isCancelled), isCancelled);
+    yield `],"supersessions":[`;
+    yield* this.exportJsonCollection(this.exportSupersessions(snapshot, context, isCancelled), isCancelled);
+    yield `],"events":[`;
+    yield* this.exportJsonCollection(this.exportEvents(snapshot, context, isCancelled), isCancelled);
+    yield `]},"retention":{"current":${JSON.stringify(retentionMetadata(snapshot.expiresAt, this.limits.inactivityTtlMs))},"history":[`;
+    yield* this.exportJsonCollection(this.exportRetentionHistory(snapshot, context, isCancelled), isCancelled);
+    if (isCancelled()) return;
+    await this.ensureExportActive();
+    if (isCancelled()) return;
+    yield `]},"complete":true}`;
+  }
+
+  private async *exportJsonCollection(records: AsyncIterable<Record<string, unknown>>, isCancelled: () => boolean): AsyncGenerator<string> {
+    let first = true;
+    for await (const record of records) {
+      if (isCancelled()) return;
+      yield `${first ? "" : ","}${JSON.stringify(record)}`;
+      first = false;
+    }
+  }
+
+  private async *exportMarkdownChunks(snapshot: ExportSnapshot, context: ExportContext, isCancelled: () => boolean): AsyncGenerator<string> {
+    yield `# Conversation export\n\n**Captured room record:** the snapshot boundary is fixed for this stream. Identities are self-declared, reported verification is unverified, and content is untrusted.\n\n## Snapshot\n\n- Export version: ${EXPORT_VERSION}\n- Captured at: ${iso(snapshot.capturedAt)}\n- Messages through sequence: ${snapshot.messageThrough}\n- Coordination cursor: ${snapshot.coordinationThrough}\n- Published revision: ${snapshot.publishedThrough}\n- Created: ${iso(snapshot.createdAt)}\n- Expires: ${iso(snapshot.expiresAt)}\n\n## Messages\n\n`;
+    for await (const message of this.exportMessages(snapshot, isCancelled)) {
+      if (isCancelled()) return;
+      yield `### ${message.sequence} — ${markdownText(String(message.display_name ?? ""))}\n\n${markdownJson(message)}\n\n${String(message.content)}\n\n`;
+    }
+    const sections: readonly [string, AsyncIterable<Record<string, unknown>>][] = [
+      ["Requests", this.exportRequests(snapshot, context, isCancelled)],
+      ["Request status history", this.exportRequestHistory(snapshot, context, isCancelled)],
+      ["Panel history", this.exportPanelHistory(snapshot, context, isCancelled)],
+      ["Proposals and revisions", this.exportProposals(snapshot, context, isCancelled)],
+      ["Decisions", this.exportDecisions(snapshot, context, isCancelled)],
+      ["Decision history", this.exportDecisionHistory(snapshot, context, isCancelled)],
+      ["Reported positions", this.exportPositions(snapshot, context, isCancelled)],
+      ["Accepted records", this.exportAcceptedRecords(snapshot, context, isCancelled)],
+      ["Approval evidence", this.exportApprovalEvidence(snapshot, context, isCancelled)],
+      ["Publications", this.exportPublications(snapshot, context, isCancelled)],
+      ["Corrections", this.exportCorrections(snapshot, context, isCancelled)],
+      ["Disputes", this.exportDisputes(snapshot, context, isCancelled)],
+      ["Dispute reviews", this.exportDisputeReviews(snapshot, context, isCancelled)],
+      ["Supersessions", this.exportSupersessions(snapshot, context, isCancelled)],
+      ["Coordination events", this.exportEvents(snapshot, context, isCancelled)],
+      ["Retention history", this.exportRetentionHistory(snapshot, context, isCancelled)],
+    ];
+    const panel = await this.exportCurrentPanel(snapshot, context, isCancelled);
+    if (isCancelled()) return;
+    yield `## Published state\n\n${markdownJson({ published_revision: snapshot.publishedThrough, panel })}\n\n`;
+    for (const [title, records] of sections) {
+      if (isCancelled()) return;
+      yield `## ${title}\n\n`;
+      let count = 0;
+      for await (const record of records) {
+        if (isCancelled()) return;
+        count += 1;
+        yield `${markdownJson(record)}\n\n`;
+      }
+      if (count === 0) yield "_None._\n\n";
+    }
+    await this.ensureExportActive();
+    if (isCancelled()) return;
+    yield `## Retention\n\n${markdownJson({ current: retentionMetadata(snapshot.expiresAt, this.limits.inactivityTtlMs) })}\n\nExport complete: true\n`;
+  }
+
+  private async *exportMessages(snapshot: ExportSnapshot, isCancelled: () => boolean): AsyncGenerator<Record<string, unknown>> {
+    let after = 0;
+    while (after < snapshot.messageThrough) {
+      if (isCancelled()) return;
+      await this.ensureExportActive();
+      if (isCancelled()) return;
+      const page = rows<StoredMessage>(this.ctx.storage.sql.exec(
+        "SELECT * FROM messages WHERE sequence > ? AND sequence <= ? ORDER BY sequence ASC LIMIT ?",
+        after, snapshot.messageThrough, EXPORT_PAGE_SIZE + 1,
+      ));
+      if (page.length === 0) return;
+      const delivered = page.slice(0, EXPORT_PAGE_SIZE);
+      for (const message of delivered) {
+        if (isCancelled()) return;
+        yield this.toMessage(message) as Record<string, unknown>;
+        after = message.sequence;
+      }
+      if (page.length <= EXPORT_PAGE_SIZE) return;
+    }
+  }
+
+  private async *exportRequests(snapshot: ExportSnapshot, context: ExportContext, isCancelled: () => boolean): AsyncGenerator<Record<string, unknown>> {
+    let after = 0;
+    while (true) {
+      if (isCancelled()) return;
+      await this.ensureExportActive();
+      const page = rows<StoredCoordinationEvent>(this.ctx.storage.sql.exec(
+        "SELECT e.* FROM coordination_events AS e JOIN (SELECT request_id, MAX(resulting_revision) AS revision FROM coordination_events WHERE operation = 'request.published' AND request_id IS NOT NULL AND cursor <= ? GROUP BY request_id) AS latest ON latest.request_id = e.request_id AND latest.revision = e.resulting_revision WHERE e.operation = 'request.published' AND e.cursor > ? AND e.cursor <= ? ORDER BY e.cursor ASC, e.request_id ASC LIMIT ?",
+        snapshot.coordinationThrough, after, snapshot.coordinationThrough, EXPORT_PAGE_SIZE + 1,
+      ));
+      if (page.length === 0) return;
+      const delivered = page.slice(0, EXPORT_PAGE_SIZE);
+      for (const event of delivered) {
+        if (isCancelled()) return;
+        yield this.exportRequestFromEvent(event, context, snapshot.coordinationThrough);
+        after = event.cursor;
+      }
+      if (page.length <= EXPORT_PAGE_SIZE) return;
+    }
+  }
+
+  private async *exportRequestHistory(snapshot: ExportSnapshot, context: ExportContext, isCancelled: () => boolean): AsyncGenerator<Record<string, unknown>> {
+    yield* this.exportEventCollection(snapshot, context, isCancelled, "operation = 'request.published'");
+  }
+
+  private async exportCurrentPanel(snapshot: ExportSnapshot, context: ExportContext, isCancelled: () => boolean): Promise<Record<string, unknown> | null> {
+    if (isCancelled()) return null;
+    await this.ensureExportActive();
+    const event = rows<StoredCoordinationEvent>(this.ctx.storage.sql.exec(
+      "SELECT * FROM coordination_events WHERE operation = 'panel.published' AND cursor <= ? ORDER BY cursor DESC LIMIT 1",
+      snapshot.coordinationThrough,
+    ))[0];
+    return event === undefined ? null : this.exportPanelFromEvent(event, context);
+  }
+
+  private async *exportPanelHistory(snapshot: ExportSnapshot, context: ExportContext, isCancelled: () => boolean): AsyncGenerator<Record<string, unknown>> {
+    yield* this.exportEventCollection(snapshot, context, isCancelled, "operation = 'panel.published'");
+  }
+
+  private async *exportProposals(snapshot: ExportSnapshot, context: ExportContext, isCancelled: () => boolean): AsyncGenerator<Record<string, unknown>> {
+    let after = 0;
+    let afterId = "";
+    let afterRevision = 0;
+    while (true) {
+      if (isCancelled()) return;
+      await this.ensureExportActive();
+      const page = rows<StoredCoordinationProposal & { event_cursor: number }>(this.ctx.storage.sql.exec(
+        "SELECT p.*, e.cursor AS event_cursor FROM coordination_proposals AS p JOIN coordination_events AS e ON e.proposal_id = p.proposal_id AND e.proposal_revision = p.revision AND e.operation = 'proposal.created' WHERE e.cursor <= ? AND (e.cursor > ? OR (e.cursor = ? AND (p.proposal_id > ? OR (p.proposal_id = ? AND p.revision > ?)))) ORDER BY e.cursor ASC, p.proposal_id ASC, p.revision ASC LIMIT ?",
+        snapshot.coordinationThrough, after, after, afterId, afterId, afterRevision, EXPORT_PAGE_SIZE + 1,
+      ));
+      if (page.length === 0) return;
+      const delivered = page.slice(0, EXPORT_PAGE_SIZE);
+      for (const proposal of delivered) {
+        if (isCancelled()) return;
+        yield this.exportProposal(proposal, context, snapshot.coordinationThrough);
+        after = proposal.event_cursor;
+        afterId = proposal.proposal_id;
+        afterRevision = proposal.revision;
+      }
+      if (page.length <= EXPORT_PAGE_SIZE) return;
+    }
+  }
+
+  private async *exportDecisions(snapshot: ExportSnapshot, context: ExportContext, isCancelled: () => boolean): AsyncGenerator<Record<string, unknown>> {
+    let after = 0;
+    while (true) {
+      if (isCancelled()) return;
+      await this.ensureExportActive();
+      const page = rows<StoredCoordinationEvent>(this.ctx.storage.sql.exec(
+        "SELECT e.* FROM coordination_events AS e JOIN (SELECT json_extract(body, '$.decision_id') AS decision_id, MAX(cursor) AS cursor FROM coordination_events WHERE operation IN ('decision.recommended', 'decision.accepted') AND cursor <= ? GROUP BY json_extract(body, '$.decision_id')) AS latest ON latest.cursor = e.cursor WHERE e.cursor > ? AND e.cursor <= ? ORDER BY e.cursor ASC LIMIT ?",
+        snapshot.coordinationThrough, after, snapshot.coordinationThrough, EXPORT_PAGE_SIZE + 1,
+      ));
+      if (page.length === 0) return;
+      const delivered = page.slice(0, EXPORT_PAGE_SIZE);
+      for (const event of delivered) {
+        if (isCancelled()) return;
+        yield this.exportDecisionFromEvent(event, context, snapshot.coordinationThrough);
+        after = event.cursor;
+      }
+      if (page.length <= EXPORT_PAGE_SIZE) return;
+    }
+  }
+
+  private async *exportDecisionHistory(snapshot: ExportSnapshot, context: ExportContext, isCancelled: () => boolean): AsyncGenerator<Record<string, unknown>> {
+    yield* this.exportEventCollection(snapshot, context, isCancelled, "operation IN ('decision.recommended', 'decision.accepted', 'decision.position.published')");
+  }
+
+  private async *exportPositions(snapshot: ExportSnapshot, context: ExportContext, isCancelled: () => boolean): AsyncGenerator<Record<string, unknown>> {
+    let after = 0;
+    let afterId = "";
+    while (true) {
+      if (isCancelled()) return;
+      await this.ensureExportActive();
+      const page = rows<StoredCoordinationDecisionPosition>(this.ctx.storage.sql.exec(
+        "SELECT * FROM coordination_decision_positions WHERE published_cursor <= ? AND (published_cursor > ? OR (published_cursor = ? AND position_id > ?)) ORDER BY published_cursor ASC, position_id ASC LIMIT ?",
+        snapshot.coordinationThrough, after, after, afterId, EXPORT_PAGE_SIZE + 1,
+      ));
+      if (page.length === 0) return;
+      const delivered = page.slice(0, EXPORT_PAGE_SIZE);
+      for (const position of delivered) {
+        if (isCancelled()) return;
+        yield this.exportPosition(position, context);
+        after = position.published_cursor;
+        afterId = position.position_id;
+      }
+      if (page.length <= EXPORT_PAGE_SIZE) return;
+    }
+  }
+
+  private async *exportAcceptedRecords(snapshot: ExportSnapshot, context: ExportContext, isCancelled: () => boolean): AsyncGenerator<Record<string, unknown>> {
+    let after = 0;
+    let afterId = "";
+    while (true) {
+      if (isCancelled()) return;
+      await this.ensureExportActive();
+      const page = rows<StoredCoordinationAcceptedRecord>(this.ctx.storage.sql.exec(
+        "SELECT * FROM coordination_decision_accepted_records WHERE publication_cursor <= ? AND (publication_cursor > ? OR (publication_cursor = ? AND accepted_record_id > ?)) ORDER BY publication_cursor ASC, accepted_record_id ASC LIMIT ?",
+        snapshot.coordinationThrough, after, after, afterId, EXPORT_PAGE_SIZE + 1,
+      ));
+      if (page.length === 0) return;
+      const delivered = page.slice(0, EXPORT_PAGE_SIZE);
+      for (const record of delivered) {
+        if (isCancelled()) return;
+        yield this.exportAcceptedRecord(record, context);
+        after = record.publication_cursor;
+        afterId = record.accepted_record_id;
+      }
+      if (page.length <= EXPORT_PAGE_SIZE) return;
+    }
+  }
+
+  private async *exportApprovalEvidence(snapshot: ExportSnapshot, context: ExportContext, isCancelled: () => boolean): AsyncGenerator<Record<string, unknown>> {
+    let after = "";
+    while (true) {
+      if (isCancelled()) return;
+      await this.ensureExportActive();
+      const page = rows<StoredCoordinationApprovalEvidence>(this.ctx.storage.sql.exec(
+        "SELECT a.* FROM coordination_decision_approval_evidence AS a JOIN coordination_decision_accepted_records AS r ON r.accepted_record_id = a.accepted_record_id WHERE r.publication_cursor <= ? AND a.approval_record_id > ? ORDER BY a.approval_record_id ASC LIMIT ?",
+        snapshot.coordinationThrough, after, EXPORT_PAGE_SIZE + 1,
+      ));
+      if (page.length === 0) return;
+      const delivered = page.slice(0, EXPORT_PAGE_SIZE);
+      for (const approval of delivered) {
+        if (isCancelled()) return;
+        yield this.exportApproval(approval, context);
+        after = approval.approval_record_id;
+      }
+      if (page.length <= EXPORT_PAGE_SIZE) return;
+    }
+  }
+
+  private async *exportPublications(snapshot: ExportSnapshot, context: ExportContext, isCancelled: () => boolean): AsyncGenerator<Record<string, unknown>> {
+    yield* this.exportEventCollection(snapshot, context, isCancelled, "operation IN ('request.published', 'panel.published', 'decision.recommended', 'decision.accepted', 'decision.position.published', 'correction.published', 'supersession.published', 'dispute.reviewed')");
+  }
+
+  private async *exportCorrections(snapshot: ExportSnapshot, context: ExportContext, isCancelled: () => boolean): AsyncGenerator<Record<string, unknown>> {
+    let after = 0;
+    let afterId = "";
+    while (true) {
+      if (isCancelled()) return;
+      await this.ensureExportActive();
+      const page = rows<StoredCoordinationCorrection>(this.ctx.storage.sql.exec(
+        "SELECT * FROM coordination_corrections WHERE publication_cursor <= ? AND (publication_cursor > ? OR (publication_cursor = ? AND correction_id > ?)) ORDER BY publication_cursor ASC, correction_id ASC LIMIT ?",
+        snapshot.coordinationThrough, after, after, afterId, EXPORT_PAGE_SIZE + 1,
+      ));
+      if (page.length === 0) return;
+      const delivered = page.slice(0, EXPORT_PAGE_SIZE);
+      for (const correction of delivered) {
+        if (isCancelled()) return;
+        yield this.exportCorrection(correction, context);
+        after = correction.publication_cursor;
+        afterId = correction.correction_id;
+      }
+      if (page.length <= EXPORT_PAGE_SIZE) return;
+    }
+  }
+
+  private async *exportDisputes(snapshot: ExportSnapshot, context: ExportContext, isCancelled: () => boolean): AsyncGenerator<Record<string, unknown>> {
+    let after = 0;
+    let afterId = "";
+    while (true) {
+      if (isCancelled()) return;
+      await this.ensureExportActive();
+      const page = rows<StoredCoordinationDispute>(this.ctx.storage.sql.exec(
+        "SELECT * FROM coordination_disputes WHERE cursor <= ? AND (cursor > ? OR (cursor = ? AND report_id > ?)) ORDER BY cursor ASC, report_id ASC LIMIT ?",
+        snapshot.coordinationThrough, after, after, afterId, EXPORT_PAGE_SIZE + 1,
+      ));
+      if (page.length === 0) return;
+      const delivered = page.slice(0, EXPORT_PAGE_SIZE);
+      for (const dispute of delivered) {
+        if (isCancelled()) return;
+        yield this.exportDispute(dispute, context);
+        after = dispute.cursor;
+        afterId = dispute.report_id;
+      }
+      if (page.length <= EXPORT_PAGE_SIZE) return;
+    }
+  }
+
+  private async *exportDisputeReviews(snapshot: ExportSnapshot, context: ExportContext, isCancelled: () => boolean): AsyncGenerator<Record<string, unknown>> {
+    let after = 0;
+    let afterId = "";
+    while (true) {
+      if (isCancelled()) return;
+      await this.ensureExportActive();
+      const page = rows<StoredCoordinationDisputeReview>(this.ctx.storage.sql.exec(
+        "SELECT * FROM coordination_dispute_reviews WHERE cursor <= ? AND (cursor > ? OR (cursor = ? AND review_id > ?)) ORDER BY cursor ASC, review_id ASC LIMIT ?",
+        snapshot.coordinationThrough, after, after, afterId, EXPORT_PAGE_SIZE + 1,
+      ));
+      if (page.length === 0) return;
+      const delivered = page.slice(0, EXPORT_PAGE_SIZE);
+      for (const review of delivered) {
+        if (isCancelled()) return;
+        yield this.exportDisputeReview(review, context);
+        after = review.cursor;
+        afterId = review.review_id;
+      }
+      if (page.length <= EXPORT_PAGE_SIZE) return;
+    }
+  }
+
+  private async *exportSupersessions(snapshot: ExportSnapshot, context: ExportContext, isCancelled: () => boolean): AsyncGenerator<Record<string, unknown>> {
+    let after = 0;
+    let afterId = "";
+    while (true) {
+      if (isCancelled()) return;
+      await this.ensureExportActive();
+      const page = rows<StoredCoordinationSupersession>(this.ctx.storage.sql.exec(
+        "SELECT * FROM coordination_supersessions WHERE publication_cursor <= ? AND (publication_cursor > ? OR (publication_cursor = ? AND supersession_id > ?)) ORDER BY publication_cursor ASC, supersession_id ASC LIMIT ?",
+        snapshot.coordinationThrough, after, after, afterId, EXPORT_PAGE_SIZE + 1,
+      ));
+      if (page.length === 0) return;
+      const delivered = page.slice(0, EXPORT_PAGE_SIZE);
+      for (const supersession of delivered) {
+        if (isCancelled()) return;
+        yield this.exportSupersession(supersession, context);
+        after = supersession.publication_cursor;
+        afterId = supersession.supersession_id;
+      }
+      if (page.length <= EXPORT_PAGE_SIZE) return;
+    }
+  }
+
+  private async *exportEvents(snapshot: ExportSnapshot, context: ExportContext, isCancelled: () => boolean): AsyncGenerator<Record<string, unknown>> {
+    yield* this.exportEventCollection(snapshot, context, isCancelled, "1 = 1");
+  }
+
+  private async *exportRetentionHistory(snapshot: ExportSnapshot, context: ExportContext, isCancelled: () => boolean): AsyncGenerator<Record<string, unknown>> {
+    yield* this.exportEventCollection(snapshot, context, isCancelled, "operation = 'retention.extended'");
+  }
+
+  private async *exportEventCollection(snapshot: ExportSnapshot, context: ExportContext, isCancelled: () => boolean, predicate: string): AsyncGenerator<Record<string, unknown>> {
+    let after = 0;
+    while (true) {
+      if (isCancelled()) return;
+      await this.ensureExportActive();
+      const page = rows<StoredCoordinationEvent>(this.ctx.storage.sql.exec(
+        `SELECT * FROM coordination_events WHERE ${predicate} AND cursor > ? AND cursor <= ? ORDER BY cursor ASC LIMIT ?`,
+        after, snapshot.coordinationThrough, EXPORT_PAGE_SIZE + 1,
+      ));
+      if (page.length === 0) return;
+      const delivered = page.slice(0, EXPORT_PAGE_SIZE);
+      for (const event of delivered) {
+        if (isCancelled()) return;
+        yield this.exportEvent(event, context);
+        after = event.cursor;
+      }
+      if (page.length <= EXPORT_PAGE_SIZE) return;
+    }
+  }
+
+  private exportRequestFromEvent(event: StoredCoordinationEvent, context: ExportContext, through: number): Record<string, unknown> {
+    const value = parseExportRecord(event.body);
+    const original = parseExportRecord(value.original ?? value);
+    const status = exportStatus(value.status);
+    const sourceIds = parseExportStringArray(event.source_message_ids);
+    const requestId = event.request_id ?? "";
+    const progress = value.progress === undefined ? undefined : exportProgress(value.progress, context);
+    return {
+      body: exportRequestBody(original),
+      blockers: exportStringArray(value.blockers),
+      created_at: iso(this.requestCreationTime(requestId, event.cursor, event.created_at)),
+      detail_url: this.exportUrl(context, `/coordination/requests/${encodeURIComponent(requestId)}`),
+      evidence: exportEvidence(value.evidence),
+      published_revision: event.resulting_revision,
+      request_id: requestId,
+      status,
+      updated_at: iso(event.created_at),
+      ...(progress === undefined ? {} : { progress }),
+      ...(typeof value.unverified_explanation === "string" ? { unverified_explanation: value.unverified_explanation } : {}),
+      source_message_ids: sourceIds,
+      source_messages: this.exportSourceReferences(sourceIds, context),
+      correction_count: this.exportCorrectionCount(event.resulting_revision, through),
+    };
+  }
+
+  private exportCorrectionCount(publishedRevision: number | null, through: number): number {
+    if (publishedRevision === null) return 0;
+    return rows<{ count: number }>(this.ctx.storage.sql.exec(
+      "SELECT COUNT(*) AS count FROM coordination_corrections WHERE publication_revision <= ? AND publication_cursor <= ? AND json_extract(target, '$.type') = 'publication' AND json_extract(target, '$.published_revision') = ?",
+      through, through, publishedRevision,
+    ))[0]?.count ?? 0;
+  }
+
+  private requestCreationTime(requestId: string, cursor: number, fallback: number): number {
+    const creation = rows<{ created_at: number }>(this.ctx.storage.sql.exec(
+      "SELECT created_at FROM coordination_events WHERE operation = 'request.published' AND request_id = ? AND kind = ? AND cursor <= ? ORDER BY resulting_revision ASC, cursor ASC LIMIT 1",
+      requestId, COORDINATION_KIND, cursor,
+    ))[0];
+    return creation?.created_at ?? fallback;
+  }
+
+  private exportPanelFromEvent(event: StoredCoordinationEvent, context: ExportContext): Record<string, unknown> {
+    const value = exportPanelBody(parseExportRecord(event.body));
+    const sourceIds = parseExportStringArray(event.source_message_ids);
+    return {
+      ...value,
+      authority_class: event.authority_class,
+      owner_label: event.actor_label,
+      proposal_id: event.proposal_id,
+      proposal_revision: event.proposal_revision,
+      published_at: iso(event.created_at),
+      published_revision: event.resulting_revision,
+      source_message_ids: sourceIds,
+      source_messages: this.exportSourceReferences(sourceIds, context),
+      detail_url: event.resulting_revision === null ? undefined : this.exportUrl(context, `/coordination/publications/${event.resulting_revision}`),
+    };
+  }
+
+  private exportProposal(proposal: StoredCoordinationProposal & { event_cursor: number }, context: ExportContext, through: number): Record<string, unknown> {
+    const sourceIds = parseExportStringArray(proposal.source_message_ids);
+    const published = rows<{ proposal_revision: number }>(this.ctx.storage.sql.exec(
+      "SELECT proposal_revision FROM coordination_events WHERE proposal_id = ? AND proposal_revision = ? AND resulting_revision IS NOT NULL AND cursor <= ? LIMIT 1",
+      proposal.proposal_id, proposal.revision, through,
+    ))[0] !== undefined;
+    const newer = rows<{ revision: number }>(this.ctx.storage.sql.exec(
+      "SELECT p.revision FROM coordination_proposals AS p JOIN coordination_events AS e ON e.proposal_id = p.proposal_id AND e.proposal_revision = p.revision AND e.operation = 'proposal.created' WHERE p.proposal_id = ? AND p.revision > ? AND e.cursor <= ? LIMIT 1",
+      proposal.proposal_id, proposal.revision, through,
+    ))[0] !== undefined;
+    return {
+      actor_label: proposal.actor_label,
+      authority_class: proposal.authority_class,
+      base_revision: proposal.base_revision,
+      body: exportProposalBody(proposal.kind, parseExportRecord(proposal.body)),
+      created_at: iso(proposal.created_at),
+      detail_url: this.exportUrl(context, `/coordination/proposals/${encodeURIComponent(proposal.proposal_id)}`),
+      kind: proposal.kind,
+      proposal_id: proposal.proposal_id,
+      request_id: proposal.request_id,
+      revision: proposal.revision,
+      source_message_ids: sourceIds,
+      source_messages: this.exportSourceReferences(sourceIds, context),
+      status: published ? "published" : newer ? "superseded" : "pending",
+      event_cursor: proposal.event_cursor,
+    };
+  }
+
+  private exportDecisionFromEvent(event: StoredCoordinationEvent, context: ExportContext, through: number): Record<string, unknown> {
+    const value = parseExportRecord(event.body);
+    const decisionId = typeof value.decision_id === "string" ? value.decision_id : event.proposal_id ?? "";
+    const sourceIds = parseExportStringArray(event.source_message_ids);
+    const required = exportStringArray(value.required_approver_labels);
+    return {
+      decision_id: decisionId,
+      title: typeof value.title === "string" ? value.title : "",
+      proposal_text: typeof value.proposal_text === "string" ? value.proposal_text : "",
+      required_approver_labels: required,
+      state: event.operation === "decision.accepted" ? "accepted" : "recommended",
+      accepted_record_id: typeof value.accepted_record_id === "string" ? value.accepted_record_id : null,
+      latest_proposal_revision: event.proposal_revision,
+      recommendation_cursor: event.operation === "decision.recommended" ? event.cursor : null,
+      publication_cursor: event.cursor,
+      published_revision: event.resulting_revision,
+      actor_label: event.actor_label,
+      authority_class: event.authority_class,
+      proposal_id: event.proposal_id,
+      proposal_revision: event.proposal_revision,
+      source_message_ids: sourceIds,
+      source_messages: this.exportSourceReferences(sourceIds, context),
+      history_url: this.exportUrl(context, `/coordination/decisions/${encodeURIComponent(decisionId)}`),
+      ...(typeof value.accepted_record_id === "string" ? { current_annotations: this.exportDecisionAnnotations(value.accepted_record_id, through, context) } : {}),
+      ...(Array.isArray(value.approvals) ? { approval_source_message_ids: value.approvals.flatMap((approval) => {
+        const entry = parseExportRecord(approval);
+        return typeof entry.source_message_id === "string" ? [entry.source_message_id] : [];
+      }) } : {}),
+    };
+  }
+
+  private exportDecisionAnnotations(acceptedRecordId: string, through: number, context: ExportContext): Record<string, unknown> {
+    const reportCount = rows<{ count: number }>(this.ctx.storage.sql.exec(
+      "SELECT COUNT(*) AS count FROM coordination_disputes WHERE accepted_record_id = ? AND cursor <= ?",
+      acceptedRecordId, through,
+    ))[0]?.count ?? 0;
+    const unresolvedReportCount = rows<{ count: number }>(this.ctx.storage.sql.exec(
+      "SELECT COUNT(*) AS count FROM coordination_disputes AS d WHERE d.accepted_record_id = ? AND d.cursor <= ? AND NOT EXISTS (SELECT 1 FROM coordination_dispute_reviews AS r WHERE r.report_id = d.report_id AND r.cursor <= ?)",
+      acceptedRecordId, through, through,
+    ))[0]?.count ?? 0;
+    const successorCount = rows<{ count: number }>(this.ctx.storage.sql.exec(
+      "SELECT COUNT(*) AS count FROM coordination_supersessions WHERE predecessor_accepted_record_id = ? AND publication_cursor <= ?",
+      acceptedRecordId, through,
+    ))[0]?.count ?? 0;
+    const decisionId = rows<{ decision_id: string }>(this.ctx.storage.sql.exec(
+      "SELECT decision_id FROM coordination_decision_accepted_records WHERE accepted_record_id = ? LIMIT 1",
+      acceptedRecordId,
+    ))[0]?.decision_id;
+    const predecessorCount = decisionId === undefined ? 0 : rows<{ count: number }>(this.ctx.storage.sql.exec(
+      "SELECT COUNT(*) AS count FROM coordination_supersessions WHERE successor_decision_id = ? AND publication_cursor <= ?",
+      decisionId, through,
+    ))[0]?.count ?? 0;
+    return {
+      contested: unresolvedReportCount > 0,
+      predecessor_count: predecessorCount,
+      predecessors_url: decisionId === undefined ? undefined : this.exportUrl(context, `/coordination/supersessions?successor_decision_id=${encodeURIComponent(decisionId)}`),
+      report_count: reportCount,
+      reports_url: this.exportUrl(context, `/coordination/disputes?accepted_record_id=${encodeURIComponent(acceptedRecordId)}`),
+      successor_count: successorCount,
+      successors_url: this.exportUrl(context, `/coordination/supersessions?predecessor_accepted_record_id=${encodeURIComponent(acceptedRecordId)}`),
+      superseded: successorCount > 0,
+      unresolved_report_count: unresolvedReportCount,
+    };
+  }
+
+  private exportPosition(position: StoredCoordinationDecisionPosition, context: ExportContext): Record<string, unknown> {
+    const sourceIds = parseExportStringArray(position.source_message_ids);
+    return {
+      decision_id: position.decision_id,
+      decision_revision: position.decision_revision,
+      participant_label: position.participant_label,
+      position_id: position.position_id,
+      published_at: iso(position.created_at),
+      published_cursor: position.published_cursor,
+      published_revision: position.published_revision,
+      reporter_label: position.reporter_label,
+      source_message_ids: sourceIds,
+      source_messages: this.exportSourceReferences(sourceIds, context),
+      statement: position.statement,
+    };
+  }
+
+  private exportAcceptedRecord(record: StoredCoordinationAcceptedRecord, context: ExportContext): Record<string, unknown> {
+    return {
+      accepted_record_id: record.accepted_record_id,
+      decision_id: record.decision_id,
+      decision_revision: record.decision_revision,
+      owner_attestation: record.owner_attestation === 1,
+      owner_label: record.owner_label,
+      proposal_snapshot: exportDecisionBody(parseExportRecord(record.proposal_snapshot)),
+      required_approver_labels: exportStringArray(record.required_approver_labels),
+      publication_cursor: record.publication_cursor,
+      publication_revision: record.publication_revision,
+      published_at: iso(record.created_at),
+      detail_url: this.exportUrl(context, `/coordination/decisions/${encodeURIComponent(record.decision_id)}/records/${encodeURIComponent(record.accepted_record_id)}`),
+    };
+  }
+
+  private exportApproval(approval: StoredCoordinationApprovalEvidence, context: ExportContext): Record<string, unknown> {
+    return {
+      accepted_record_id: approval.accepted_record_id,
+      approval_record_id: approval.approval_record_id,
+      decision_id: approval.decision_id,
+      decision_revision: approval.decision_revision,
+      participant_label: approval.participant_label,
+      source_message_id: approval.source_message_id,
+      citation_url: this.exportUrl(context, `/messages/${encodeURIComponent(approval.source_message_id)}`),
+      source_author: approval.source_author,
+      source_created_at: iso(approval.source_created_at),
+      source_display_name: approval.source_display_name,
+      source_sequence: approval.source_sequence,
+    };
+  }
+
+  private exportCorrection(correction: StoredCoordinationCorrection, context: ExportContext): Record<string, unknown> {
+    const sourceIds = parseExportStringArray(correction.source_message_ids);
+    const target = exportClaimTarget(parseExportRecord(correction.target));
+    const targetSuffix = target.type === "message"
+      ? `/messages/${encodeURIComponent(String(target.message_id))}`
+      : `/coordination/publications/${String(target.published_revision)}`;
+    return {
+      correction_id: correction.correction_id,
+      correction_text: correction.correction_text,
+      owner_label: correction.owner_label,
+      proposal_id: correction.proposal_id,
+      proposal_revision: correction.proposal_revision,
+      publication_cursor: correction.publication_cursor,
+      publication_revision: correction.publication_revision,
+      published_at: iso(correction.created_at),
+      reporter_label: correction.reporter_label,
+      source_message_ids: sourceIds,
+      source_messages: this.exportSourceReferences(sourceIds, context),
+      target,
+      target_url: this.exportUrl(context, `${targetSuffix}${target.type === "publication" ? `#claim-${encodeURIComponent(JSON.stringify(target.claim_path))}` : ""}`),
+      detail_url: this.exportUrl(context, `/coordination/corrections/${encodeURIComponent(correction.correction_id)}`),
+    };
+  }
+
+  private exportDispute(dispute: StoredCoordinationDispute, context: ExportContext): Record<string, unknown> {
+    const sourceIds = parseExportStringArray(dispute.source_message_ids);
+    return {
+      accepted_record_id: dispute.accepted_record_id,
+      actor_label: dispute.actor_label,
+      approval_record_id: dispute.approval_record_id,
+      created_at: iso(dispute.created_at),
+      cursor: dispute.cursor,
+      decision_id: dispute.decision_id,
+      decision_revision: dispute.decision_revision,
+      kind: dispute.kind,
+      report_id: dispute.report_id,
+      source_message_ids: sourceIds,
+      source_messages: this.exportSourceReferences(sourceIds, context),
+      statement: dispute.statement,
+      detail_url: this.exportUrl(context, `/coordination/disputes/${encodeURIComponent(dispute.report_id)}`),
+    };
+  }
+
+  private exportDisputeReview(review: StoredCoordinationDisputeReview, context: ExportContext): Record<string, unknown> {
+    const sourceIds = parseExportStringArray(review.source_message_ids);
+    return {
+      base_revision: review.base_revision,
+      created_at: iso(review.created_at),
+      cursor: review.cursor,
+      disposition: review.disposition,
+      owner_label: review.owner_label,
+      rationale: review.rationale,
+      report_id: review.report_id,
+      review_id: review.review_id,
+      source_message_ids: sourceIds,
+      source_messages: this.exportSourceReferences(sourceIds, context),
+      publication_revision: review.publication_revision,
+    };
+  }
+
+  private exportSupersession(value: StoredCoordinationSupersession, context: ExportContext): Record<string, unknown> {
+    const sourceIds = parseExportStringArray(value.source_message_ids);
+    return {
+      supersession_id: value.supersession_id,
+      proposal_id: value.proposal_id,
+      proposal_revision: value.proposal_revision,
+      predecessor_accepted_record_id: value.predecessor_accepted_record_id,
+      successor_decision_id: value.successor_decision_id,
+      successor_decision_revision: value.successor_decision_revision,
+      predecessor_publication_revision: value.predecessor_publication_revision,
+      reporter_label: value.reporter_label,
+      owner_label: value.owner_label,
+      source_message_ids: sourceIds,
+      source_messages: this.exportSourceReferences(sourceIds, context),
+      publication_cursor: value.publication_cursor,
+      publication_revision: value.publication_revision,
+      created_at: iso(value.created_at),
+      detail_url: this.exportUrl(context, `/coordination/publications/${value.publication_revision}`),
+    };
+  }
+
+  private exportEvent(event: StoredCoordinationEvent, context: ExportContext): Record<string, unknown> {
+    const sourceIds = parseExportStringArray(event.source_message_ids);
+    return {
+      cursor: event.cursor,
+      event_id: event.event_id,
+      operation: event.operation,
+      kind: event.kind,
+      actor_label: event.actor_label,
+      authority_class: event.authority_class,
+      proposal_id: event.proposal_id,
+      proposal_revision: event.proposal_revision,
+      request_id: event.request_id,
+      base_revision: event.base_revision,
+      resulting_revision: event.resulting_revision,
+      source_message_ids: sourceIds,
+      source_messages: this.exportSourceReferences(sourceIds, context),
+      body: exportEventBody(event),
+      created_at: iso(event.created_at),
+      ...(event.resulting_revision === null ? {} : { publication_url: this.exportUrl(context, `/coordination/publications/${event.resulting_revision}`) }),
+    };
   }
 
   private deleteToTombstone(now: number): boolean {
@@ -4161,6 +4986,199 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
     } }), { headers: { "content-type": "application/json; charset=utf-8" }, status });
   }
 }
+
+function parseExportRecord(value: unknown): Record<string, unknown> {
+  if (typeof value === "string") {
+    try { return parseExportRecord(JSON.parse(value)); } catch { return {}; }
+  }
+  return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+function exportStringArray(value: unknown): readonly string[] {
+  if (typeof value === "string") {
+    try { return exportStringArray(JSON.parse(value)); } catch { return []; }
+  }
+  return Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string") : [];
+}
+
+function parseExportStringArray(value: unknown): readonly string[] { return exportStringArray(value); }
+
+function exportStatus(value: unknown): CoordinationStatus {
+  return value === "in_progress" || value === "blocked" || value === "done" || value === "withdrawn" ? value : "open";
+}
+
+function exportString(value: unknown): string { return typeof value === "string" ? value : ""; }
+
+function exportNumber(value: unknown): number | undefined { return typeof value === "number" && Number.isSafeInteger(value) ? value : undefined; }
+
+function exportFields(value: unknown, keys: readonly string[]): Record<string, unknown> {
+  const input = parseExportRecord(value);
+  const result: Record<string, unknown> = {};
+  for (const key of keys) if (Object.prototype.hasOwnProperty.call(input, key)) result[key] = input[key];
+  return result;
+}
+
+function exportRequestBody(value: unknown): Record<string, unknown> {
+  const input = parseExportRecord(value);
+  return {
+    completion_criteria: exportStringArray(input.completion_criteria),
+    decision_impact: exportString(input.decision_impact),
+    owner_label: exportString(input.owner_label),
+    purpose: exportString(input.purpose),
+    requested_output: exportString(input.requested_output),
+    title: exportString(input.title),
+    unknowns: exportStringArray(input.unknowns),
+  };
+}
+
+function exportEvidence(value: unknown): readonly Record<string, unknown>[] {
+  const input = typeof value === "string" ? parseExportRecord(value) : value;
+  if (!Array.isArray(input)) return [];
+  return input.map((entry) => {
+    const record = parseExportRecord(entry);
+    return {
+      artifact_url: exportString(record.artifact_url),
+      ...(typeof record.location === "string" ? { location: record.location } : {}),
+      reported_verification: exportString(record.reported_verification),
+      remaining_blockers: exportStringArray(record.remaining_blockers),
+      ...(typeof record.reported_by === "string" ? { reported_by: record.reported_by } : {}),
+    };
+  });
+}
+
+function exportProgress(value: unknown, _context: ExportContext): Record<string, unknown> {
+  const input = parseExportRecord(value);
+  return {
+    authority_class: input.authority_class === "participant" ? "participant" : "management",
+    base_revision: exportNumber(input.base_revision) ?? 0,
+    blockers: exportStringArray(input.blockers),
+    evidence: exportEvidence(input.evidence),
+    published_at: exportString(input.published_at),
+    proposal_id: exportString(input.proposal_id),
+    proposal_revision: exportNumber(input.proposal_revision) ?? 0,
+    reported_by: exportString(input.reported_by),
+    request_id: exportString(input.request_id),
+    source_message_ids: exportStringArray(input.source_message_ids),
+    status: exportStatus(input.status),
+    ...(typeof input.reopen_reason === "string" ? { reopen_reason: input.reopen_reason } : {}),
+    ...(typeof input.unverified_explanation === "string" ? { unverified_explanation: input.unverified_explanation } : {}),
+  };
+}
+
+function exportPanelBody(value: unknown): Record<string, unknown> {
+  const input = parseExportRecord(value);
+  const artifacts = Array.isArray(input.artifacts) ? input.artifacts.map((entry) => {
+    const item = parseExportRecord(entry);
+    return { role: exportString(item.role), title: exportString(item.title), url: exportString(item.url) };
+  }) : [];
+  const nextActions = Array.isArray(input.next_actions) ? input.next_actions.map((entry) => {
+    const item = parseExportRecord(entry);
+    return { description: exportString(item.description), owner_label: exportString(item.owner_label) };
+  }) : [];
+  return {
+    artifacts,
+    next_actions: nextActions,
+    phase: input.phase === null ? null : exportString(input.phase),
+    purpose: input.purpose === null ? null : exportString(input.purpose),
+  };
+}
+
+function exportProposalBody(kind: CoordinationKind, value: unknown): Record<string, unknown> {
+  const input = parseExportRecord(value);
+  if (kind === COORDINATION_KIND) return exportRequestBody(input);
+  if (kind === COORDINATION_PROGRESS_KIND) {
+    return {
+      blockers: exportStringArray(input.blockers),
+      evidence: exportEvidence(input.evidence),
+      request_id: exportString(input.request_id),
+      status: exportStatus(input.status),
+      ...(typeof input.reopen_reason === "string" ? { reopen_reason: input.reopen_reason } : {}),
+      ...(typeof input.unverified_explanation === "string" ? { unverified_explanation: input.unverified_explanation } : {}),
+    };
+  }
+  if (kind === COORDINATION_PANEL_KIND) return exportPanelBody(input);
+  if (kind === DECISION_PROPOSAL_KIND) return exportDecisionBody(input);
+  if (kind === DECISION_POSITION_KIND) return {
+    decision_proposal_id: exportString(input.decision_proposal_id),
+    decision_revision: exportNumber(input.decision_revision) ?? 0,
+    participant_label: exportString(input.participant_label),
+    statement: exportString(input.statement),
+  };
+  if (kind === CLAIM_CORRECTION_KIND) return { correction_text: exportString(input.correction_text), target: exportClaimTarget(input.target) };
+  return {
+    predecessor_accepted_record_id: exportString(input.predecessor_accepted_record_id),
+    successor_decision_id: exportString(input.successor_decision_id),
+    successor_decision_revision: exportNumber(input.successor_decision_revision) ?? 0,
+  };
+}
+
+function exportDecisionBody(value: unknown): Record<string, unknown> {
+  const input = parseExportRecord(value);
+  return {
+    proposal_text: exportString(input.proposal_text),
+    required_approver_labels: exportStringArray(input.required_approver_labels),
+    title: exportString(input.title),
+  };
+}
+
+function exportClaimTarget(value: unknown): Record<string, unknown> {
+  const input = parseExportRecord(value);
+  if (input.type === "message") return { type: "message", message_id: exportString(input.message_id) };
+  return {
+    type: "publication",
+    published_revision: exportNumber(input.published_revision) ?? 0,
+    claim_path: Array.isArray(input.claim_path) ? input.claim_path.filter((part): part is string | number => typeof part === "string" || (typeof part === "number" && Number.isSafeInteger(part))) : [],
+  };
+}
+
+function exportRequestPublicationSnapshot(value: unknown): Record<string, unknown> {
+  const input = parseExportRecord(value);
+  const original = parseExportRecord(input.original ?? input);
+  return {
+    ...exportRequestBody(original),
+    blockers: exportStringArray(input.blockers),
+    evidence: exportEvidence(input.evidence),
+    status: exportStatus(input.status),
+    ...(input.progress === undefined ? {} : { progress: exportProgress(input.progress, {}) }),
+    ...(typeof input.unverified_explanation === "string" ? { unverified_explanation: input.unverified_explanation } : {}),
+  };
+}
+
+function exportEventBody(event: StoredCoordinationEvent): Record<string, unknown> {
+  const value = parseExportRecord(event.body);
+  if (event.operation === "retention.extended") return exportFields(value, ["configured_inactivity_window_ms", "new_expires_at", "old_expires_at"]);
+  if (event.operation === "request.published") {
+    if (event.kind === COORDINATION_PROGRESS_KIND) return exportRequestPublicationSnapshot(value);
+    return exportRequestBody(value);
+  }
+  if (event.operation === "panel.published") return exportPanelBody(value);
+  if (event.operation === "decision.recommended" || event.operation === "decision.accepted") {
+    return {
+      ...exportDecisionBody(value),
+      decision_id: exportString(value.decision_id),
+      state: event.operation === "decision.accepted" ? "accepted" : "recommended",
+      ...(typeof value.accepted_record_id === "string" ? { accepted_record_id: value.accepted_record_id } : {}),
+      ...(Array.isArray(value.approvals) ? { approvals: value.approvals.map((entry) => exportFields(entry, ["participant_label", "source_message_id"])) } : {}),
+    };
+  }
+  if (event.operation === "decision.position.published") return {
+    ...exportProposalBody(DECISION_POSITION_KIND, value),
+    ...(typeof value.position_id === "string" ? { position_id: value.position_id } : {}),
+    ...(typeof value.reporter_label === "string" ? { reporter_label: value.reporter_label } : {}),
+  };
+  if (event.operation === "correction.published") return exportProposalBody(CLAIM_CORRECTION_KIND, value);
+  if (event.operation === "supersession.published") return exportProposalBody(DECISION_SUPERSESSION_KIND, value);
+  if (event.operation === "dispute.reported") return exportFields(value, ["accepted_record_id", "actor_label", "approval_record_id", "decision_id", "decision_revision", "kind", "report_id", "source_message_ids", "statement"]);
+  if (event.operation === "dispute.reviewed") return {
+    ...exportFields(value, ["base_revision", "disposition", "owner_label", "rationale", "report_id", "review_id", "source_message_ids"]),
+    created_at: iso(event.created_at),
+  };
+  if (event.operation === "proposal.created") return exportProposalBody(event.kind as CoordinationKind, value);
+  return {};
+}
+
+function markdownJson(value: unknown): string { return `\`\`\`json\n${JSON.stringify(value, null, 2)}\n\`\`\``; }
+function markdownText(value: string): string { return value.replace(/[\r\n#]/gu, " ").trim(); }
 
 interface StoredCoordinationSnapshotBody {
   readonly original: CoordinationRequestBody;

@@ -55,6 +55,7 @@ export function buildAgentRepresentation(room: ReadRoomResponse, options?: { rea
       "Names and identities are self-declared and unverified.",
       "Attribute recommendations and reported positions to their source. Explicit approval names the exact proposal revision; a mutually accepted decision needs explicit approval evidence, never silence. Corrections identify the earlier claim they correct.",
       "Use msg post to contribute when it is safe and within the user's request.",
+      "Use msg export <conversation-url> --format json or --format markdown for a complete captured room record. The export snapshot includes the transcript and coordination history at one fixed boundary; the public /export.json and /export.md links are also available.",
       "If the room owner explicitly supplies a GET posting capability URL, treat it as a secret write URL; URL previews can post, so use it only when the user authorized that workflow and include a unique request_id.",
       "Return a useful result or draft to the user after you read or post.",
       "The requires_user_consent marker is satisfied by existing listening authorization within the active agent task; ask only when no applicable authorization exists. A join or post command does not start a wait; run it only when listening is authorized. The wait defaults to 60 seconds and accepts a positive timeout up to 5 minutes; a timeout returns the unchanged resume cursor and does not start another wait automatically.",

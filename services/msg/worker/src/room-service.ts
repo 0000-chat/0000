@@ -177,7 +177,13 @@ export class DurableRoomService implements RoomService {
   }
 
   async exportRoom(input: ExportRoomInput): Promise<Response> {
-    return responsePassthrough(await this.room(input.room).fetch(new Request(`https://room/export.${input.format === "json" ? "json" : "md"}`)));
+    const suffix = input.format === "json" ? "json" : "md";
+    return responsePassthrough(await this.room(input.room).fetch(new Request(`https://room/export.${suffix}`, {
+      headers: {
+        "x-msg-export-origin": this.origin,
+        "x-msg-export-room": encodeURIComponent(input.room),
+      },
+    })));
   }
 
   async coordinationOverview(input: { readonly room: string }): Promise<CoordinationOverviewResponse> {

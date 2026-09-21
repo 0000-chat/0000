@@ -12,22 +12,46 @@ mock.module("cloudflare:workers", () => ({
   },
 }));
 
+class CoordinationFakeSocket {
+  readonly sent: string[] = [];
+  closed?: { code: number; reason: string };
+  private attachment: unknown;
+  send(value: string) { this.sent.push(value); }
+  close(code: number, reason: string) { this.closed = { code, reason }; }
+  deserializeAttachment() { return this.attachment; }
+  serializeAttachment(value: unknown) { this.attachment = value; }
+}
+
+class CoordinationFakeWebSocketPair {
+  0 = new CoordinationFakeSocket();
+  1 = new CoordinationFakeSocket();
+}
+
+(globalThis as unknown as { WebSocketPair: typeof CoordinationFakeWebSocketPair }).WebSocketPair = CoordinationFakeWebSocketPair;
+
 class Context {
+  alarm: number | undefined;
+  deleteAlarmCalls = 0;
+  messagePageSelects = 0;
+  setAlarmCalls = 0;
+  readonly sockets: CoordinationFakeSocket[] = [];
   readonly storage: { readonly sql: { exec(query: string, ...values: unknown[]): Iterable<unknown> }; transactionSync<T>(callback: () => T): T; setAlarm(value: number): Promise<void>; deleteAlarm(): Promise<void> };
   constructor(readonly database: Database) {
     this.storage = {
       sql: { exec: (query, ...values) => {
         if (values.length === 0 && query.includes(";")) { database.exec(query); return []; }
+        if (/FROM messages WHERE sequence >/iu.test(query)) this.messagePageSelects += 1;
         const statement = database.query(query);
         if (/^\s*(?:SELECT|PRAGMA)/iu.test(query)) return statement.all(...(values as never[]));
         statement.run(...(values as never[])); return [];
       } },
       transactionSync: <T>(callback: () => T) => database.transaction(callback)(),
-      setAlarm: async () => {},
-      deleteAlarm: async () => {},
+      setAlarm: async (value) => { this.alarm = value; this.setAlarmCalls += 1; },
+      deleteAlarm: async () => { this.alarm = undefined; this.deleteAlarmCalls += 1; },
     };
   }
-  getWebSockets() { return []; }
+  getWebSockets() { return this.sockets; }
+  acceptWebSocket(socket: CoordinationFakeSocket) { this.sockets.push(socket); }
   waitUntil() {}
 }
 
@@ -132,6 +156,15 @@ function decisionPosition(retry: string, decisionId: string, revision: number, s
     kind: "decision.position",
     source_message_ids: [source],
   };
+}
+
+function exportPathValue(value: unknown, path: readonly (string | number)[]): unknown {
+  let current = value;
+  for (const segment of path) {
+    if (current === null || typeof current !== "object") return undefined;
+    current = (current as Record<string | number, unknown>)[segment];
+  }
+  return current;
 }
 
 test("routes a complete panel replacement through pending review, exact publication, history, and agent reads", async () => {
@@ -355,6 +388,397 @@ test("cannot resurrect a room after expiry or explicit deletion", async () => {
   expect(deleteResponse.status).toBe(200);
   expect(await deleteResponse.json()).toMatchObject({ deleted: true });
   expect((await deleted.worker.fetch(workerJson("/manage/room/owner-token/retention", { client_retry_id: "retention-after-explicit-delete", expires_at: new Date(12_000).toISOString() }))).status).toBe(404);
+});
+
+test("fails a captured export when deletion interleaves with a buffered page", async () => {
+  const { room: durable, database } = await room();
+  await durable.fetch(json("/initialize", { management_hash: await hashCapability("owner-token"), initial: { content: "source", author: "a", display_name: "A", semantic_type: "message" } }));
+  await durable.fetch(json("/messages", { input: { content: "second", author: "b", display_name: "B", semantic_type: "message" } }));
+  const service = new DurableRoomService({ getByName: () => ({ fetch: (request: Request) => durable.fetch(request) }) }, "https://msg.0000.chat");
+  const worker = createWorker(service);
+  const response = await worker.fetch(new Request("https://msg.0000.chat/room/export.json"));
+  expect(response.status).toBe(200);
+  const reader = response.body!.getReader();
+  const decoder = new TextDecoder();
+  const header = await reader.read();
+  const message = await reader.read();
+  const captured = `${decoder.decode(header.value)}${decoder.decode(message.value)}`;
+  expect(header.done).toBe(false);
+  expect(message.done).toBe(false);
+  expect(captured).toContain('"messages":[');
+  expect(captured).toContain('"content":"source"');
+  expect(captured).not.toContain('"complete":true');
+
+  const deleted = await worker.fetch(new Request("https://msg.0000.chat/manage/room/owner-token", { method: "DELETE", headers: { accept: "application/json" } }));
+  expect(deleted.status).toBe(200);
+  let deletionError: unknown;
+  try { await reader.read(); } catch (error) { deletionError = error; }
+  expect(deletionError).toBeDefined();
+  expect(database.query("SELECT status FROM room_state WHERE singleton = 1").get()).toEqual({ status: "deleted" });
+});
+
+test("keeps the scheduled expiry lifecycle intact when export expires between pulls", async () => {
+  const { room: durable, context, database, setNow } = await room({ MSG_TEST_ROOM_LIMITS: JSON.stringify({ inactivityTtlMs: 1_000 }) });
+  await durable.fetch(json("/initialize", { management_hash: await hashCapability("owner-token"), initial: { content: "source", author: "a", display_name: "A", semantic_type: "message" } }));
+  const service = new DurableRoomService({ getByName: () => ({ fetch: (request: Request) => durable.fetch(request) }) }, "https://msg.0000.chat");
+  const worker = createWorker(service);
+  const live = await durable.fetch(new Request("https://room/live?after=1", { headers: { upgrade: "websocket" } }));
+  expect(live.status).toBe(101);
+  const response = await worker.fetch(new Request("https://msg.0000.chat/room/export.json"));
+  const reader = response.body!.getReader();
+  await reader.read();
+  await reader.read();
+  expect(context.alarm).toBe(11_000);
+
+  setNow(11_001);
+  await durable.alarm();
+  expect(database.query("SELECT status FROM room_state WHERE singleton = 1").get()).toEqual({ status: "deleted" });
+  expect(JSON.parse(context.sockets[0]!.sent.at(-1)!)).toMatchObject({ type: "conversation.expired" });
+  expect(context.sockets[0]!.closed).toEqual({ code: 1001, reason: "Conversation expired" });
+  expect(context.alarm).toBeGreaterThan(11_001);
+  let expiryError: unknown;
+  try { await reader.read(); } catch (error) { expiryError = error; }
+  expect(expiryError).toBeDefined();
+});
+
+test("exports captured coordination history, evidence, and bounded late changes", async () => {
+  const { room: durable, database } = await room();
+  const service = new DurableRoomService({ getByName: () => ({ fetch: (request: Request) => durable.fetch(request) }) }, "https://msg.0000.chat");
+  const worker = createWorker(service);
+  const initialized = await durable.fetch(json("/initialize", { management_hash: await hashCapability("owner-token"), initial: { content: "Owner source", author: "owner", display_name: "Owner", semantic_type: "message" } }));
+  const ownerSource = (await initialized.json() as { id: string }).id;
+  const delegatedToken = "delegated-export-token";
+  const delegated = await durable.fetch(json("/manage?token=owner-token", { action: "enable", get_post_token: delegatedToken }));
+  expect(delegated.status).toBe(200);
+  const managementHash = (database.query("SELECT management_hash FROM room_state WHERE singleton = 1").get() as { management_hash: string }).management_hash;
+  const delegatedHash = (database.query("SELECT get_post_hash FROM room_state WHERE singleton = 1").get() as { get_post_hash: string }).get_post_hash;
+  expect(managementHash).toMatch(/^[A-Za-z0-9_-]{43}$/u);
+  expect(delegatedHash).toMatch(/^[A-Za-z0-9_-]{43}$/u);
+  const webhookCreated = await durable.fetch(json("/webhooks", { url: "https://receiver.example.com/export-secret?audience=public" }));
+  expect(webhookCreated.status).toBe(200);
+  const webhook = await webhookCreated.json() as { secret: string; webhook: { id: string } };
+  expect(webhook.webhook.id).toMatch(/^[0-9a-f-]{36}$/u);
+  const pushEnrollment = await durable.fetch(json("/push-subscriptions", {
+    browser_id: "export-browser-secret",
+    subscription: {
+      auth: "push-auth-secret",
+      endpoint: "https://push.example.net/export-subscription-secret",
+      p256dh: "push-p256dh-secret",
+    },
+  }));
+  expect(pushEnrollment.status).toBe(200);
+  const privateExportValues = ["owner-token", managementHash, delegatedHash, delegatedToken, webhook.secret, "https://receiver.example.com/export-secret?audience=public", "push-auth-secret", "push-p256dh-secret", "https://push.example.net/export-subscription-secret", "export-browser-secret"];
+  const alice = await durable.fetch(json("/messages", { input: { content: "Alice approval", author: "alice", display_name: "Alice", semantic_type: "message" } }));
+  const aliceSource = (await alice.json() as { message: { id: string } }).message.id;
+  const bob = await durable.fetch(json("/messages", { input: { content: "Bob approval", author: "bob", display_name: "Bob", semantic_type: "message" } }));
+  const bobSource = (await bob.json() as { message: { id: string } }).message.id;
+  const expectedProposalKeys = new Set<string>();
+
+  const panelCreated = await worker.fetch(workerJson("/room/coordination/proposals", panelProposal("export-panel", ownerSource)));
+  expect(panelCreated.status).toBe(201);
+  const panel = await panelCreated.json() as { proposal: { proposal_id: string; revision: number } };
+  expectedProposalKeys.add(`${panel.proposal.proposal_id}:${panel.proposal.revision}`);
+  expect((await worker.fetch(workerJson("/manage/room/owner-token/coordination/publish", { base_revision: 0, client_retry_id: "export-panel-publish", owner_label: "room-owner", proposal_id: panel.proposal.proposal_id, revision: panel.proposal.revision }))).status).toBe(201);
+
+  const requestCreated = await worker.fetch(workerJson("/room/coordination/proposals", proposal("export-request", ownerSource, 1)));
+  expect(requestCreated.status).toBe(201);
+  const requestValue = await requestCreated.json() as { proposal: { proposal_id: string; request_id: string; revision: number } };
+  expectedProposalKeys.add(`${requestValue.proposal.proposal_id}:${requestValue.proposal.revision}`);
+  expect((await worker.fetch(workerJson("/manage/room/owner-token/coordination/publish", { base_revision: 1, client_retry_id: "export-request-publish", owner_label: "room-owner", proposal_id: requestValue.proposal.proposal_id, revision: requestValue.proposal.revision }))).status).toBe(201);
+
+  const progressCreated = await worker.fetch(workerJson("/room/coordination/proposals", progress("export-progress", requestValue.proposal.request_id, "done", 2, ownerSource)));
+  expect(progressCreated.status).toBe(201);
+  const progressValue = await progressCreated.json() as { proposal: { proposal_id: string; revision: number } };
+  expectedProposalKeys.add(`${progressValue.proposal.proposal_id}:${progressValue.proposal.revision}`);
+  expect((await worker.fetch(workerJson("/manage/room/owner-token/coordination/publish", { base_revision: 2, client_retry_id: "export-progress-publish", owner_label: "room-owner", proposal_id: progressValue.proposal.proposal_id, revision: progressValue.proposal.revision }))).status).toBe(201);
+
+  const decisionCreated = await worker.fetch(workerJson("/room/coordination/proposals", decisionProposal("export-decision", ownerSource, 3)));
+  expect(decisionCreated.status).toBe(201);
+  const decision = await decisionCreated.json() as { proposal: { proposal_id: string; revision: number } };
+  expectedProposalKeys.add(`${decision.proposal.proposal_id}:${decision.proposal.revision}`);
+  expect((await worker.fetch(workerJson("/manage/room/owner-token/coordination/publish", { base_revision: 3, client_retry_id: "export-decision-recommendation", decision_publication: { mode: "recommendation" }, owner_label: "room-owner", proposal_id: decision.proposal.proposal_id, revision: decision.proposal.revision }))).status).toBe(201);
+  const positionCreated = await worker.fetch(workerJson("/room/coordination/proposals", { ...decisionPosition("export-position", decision.proposal.proposal_id, 1, ownerSource), base_revision: 4 }));
+  expect(positionCreated.status).toBe(201);
+  const position = await positionCreated.json() as { proposal: { proposal_id: string; revision: number } };
+  expectedProposalKeys.add(`${position.proposal.proposal_id}:${position.proposal.revision}`);
+  expect((await worker.fetch(workerJson("/manage/room/owner-token/coordination/publish", { base_revision: 4, client_retry_id: "export-position-publish", owner_label: "room-owner", proposal_id: position.proposal.proposal_id, revision: position.proposal.revision }))).status).toBe(201);
+  const acceptedResponse = await worker.fetch(workerJson("/manage/room/owner-token/coordination/publish", {
+    base_revision: 5,
+    client_retry_id: "export-decision-acceptance",
+    decision_publication: { approvals: [{ participant_label: "alice", source_message_id: aliceSource }, { participant_label: "bob", source_message_id: bobSource }], mode: "acceptance", owner_attestation: true },
+    owner_label: "room-owner",
+    proposal_id: decision.proposal.proposal_id,
+    revision: decision.proposal.revision,
+  }));
+  expect(acceptedResponse.status).toBe(201);
+  const accepted = await acceptedResponse.json() as { accepted_record: { accepted_record_id: string }; published_revision: number };
+  expect(accepted.published_revision).toBe(6);
+
+  const reportResponse = await worker.fetch(workerJson("/room/coordination/disputes", { accepted_record_id: accepted.accepted_record.accepted_record_id, actor_label: "reviewer", client_retry_id: "export-dispute", kind: "dispute", source_message_ids: [bobSource], statement: "The accepted conclusion needs a review trail." }));
+  expect(reportResponse.status).toBe(201);
+  const report = await reportResponse.json() as { dispute: { report_id: string } };
+  const reviewResponse = await worker.fetch(workerJson(`/manage/room/owner-token/coordination/disputes/${report.dispute.report_id}/review`, { base_revision: 6, client_retry_id: "export-review", disposition: "acknowledged", owner_label: "room-owner", rationale: "The owner recorded the review.", source_message_ids: [bobSource] }));
+  expect(reviewResponse.status).toBe(201);
+  const review = await reviewResponse.json() as { published_revision: number };
+  expect(review.published_revision).toBe(7);
+
+  const correctionResponse = await worker.fetch(workerJson("/room/coordination/proposals", {
+    actor_label: "correction-reporter",
+    base_revision: 7,
+    body: { correction_text: "The published request needs a clearer title.", target: { claim_path: ["title"], published_revision: 2, type: "publication" } },
+    client_retry_id: "export-correction",
+    kind: "claim.correction",
+    source_message_ids: [ownerSource],
+  }));
+  expect(correctionResponse.status).toBe(201);
+  const correction = await correctionResponse.json() as { proposal: { proposal_id: string; revision: number } };
+  expectedProposalKeys.add(`${correction.proposal.proposal_id}:${correction.proposal.revision}`);
+  const correctionPublication = await worker.fetch(workerJson("/manage/room/owner-token/coordination/publish", { base_revision: 7, client_retry_id: "export-correction-publish", owner_label: "room-owner", proposal_id: correction.proposal.proposal_id, revision: correction.proposal.revision }));
+  expect(correctionPublication.status).toBe(201);
+  expect((await correctionPublication.json() as { published_revision: number }).published_revision).toBe(8);
+
+  const inspect = await worker.fetch(new Request("https://msg.0000.chat/manage/room/owner-token", { headers: { accept: "application/json" } }));
+  const bounds = await inspect.json() as { maximum_expires_at: string };
+  const retention = await worker.fetch(workerJson("/manage/room/owner-token/retention", { client_retry_id: "export-retention", expires_at: bounds.maximum_expires_at }));
+  expect(retention.status).toBe(201);
+
+  const successorResponse = await worker.fetch(workerJson("/room/coordination/proposals", decisionProposal("export-successor", ownerSource, 8, "New release")));
+  expect(successorResponse.status).toBe(201);
+  const successor = await successorResponse.json() as { proposal: { proposal_id: string; revision: number } };
+  expectedProposalKeys.add(`${successor.proposal.proposal_id}:${successor.proposal.revision}`);
+  const successorPublication = await worker.fetch(workerJson("/manage/room/owner-token/coordination/publish", { base_revision: 8, client_retry_id: "export-successor-acceptance", decision_publication: { approvals: [{ participant_label: "alice", source_message_id: aliceSource }, { participant_label: "bob", source_message_id: bobSource }], mode: "acceptance", owner_attestation: true }, owner_label: "room-owner", proposal_id: successor.proposal.proposal_id, revision: successor.proposal.revision }));
+  expect(successorPublication.status).toBe(201);
+  const successorAccepted = await successorPublication.json() as { accepted_record: { accepted_record_id: string }; published_revision: number };
+  expect(successorAccepted.published_revision).toBe(9);
+  const supersessionResponse = await worker.fetch(workerJson("/room/coordination/proposals", {
+    actor_label: "supersession-reporter",
+    base_revision: 9,
+    body: { predecessor_accepted_record_id: accepted.accepted_record.accepted_record_id, successor_decision_id: successor.proposal.proposal_id, successor_decision_revision: successor.proposal.revision },
+    client_retry_id: "export-supersession",
+    kind: "decision.supersession",
+    source_message_ids: [ownerSource],
+  }));
+  expect(supersessionResponse.status).toBe(201);
+  const supersession = await supersessionResponse.json() as { proposal: { proposal_id: string; revision: number } };
+  expectedProposalKeys.add(`${supersession.proposal.proposal_id}:${supersession.proposal.revision}`);
+  const supersessionPublication = await worker.fetch(workerJson("/manage/room/owner-token/coordination/publish", { base_revision: 9, client_retry_id: "export-supersession-publish", owner_label: "room-owner", proposal_id: supersession.proposal.proposal_id, revision: supersession.proposal.revision }));
+  expect(supersessionPublication.status).toBe(201);
+  expect((await supersessionPublication.json() as { published_revision: number }).published_revision).toBe(10);
+
+  const revisedProposalResponse = await worker.fetch(workerJson("/room/coordination/proposals", proposal("export-revised-v1", bobSource, 10, "Revision one")));
+  expect(revisedProposalResponse.status).toBe(201);
+  const revisedProposal = await revisedProposalResponse.json() as { proposal: { proposal_id: string; revision: number } };
+  expectedProposalKeys.add(`${revisedProposal.proposal.proposal_id}:${revisedProposal.proposal.revision}`);
+  const revisedProposalRevisionResponse = await worker.fetch(workerJson(`/room/coordination/proposals/${revisedProposal.proposal.proposal_id}/revisions`, { ...proposal("export-revised-v2", bobSource, 10, "Revision two"), base_revision: 10 }));
+  expect(revisedProposalRevisionResponse.status).toBe(201);
+  const revisedProposalRevision = await revisedProposalRevisionResponse.json() as { proposal: { proposal_id: string; revision: number } };
+  expectedProposalKeys.add(`${revisedProposalRevision.proposal.proposal_id}:${revisedProposalRevision.proposal.revision}`);
+  for (let index = 0; index < 105; index += 1) {
+    const bulkProposalResponse = await worker.fetch(workerJson("/room/coordination/proposals", proposal(`export-bulk-${index}`, bobSource, 10, `Bulk proposal ${index}`)));
+    expect(bulkProposalResponse.status).toBe(201);
+    const bulkProposal = await bulkProposalResponse.json() as { proposal: { proposal_id: string; revision: number } };
+    expectedProposalKeys.add(`${bulkProposal.proposal.proposal_id}:${bulkProposal.proposal.revision}`);
+  }
+
+  const markdownResponse = await worker.fetch(new Request("https://msg.0000.chat/room/export.md"));
+  expect(markdownResponse.status).toBe(200);
+  const markdown = await markdownResponse.text();
+  expect(markdown).toContain("**Captured room record:**");
+  expect(markdown).toContain('"id": "');
+  expect(markdown).toContain('"created_at": "');
+  expect(markdown).toContain('"author": "owner"');
+  expect(markdown).toContain('"semantic_type": "message"');
+  for (const heading of ["Messages", "Requests", "Request status history", "Panel history", "Proposals and revisions", "Decisions", "Decision history", "Reported positions", "Accepted records", "Approval evidence", "Publications", "Corrections", "Disputes", "Dispute reviews", "Supersessions", "Coordination events", "Retention history", "Published state", "Retention"]) {
+    expect(markdown).toContain(`## ${heading}`);
+  }
+  expect(markdown).toContain("Export complete: true");
+  const markdownRecords = [...markdown.matchAll(/```json\n([\s\S]*?)\n```/gu)].map((match) => JSON.parse(match[1]!) as Record<string, unknown>);
+  const markdownTargetPublication = markdownRecords.find((record) => record.operation === "request.published" && record.resulting_revision === 2);
+  const markdownTargetBody = markdownTargetPublication?.body as Record<string, unknown> | undefined;
+  expect(markdownTargetBody).toMatchObject({ title: "Collect evidence" });
+  expect(markdownTargetBody).not.toHaveProperty("original");
+  expect(exportPathValue(markdownTargetBody, ["title"])).toBe("Collect evidence");
+  expect(markdown).toContain("Owner source");
+  for (const value of privateExportValues) expect(markdown).not.toContain(value);
+  for (const field of ["management_hash", "get_post_hash", "get_post_enabled", "get_post_token", "webhook_endpoints", "push_subscriptions", "source_browser_id", "secret", "p256dh", "auth"]) {
+    expect(markdown).not.toContain(`"${field}"`);
+  }
+
+  database.query("DELETE FROM messages WHERE id = ?").run(ownerSource);
+  const response = await worker.fetch(new Request("https://msg.0000.chat/room/export.json"));
+  expect(response.status).toBe(200);
+  const reader = response.body!.getReader();
+  const decoder = new TextDecoder();
+  const header = await reader.read();
+  expect(header.done).toBe(false);
+  const headerText = decoder.decode(header.value);
+  const headerJsonEnd = headerText.indexOf(',"messages":[');
+  const capturedHeader = JSON.parse(`${headerText.slice(0, headerJsonEnd)}}`) as { export: { coordination_cursor: number; published_revision: number } };
+  const capturedCursor = capturedHeader.export.coordination_cursor;
+  const eventIds = (predicate: string): string[] => (database.query(`SELECT event_id FROM coordination_events WHERE ${predicate} AND cursor <= ? ORDER BY cursor ASC`).all(capturedCursor) as { event_id: string }[]).map((event) => event.event_id);
+  const recordIds = (table: string, column: string, cursorColumn = "publication_cursor"): string[] => (database.query(`SELECT ${column} AS value FROM ${table} WHERE ${cursorColumn} <= ? ORDER BY ${cursorColumn} ASC, ${column} ASC`).all(capturedCursor) as { value: string }[]).map((record) => record.value);
+  const capturedEventIds = new Set(eventIds("1 = 1"));
+  const capturedRequestHistoryIds = eventIds("operation = 'request.published'");
+  const capturedPanelHistoryIds = eventIds("operation = 'panel.published'");
+  const capturedDecisionHistoryIds = eventIds("operation IN ('decision.recommended', 'decision.accepted', 'decision.position.published')");
+  const capturedPublicationIds = eventIds("operation IN ('request.published', 'panel.published', 'decision.recommended', 'decision.accepted', 'decision.position.published', 'correction.published', 'supersession.published', 'dispute.reviewed')");
+  const capturedRetentionIds = eventIds("operation = 'retention.extended'");
+  const capturedPositionIds = recordIds("coordination_decision_positions", "position_id", "published_cursor");
+  const capturedAcceptedRecordIds = recordIds("coordination_decision_accepted_records", "accepted_record_id");
+  const capturedApprovalIds = (database.query("SELECT a.approval_record_id AS value FROM coordination_decision_approval_evidence AS a JOIN coordination_decision_accepted_records AS r ON r.accepted_record_id = a.accepted_record_id WHERE r.publication_cursor <= ? ORDER BY a.approval_record_id ASC").all(capturedCursor) as { value: string }[]).map((record) => record.value);
+  const capturedCorrectionIds = recordIds("coordination_corrections", "correction_id");
+  const capturedDisputeIds = recordIds("coordination_disputes", "report_id", "cursor");
+  const capturedReviewIds = recordIds("coordination_dispute_reviews", "review_id", "cursor");
+  const capturedSupersessionIds = recordIds("coordination_supersessions", "supersession_id");
+  const lateReview = await worker.fetch(workerJson(`/manage/room/owner-token/coordination/disputes/${report.dispute.report_id}/review`, { base_revision: 10, client_retry_id: "late-review", disposition: "rejected", owner_label: "room-owner", rationale: "This review is after capture.", source_message_ids: [] }));
+  expect(lateReview.status).toBe(201);
+  const lateReviewValue = await lateReview.json() as { review: { review_id: string } };
+  const lateProgress = await worker.fetch(workerJson("/room/coordination/proposals", progress("late-progress", requestValue.proposal.request_id, "blocked", 11, bobSource, { reopen_reason: "A later review reopened this work." })));
+  expect(lateProgress.status).toBe(201);
+  const lateProgressValue = await lateProgress.json() as { proposal: { proposal_id: string; revision: number } };
+  const lateRequestPublication = await worker.fetch(workerJson("/manage/room/owner-token/coordination/publish", { base_revision: 11, client_retry_id: "late-request-publish", owner_label: "room-owner", proposal_id: lateProgressValue.proposal.proposal_id, revision: lateProgressValue.proposal.revision }));
+  expect(lateRequestPublication.status).toBe(201);
+  const latePanel = await worker.fetch(workerJson("/room/coordination/proposals", panelProposal("late-panel", bobSource, 12, "Late panel")));
+  expect(latePanel.status).toBe(201);
+  const latePanelValue = await latePanel.json() as { proposal: { proposal_id: string; revision: number } };
+  const latePanelPublication = await worker.fetch(workerJson("/manage/room/owner-token/coordination/publish", { base_revision: 12, client_retry_id: "late-panel-publish", owner_label: "room-owner", proposal_id: latePanelValue.proposal.proposal_id, revision: latePanelValue.proposal.revision }));
+  expect(latePanelPublication.status).toBe(201);
+  const lateRetention = await worker.fetch(workerJson("/manage/room/owner-token/retention", { client_retry_id: "late-retention", expires_at: bounds.maximum_expires_at }));
+  expect(lateRetention.status).toBe(201);
+
+  let output = decoder.decode(header.value);
+  for (;;) {
+    const next = await reader.read();
+    if (next.done) break;
+    output += decoder.decode(next.value, { stream: true });
+  }
+  output += decoder.decode();
+  const exported = JSON.parse(output) as {
+    export: { message_max_sequence: number; coordination_cursor: number; published_revision: number };
+    messages: readonly Record<string, unknown>[];
+    coordination: Record<string, readonly Record<string, unknown>[]> & { panel: Record<string, unknown> | null };
+    retention: { history: readonly Record<string, unknown>[] };
+    complete: boolean;
+  };
+  expect(exported.complete).toBe(true);
+  expect(exported.export.message_max_sequence).toBe(3);
+  expect(exported.export.coordination_cursor).toBe(capturedCursor);
+  expect(exported.export.published_revision).toBe(capturedHeader.export.published_revision);
+  const exactIds = (records: readonly Record<string, unknown>[], key: string, expected: readonly string[]) => {
+    const actual = records.map((record) => String(record[key]));
+    expect(actual.length).toBe(expected.length);
+    expect(new Set(actual).size).toBe(actual.length);
+    expect([...actual].sort()).toEqual([...expected].sort());
+  };
+  exactIds(exported.coordination.events, "event_id", [...capturedEventIds]);
+  exactIds(exported.coordination.request_history, "event_id", capturedRequestHistoryIds);
+  exactIds(exported.coordination.panel_history, "event_id", capturedPanelHistoryIds);
+  exactIds(exported.coordination.decision_history, "event_id", capturedDecisionHistoryIds);
+  exactIds(exported.coordination.publications, "event_id", capturedPublicationIds);
+  exactIds(exported.coordination.positions, "position_id", capturedPositionIds);
+  exactIds(exported.coordination.accepted_records, "accepted_record_id", capturedAcceptedRecordIds);
+  exactIds(exported.coordination.approval_evidence, "approval_record_id", capturedApprovalIds);
+  exactIds(exported.coordination.corrections, "correction_id", capturedCorrectionIds);
+  exactIds(exported.coordination.disputes, "report_id", capturedDisputeIds);
+  exactIds(exported.coordination.dispute_reviews, "review_id", capturedReviewIds);
+  exactIds(exported.coordination.supersessions, "supersession_id", capturedSupersessionIds);
+  expect(JSON.stringify(exported)).not.toContain("owner-token");
+  expect(JSON.stringify(exported)).not.toContain("management_hash");
+  expect(JSON.stringify(exported)).not.toContain("coordination_retries");
+  const actualProposalKeys = exported.coordination.proposals.map((proposal) => `${String(proposal.proposal_id)}:${String(proposal.revision)}`);
+  expect(actualProposalKeys.length).toBe(expectedProposalKeys.size);
+  expect(new Set(actualProposalKeys).size).toBe(actualProposalKeys.length);
+  expect([...actualProposalKeys].sort()).toEqual([...expectedProposalKeys].sort());
+  exactIds(exported.coordination.decisions, "decision_id", [decision.proposal.proposal_id, successor.proposal.proposal_id]);
+  exactIds(exported.coordination.requests, "request_id", [requestValue.proposal.request_id]);
+  expect(exported.coordination.requests[0]).toMatchObject({ status: "done", body: { title: "Collect evidence" }, progress: { status: "done" } });
+  expect(exported.coordination.panel).toMatchObject({ proposal_id: panel.proposal.proposal_id, purpose: "Ship the room panel" });
+  const targetCorrection = exported.coordination.corrections.find((correction) => (correction.target as Record<string, unknown> | undefined)?.published_revision === 2);
+  const targetPublication = exported.coordination.publications.find((publication) => publication.operation === "request.published" && publication.resulting_revision === 2);
+  const targetPublicationBody = targetPublication?.body as Record<string, unknown> | undefined;
+  expect(targetCorrection).toBeDefined();
+  if (targetCorrection === undefined) throw new Error("The export omitted the target correction.");
+  expect(targetPublicationBody).toMatchObject({ title: "Collect evidence" });
+  expect(targetPublicationBody).not.toHaveProperty("original");
+  expect(exportPathValue(targetPublicationBody, ((targetCorrection.target as Record<string, unknown>).claim_path ?? []) as (string | number)[])).toBe("Collect evidence");
+  const positionPublication = exported.coordination.publications.find((publication) => publication.operation === "decision.position.published");
+  expect(positionPublication?.body).toMatchObject({ position_id: position.proposal.proposal_id, reporter_label: "position-reporter" });
+  const reviewRecord = exported.coordination.dispute_reviews[0];
+  const reviewPublication = exported.coordination.publications.find((publication) => publication.operation === "dispute.reviewed");
+  expect(reviewPublication?.body).toMatchObject({ created_at: reviewRecord?.created_at, review_id: reviewRecord?.review_id });
+  exactIds(exported.retention.history, "event_id", capturedRetentionIds);
+  expect(exported.messages.some((message) => message.content === "Bob approval")).toBe(true);
+  const exportedJson = JSON.stringify(exported);
+  for (const value of privateExportValues) expect(exportedJson).not.toContain(value);
+  for (const field of ["management_hash", "get_post_hash", "get_post_enabled", "get_post_token", "webhook_endpoints", "push_subscriptions", "source_browser_id", "secret", "p256dh", "auth"]) {
+    expect(exportedJson).not.toContain(`"${field}"`);
+  }
+  expect(exported.coordination.events.some((event) => event.review_id === lateReviewValue.review.review_id)).toBe(false);
+  expect(exported.coordination.events.some((event) => event.proposal_id === lateProgressValue.proposal.proposal_id)).toBe(false);
+  expect(exported.coordination.events.some((event) => event.proposal_id === latePanelValue.proposal.proposal_id)).toBe(false);
+  expect(database.query("SELECT status FROM coordination_requests WHERE request_id = ?").get(requestValue.proposal.request_id)).toMatchObject({ status: "blocked" });
+  expect(database.query("SELECT proposal_id FROM coordination_panel WHERE singleton = 1").get()).toMatchObject({ proposal_id: latePanelValue.proposal.proposal_id });
+  expect(database.query("SELECT COUNT(*) AS count FROM coordination_dispute_reviews WHERE report_id = ?").get(report.dispute.report_id)).toEqual({ count: 2 });
+  const missingSource = exported.coordination.corrections[0]?.source_messages?.[0] as Record<string, unknown> | undefined;
+  expect(missingSource).toMatchObject({ id: ownerSource, available: false, unavailable_reason: "The original source message is unavailable in this captured room." });
+  expect(missingSource).not.toHaveProperty("content");
+  expect(missingSource).not.toHaveProperty("author");
+});
+
+test("cancels a paged export before it schedules another message page", async () => {
+  const { room: durable, context } = await room();
+  await durable.fetch(json("/initialize", { management_hash: await hashCapability("owner-token"), initial: { content: "control-0", author: "fixture", display_name: "Fixture", client: "coordination-test", semantic_type: "message" } }));
+  for (let index = 1; index <= 40; index += 1) {
+    const response = await durable.fetch(json("/messages", { input: { content: `control-${index}`, author: "fixture", display_name: "Fixture", client: "coordination-test", semantic_type: "message", reply_to: "1" } }));
+    expect(response.status).toBe(200);
+  }
+  const service = new DurableRoomService({ getByName: () => ({ fetch: (request: Request) => durable.fetch(request) }) }, "https://msg.0000.chat");
+  const worker = createWorker(service);
+  const response = await worker.fetch(new Request("https://msg.0000.chat/room/export.json"));
+  const reader = response.body!.getReader();
+  const beforeHeader = context.messagePageSelects;
+  const header = await reader.read();
+  expect(header.done).toBe(false);
+  expect(context.messagePageSelects).toBe(beforeHeader);
+  const firstMessage = await reader.read();
+  expect(firstMessage.done).toBe(false);
+  expect(context.messagePageSelects).toBe(beforeHeader + 1);
+  const alarmsAfterFirstMessage = context.setAlarmCalls;
+  await reader.cancel();
+  await Promise.resolve();
+  expect(context.messagePageSelects).toBe(beforeHeader + 1);
+  expect(context.setAlarmCalls).toBe(alarmsAfterFirstMessage);
+});
+
+test("exports a large control-heavy message exactly in bounded JSON and Markdown pages", async () => {
+  const { room: durable, context } = await room();
+  await durable.fetch(json("/initialize", { management_hash: await hashCapability("owner-token"), initial: { content: "source", author: "a", display_name: "A", semantic_type: "message" } }));
+  const content = Array.from({ length: 64 * 1024 }, (_, index) => ["\u0000", "\u0001", "\u0008", "\u0009", "\u000a", "\u000b", "\u000c", "\u000d", "\u001b"][index % 9]!).join("");
+  const posted = await durable.fetch(json("/messages", { input: { content, author: "control-heavy", display_name: "Control Heavy", semantic_type: "message" } }));
+  expect(posted.status).toBe(200);
+  const messageId = (await posted.json() as { message: { id: string } }).message.id;
+  const service = new DurableRoomService({ getByName: () => ({ fetch: (request: Request) => durable.fetch(request) }) }, "https://msg.0000.chat");
+  const worker = createWorker(service);
+
+  const beforeJsonPages = context.messagePageSelects;
+  const jsonResponse = await worker.fetch(new Request("https://msg.0000.chat/room/export.json"));
+  expect(jsonResponse.status).toBe(200);
+  const jsonText = await jsonResponse.text();
+  const exported = JSON.parse(jsonText) as { messages: readonly { content: string; id: string }[]; complete: boolean };
+  expect(exported.complete).toBe(true);
+  expect(exported.messages.find((message) => message.id === messageId)?.content).toBe(content);
+  expect(jsonText).toContain("\\u0000");
+  expect(new TextEncoder().encode(jsonText).byteLength).toBeGreaterThan(content.length * 3);
+  expect(context.messagePageSelects).toBe(beforeJsonPages + 1);
+
+  const beforeMarkdownPages = context.messagePageSelects;
+  const markdownResponse = await worker.fetch(new Request("https://msg.0000.chat/room/export.md"));
+  expect(markdownResponse.status).toBe(200);
+  const markdown = await markdownResponse.text();
+  expect(markdown).toContain("Export complete: true");
+  expect(markdown).toContain(content);
+  expect(markdown).toContain(`"id": "${messageId}"`);
+  expect(context.messagePageSelects).toBe(beforeMarkdownPages + 1);
 });
 
 test("runs proposal, review, exact publication, retries, and revisions inside the room route", async () => {

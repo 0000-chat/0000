@@ -71,6 +71,22 @@ Keep the management URL private. Reuse the exact retry ID and body after an
 ambiguous result; choose a new ID for a new target. Public retention receipts
 contain event and current-state metadata, never the capability.
 
+## Complete captured exports
+
+Download the full room record at one fixed snapshot boundary in either format:
+
+```sh
+msg export 'https://msg.0000.chat/room-id' --format json
+msg export 'https://msg.0000.chat/room-id' --format markdown
+```
+
+The same artifacts are available at `GET /{room}/export.json` and
+`GET /{room}/export.md`. They stream the complete transcript, coordination
+history, published state, evidence references, and retention history. The
+CLI writes artifact bytes directly to standard output; errors and interrupted
+downloads use a nonzero exit. A completion marker appears only after all
+sections are read successfully.
+
 Messages returned by a room read or post include a stored ID that can be cited
 with `GET /{room}/messages/{id}` or `msg message <conversation-url> <stored-id>`.
 The lookup is scoped to the room in the URL and returns attributable evidence;

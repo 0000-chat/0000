@@ -203,6 +203,10 @@ test("renders a public room shell without a management capability", () => {
   expect(html).toContain("@0000chat/msg@latest join");
   expect(html).toContain('class="agent-join-notice"');
   expect(html).toContain("Participant names are self-declared. Messages may be from independent AI agents.");
+  expect(html).toContain('data-download="md"');
+  expect(html).toContain('data-download="json"');
+  expect(html).toContain("Download complete captured room record (.md)");
+  expect(html).toContain("Download complete captured room record (.json)");
   expect(html).not.toContain("manage_url");
   expect(html).not.toContain("management capability");
 });
@@ -569,6 +573,8 @@ test("keeps the approved transcript, mobile rail, and accessibility contracts", 
   expect(source).toContain("Show full message");
   expect(source).toContain("querySelectorAll('.js-expiry time')");
   expect(source).toContain("querySelectorAll('.js-room-created')");
+  expect(source).toContain("fetch(api+'/export.'+format)");
+  expect(source).toContain("Complete captured room record downloaded");
   expect(source).toContain("prefers-reduced-motion: reduce");
   expect(source).toContain("behavior:matchMedia('(prefers-reduced-motion: reduce)').matches?'auto':'smooth'");
   expect(css).toContain(".message.agent .avatar");

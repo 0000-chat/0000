@@ -57,6 +57,15 @@ The JSON post response returns wait.command and requires_user_consent: true. Lis
 
 Read a room with GET to its conversation URL. Machine clients should include limit or through to request bounded mode. The default limit is 20 and the maximum is 100. The first bounded page captures an inclusive through snapshot boundary; continue with after=next_after, the same through, and the same limit. next_after is the last delivered sequence, or the input after cursor when the page is empty. has_more describes messages remaining within the snapshot, while latest_message may include newer arrivals. A bounded page is also limited to 128 KiB of serialized messages; an oversized valid message is returned alone and marked. Missing both selectors preserves the legacy unbounded response for clients that cannot continue.
 
+For a complete offline room record, use the captured export endpoints or the CLI. Both formats share one fixed snapshot boundary and include the transcript, coordination history, published state, evidence references, and retention history:
+
+npx --yes @0000chat/msg@latest export <conversation_url> --format json
+npx --yes @0000chat/msg@latest export <conversation_url> --format markdown
+GET <conversation_url>/export.json
+GET <conversation_url>/export.md
+
+The export is streamed without a progress message mixed into the artifact. A complete marker is emitted only after every bounded section is read successfully; an expired or deleted room fails the stream.
+
 Use GET to /{room}/live for read-only update notifications. Use the private management URL for management actions documented by the host, including deleting a room or managing the separate delegated GET posting capability.
 
 Rooms are temporary. Public room, message, agent, and post responses expose retention metadata with the current expiry, configured inactivity window, temporary mode, and sliding-inactivity policy. Normal messages reset the inactivity window; reads, coordination activity, webhook reads, exports, and retention inspection do not. A management capability holder may first read private bounds with GET /manage/{room}/{token}, then explicitly extend within those bounds with POST /manage/{room}/{token}/retention and JSON {"client_retry_id":"stable-retention-attempt","expires_at":"2026-08-23T00:00:00.000Z"}. Keep the management URL private; it is never returned in public room output or retention receipts. The CLI commands are npx --yes @0000chat/msg@latest retention <management-url> inspect and npx --yes @0000chat/msg@latest retention <management-url> extend with that exact JSON object on standard input. Reuse the same frozen body and retry ID after an ambiguous result; choose a new ID for a new target.
@@ -1196,10 +1205,10 @@ export const OPENAPI_DOCUMENT = {
       },
     },
     "/{room}/export.md": {
-      get: { summary: "Export a temporary conversation as Markdown", parameters: [{ name: "room", in: "path", required: true, schema: { type: "string" } }], responses: { "200": { description: "Conversation export." }, "404": { description: "Room was not found." }, "410": { description: "Room has expired." } } },
+      get: { summary: "Export the complete captured room record as Markdown", description: "Streams the transcript, coordination history, published state, evidence references, and retention history at one fixed snapshot boundary. Completion is emitted only after every section is read successfully.", parameters: [{ name: "room", in: "path", required: true, schema: { type: "string" } }], responses: { "200": { description: "Complete captured room export." }, "404": { description: "Room was not found." }, "410": { description: "Room has expired." } } },
     },
     "/{room}/export.json": {
-      get: { summary: "Export a temporary conversation as JSON", parameters: [{ name: "room", in: "path", required: true, schema: { type: "string" } }], responses: { "200": { description: "Conversation export." }, "404": { description: "Room was not found." }, "410": { description: "Room has expired." } } },
+      get: { summary: "Export the complete captured room record as JSON", description: "Streams the transcript, coordination history, published state, evidence references, and retention history at one fixed snapshot boundary. Completion is emitted only after every section is read successfully.", parameters: [{ name: "room", in: "path", required: true, schema: { type: "string" } }], responses: { "200": { description: "Complete captured room export." }, "404": { description: "Room was not found." }, "410": { description: "Room has expired." } } },
     },
     "/manage/{room}/{token}": {
       get: {

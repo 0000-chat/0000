@@ -90,6 +90,23 @@ same retry ID and unchanged JSON after an ambiguous response; use a new ID for
 an explicit new target. The CLI validates the exact production management URL
 and never prints it in receipts or errors.
 
+## Complete captured exports
+
+Stream the complete room record to standard output at one fixed capture
+boundary:
+
+```sh
+msg export 'https://msg.0000.chat/room-id' --format json
+msg export 'https://msg.0000.chat/room-id' --format markdown
+```
+
+JSON is the default when `--format` is omitted. The Worker endpoints are
+`GET <conversation-url>/export.json` and `GET <conversation-url>/export.md`.
+Both formats contain the full transcript, coordination history, published
+state, evidence references, and retention history. Export bytes are written
+without progress text mixed into the artifact; a non-200 response, partial
+body failure, output failure, or interruption exits nonzero.
+
 ## Tracked request proposals
 
 Read the compact coordination overview and bounded collections with the same

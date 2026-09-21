@@ -1616,6 +1616,39 @@ test.serial("renders Durable Object export errors in the negotiated public repre
   }, { ...TEST_ROOM_LIMITS, tombstoneTtlMs: 5_000 });
 });
 
+test.serial("streams a captured complete export over the public HTTP route", { timeout: 30_000 }, async () => {
+  await withRuntime(async (miniflare) => {
+    const created = await createRoom(miniflare, "first");
+    for (let index = 0; index < 105; index += 1) {
+      expect((await post(miniflare, created.room.id, `message-${index}`)).status).toBe(201);
+    }
+    const response = await miniflare.dispatchFetch(`https://msg.0000.chat/${created.room.id}/export.json`, { headers: { accept: "application/json" } });
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toContain("application/json");
+    const reader = response.body!.getReader();
+    const decoder = new TextDecoder();
+    const first = await reader.read();
+    expect(first.done).toBe(false);
+    const firstText = decoder.decode(first.value, { stream: true });
+    expect(firstText).toContain("message_max_sequence");
+    expect((await post(miniflare, created.room.id, "arrives-after-capture")).status).toBe(201);
+    const chunks: string[] = [];
+    chunks.push(firstText);
+    while (true) {
+      const next = await reader.read();
+      if (next.done) break;
+      chunks.push(decoder.decode(next.value, { stream: true }));
+    }
+    chunks.push(decoder.decode());
+    const value = JSON.parse(chunks.join("")) as { complete: boolean; messages: Array<{ sequence: number; content: string }>; snapshot: { message_max_sequence: number } };
+    expect(value.complete).toBe(true);
+    expect(value.snapshot.message_max_sequence).toBe(106);
+    expect(value.messages).toHaveLength(106);
+    expect(value.messages.at(-1)).toMatchObject({ sequence: 106, content: "message-104" });
+    expect(value.messages.some((message) => message.content === "arrives-after-capture")).toBe(false);
+  }, { ...TEST_ROOM_LIMITS, maxMessages: 200 });
+});
+
 test.serial("returns gone after management deletion and enforces the test quota", { timeout: 15_000 }, async () => {
   await withRuntime(async (miniflare) => {
     const quotaRoom = await createRoom(miniflare);
