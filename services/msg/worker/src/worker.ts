@@ -543,9 +543,6 @@ function boundedQueryValue(value: string | null, field: string, maxChars: number
 }
 
 function rejectGetPostPrefetch(request: Request): void {
-  if (request.headers.get("sec-fetch-site")?.toLowerCase() === "cross-site") {
-    throw new ProtocolError(ERROR_CODES.forbidden, "GET posting URLs cannot be used by cross-site browser requests.", 403);
-  }
   const prefetchHeaders = ["purpose", "sec-purpose", "x-moz"].map((name) => request.headers.get(name)?.toLowerCase() ?? "");
   if (prefetchHeaders.some((value) => value.includes("prefetch") || value.includes("prerender"))) {
     throw new ProtocolError(ERROR_CODES.forbidden, "GET posting URLs cannot be used by prefetch or prerender requests.", 403);
