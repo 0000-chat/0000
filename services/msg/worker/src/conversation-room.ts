@@ -1743,6 +1743,7 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
     if (decisionPublication.mode === "recommendation") {
       if (priorRecommendation || priorAccepted) throw new ProtocolError(ERROR_CODES.conflict, "The exact decision proposal revision has already been recommended or accepted.", 409);
       if (proposal.base_revision !== input.base_revision) throw new ProtocolError(ERROR_CODES.staleRevision, "The decision proposal was based on a different published revision; rebase it before publishing.", 409, undefined, { current_revision: state.published_revision, submitted_base_revision: proposal.base_revision });
+      const previousProjection = rows<StoredCoordinationDecision>(this.ctx.storage.sql.exec("SELECT * FROM coordination_decisions WHERE decision_id = ?", proposal.proposal_id))[0];
       const projection: StoredCoordinationDecision = {
         accepted_record_id: null,
         byte_count: coordinationStorageBytes({ decision_id: proposal.proposal_id, ...body, state: "recommended" }, proposal.proposal_id),
@@ -1762,9 +1763,10 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
       const response = this.coordinationDecisionPublicationResponse(proposal, projection, undefined, [], sourceMessages, state, cursor, nextRevision);
       const receiptText = JSON.stringify(response);
       const retryBytes = coordinationStorageBytes({ operation, retry_id: input.client_retry_id, fingerprint, receipt: receiptText });
-      this.ensureCoordinationCapacity(state, projection.byte_count + eventBytes + retryBytes);
+      const projectionDelta = previousProjection === undefined ? projection.byte_count : projection.byte_count - previousProjection.byte_count;
+      this.ensureCoordinationCapacity(state, Math.max(0, projectionDelta) + eventBytes + retryBytes);
       this.ctx.storage.sql.exec(
-        "INSERT INTO coordination_decisions (decision_id, latest_proposal_revision, title, proposal_text, required_approver_labels, state, recommendation_cursor, recommendation_published_revision, accepted_record_id, updated_at, byte_count) VALUES (?, ?, ?, ?, ?, 'recommended', ?, ?, NULL, ?, ?)",
+        "INSERT OR REPLACE INTO coordination_decisions (decision_id, latest_proposal_revision, title, proposal_text, required_approver_labels, state, recommendation_cursor, recommendation_published_revision, accepted_record_id, updated_at, byte_count) VALUES (?, ?, ?, ?, ?, 'recommended', ?, ?, NULL, ?, ?)",
         projection.decision_id, projection.latest_proposal_revision, projection.title, projection.proposal_text, projection.required_approver_labels, projection.recommendation_cursor, projection.recommendation_published_revision, projection.updated_at, projection.byte_count,
       );
       this.ctx.storage.sql.exec(
@@ -1772,7 +1774,7 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
         cursor, eventId, proposal.proposal_id, proposal.revision, proposal.kind, input.owner_label, proposal.source_message_ids, input.base_revision, nextRevision, eventBody, now, eventBytes,
       );
       this.ctx.storage.sql.exec("INSERT INTO coordination_retries (operation, retry_id, fingerprint, receipt, created_at, byte_count) VALUES (?, ?, ?, ?, ?, ?)", operation, input.client_retry_id, fingerprint, receiptText, now, retryBytes);
-      this.ctx.storage.sql.exec("UPDATE room_state SET coordination_cursor = ?, published_revision = ?, total_bytes = total_bytes + ? WHERE singleton = 1", cursor, nextRevision, projection.byte_count + eventBytes + retryBytes);
+      this.ctx.storage.sql.exec("UPDATE room_state SET coordination_cursor = ?, published_revision = ?, total_bytes = total_bytes + ? WHERE singleton = 1", cursor, nextRevision, projectionDelta + eventBytes + retryBytes);
       return { expired: false as const, replayed: false as const, response };
     }
 

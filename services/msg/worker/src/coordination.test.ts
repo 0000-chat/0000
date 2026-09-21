@@ -1082,6 +1082,93 @@ test("publishes recommendation then exact-revision acceptance with distinct evid
   expect(wrongAuthReplay.status).toBe(404);
 });
 
+test("replaces an unaccepted recommendation when its latest proposal revision is published", async () => {
+  const { room: durable, database } = await room();
+  const initialized = await durable.fetch(json("/initialize", { management_hash: await hashCapability("owner-token"), initial: { content: "I approve the revised proposal.", author: "alice", display_name: "Alice", semantic_type: "message" } }));
+  const aliceMessageId = (await initialized.json() as { id: string }).id;
+  const bobResponse = await durable.fetch(json("/messages", { input: { content: "I approve the revised proposal too.", author: "bob", display_name: "Bob", semantic_type: "message" } }));
+  const bobMessageId = (await bobResponse.json() as { message: { id: string } }).message.id;
+
+  const created = await durable.fetch(json("/coordination/proposals", decisionProposal("recommendation-revision-v1", aliceMessageId, 0, "Choose revision one")));
+  const decision = await created.json() as { proposal: { proposal_id: string; revision: number } };
+  expect(created.status).toBe(201);
+  expect(decision.proposal.revision).toBe(1);
+
+  const firstRecommendationInput = {
+    base_revision: 0,
+    client_retry_id: "recommendation-publish-v1",
+    decision_publication: { mode: "recommendation" },
+    owner_label: "room-owner",
+    proposal_id: decision.proposal.proposal_id,
+    revision: decision.proposal.revision,
+  };
+  const firstRecommendation = await durable.fetch(json("/coordination/publish?token=owner-token", firstRecommendationInput));
+  const firstRecommendationValue = await firstRecommendation.json() as { coordination_cursor: number; published_revision: number };
+  expect(firstRecommendation.status).toBe(201);
+  expect(firstRecommendationValue.published_revision).toBe(1);
+  const firstProjection = database.query("SELECT byte_count FROM coordination_decisions WHERE decision_id = ?").get(decision.proposal.proposal_id) as { byte_count: number };
+
+  const revised = await durable.fetch(json(`/coordination/proposals/${decision.proposal.proposal_id}/revisions`, decisionProposal("recommendation-revision-v2", aliceMessageId, 1, "Choose revision two")));
+  const revisedValue = await revised.json() as { proposal: { proposal_id: string; revision: number } };
+  expect(revised.status).toBe(201);
+  expect(revisedValue.proposal).toMatchObject({ proposal_id: decision.proposal.proposal_id, revision: 2 });
+
+  const beforeSecondRecommendation = database.query("SELECT total_bytes FROM room_state WHERE singleton = 1").get() as { total_bytes: number };
+  const secondRecommendationInput = {
+    base_revision: 1,
+    client_retry_id: "recommendation-publish-v2",
+    decision_publication: { mode: "recommendation" },
+    owner_label: "room-owner",
+    proposal_id: decision.proposal.proposal_id,
+    revision: revisedValue.proposal.revision,
+  };
+  const secondRecommendation = await durable.fetch(json("/coordination/publish?token=owner-token", secondRecommendationInput));
+  expect(secondRecommendation.status).toBe(201);
+  expect(await secondRecommendation.json()).toMatchObject({ decision: { state: "recommended", latest_proposal_revision: 2, title: "Choose revision two" }, published_revision: 2 });
+  const secondProjection = database.query("SELECT byte_count FROM coordination_decisions WHERE decision_id = ?").get(decision.proposal.proposal_id) as { byte_count: number };
+  const secondEvent = database.query("SELECT byte_count FROM coordination_events WHERE operation = 'decision.recommended' AND proposal_id = ? AND proposal_revision = 2").get(decision.proposal.proposal_id) as { byte_count: number };
+  const secondRetry = database.query("SELECT byte_count FROM coordination_retries WHERE operation = 'publication' AND retry_id = ?").get(secondRecommendationInput.client_retry_id) as { byte_count: number };
+  const afterSecondRecommendation = database.query("SELECT total_bytes FROM room_state WHERE singleton = 1").get() as { total_bytes: number };
+  expect(afterSecondRecommendation.total_bytes - beforeSecondRecommendation.total_bytes).toBe(secondProjection.byte_count - firstProjection.byte_count + secondEvent.byte_count + secondRetry.byte_count);
+
+  const current = await durable.fetch(new Request(`https://room/coordination/decisions/${decision.proposal.proposal_id}`));
+  expect(await current.json()).toMatchObject({ decision: { state: "recommended", latest_proposal_revision: 2, title: "Choose revision two" }, history: [{ operation: "decision.recommended", proposal_revision: 1 }, { operation: "decision.recommended", proposal_revision: 2 }] });
+  const asOfFirstRecommendation = await durable.fetch(new Request(`https://room/coordination/decisions/${decision.proposal.proposal_id}?through=${firstRecommendationValue.coordination_cursor}`));
+  expect(await asOfFirstRecommendation.json()).toMatchObject({ decision: { state: "recommended", latest_proposal_revision: 1, title: "Choose revision one" }, history: [{ operation: "decision.recommended", proposal_revision: 1 }] });
+
+  const oldRevisionRepublish = await durable.fetch(json("/coordination/publish?token=owner-token", { ...firstRecommendationInput, base_revision: 2, client_retry_id: "recommendation-republish-v1" }));
+  expect(oldRevisionRepublish.status).toBe(409);
+  expect(await oldRevisionRepublish.json()).toMatchObject({ error: { code: "conflict" } });
+
+  const beforeFirstReplay = database.query("SELECT coordination_cursor, published_revision, total_bytes FROM room_state WHERE singleton = 1").get();
+  const firstReplay = await durable.fetch(json("/coordination/publish?token=owner-token", firstRecommendationInput));
+  expect(firstReplay.status).toBe(200);
+  expect(await firstReplay.json()).toMatchObject({ replayed: true, decision: { latest_proposal_revision: 1, title: "Choose revision one" } });
+  expect(database.query("SELECT coordination_cursor, published_revision, total_bytes FROM room_state WHERE singleton = 1").get()).toEqual(beforeFirstReplay);
+
+  const acceptance = await durable.fetch(json("/coordination/publish?token=owner-token", {
+    base_revision: 2,
+    client_retry_id: "recommendation-acceptance-v2",
+    decision_publication: { approvals: [{ participant_label: "alice", source_message_id: aliceMessageId }, { participant_label: "bob", source_message_id: bobMessageId }], mode: "acceptance", owner_attestation: true },
+    owner_label: "room-owner",
+    proposal_id: decision.proposal.proposal_id,
+    revision: revisedValue.proposal.revision,
+  }));
+  expect(acceptance.status).toBe(201);
+  const accepted = await acceptance.json() as { accepted_record: { decision_revision: number }; approvals: readonly { decision_revision: number }[]; decision: { latest_proposal_revision: number; state: string } };
+  expect(accepted).toMatchObject({ accepted_record: { decision_revision: 2 }, approvals: [{ decision_revision: 2 }, { decision_revision: 2 }], decision: { latest_proposal_revision: 2, state: "accepted" } });
+
+  const beforeSecondReplay = database.query("SELECT coordination_cursor, published_revision, total_bytes FROM room_state WHERE singleton = 1").get();
+  const secondReplay = await durable.fetch(json("/coordination/publish?token=owner-token", secondRecommendationInput));
+  expect(secondReplay.status).toBe(200);
+  expect(await secondReplay.json()).toMatchObject({ replayed: true, decision: { latest_proposal_revision: 2, title: "Choose revision two" } });
+  expect(database.query("SELECT coordination_cursor, published_revision, total_bytes FROM room_state WHERE singleton = 1").get()).toEqual(beforeSecondReplay);
+
+  const afterAcceptanceRevision = await durable.fetch(json(`/coordination/proposals/${decision.proposal.proposal_id}/revisions`, decisionProposal("recommendation-revision-after-acceptance", aliceMessageId, 2, "Should not revise")));
+  expect(afterAcceptanceRevision.status).toBe(409);
+  expect(await afterAcceptanceRevision.json()).toMatchObject({ error: { code: "conflict" } });
+});
+
 test("rejects insufficient or misattributed acceptance evidence and preserves reported positions separately", async () => {
   const { room: durable } = await room();
   const initialized = await durable.fetch(json("/initialize", { management_hash: await hashCapability("owner-token"), initial: { content: "Owner source", author: "owner", display_name: "Owner", semantic_type: "message" } }));
