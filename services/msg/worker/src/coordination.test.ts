@@ -702,3 +702,270 @@ test("keeps decision history and positions paginated at a frozen cursor", async 
   const frozenList = await worker.fetch(new Request(`https://msg.0000.chat/room/coordination/decisions?through=${frozenValue.history_through}&limit=20`));
   expect(await frozenList.json()).toMatchObject({ through: frozenValue.history_through, decisions: [{ decision_id: createdValue.proposal.proposal_id, state: "recommended" }] });
 });
+
+test("routes correction publication and follows its original publication and source links", async () => {
+  const { room: durable } = await room();
+  const service = new DurableRoomService({ getByName: () => ({ fetch: (request: Request) => durable.fetch(request) }) }, "https://msg.0000.chat");
+  const worker = createWorker(service);
+  const initialized = await durable.fetch(json("/initialize", { management_hash: await hashCapability("owner-token"), initial: { content: "Owner source", author: "owner", display_name: "Owner", semantic_type: "message" } }));
+  const sourceId = (await initialized.json() as { id: string }).id;
+
+  const created = await worker.fetch(workerJson("/room/coordination/proposals", proposal("correction-request", sourceId)));
+  const createdValue = await created.json() as { proposal: { proposal_id: string; revision: number } };
+  const published = await worker.fetch(workerJson("/manage/room/owner-token/coordination/publish", { base_revision: 0, client_retry_id: "correction-request-publish", owner_label: "room-owner", proposal_id: createdValue.proposal.proposal_id, revision: createdValue.proposal.revision }));
+  expect(published.status).toBe(201);
+  const publishedValue = await published.json() as { published_revision: number };
+  const publication = await worker.fetch(new Request(`https://msg.0000.chat/room/coordination/publications/${publishedValue.published_revision}`));
+  expect(publication.status).toBe(200);
+  const publicationValue = await publication.json() as { publication: { body: { title: string }; source_messages: readonly { citation_url: string }[]; corrections_url: string; correction_count: number } };
+  expect(publicationValue.publication).toMatchObject({ body: { title: "Collect evidence" }, correction_count: 0, source_messages: [{ citation_url: `https://msg.0000.chat/room/messages/${sourceId}` }] });
+  const inheritedPath = await worker.fetch(workerJson("/room/coordination/proposals", {
+    actor_label: "reporter",
+    base_revision: publishedValue.published_revision,
+    body: { correction_text: "Inherited properties are not claims.", target: { claim_path: ["toString"], published_revision: publishedValue.published_revision, type: "publication" } },
+    client_retry_id: "correction-inherited-path",
+    kind: "claim.correction",
+    source_message_ids: [sourceId],
+  }));
+  expect(inheritedPath.status).toBe(400);
+  const missingMessage = await worker.fetch(workerJson("/room/coordination/proposals", {
+    actor_label: "reporter",
+    base_revision: publishedValue.published_revision,
+    body: { correction_text: "The missing message cannot be corrected.", target: { message_id: "missing-message", type: "message" } },
+    client_retry_id: "correction-missing-message",
+    kind: "claim.correction",
+    source_message_ids: [sourceId],
+  }));
+  expect(missingMessage.status).toBe(404);
+
+  const correction = await worker.fetch(workerJson("/room/coordination/proposals", {
+    actor_label: "reporter",
+    base_revision: publishedValue.published_revision,
+    body: { correction_text: "The title should identify the release evidence.", target: { claim_path: ["title"], published_revision: publishedValue.published_revision, type: "publication" } },
+    client_retry_id: "correction-proposal",
+    kind: "claim.correction",
+    source_message_ids: [sourceId],
+  }));
+  expect(correction.status).toBe(201);
+  const correctionValue = await correction.json() as { proposal: { proposal_id: string; revision: number } };
+  const correctionPublication = await worker.fetch(workerJson("/manage/room/owner-token/coordination/publish", { base_revision: publishedValue.published_revision, client_retry_id: "correction-publish", owner_label: "room-owner", proposal_id: correctionValue.proposal.proposal_id, revision: correctionValue.proposal.revision }));
+  expect(correctionPublication.status).toBe(201);
+  const correctionPublicationValue = await correctionPublication.json() as { correction: { correction_id: string; target_url: string; source_messages: readonly { citation_url: string }[] }; published_revision: number };
+  expect(correctionPublicationValue.correction).toMatchObject({ target_url: `https://msg.0000.chat/room/coordination/publications/${publishedValue.published_revision}#claim-%5B%22title%22%5D`, source_messages: [{ citation_url: `https://msg.0000.chat/room/messages/${sourceId}` }] });
+
+  const listed = await worker.fetch(new Request(`https://msg.0000.chat/room/coordination/corrections?target_type=publication&target_published_revision=${publishedValue.published_revision}&limit=20`));
+  expect(await listed.json()).toMatchObject({ correction_count: 1, corrections: [{ correction_id: correctionValue.proposal.proposal_id }] });
+  const detail = await worker.fetch(new Request(`https://msg.0000.chat/room/coordination/corrections/${correctionValue.proposal.proposal_id}`));
+  expect(await detail.json()).toMatchObject({ correction: { target_url: `https://msg.0000.chat/room/coordination/publications/${publishedValue.published_revision}#claim-%5B%22title%22%5D` } });
+  const original = await worker.fetch(new Request(`https://msg.0000.chat/room/coordination/publications/${publishedValue.published_revision}`));
+  expect(await original.json()).toMatchObject({ publication: { body: { title: "Collect evidence" }, correction_count: 1 } });
+
+  const secondCorrectionProposal = await worker.fetch(workerJson("/room/coordination/proposals", {
+    actor_label: "reporter-two",
+    base_revision: correctionPublicationValue.published_revision,
+    body: { correction_text: "The purpose also needs a source qualifier.", target: { claim_path: ["purpose"], published_revision: publishedValue.published_revision, type: "publication" } },
+    client_retry_id: "correction-second-proposal",
+    kind: "claim.correction",
+    source_message_ids: [sourceId],
+  }));
+  const secondCorrection = await secondCorrectionProposal.json() as { proposal: { proposal_id: string; revision: number } };
+  const secondPublished = await worker.fetch(workerJson("/manage/room/owner-token/coordination/publish", { base_revision: correctionPublicationValue.published_revision, client_retry_id: "correction-second-publish", owner_label: "room-owner", proposal_id: secondCorrection.proposal.proposal_id, revision: secondCorrection.proposal.revision }));
+  expect(secondPublished.status).toBe(201);
+  const secondPublishedValue = await secondPublished.json() as { published_revision: number };
+  const titlePath = encodeURIComponent(JSON.stringify(["title"]));
+  const purposePath = encodeURIComponent(JSON.stringify(["purpose"]));
+  expect(await (await worker.fetch(new Request(`https://msg.0000.chat/room/coordination/corrections?target_published_revision=${publishedValue.published_revision}&target_claim_path=${titlePath}&limit=20`))).json()).toMatchObject({ correction_count: 1, corrections: [{ correction_id: correctionPublicationValue.correction.correction_id }] });
+  expect(await (await worker.fetch(new Request(`https://msg.0000.chat/room/coordination/corrections?target_published_revision=${publishedValue.published_revision}&target_claim_path=${purposePath}&limit=20`))).json()).toMatchObject({ correction_count: 1, corrections: [{ correction_id: secondCorrection.proposal.proposal_id }] });
+
+  const beforeMessage = await worker.fetch(new Request(`https://msg.0000.chat/room/messages/${sourceId}`, { headers: { accept: "application/json" } }));
+  const beforeMessageValue = await beforeMessage.json() as { message: unknown; correction_count: number; corrections_url: string; coordination_cursor: number };
+  const messageCorrectionProposal = await worker.fetch(workerJson("/room/coordination/proposals", {
+    actor_label: "message-reporter",
+    base_revision: secondPublishedValue.published_revision,
+    body: { correction_text: "The original message is accompanied by this attributed correction.", target: { message_id: sourceId, type: "message" } },
+    client_retry_id: "correction-message-proposal",
+    kind: "claim.correction",
+    source_message_ids: [sourceId],
+  }));
+  const messageCorrection = await messageCorrectionProposal.json() as { proposal: { proposal_id: string; revision: number } };
+  const messagePublished = await worker.fetch(workerJson("/manage/room/owner-token/coordination/publish", { base_revision: secondPublishedValue.published_revision, client_retry_id: "correction-message-publish", owner_label: "room-owner", proposal_id: messageCorrection.proposal.proposal_id, revision: messageCorrection.proposal.revision }));
+  expect(messagePublished.status).toBe(201);
+  const afterMessage = await worker.fetch(new Request(`https://msg.0000.chat/room/messages/${sourceId}`, { headers: { accept: "application/json", "if-none-match": beforeMessage.headers.get("etag") ?? "" } }));
+  const afterMessageValue = await afterMessage.json() as { message: unknown; correction_count: number; corrections_url: string; coordination_cursor: number };
+  expect(afterMessageValue).toMatchObject({ correction_count: 1, corrections_url: `https://msg.0000.chat/room/coordination/corrections?target_type=message&target_message_id=${sourceId}` });
+  expect(afterMessageValue.message).toEqual(beforeMessageValue.message);
+  expect(afterMessageValue.coordination_cursor).toBeGreaterThan(beforeMessageValue.coordination_cursor);
+  expect(afterMessage.headers.get("etag")).not.toBe(beforeMessage.headers.get("etag"));
+});
+
+test("routes attributed disputes and owner reviews without changing the accepted record", async () => {
+  const { room: durable } = await room();
+  const service = new DurableRoomService({ getByName: () => ({ fetch: (request: Request) => durable.fetch(request) }) }, "https://msg.0000.chat");
+  const worker = createWorker(service);
+  const initialized = await durable.fetch(json("/initialize", { management_hash: await hashCapability("owner-token"), initial: { content: "Owner source", author: "owner", display_name: "Owner", semantic_type: "message" } }));
+  const ownerSource = (await initialized.json() as { id: string }).id;
+  const approval = await durable.fetch(json("/messages", { input: { content: "I approve this exact proposal.", author: "alice", display_name: "Alice", semantic_type: "message" } }));
+  const approvalSource = (await approval.json() as { message: { id: string } }).message.id;
+  const secondApproval = await durable.fetch(json("/messages", { input: { content: "I approve this exact proposal too.", author: "bob", display_name: "Bob", semantic_type: "message" } }));
+  const secondApprovalSource = (await secondApproval.json() as { message: { id: string } }).message.id;
+  const created = await worker.fetch(workerJson("/room/coordination/proposals", decisionProposal("dispute-decision", ownerSource)));
+  const decision = await created.json() as { proposal: { proposal_id: string; revision: number } };
+  const accepted = await worker.fetch(workerJson("/manage/room/owner-token/coordination/publish", { base_revision: 0, client_retry_id: "dispute-acceptance", decision_publication: { approvals: [{ participant_label: "alice", source_message_id: approvalSource }, { participant_label: "bob", source_message_id: secondApprovalSource }], mode: "acceptance", owner_attestation: true }, owner_label: "room-owner", proposal_id: decision.proposal.proposal_id, revision: decision.proposal.revision }));
+  expect(accepted.status).toBe(201);
+  const acceptedValue = await accepted.json() as { accepted_record: { accepted_record_id: string; proposal_snapshot: unknown; publication_revision: number }; approvals: readonly { approval_record_id: string }[]; published_revision: number };
+  const immutableSnapshot = acceptedValue.accepted_record.proposal_snapshot;
+
+  const invalidWithdrawal = await worker.fetch(workerJson("/room/coordination/disputes", { accepted_record_id: acceptedValue.accepted_record.accepted_record_id, actor_label: "reporter", approval_record_id: "missing-approval", client_retry_id: "invalid-withdrawal", kind: "approval_withdrawal", source_message_ids: [], statement: "This approval record does not belong to the accepted decision." }));
+  expect(invalidWithdrawal.status).toBe(404);
+
+  const reported = await worker.fetch(workerJson("/room/coordination/disputes", { accepted_record_id: acceptedValue.accepted_record.accepted_record_id, actor_label: "reporter", client_retry_id: "dispute-report-one", kind: "dispute", source_message_ids: [ownerSource], statement: "I dispute the conclusion based on the cited evidence." }));
+  expect(reported.status).toBe(201);
+  const report = await reported.json() as { dispute: { report_id: string; actor_label: string; cursor: number; latest_review?: unknown }; published_revision: number; coordination_cursor: number };
+  expect(report).toMatchObject({ dispute: { actor_label: "reporter" }, published_revision: acceptedValue.published_revision });
+
+  const contested = await worker.fetch(new Request(`https://msg.0000.chat/room/coordination/decisions/${decision.proposal.proposal_id}`));
+  expect(await contested.json()).toMatchObject({ decision: { contested: true, current_annotations: { report_count: 1, unresolved_report_count: 1 } } });
+  const record = await worker.fetch(new Request(`https://msg.0000.chat/room/coordination/decisions/${decision.proposal.proposal_id}/records/${acceptedValue.accepted_record.accepted_record_id}`));
+  expect(await record.json()).toMatchObject({ accepted_record: { proposal_snapshot: immutableSnapshot }, current_annotations: { contested: true, reports_preview: [{ report_id: report.dispute.report_id }] } });
+  const reports = await worker.fetch(new Request(`https://msg.0000.chat/room/coordination/disputes?accepted_record_id=${acceptedValue.accepted_record.accepted_record_id}&limit=20`));
+  expect(await reports.json()).toMatchObject({ report_count: 1, unresolved_report_count: 1, disputes: [{ report_id: report.dispute.report_id, source_messages: [{ citation_url: `https://msg.0000.chat/room/messages/${ownerSource}` }] }] });
+
+  const reviewed = await worker.fetch(workerJson(`/manage/room/owner-token/coordination/disputes/${report.dispute.report_id}/review`, { base_revision: acceptedValue.published_revision, client_retry_id: "dispute-review-one", disposition: "acknowledged", owner_label: "room-owner", rationale: "The owner recorded the account for follow-up.", source_message_ids: [ownerSource] }));
+  expect(reviewed.status).toBe(201);
+  const reviewedValue = await reviewed.json() as { review: { review_id: string }; published_revision: number };
+  expect(reviewedValue.review.review_id).toBeString();
+  expect(reviewedValue.published_revision).toBe(acceptedValue.published_revision + 1);
+  const afterReview = await worker.fetch(new Request(`https://msg.0000.chat/room/coordination/decisions/${decision.proposal.proposal_id}`));
+  expect(await afterReview.json()).toMatchObject({ decision: { contested: false, current_annotations: { report_count: 1, unresolved_report_count: 0, reports_preview: [{ latest_review: { review_id: reviewedValue.review.review_id } }] } } });
+
+  const unauthorizedReplay = await worker.fetch(workerJson(`/manage/room/wrong-token/coordination/disputes/${report.dispute.report_id}/review`, { base_revision: acceptedValue.published_revision, client_retry_id: "dispute-review-one", disposition: "acknowledged", owner_label: "room-owner", rationale: "The owner recorded the account for follow-up.", source_message_ids: [ownerSource] }));
+  expect(unauthorizedReplay.status).toBe(404);
+  const replayedReview = await worker.fetch(workerJson(`/manage/room/owner-token/coordination/disputes/${report.dispute.report_id}/review`, { base_revision: acceptedValue.published_revision, client_retry_id: "dispute-review-one", disposition: "acknowledged", owner_label: "room-owner", rationale: "The owner recorded the account for follow-up.", source_message_ids: [ownerSource] }));
+  expect(await replayedReview.json()).toMatchObject({ replayed: true, review: { review_id: reviewedValue.review.review_id } });
+  const changedReplay = await worker.fetch(workerJson(`/manage/room/owner-token/coordination/disputes/${report.dispute.report_id}/review`, { base_revision: acceptedValue.published_revision, client_retry_id: "dispute-review-one", disposition: "rejected", owner_label: "room-owner", rationale: "Changed retry input.", source_message_ids: [ownerSource] }));
+  expect(changedReplay.status).toBe(409);
+
+  const secondReviewed = await worker.fetch(workerJson(`/manage/room/owner-token/coordination/disputes/${report.dispute.report_id}/review`, { base_revision: reviewedValue.published_revision, client_retry_id: "dispute-review-two", disposition: "rejected", owner_label: "room-owner", rationale: "A later owner assessment remains attributable.", source_message_ids: [] }));
+  expect(secondReviewed.status).toBe(201);
+  const secondReviewedValue = await secondReviewed.json() as { review: { review_id: string }; published_revision: number };
+  const frozenReport = await worker.fetch(new Request(`https://msg.0000.chat/room/coordination/disputes/${report.dispute.report_id}?through=${report.dispute.cursor}&limit=20`));
+  expect(await frozenReport.json()).toMatchObject({ through: report.dispute.cursor, dispute: { reviews: [], reviews_has_more: false, reviews_next_after: 0, reviews_through: report.dispute.cursor } });
+  const reviewPageOne = await worker.fetch(new Request(`https://msg.0000.chat/room/coordination/disputes/${report.dispute.report_id}?limit=1`));
+  const reviewPageOneValue = await reviewPageOne.json() as { dispute: { reviews: readonly { review_id: string; cursor: number }[]; reviews_has_more: boolean; reviews_next_after: number; reviews_through: number } };
+  expect(reviewPageOneValue.dispute).toMatchObject({ reviews: [{ review_id: reviewedValue.review.review_id }], reviews_has_more: true });
+  const reviewPageTwo = await worker.fetch(new Request(`https://msg.0000.chat/room/coordination/disputes/${report.dispute.report_id}?after=${reviewPageOneValue.dispute.reviews_next_after}&limit=1`));
+  expect(await reviewPageTwo.json()).toMatchObject({ dispute: { reviews: [{ review_id: secondReviewedValue.review.review_id }], reviews_has_more: false } });
+
+  const secondReported = await worker.fetch(workerJson("/room/coordination/disputes", { accepted_record_id: acceptedValue.accepted_record.accepted_record_id, actor_label: "second-reporter", approval_record_id: acceptedValue.approvals[0]!.approval_record_id, client_retry_id: "dispute-report-two", kind: "approval_withdrawal", source_message_ids: [], statement: "A second attributed withdrawal account remains unresolved." }));
+  expect(secondReported.status).toBe(201);
+  const secondReportValue = await secondReported.json() as { dispute: { report_id: string; cursor: number } };
+  expect(await (await worker.fetch(new Request(`https://msg.0000.chat/room/coordination/decisions/${decision.proposal.proposal_id}`))).json()).toMatchObject({ decision: { contested: true, current_annotations: { report_count: 2, unresolved_report_count: 1 } } });
+  const absentAtThrough = await worker.fetch(new Request(`https://msg.0000.chat/room/coordination/disputes/${secondReportValue.dispute.report_id}?through=${report.dispute.cursor}`));
+  expect(absentAtThrough.status).toBe(404);
+  const reportDetail = await worker.fetch(new Request(`https://msg.0000.chat/room/coordination/disputes/${report.dispute.report_id}?limit=20`));
+  expect(await reportDetail.json()).toMatchObject({ dispute: { reviews: [{ review_id: reviewedValue.review.review_id }, { review_id: secondReviewedValue.review.review_id }] } });
+
+  const hiddenReportIds: string[] = [];
+  for (let index = 0; index < 6; index += 1) {
+    const hiddenReport = await worker.fetch(workerJson("/room/coordination/disputes", { accepted_record_id: acceptedValue.accepted_record.accepted_record_id, actor_label: `hidden-reporter-${index}`, client_retry_id: `hidden-report-${index}`, kind: "dispute", source_message_ids: [], statement: `Unresolved attributed account ${index}.` }));
+    expect(hiddenReport.status).toBe(201);
+    hiddenReportIds.push(((await hiddenReport.json()) as { dispute: { report_id: string } }).dispute.report_id);
+  }
+  const previewResponse = await worker.fetch(new Request(`https://msg.0000.chat/room/coordination/decisions/${decision.proposal.proposal_id}/records/${acceptedValue.accepted_record.accepted_record_id}`));
+  const previewValue = await previewResponse.json() as { current_annotations: { reports_preview: readonly { report_id: string; latest_review?: unknown }[] } };
+  expect(previewValue.current_annotations.reports_preview).toHaveLength(5);
+  let reviewBase = secondReviewedValue.published_revision;
+  for (const previewReport of previewValue.current_annotations.reports_preview) {
+    if (previewReport.latest_review !== undefined) continue;
+    const previewReview = await worker.fetch(workerJson(`/manage/room/owner-token/coordination/disputes/${previewReport.report_id}/review`, { base_revision: reviewBase, client_retry_id: `preview-review-${previewReport.report_id}`, disposition: "acknowledged", owner_label: "room-owner", rationale: "The owner reviewed this visible account.", source_message_ids: [] }));
+    expect(previewReview.status).toBe(201);
+    reviewBase = ((await previewReview.json()) as { published_revision: number }).published_revision;
+  }
+  const afterPreviewReviews = await worker.fetch(new Request(`https://msg.0000.chat/room/coordination/decisions/${decision.proposal.proposal_id}/records/${acceptedValue.accepted_record.accepted_record_id}`));
+  expect(await afterPreviewReviews.json()).toMatchObject({ current_annotations: { report_count: 8, unresolved_report_count: 3 } });
+  expect(hiddenReportIds).toHaveLength(6);
+});
+
+test("rejects a dispute atomically when persisted metadata exceeds the room quota", async () => {
+  const { room: durable } = await room({ MSG_TEST_ROOM_LIMITS: JSON.stringify({ maxRoomBytes: 20_000 }) });
+  const service = new DurableRoomService({ getByName: () => ({ fetch: (request: Request) => durable.fetch(request) }) }, "https://msg.0000.chat");
+  const worker = createWorker(service);
+  const initialized = await durable.fetch(json("/initialize", { management_hash: await hashCapability("owner-token"), initial: { content: "Owner source", author: "owner", display_name: "Owner", semantic_type: "message" } }));
+  const ownerSource = (await initialized.json() as { id: string }).id;
+  const alice = await durable.fetch(json("/messages", { input: { content: "I approve this exact proposal.", author: "alice", display_name: "Alice", semantic_type: "message" } }));
+  const aliceSource = (await alice.json() as { message: { id: string } }).message.id;
+  const bob = await durable.fetch(json("/messages", { input: { content: "I approve this exact proposal too.", author: "bob", display_name: "Bob", semantic_type: "message" } }));
+  const bobSource = (await bob.json() as { message: { id: string } }).message.id;
+  const created = await worker.fetch(workerJson("/room/coordination/proposals", decisionProposal("quota-dispute-decision", ownerSource)));
+  const decision = await created.json() as { proposal: { proposal_id: string; revision: number } };
+  const accepted = await worker.fetch(workerJson("/manage/room/owner-token/coordination/publish", { base_revision: 0, client_retry_id: "quota-dispute-acceptance", decision_publication: { approvals: [{ participant_label: "alice", source_message_id: aliceSource }, { participant_label: "bob", source_message_id: bobSource }], mode: "acceptance", owner_attestation: true }, owner_label: "room-owner", proposal_id: decision.proposal.proposal_id, revision: decision.proposal.revision }));
+  expect(accepted.status).toBe(201);
+  const acceptedValue = await accepted.json() as { accepted_record: { accepted_record_id: string } };
+  const before = await (await durable.fetch(new Request("https://room/read?after=0&limit=20"))).json() as { coordination_cursor: number; latest_message: number; published_revision: number };
+  const reportInput = { accepted_record_id: acceptedValue.accepted_record.accepted_record_id, actor_label: "a".repeat(80), client_retry_id: "quota-dispute-report", kind: "dispute", source_message_ids: [ownerSource, aliceSource, bobSource], statement: "x".repeat(1_800) };
+  const rejected = await worker.fetch(workerJson("/room/coordination/disputes", reportInput));
+  expect(rejected.status).toBe(429);
+  expect(await (await durable.fetch(new Request("https://room/read?after=0&limit=20"))).json()).toMatchObject(before);
+  expect(await (await worker.fetch(new Request(`https://msg.0000.chat/room/coordination/disputes?accepted_record_id=${acceptedValue.accepted_record.accepted_record_id}`))).json()).toMatchObject({ report_count: 0, disputes: [] });
+  expect((await worker.fetch(workerJson("/room/coordination/disputes", reportInput))).status).toBe(429);
+});
+
+test("keeps supersession proposed until the exact newer successor is accepted", async () => {
+  const { room: durable } = await room();
+  const service = new DurableRoomService({ getByName: () => ({ fetch: (request: Request) => durable.fetch(request) }) }, "https://msg.0000.chat");
+  const worker = createWorker(service);
+  const initialized = await durable.fetch(json("/initialize", { management_hash: await hashCapability("owner-token"), initial: { content: "Owner source", author: "owner", display_name: "Owner", semantic_type: "message" } }));
+  const ownerSource = (await initialized.json() as { id: string }).id;
+  const alice = await durable.fetch(json("/messages", { input: { content: "I approve the predecessor.", author: "alice", display_name: "Alice", semantic_type: "message" } }));
+  const aliceSource = (await alice.json() as { message: { id: string } }).message.id;
+  const bob = await durable.fetch(json("/messages", { input: { content: "I approve the predecessor too.", author: "bob", display_name: "Bob", semantic_type: "message" } }));
+  const bobSource = (await bob.json() as { message: { id: string } }).message.id;
+
+  const predecessorProposal = await worker.fetch(workerJson("/room/coordination/proposals", decisionProposal("supersession-predecessor", ownerSource, 0, "Old release")));
+  const predecessor = await predecessorProposal.json() as { proposal: { proposal_id: string; revision: number } };
+  const predecessorPublication = await worker.fetch(workerJson("/manage/room/owner-token/coordination/publish", { base_revision: 0, client_retry_id: "supersession-predecessor-accept", decision_publication: { approvals: [{ participant_label: "alice", source_message_id: aliceSource }, { participant_label: "bob", source_message_id: bobSource }], mode: "acceptance", owner_attestation: true }, owner_label: "room-owner", proposal_id: predecessor.proposal.proposal_id, revision: predecessor.proposal.revision }));
+  const predecessorAccepted = await predecessorPublication.json() as { accepted_record: { accepted_record_id: string }; published_revision: number };
+
+  const successorProposal = await worker.fetch(workerJson("/room/coordination/proposals", decisionProposal("supersession-successor", ownerSource, predecessorAccepted.published_revision, "New release")));
+  const successor = await successorProposal.json() as { proposal: { proposal_id: string; revision: number } };
+  const relationInput = {
+    actor_label: "reporter",
+    base_revision: predecessorAccepted.published_revision,
+    body: { predecessor_accepted_record_id: predecessorAccepted.accepted_record.accepted_record_id, successor_decision_id: successor.proposal.proposal_id, successor_decision_revision: successor.proposal.revision },
+    client_retry_id: "supersession-link",
+    kind: "decision.supersession",
+    source_message_ids: [ownerSource],
+  };
+  const relationProposal = await worker.fetch(workerJson("/room/coordination/proposals", relationInput));
+  expect(relationProposal.status).toBe(201);
+  const relation = await relationProposal.json() as { proposal: { proposal_id: string; revision: number } };
+  const pending = await worker.fetch(new Request("https://msg.0000.chat/room/coordination/proposals?limit=20"));
+  const pendingValue = await pending.json() as { proposals: readonly { kind: string; status: string }[] };
+  expect(pendingValue.proposals).toContainEqual(expect.objectContaining({ kind: "decision.supersession", status: "pending" }));
+  const premature = await worker.fetch(workerJson("/manage/room/owner-token/coordination/publish", { base_revision: predecessorAccepted.published_revision, client_retry_id: "supersession-premature", owner_label: "room-owner", proposal_id: relation.proposal.proposal_id, revision: relation.proposal.revision }));
+  expect(premature.status).toBe(409);
+
+  const successorPublication = await worker.fetch(workerJson("/manage/room/owner-token/coordination/publish", { base_revision: predecessorAccepted.published_revision, client_retry_id: "supersession-successor-accept", decision_publication: { approvals: [{ participant_label: "alice", source_message_id: aliceSource }, { participant_label: "bob", source_message_id: bobSource }], mode: "acceptance", owner_attestation: true }, owner_label: "room-owner", proposal_id: successor.proposal.proposal_id, revision: successor.proposal.revision }));
+  expect(successorPublication.status).toBe(201);
+  const successorAccepted = await successorPublication.json() as { accepted_record: { accepted_record_id: string }; published_revision: number };
+  const rebasedRelation = await worker.fetch(workerJson(`/room/coordination/proposals/${relation.proposal.proposal_id}/revisions`, { ...relationInput, base_revision: successorAccepted.published_revision, client_retry_id: "supersession-link-rebased" }));
+  expect(rebasedRelation.status).toBe(201);
+  const rebased = await rebasedRelation.json() as { coordination_cursor: number; proposal: { proposal_id: string; revision: number } };
+  const frozenThrough = rebased.coordination_cursor;
+  const publishedRelation = await worker.fetch(workerJson("/manage/room/owner-token/coordination/publish", { base_revision: successorAccepted.published_revision, client_retry_id: "supersession-link-publish", owner_label: "room-owner", proposal_id: rebased.proposal.proposal_id, revision: rebased.proposal.revision }));
+  expect(publishedRelation.status).toBe(201);
+  expect(await publishedRelation.json()).toMatchObject({ supersession: { predecessor_accepted_record_id: predecessorAccepted.accepted_record.accepted_record_id, successor_decision_id: successor.proposal.proposal_id } });
+
+  const frozenSupersessions = await worker.fetch(new Request(`https://msg.0000.chat/room/coordination/supersessions?through=${frozenThrough}&limit=20`));
+  expect(await frozenSupersessions.json()).toMatchObject({ through: frozenThrough, supersession_count: 0, supersessions: [] });
+  const currentSupersessions = await worker.fetch(new Request(`https://msg.0000.chat/room/coordination/supersessions?predecessor_accepted_record_id=${predecessorAccepted.accepted_record.accepted_record_id}&limit=20`));
+  const currentSupersessionValue = await currentSupersessions.json() as { supersession_count: number; supersessions: readonly { detail_url: string }[] };
+  expect(currentSupersessionValue).toMatchObject({ supersession_count: 1, supersessions: [{ detail_url: `https://msg.0000.chat/room/coordination/publications/${successorAccepted.published_revision + 1}` }] });
+  const successorFiltered = await worker.fetch(new Request(`https://msg.0000.chat/room/coordination/supersessions?successor_decision_id=${successor.proposal.proposal_id}&limit=20`));
+  expect(await successorFiltered.json()).toMatchObject({ supersession_count: 1, supersessions: [{ predecessor_accepted_record_id: predecessorAccepted.accepted_record.accepted_record_id }] });
+
+  const predecessorRecord = await worker.fetch(new Request(`https://msg.0000.chat/room/coordination/decisions/${predecessor.proposal.proposal_id}/records/${predecessorAccepted.accepted_record.accepted_record_id}`));
+  expect(await predecessorRecord.json()).toMatchObject({ current_annotations: { superseded: true, successor_count: 1, successor_links: [{ successor_decision_id: successor.proposal.proposal_id }] } });
+  const successorRecord = await worker.fetch(new Request(`https://msg.0000.chat/room/coordination/decisions/${successor.proposal.proposal_id}/records/${successorAccepted.accepted_record.accepted_record_id}`));
+  expect(await successorRecord.json()).toMatchObject({ current_annotations: { predecessor_count: 1, predecessor_links: [{ predecessor_accepted_record_id: predecessorAccepted.accepted_record.accepted_record_id }] } });
+});

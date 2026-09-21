@@ -144,17 +144,33 @@ function renderCoordinationOverviewText(value: CoordinationOverviewResponse): st
     : [
       `Decision summaries (${value.decision_count ?? decisions.length} total; showing ${decisions.length}):`,
       ...decisions.slice(0, 5).map((decision) => [
-        `- ${decision.title} · ${decision.state === "accepted" ? "owner-recorded accepted decision" : "recommendation"} · proposal revision ${decision.latest_proposal_revision} · publication revision ${decision.published_revision}`,
-        `  Required labels: ${decision.required_approver_labels.join(", ") || "none"}; inspect: ${decision.detail_url}`,
+        `- ${decision.title} · ${decision.state === "accepted" ? "owner-recorded accepted decision" : "recommendation"}${decision.contested ? " · contested" : ""} · proposal revision ${decision.latest_proposal_revision} · publication revision ${decision.published_revision}`,
+        `  Required labels: ${decision.required_approver_labels.join(", ") || "none"}; inspect: ${decision.detail_url}${decision.corrections_url ? `; corrections: ${decision.corrections_url}` : ""}`,
+        ...(decision.current_annotations === undefined ? [] : [`  Reports: ${decision.current_annotations.report_count} total, ${decision.current_annotations.unresolved_report_count} unresolved; ${decision.current_annotations.superseded ? "superseded" : "not superseded"}; reports: ${decision.current_annotations.reports_url}`, ...(decision.current_annotations.predecessors_url ? [`  Predecessor history: ${decision.current_annotations.predecessors_url}`] : []), ...(decision.current_annotations.successors_url ? [`  Successor history: ${decision.current_annotations.successors_url}`] : [])]),
       ].join("\n")),
     ];
+  const corrections = value.correction_summaries ?? [];
+  const correctionLines = corrections.length === 0
+    ? ["Correction summaries: none"]
+    : [
+      `Correction summaries (${value.correction_count ?? corrections.length} total; showing ${corrections.length}):`,
+      ...corrections.slice(0, 5).map((correction) => {
+        const target = correction.target.type === "message" ? `message ${correction.target.message_id}` : `publication ${correction.target.published_revision} claim ${JSON.stringify(correction.target.claim_path)}`;
+        return `- ${target} · reported by ${correction.reporter_label} · published by ${correction.owner_label}: ${correction.correction_text} · inspect ${correction.detail_url}`;
+      }),
+      ...(value.corrections_url ? [`Full correction history: ${value.corrections_url}`] : []),
+    ];
+  const requestLines = value.published_requests.length === 0
+    ? ["Published request details: none"]
+    : ["Published request details:", ...value.published_requests.slice(0, 5).map((request) => `- ${request.title} · ${request.status} · publication revision ${request.published_revision} · inspect ${request.detail_url}${request.corrections_url ? ` · corrections ${request.corrections_url}` : ""}`)];
   return [
     `Coordination revision: ${value.published_revision}; event cursor: ${value.coordination_cursor}`,
     `Pending proposals: ${value.pending_proposal_count} (${value.pending_panel_proposal_count ?? 0} panel, ${value.pending_request_proposal_count ?? value.pending_proposal_count} request)`,
     `Published requests: ${value.published_request_count}; status counts open=${statusCounts.open ?? 0}, in_progress=${statusCounts.in_progress ?? 0}, blocked=${statusCounts.blocked ?? 0}, done=${statusCounts.done ?? 0}, withdrawn=${statusCounts.withdrawn ?? 0}`,
+    ...requestLines,
     ...panelLines,
     ...decisionLines,
-    "Correction summaries: none",
+    ...correctionLines,
     `Overview: ${value.conversation_url}${value.panel_url ? ` · panel detail: ${value.panel_url}` : ""}${value.panel_history_url ? ` · panel history: ${value.panel_history_url}` : ""}`,
   ].join("\n");
 }

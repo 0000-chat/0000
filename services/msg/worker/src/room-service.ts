@@ -1,7 +1,7 @@
 import { ERROR_CODES, isStaleRevisionDetails, isStaleSequenceDetails, ProtocolError } from "./errors";
-import { parseCoordinationProposal, parseCoordinationPublish, parseCoordinationRevision } from "./coordination-domain";
+import { parseCoordinationDispute, parseCoordinationDisputeReview, parseCoordinationProposal, parseCoordinationPublish, parseCoordinationRevision } from "./coordination-domain";
 import { hashCapability, parseBasedOnSequence, parseMessageInput, randomCapability, validateIdempotencyKey, validateRequestId } from "./room-domain";
-import { buildShareMessage, foregroundWait, PROTOCOL_VERSION, stripLegacyAbsoluteExpiry, type CoordinationAcceptedRecordInput, type CoordinationAcceptedRecordResponse, type CoordinationDecisionDetailInput, type CoordinationDecisionListInput, type CoordinationDecisionListResponse, type CoordinationDecisionResponse, type CoordinationListInput, type CoordinationOverviewResponse, type CoordinationPanelDetailInput, type CoordinationPanelHistoryInput, type CoordinationPanelHistoryResponse, type CoordinationPanelResponse, type CoordinationProposalDetailInput, type CoordinationProposalInput, type CoordinationProposalResponse, type CoordinationProposalRevisionInput, type CoordinationProposalListResponse, type CoordinationPublishInput, type CoordinationPublishResponse, type CoordinationRequestDetailInput, type CoordinationRequestListResponse, type CoordinationRequestResponse, type CreateRoomInput, type CreateRoomResponse, type CreateWebhookInput, type CreateWebhookResponse, type EnrollPushInput, type ExportRoomInput, type GetPostMessageInput, type GetPostMessageResponse, type ListWebhooksInput, type ListWebhooksResponse, type LiveRoomInput, type ManageRoomInput, type ManageRoomResponse, type ManageWebhookInput, type ManageWebhookResponse, type PostMessageInput, type PostMessageResponse, type PushEnrollmentInput, type PushEnrollmentResponse, type ReadMessageInput, type ReadMessageResponse, type ReadRoomInput, type ReadRoomResponse, type RedeliverWebhookInput, type RedeliverWebhookResponse, type RemovePushEnrollmentResponse, type RemoveWebhookInput, type RemoveWebhookResponse, type RotateWebhookSecretResponse, type RoomService } from "./protocol";
+import { buildShareMessage, foregroundWait, PROTOCOL_VERSION, stripLegacyAbsoluteExpiry, type CoordinationAcceptedRecordInput, type CoordinationAcceptedRecordResponse, type CoordinationCorrectionDetailInput, type CoordinationCorrectionListInput, type CoordinationCorrectionListResponse, type CoordinationCorrectionResponse, type CoordinationDecisionDetailInput, type CoordinationDecisionListInput, type CoordinationDecisionListResponse, type CoordinationDecisionResponse, type CoordinationDisputeDetailInput, type CoordinationDisputeInput, type CoordinationDisputeListInput, type CoordinationDisputeListResponse, type CoordinationDisputeResponse, type CoordinationDisputeReviewInput, type CoordinationDisputeReviewResponse, type CoordinationListInput, type CoordinationOverviewResponse, type CoordinationPanelDetailInput, type CoordinationPanelHistoryInput, type CoordinationPanelHistoryResponse, type CoordinationPanelResponse, type CoordinationProposalDetailInput, type CoordinationProposalInput, type CoordinationProposalResponse, type CoordinationProposalRevisionInput, type CoordinationProposalListResponse, type CoordinationPublishInput, type CoordinationPublishResponse, type CoordinationPublicationInput, type CoordinationPublicationResponse, type CoordinationRequestDetailInput, type CoordinationRequestListResponse, type CoordinationRequestResponse, type CoordinationSupersessionListInput, type CoordinationSupersessionListResponse, type CreateRoomInput, type CreateRoomResponse, type CreateWebhookInput, type CreateWebhookResponse, type EnrollPushInput, type ExportRoomInput, type GetPostMessageInput, type GetPostMessageResponse, type ListWebhooksInput, type ListWebhooksResponse, type LiveRoomInput, type ManageRoomInput, type ManageRoomResponse, type ManageWebhookInput, type ManageWebhookResponse, type PostMessageInput, type PostMessageResponse, type PushEnrollmentInput, type PushEnrollmentResponse, type ReadMessageInput, type ReadMessageResponse, type ReadRoomInput, type ReadRoomResponse, type RedeliverWebhookInput, type RedeliverWebhookResponse, type RemovePushEnrollmentResponse, type RemoveWebhookInput, type RemoveWebhookResponse, type RotateWebhookSecretResponse, type RoomService } from "./protocol";
 
 export interface RoomStub { fetch(request: Request): Promise<Response>; }
 export interface RoomNamespace { getByName(name: string): RoomStub; }
@@ -60,7 +60,7 @@ export class DurableRoomService implements RoomService {
 
   async readMessage(input: ReadMessageInput): Promise<ReadMessageResponse> {
     const endpoint = `https://room/messages/${encodeURIComponent(input.id)}`;
-    const value = stripLegacyAbsoluteExpiry(await responseJson(await this.room(input.room).fetch(new Request(endpoint))));
+    const value = hydrateCoordination(stripLegacyAbsoluteExpiry(await responseJson(await this.room(input.room).fetch(new Request(endpoint)))), this.origin, input.room) as Record<string, unknown>;
     return {
       ...value,
       conversation_url: `${this.origin}/${input.room}`,
@@ -190,6 +190,48 @@ export class DurableRoomService implements RoomService {
     return hydrateCoordination(value, this.origin, input.room) as CoordinationAcceptedRecordResponse;
   }
 
+  async readCoordinationPublication(input: CoordinationPublicationInput): Promise<CoordinationPublicationResponse> {
+    const value = await responseJson(await this.room(input.room).fetch(new Request(`https://room/coordination/publications/${input.publishedRevision}`))) as unknown as CoordinationPublicationResponse;
+    return hydrateCoordination(value, this.origin, input.room) as CoordinationPublicationResponse;
+  }
+
+  async listCoordinationCorrections(input: CoordinationCorrectionListInput): Promise<CoordinationCorrectionListResponse> {
+    const value = await responseJson(await this.room(input.room).fetch(new Request(coordinationListUrl("/coordination/corrections", input)))) as unknown as CoordinationCorrectionListResponse;
+    return hydrateCoordination(value, this.origin, input.room) as CoordinationCorrectionListResponse;
+  }
+
+  async readCoordinationCorrection(input: CoordinationCorrectionDetailInput): Promise<CoordinationCorrectionResponse> {
+    const value = await responseJson(await this.room(input.room).fetch(new Request(`https://room/coordination/corrections/${encodeURIComponent(input.correctionId)}`))) as unknown as CoordinationCorrectionResponse;
+    return hydrateCoordination(value, this.origin, input.room) as CoordinationCorrectionResponse;
+  }
+
+  async submitCoordinationDispute(input: CoordinationDisputeInput): Promise<CoordinationDisputeResponse> {
+    const body = input.body.kind === "json" ? parseCoordinationDispute(input.body.value) : (() => { throw new ProtocolError(ERROR_CODES.invalidBody, "The coordination dispute must be JSON.", 400); })();
+    const value = await responseJson(await this.room(input.room).fetch(jsonRequest("/coordination/disputes", body))) as unknown as CoordinationDisputeResponse;
+    return hydrateCoordination(value, this.origin, input.room) as CoordinationDisputeResponse;
+  }
+
+  async listCoordinationDisputes(input: CoordinationDisputeListInput): Promise<CoordinationDisputeListResponse> {
+    const value = await responseJson(await this.room(input.room).fetch(new Request(coordinationListUrl("/coordination/disputes", input)))) as unknown as CoordinationDisputeListResponse;
+    return hydrateCoordination(value, this.origin, input.room) as CoordinationDisputeListResponse;
+  }
+
+  async listCoordinationSupersessions(input: CoordinationSupersessionListInput): Promise<CoordinationSupersessionListResponse> {
+    const value = await responseJson(await this.room(input.room).fetch(new Request(coordinationListUrl("/coordination/supersessions", input)))) as unknown as CoordinationSupersessionListResponse;
+    return hydrateCoordination(value, this.origin, input.room) as CoordinationSupersessionListResponse;
+  }
+
+  async readCoordinationDispute(input: CoordinationDisputeDetailInput): Promise<CoordinationDisputeResponse> {
+    const value = await responseJson(await this.room(input.room).fetch(new Request(coordinationListUrl(`/coordination/disputes/${encodeURIComponent(input.reportId)}`, input)))) as unknown as CoordinationDisputeResponse;
+    return hydrateCoordination(value, this.origin, input.room) as CoordinationDisputeResponse;
+  }
+
+  async reviewCoordinationDispute(input: CoordinationDisputeReviewInput): Promise<CoordinationDisputeReviewResponse> {
+    const body = input.body.kind === "json" ? parseCoordinationDisputeReview(input.body.value) : (() => { throw new ProtocolError(ERROR_CODES.invalidBody, "The coordination dispute review must be JSON.", 400); })();
+    const value = await responseJson(await this.room(input.room).fetch(jsonRequest(`/coordination/disputes/${encodeURIComponent(input.reportId)}/review?token=${encodeURIComponent(input.ownerToken)}`, body))) as unknown as CoordinationDisputeReviewResponse;
+    return hydrateCoordination(value, this.origin, input.room) as CoordinationDisputeReviewResponse;
+  }
+
   async listCoordinationProposals(input: CoordinationListInput): Promise<CoordinationProposalListResponse> {
     const value = await responseJson(await this.room(input.room).fetch(new Request(coordinationListUrl("/coordination/proposals", input)))) as unknown as CoordinationProposalListResponse;
     return hydrateCoordination(value, this.origin, input.room) as CoordinationProposalListResponse;
@@ -278,51 +320,111 @@ async function responseError(response: Response): Promise<ProtocolError> {
   return new ProtocolError(code, error?.message ?? "The room could not complete the request.", response.status, undefined, details);
 }
 
-function coordinationListUrl(path: string, input: { readonly after?: number; readonly limit?: number; readonly owner_label?: string; readonly status?: string; readonly through?: number }): string {
+function coordinationListUrl(path: string, input: { readonly acceptedRecordId?: string; readonly after?: number; readonly kind?: string; readonly limit?: number; readonly owner_label?: string; readonly predecessorAcceptedRecordId?: string; readonly status?: string; readonly successorDecisionId?: string; readonly targetClaimPath?: readonly (string | number)[]; readonly targetMessageId?: string; readonly targetPublishedRevision?: number; readonly targetType?: string; readonly through?: number }): string {
   const url = new URL(`https://room${path}`);
+  if (input.acceptedRecordId !== undefined) url.searchParams.set("accepted_record_id", input.acceptedRecordId);
   if (input.after !== undefined) url.searchParams.set("after", String(input.after));
+  if (input.kind !== undefined) url.searchParams.set("kind", input.kind);
   if (input.limit !== undefined) url.searchParams.set("limit", String(input.limit));
   if (input.owner_label !== undefined) url.searchParams.set("owner_label", input.owner_label);
+  if (input.predecessorAcceptedRecordId !== undefined) url.searchParams.set("predecessor_accepted_record_id", input.predecessorAcceptedRecordId);
   if (input.status !== undefined) url.searchParams.set("status", input.status);
+  if (input.successorDecisionId !== undefined) url.searchParams.set("successor_decision_id", input.successorDecisionId);
+  if (input.targetClaimPath !== undefined) url.searchParams.set("target_claim_path", JSON.stringify(input.targetClaimPath));
+  if (input.targetMessageId !== undefined) url.searchParams.set("target_message_id", input.targetMessageId);
+  if (input.targetPublishedRevision !== undefined) url.searchParams.set("target_published_revision", String(input.targetPublishedRevision));
+  if (input.targetType !== undefined) url.searchParams.set("target_type", input.targetType);
   if (input.through !== undefined) url.searchParams.set("through", String(input.through));
   return url.toString();
 }
 
+const COORDINATION_URL_KEYS = [
+  "accepted_record_url",
+  "citation_url",
+  "corrections_url",
+  "decision_url",
+  "detail_url",
+  "panel_history_url",
+  "panel_url",
+  "predecessor_url",
+  "predecessors_url",
+  "proposal_url",
+  "proposals_url",
+  "published_url",
+  "reports_url",
+  "request_url",
+  "requests_url",
+  "source_url",
+  "successor_url",
+  "successors_url",
+  "supersessions_url",
+  "target_url",
+] as const;
+
+const COORDINATION_OBJECT_KEYS = [
+  "accepted_record",
+  "coordination_overview",
+  "correction",
+  "current_annotations",
+  "decision",
+  "dispute",
+  "latest_review",
+  "panel",
+  "position",
+  "publication",
+  "proposal",
+  "report",
+  "request",
+  "review",
+  "source_message",
+  "supersession",
+] as const;
+
+const COORDINATION_ARRAY_KEYS = [
+  "approvals",
+  "correction_summaries",
+  "corrections",
+  "decision_summaries",
+  "decisions",
+  "disputes",
+  "events",
+  "history",
+  "pending_proposals",
+  "positions",
+  "predecessor_links",
+  "proposals",
+  "published_requests",
+  "reports_preview",
+  "requests",
+  "revisions",
+  "reviews",
+  "source_messages",
+  "successor_links",
+  "supersessions",
+] as const;
+
 function hydrateCoordination(value: unknown, origin: string, room: string): unknown {
   if (!value || typeof value !== "object" || Array.isArray(value)) return value;
-  const result = { ...(value as Record<string, unknown>) };
   const base = `${origin}/${encodeURIComponent(room)}`;
+  const result = hydrateCoordinationRecord(value as Record<string, unknown>, base);
   if ("coordination_cursor" in result || "published_revision" in result) result.conversation_url = base;
-  for (const key of ["proposals_url", "requests_url", "panel_url", "panel_history_url", "decisions_url", "decision_url"] as const) {
-    if (typeof result[key] === "string" && result[key].startsWith("/")) result[key] = `${base}${result[key]}`;
-  }
-  for (const key of ["proposal", "request", "panel", "decision", "accepted_record", "coordination_overview"] as const) {
-    const item = result[key];
-    if (item && typeof item === "object" && !Array.isArray(item)) result[key] = key === "coordination_overview"
-      ? hydrateCoordination(item, origin, room)
-      : hydrateCoordinationItem(item as Record<string, unknown>, base);
-  }
-  for (const key of ["proposals", "pending_proposals", "requests", "published_requests", "decisions", "decision_summaries", "positions", "approvals", "revisions", "events"] as const) {
-    const items = result[key];
-    if (Array.isArray(items)) result[key] = items.map((item) => item && typeof item === "object" && !Array.isArray(item) ? hydrateCoordinationItem(item as Record<string, unknown>, base) : item);
-  }
   return result;
 }
 
-function hydrateCoordinationItem(item: Record<string, unknown>, base: string): Record<string, unknown> {
+function hydrateCoordinationRecord(item: Record<string, unknown>, base: string): Record<string, unknown> {
   const result = { ...item };
-  if (typeof result.detail_url === "string" && result.detail_url.startsWith("/")) result.detail_url = `${base}${result.detail_url}`;
-  if (Array.isArray(result.source_messages)) {
-    result.source_messages = result.source_messages.map((source) => {
-      if (!source || typeof source !== "object" || Array.isArray(source)) return source;
-      const hydrated = { ...(source as Record<string, unknown>) };
-      if (typeof hydrated.citation_url === "string" && hydrated.citation_url.startsWith("/")) hydrated.citation_url = `${base}${hydrated.citation_url}`;
-      return hydrated;
-    });
+  for (const key of COORDINATION_URL_KEYS) {
+    if (typeof result[key] === "string" && result[key].startsWith("/")) result[key] = `${base}${result[key]}`;
   }
-  if (typeof result.citation_url === "string" && result.citation_url.startsWith("/")) result.citation_url = `${base}${result.citation_url}`;
-  if (result.source_message && typeof result.source_message === "object" && !Array.isArray(result.source_message)) {
-    result.source_message = hydrateCoordinationItem(result.source_message as Record<string, unknown>, base);
+  for (const key of COORDINATION_OBJECT_KEYS) {
+    const nested = result[key];
+    if (nested && typeof nested === "object" && !Array.isArray(nested)) result[key] = hydrateCoordinationRecord(nested as Record<string, unknown>, base);
+  }
+  for (const key of COORDINATION_ARRAY_KEYS) {
+    const nested = result[key];
+    if (Array.isArray(nested)) result[key] = nested.map((entry) => entry && typeof entry === "object" && !Array.isArray(entry)
+      ? hydrateCoordinationRecord(entry as Record<string, unknown>, base)
+      : entry);
   }
   return result;
 }

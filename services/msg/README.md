@@ -101,7 +101,8 @@ publishing tracked requests:
 - Public `POST /{room}/coordination/proposals` accepts only the canonical
   `client_retry_id`, `actor_label`, `base_revision`, `source_message_ids`,
   `kind: "request.create"`, `"request.progress"`, `"panel.replace"`,
-  `"decision.proposal"`, or `"decision.position"`, and
+  `"decision.proposal"`, `"decision.position"`, `"claim.correction"`, or
+  `"decision.supersession"`, and
   `body` fields. A panel replacement is complete: nullable `purpose` and
   `phase`, bounded `artifacts` (`title`, `role`, absolute HTTP(S) URL), and
   bounded `next_actions` (`description`, `owner_label`). Empty arrays and null
@@ -111,14 +112,32 @@ publishing tracked requests:
   `POST /manage/{room}/{token}/coordination/publish` with the exact
   `proposal_id`, `revision`, and matching `base_revision`. Keep that URL
   private; it is never part of public room output, source citations, or logs.
+- `GET /{room}/coordination/publications/{published_revision}` exposes the
+  allowlisted public body and provenance for an exact immutable publication.
+  `GET /{room}/coordination/corrections` and its detail route expose attributed
+  corrections without overwriting the original message or publication. The
+  overview includes at most five correction previews, the actual total, and a
+  full-list link.
+- `POST /{room}/coordination/disputes` records an attributed dispute or exact
+  approval withdrawal. Withdrawal requires the stable approval record ID and
+  never changes the reporter into the approval participant. Owners review one
+  report through the private `/coordination/disputes/{report_id}/review` route;
+  review pages remain bounded and expose their captured continuation.
+- `decision.supersession` links an accepted predecessor to an exact successor
+  acceptance. Recommendations cannot supersede acceptance; reciprocal bounded
+  history remains visible after publication. Contested and superseded state is
+  exposed as annotations beside the immutable accepted record.
 
 The CLI mirrors these reads with `coordination <conversation-url> overview`,
 `panel [--revision N]`, `panel-history`, `proposals`, `requests`, `proposal <id>`,
-`request <id>`, `decisions`, `decision <id>`, and `decision-record <decision-id>
-<accepted-record-id>`. `propose`,
+`request <id>`, `decisions`, `decision <id>`, `decision-record <decision-id>
+<accepted-record-id>`, `publication <revision>`, `corrections`, `correction
+<id>`, `disputes`, `dispute <id>`, and `supersessions`. `propose`, `correct`,
+`supersede`, `report`,
 `revise <proposal-id>`, and `publish <management-coordination-url>` read the
 canonical JSON mutation from standard input and write only the structured
-receipt to standard output. Browser coordination keeps the owner URL in the
+receipt to standard output. `review <management-coordination-url> <report-id>`
+uses the same typed JSON stdin contract without printing the capability. Browser coordination keeps the owner URL in the
 current session after validating its origin and room, and preserves a frozen
 retry payload after ambiguous network or receipt failures.
 

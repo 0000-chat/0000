@@ -40,7 +40,7 @@ describe("agent browser pages", () => {
     expect(html).not.toContain("/_msg/asset/client.js");
     expect(html).not.toContain("WebSocket");
     expect(html).not.toContain("data-theme-option");
-    expect(new TextEncoder().encode(html).byteLength).toBeLessThan(20_000);
+    expect(new TextEncoder().encode(html).byteLength).toBeLessThan(25_000);
   });
 
   test("separates protocol documentation from escaped untrusted room content", () => {
@@ -83,7 +83,7 @@ describe("agent browser pages", () => {
         decision_count: 2,
         decision_summaries: [
           { decision_id: "decision-recommended", detail_url: "/coordination/decisions/decision-recommended", latest_proposal_revision: 3, proposal_text: "Try the reviewed release.", published_revision: 4, required_approver_labels: ["alice"], state: "recommended", title: "Recommended release" },
-          { accepted_record_id: "accepted-1", decision_id: "decision-accepted", detail_url: "/coordination/decisions/decision-accepted", latest_proposal_revision: 1, proposal_text: "Ship the reviewed release.", published_revision: 8, required_approver_labels: ["alice", "bob"], state: "accepted", title: "Accepted release" },
+          { accepted_record_id: "accepted-1", contested: true, correction_count: 1, corrections_url: "/coordination/corrections?target_type=publication", current_annotations: { contested: true, predecessor_count: 1, predecessors_url: "/coordination/supersessions?predecessor_accepted_record_id=accepted-1", predecessor_links: [], report_count: 2, reports_preview: [], reports_url: "/coordination/disputes?accepted_record_id=accepted-1", successor_count: 1, successors_url: "/coordination/supersessions?successor_decision_id=decision-accepted", successor_links: [], superseded: true, unresolved_report_count: 1 }, decision_id: "decision-accepted", detail_url: "/coordination/decisions/decision-accepted", latest_proposal_revision: 1, proposal_text: "Ship the reviewed release.", published_revision: 8, required_approver_labels: ["alice", "bob"], state: "accepted", title: "Accepted release" },
         ],
         empty: false,
         expires_at: room.expires_at,
@@ -93,6 +93,9 @@ describe("agent browser pages", () => {
         protocol_version: 1,
         published_request_count: 0,
         published_requests: [],
+        correction_count: 1,
+        correction_summaries: [{ correction_id: "correction-1", correction_text: "Clarified release claim.", detail_url: "/coordination/corrections/correction-1", owner_label: "owner", publication_revision: 8, reporter_label: "reporter", target: { claim_path: ["proposal_text"], published_revision: 8, type: "publication" } }],
+        corrections_url: "/coordination/corrections?limit=20",
         proposals_url: `${room.conversation_url}/coordination/proposals`,
         published_revision: 8,
         requests_url: `${room.conversation_url}/coordination/requests`,
@@ -101,6 +104,11 @@ describe("agent browser pages", () => {
     expect(html).toContain("Recommended release");
     expect(html).toContain("recommendation");
     expect(html).toContain("owner-recorded accepted decision");
+    expect(html).toContain("contested");
+    expect(html).toContain("reports 2 (1 unresolved)");
+    expect(html).toContain("/coordination/supersessions?predecessor_accepted_record_id=accepted-1");
+    expect(html).toContain("correction-1");
+    expect(html).toContain("/coordination/corrections?limit=20");
     expect(html).toContain("/coordination/decisions/decision-accepted");
     expect(html).toContain("required labels");
   });

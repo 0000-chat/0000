@@ -152,3 +152,70 @@ test("validates decision proposal and publication receipts without fake request 
   expect(JSON.parse(stdout[0] ?? "{}")).toMatchObject({ proposal: { kind: "decision.proposal", request_id: null } });
   expect(JSON.parse(stdout[1] ?? "{}")).toMatchObject({ accepted_record: { accepted_record_id: "accepted-1" } });
 });
+
+test("parses exact correction, report, supersession, publication, and review commands", () => {
+  expect(parseCoordinationCommand(["coordination", roomUrl, "publication", "9"])).toEqual({ conversationUrl: roomUrl, operation: "publication", revision: 9 });
+  expect(parseCoordinationCommand(["coordination", roomUrl, "corrections", "--target-type", "publication", "--target-published-revision", "4", "--target-claim-path", '["claim","title"]', "--through", "8"])).toEqual({ conversationUrl: roomUrl, operation: "corrections", targetClaimPath: ["claim", "title"], targetPublishedRevision: 4, targetType: "publication", through: 8 });
+  expect(parseCoordinationCommand(["coordination", roomUrl, "correction", "correction-1"])).toEqual({ conversationUrl: roomUrl, id: "correction-1", operation: "correction" });
+  expect(parseCoordinationCommand(["coordination", roomUrl, "disputes", "--accepted-record-id", "accepted-1", "--kind", "approval_withdrawal", "--limit", "5", "--through", "8"])).toEqual({ acceptedRecordId: "accepted-1", conversationUrl: roomUrl, kind: "approval_withdrawal", limit: 5, operation: "disputes", through: 8 });
+  expect(parseCoordinationCommand(["coordination", roomUrl, "dispute", "report-1", "--after", "2", "--limit", "5", "--through", "8"])).toEqual({ after: 2, conversationUrl: roomUrl, id: "report-1", limit: 5, operation: "dispute", through: 8 });
+  expect(parseCoordinationCommand(["coordination", roomUrl, "supersessions", "--predecessor-accepted-record-id", "accepted-1", "--successor-decision-id", "decision-2"])).toEqual({ conversationUrl: roomUrl, operation: "supersessions", predecessorAcceptedRecordId: "accepted-1", successorDecisionId: "decision-2" });
+  expect(parseCoordinationCommand(["coordination", roomUrl, "correct"])).toEqual({ conversationUrl: roomUrl, operation: "correct" });
+  expect(parseCoordinationCommand(["coordination", roomUrl, "supersede"])).toEqual({ conversationUrl: roomUrl, operation: "supersede" });
+  expect(parseCoordinationCommand(["coordination", roomUrl, "report"])).toEqual({ conversationUrl: roomUrl, operation: "report" });
+  expect(parseCoordinationCommand(["coordination", "review", managementUrl, "report-1"])).toEqual({ managementUrl, operation: "review", reportId: "report-1" });
+  expect(() => parseCoordinationCommand(["coordination", roomUrl, "corrections", "--target-type", "message", "--target-claim-path", '["claim"]'])).toThrow("Usage: msg coordination");
+});
+
+test("reads exact ticket11 coordination routes with bounded selectors", async () => {
+  const calls: string[] = [];
+  const fetch = async (input: RequestInfo | URL) => { calls.push(String(input)); return Response.json({ corrections: [], disputes: [], supersessions: [], through: 8, has_more: false, next_after: 0, publication: {}, correction: {}, dispute: {}, reviews: [] }); };
+  const dependencies = { fetch, stderr: () => undefined, stdout: () => undefined, websocket: () => { throw new Error("WebSocket must not connect."); } };
+  expect(await runCli(["coordination", roomUrl, "publication", "9"], dependencies)).toBe(0);
+  expect(await runCli(["coordination", roomUrl, "corrections", "--target-type", "publication", "--target-published-revision", "4", "--target-claim-path", '["claim","title"]', "--after", "2", "--limit", "5", "--through", "8"], dependencies)).toBe(0);
+  expect(await runCli(["coordination", roomUrl, "correction", "correction-1"], dependencies)).toBe(0);
+  expect(await runCli(["coordination", roomUrl, "disputes", "--accepted-record-id", "accepted-1", "--kind", "approval_withdrawal", "--after", "2", "--limit", "5", "--through", "8"], dependencies)).toBe(0);
+  expect(await runCli(["coordination", roomUrl, "dispute", "report-1", "--after", "2", "--limit", "5", "--through", "8"], dependencies)).toBe(0);
+  expect(await runCli(["coordination", roomUrl, "supersessions", "--predecessor-accepted-record-id", "accepted-1", "--successor-decision-id", "decision-2", "--after", "2", "--limit", "5", "--through", "8"], dependencies)).toBe(0);
+  expect(calls).toEqual([
+    `${roomUrl}/coordination/publications/9`,
+    `${roomUrl}/coordination/corrections?after=2&limit=5&target_type=publication&target_published_revision=4&target_claim_path=%5B%22claim%22%2C%22title%22%5D&through=8`,
+    `${roomUrl}/coordination/corrections/correction-1`,
+    `${roomUrl}/coordination/disputes?after=2&limit=5&accepted_record_id=accepted-1&kind=approval_withdrawal&through=8`,
+    `${roomUrl}/coordination/disputes/report-1?after=2&limit=5&through=8`,
+    `${roomUrl}/coordination/supersessions?after=2&limit=5&predecessor_accepted_record_id=accepted-1&successor_decision_id=decision-2&through=8`,
+  ]);
+});
+
+test("sends typed correction, supersession, report, and owner-review receipts", async () => {
+  const calls: Array<{ body?: string; method?: string; url: string }> = [];
+  const stdout: string[] = [];
+  const fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input); const body = init?.body === undefined ? undefined : String(init.body); calls.push({ body, method: init?.method, url });
+    if (url.endsWith("/coordination/proposals")) {
+      const parsed = JSON.parse(body ?? "{}");
+      return Response.json({ proposal: { kind: parsed.kind, proposal_id: `${parsed.kind}-1`, revision: 1 }, replayed: false });
+    }
+    if (url.endsWith("/coordination/disputes")) return Response.json({ dispute: { report_id: "report-1" }, replayed: false });
+    return Response.json({ replayed: false, review: { report_id: "report-1", review_id: "review-1" } });
+  };
+  const base = { fetch, stderr: () => undefined, stdout: (text: string) => stdout.push(text), websocket: () => { throw new Error("WebSocket must not connect."); } };
+  expect(await runCli(["coordination", roomUrl, "correct"], { ...base, readStdin: async () => JSON.stringify({ actor_label: "reporter", base_revision: 4, body: { correction_text: "Corrected", target: { message_id: "message-1", type: "message" } }, client_retry_id: "correction-1", kind: "claim.correction", source_message_ids: [] }) })).toBe(0);
+  expect(await runCli(["coordination", roomUrl, "supersede"], { ...base, readStdin: async () => JSON.stringify({ actor_label: "reporter", base_revision: 4, body: { predecessor_accepted_record_id: "accepted-1", successor_decision_id: "decision-2", successor_decision_revision: 2 }, client_retry_id: "supersession-1", kind: "decision.supersession", source_message_ids: [] }) })).toBe(0);
+  expect(await runCli(["coordination", roomUrl, "report"], { ...base, readStdin: async () => JSON.stringify({ accepted_record_id: "accepted-1", actor_label: "reporter", approval_record_id: "approval-1", client_retry_id: "report-1", kind: "approval_withdrawal", source_message_ids: [], statement: "Disputed approval." }) })).toBe(0);
+  expect(await runCli(["coordination", "review", managementUrl, "report-1"], { ...base, readStdin: async () => JSON.stringify({ base_revision: 4, client_retry_id: "review-1", disposition: "acknowledged", owner_label: "owner", rationale: "Reviewed.", source_message_ids: [] }) })).toBe(0);
+  expect(calls.map((call) => call.url)).toEqual([`${roomUrl}/coordination/proposals`, `${roomUrl}/coordination/proposals`, `${roomUrl}/coordination/disputes`, "https://msg.0000.chat/manage/room-1/private-owner/coordination/disputes/report-1/review"]);
+  expect(JSON.parse(calls[0]!.body ?? "{}").kind).toBe("claim.correction");
+  expect(JSON.parse(calls[1]!.body ?? "{}").kind).toBe("decision.supersession");
+  expect(JSON.parse(calls[2]!.body ?? "{}").approval_record_id).toBe("approval-1");
+  expect(JSON.parse(calls[3]!.body ?? "{}")).not.toHaveProperty("report_id");
+  expect(stdout).toHaveLength(4);
+});
+
+test("CLI help names ticket11 coordination commands", async () => {
+  const stdout: string[] = [];
+  expect(await runCli(["--help"], { fetch: globalThis.fetch, stderr: () => undefined, stdout: (text: string) => stdout.push(text), websocket: () => { throw new Error("WebSocket must not connect."); } })).toBe(0);
+  expect(stdout.join("")).toContain("publication <published-revision>");
+  expect(stdout.join("")).toContain("corrections [selectors]");
+  expect(stdout.join("")).toContain("review <management-coordination-url> <report-id>");
+});

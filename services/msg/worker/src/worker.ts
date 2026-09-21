@@ -20,7 +20,7 @@ import {
 } from "./protocol";
 import { byteLength, compareCapabilities, DEFAULT_READ_LIMIT, MAX_ROOM_REQUEST_BYTES, parseBasedOnSequence, roomEtag, validateBasedOnSequenceQuery, validateBoundedCursor, validateCursor, validateIdempotencyKey, validateReadLimit, validateRequestId, validateThrough } from "./room-domain";
 import { coordinationEtag } from "./room-domain";
-import { parseCoordinationListSelectors } from "./coordination-domain";
+import { parseCoordinationClaimPath, parseCoordinationListSelectors } from "./coordination-domain";
 import {
   negotiateCreateRepresentation,
   negotiateRepresentation,
@@ -398,6 +398,87 @@ async function route(request: Request, service: RoomService, options: MsgWorkerO
     response.headers.set("retry-after", "5");
     return response;
   }
+  const coordinationPublicationMatch = /^\/([^/]+)\/coordination\/publications\/([1-9][0-9]*)$/u.exec(url.pathname);
+  if (coordinationPublicationMatch && request.method === "GET") {
+    if (!service.readCoordinationPublication) return notFound();
+    await enforceRateLimit(request, options.rateLimits?.reads);
+    return jsonResponse(await service.readCoordinationPublication({ room: coordinationPublicationMatch[1]!, publishedRevision: Number(coordinationPublicationMatch[2]!) }));
+  }
+  const coordinationCorrectionCollection = /^\/([^/]+)\/coordination\/corrections$/u.exec(url.pathname);
+  if (coordinationCorrectionCollection && request.method === "GET") {
+    if (!service.listCoordinationCorrections) return notFound();
+    await enforceRateLimit(request, options.rateLimits?.reads);
+    const selectors = parseCoordinationListSelectors(url);
+    const targetType = url.searchParams.get("target_type");
+    if (targetType !== null && targetType !== "message" && targetType !== "publication") throw new ProtocolError(ERROR_CODES.invalidBody, "The correction target_type is not supported.", 400);
+    const targetPublishedRevisionValue = url.searchParams.get("target_published_revision");
+    const targetPublishedRevision = targetPublishedRevisionValue === null ? undefined : parsePositiveCoordinationRevision(targetPublishedRevisionValue);
+    const targetClaimPath = parseCoordinationClaimPathSelector(url.searchParams.get("target_claim_path"));
+    if (targetClaimPath !== undefined && targetType === "message") throw new ProtocolError(ERROR_CODES.invalidBody, "A message correction target cannot have a claim_path filter.", 400);
+    return jsonResponse(await service.listCoordinationCorrections({
+      room: coordinationCorrectionCollection[1]!,
+      after: selectors.after,
+      limit: selectors.limit,
+      ...(targetType === null ? {} : { targetType }),
+      ...(targetClaimPath === undefined ? {} : { targetClaimPath }),
+      ...(url.searchParams.get("target_message_id") === null ? {} : { targetMessageId: url.searchParams.get("target_message_id")! }),
+      ...(targetPublishedRevision === undefined ? {} : { targetPublishedRevision }),
+      ...(selectors.through === undefined ? {} : { through: selectors.through }),
+    }));
+  }
+  const coordinationCorrectionDetail = /^\/([^/]+)\/coordination\/corrections\/([^/]+)$/u.exec(url.pathname);
+  if (coordinationCorrectionDetail && request.method === "GET") {
+    if (!service.readCoordinationCorrection) return notFound();
+    await enforceRateLimit(request, options.rateLimits?.reads);
+    return jsonResponse(await service.readCoordinationCorrection({ correctionId: decodePathSegment(coordinationCorrectionDetail[2]!), room: coordinationCorrectionDetail[1]! }));
+  }
+  const coordinationDisputeCollection = /^\/([^/]+)\/coordination\/disputes$/u.exec(url.pathname);
+  if (coordinationDisputeCollection && request.method === "GET") {
+    if (!service.listCoordinationDisputes) return notFound();
+    await enforceRateLimit(request, options.rateLimits?.reads);
+    const selectors = parseCoordinationListSelectors(url);
+    const kind = parseCoordinationDisputeKind(url.searchParams.get("kind"));
+    return jsonResponse(await service.listCoordinationDisputes({
+      room: coordinationDisputeCollection[1]!,
+      after: selectors.after,
+      limit: selectors.limit,
+      ...(url.searchParams.get("accepted_record_id") === null ? {} : { acceptedRecordId: url.searchParams.get("accepted_record_id")! }),
+      ...(kind === undefined ? {} : { kind }),
+      ...(selectors.through === undefined ? {} : { through: selectors.through }),
+    }));
+  }
+  if (coordinationDisputeCollection && request.method === "POST") {
+    if (!service.submitCoordinationDispute) return notFound();
+    await enforceRateLimit(request, options.rateLimits?.posts);
+    return jsonResponse(await service.submitCoordinationDispute({ body: await parseRequestBody(request, { maxBytes: MAX_ROOM_REQUEST_BYTES }), room: coordinationDisputeCollection[1]! }), 201);
+  }
+  const coordinationSupersessionCollection = /^\/([^/]+)\/coordination\/supersessions$/u.exec(url.pathname);
+  if (coordinationSupersessionCollection && request.method === "GET") {
+    if (!service.listCoordinationSupersessions) return notFound();
+    await enforceRateLimit(request, options.rateLimits?.reads);
+    const selectors = parseCoordinationListSelectors(url);
+    return jsonResponse(await service.listCoordinationSupersessions({
+      room: coordinationSupersessionCollection[1]!,
+      after: selectors.after,
+      limit: selectors.limit,
+      ...(url.searchParams.get("predecessor_accepted_record_id") === null ? {} : { predecessorAcceptedRecordId: url.searchParams.get("predecessor_accepted_record_id")! }),
+      ...(url.searchParams.get("successor_decision_id") === null ? {} : { successorDecisionId: url.searchParams.get("successor_decision_id")! }),
+      ...(selectors.through === undefined ? {} : { through: selectors.through }),
+    }));
+  }
+  const coordinationDisputeReviewMatch = /^\/manage\/([^/]+)\/([^/]+)\/coordination\/disputes\/([^/]+)\/review$/u.exec(url.pathname);
+  if (coordinationDisputeReviewMatch && request.method === "POST") {
+    if (!service.reviewCoordinationDispute) return notFound();
+    await enforceRateLimit(request, options.rateLimits?.posts);
+    return jsonResponse(await service.reviewCoordinationDispute({ body: await parseRequestBody(request, { maxBytes: MAX_ROOM_REQUEST_BYTES }), ownerToken: decodePathSegment(coordinationDisputeReviewMatch[2]!), reportId: decodePathSegment(coordinationDisputeReviewMatch[3]!), room: coordinationDisputeReviewMatch[1]! }), 201);
+  }
+  const coordinationDisputeDetail = /^\/([^/]+)\/coordination\/disputes\/([^/]+)$/u.exec(url.pathname);
+  if (coordinationDisputeDetail && request.method === "GET") {
+    if (!service.readCoordinationDispute) return notFound();
+    await enforceRateLimit(request, options.rateLimits?.reads);
+    const selectors = parseCoordinationListSelectors(url);
+    return jsonResponse(await service.readCoordinationDispute({ reportId: decodePathSegment(coordinationDisputeDetail[2]!), room: coordinationDisputeDetail[1]!, after: selectors.after, limit: selectors.limit, ...(selectors.through === undefined ? {} : { through: selectors.through }) }));
+  }
   const coordinationPanelHistoryMatch = /^\/([^/]+)\/coordination\/panel\/history$/u.exec(url.pathname);
   if (coordinationPanelHistoryMatch && request.method === "GET") {
     if (!service.listCoordinationPanelHistory) return notFound();
@@ -519,7 +600,12 @@ async function route(request: Request, service: RoomService, options: MsgWorkerO
     if (!service.readMessage) return notFound();
     await enforceRateLimit(request, options.rateLimits?.reads);
     const result = stripLegacyAbsoluteExpiry(await service.readMessage({ id: decodePathSegment(messageMatch[2]!), room: messageMatch[1]! })) as unknown as ReadMessageResponse;
-    return messageResponse(result, negotiateRepresentation(request.headers.get("accept")));
+    const etag = coordinationMessageEtag(result);
+    if (request.headers.get("if-none-match") === etag) return new Response(null, { headers: { etag, "retry-after": "5" }, status: 304 });
+    const response = messageResponse(result, negotiateRepresentation(request.headers.get("accept")));
+    response.headers.set("etag", etag);
+    response.headers.set("retry-after", "5");
+    return response;
   }
 
   const agentMatch = /^\/([^/]+)\/agent$/.exec(url.pathname);
@@ -765,6 +851,23 @@ function parsePositiveCoordinationRevision(value: string): number {
   return revision;
 }
 
+function parseCoordinationDisputeKind(value: string | null): "dispute" | "approval_withdrawal" | undefined {
+  if (value === null) return undefined;
+  if (value !== "dispute" && value !== "approval_withdrawal") throw new ProtocolError(ERROR_CODES.invalidBody, "The coordination report kind is not supported.", 400);
+  return value;
+}
+
+function parseCoordinationClaimPathSelector(value: string | null): readonly (string | number)[] | undefined {
+  if (value === null) return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    throw new ProtocolError(ERROR_CODES.invalidBody, "The correction target_claim_path must be JSON.", 400);
+  }
+  return parseCoordinationClaimPath(parsed);
+}
+
 function coordinationPanelEtag(result: unknown, revision: number | undefined): string {
   const value = result && typeof result === "object" && !Array.isArray(result) ? result as { coordination_cursor?: unknown; expires_at?: unknown; panel_published_revision?: unknown; published_revision?: unknown } : {};
   return `W/"coordination-panel-${String(value.coordination_cursor ?? "")}-${String(value.published_revision ?? "")}-${String(value.panel_published_revision ?? "")}-revision-${String(revision ?? "latest")}-expires-${String(value.expires_at ?? "")}"`;
@@ -773,6 +876,10 @@ function coordinationPanelEtag(result: unknown, revision: number | undefined): s
 function coordinationPanelHistoryEtag(result: unknown, selectors: { readonly after: number; readonly limit: number; readonly through?: number }): string {
   const value = result && typeof result === "object" && !Array.isArray(result) ? result as { coordination_cursor?: unknown; expires_at?: unknown; published_revision?: unknown; history_through?: unknown } : {};
   return `W/"coordination-panel-history-${String(value.coordination_cursor ?? "")}-${String(value.published_revision ?? "")}-after-${selectors.after}-limit-${selectors.limit}-through-${String(selectors.through ?? value.history_through ?? "")}-expires-${String(value.expires_at ?? "")}"`;
+}
+
+function coordinationMessageEtag(result: ReadMessageResponse): string {
+  return `W/"message-${result.message.id}-coordination-${result.coordination_cursor}-published-${result.published_revision}-corrections-${result.correction_count}-expires-${result.expires_at}"`;
 }
 
 async function enforceRateLimit(request: Request, binding: MsgRateLimit | undefined): Promise<void> {

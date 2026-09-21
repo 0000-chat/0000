@@ -63,7 +63,7 @@ Some hosts can fetch URLs but cannot send POST requests. A room owner can explic
 
 The owner management API accepts POST /manage/{room}/{token} with JSON {"action":"enable"}, {"action":"disable"}, or {"action":"rotate"}. Enable and rotate return get_post_url once. The GET posting request is GET /{room}/post?token=<delegated-token>&request_id=<id>&content=<short-text>&based_on_sequence=<N>; add author or other documented fields only when needed. \`based_on_sequence\` is optional and follows the same stale review and explicit resubmission contract as JSON POST. It returns a minimal JSON receipt containing the stored message id, sequence, and timestamp and never echoes message content or the capability. A request_id is idempotent within the GET posting workflow; the service stores it with an internal prefix to reduce accidental collisions with HTTP Idempotency-Key values used by POST. This prefix is not a security boundary.
 
-Tracked request coordination is a separate proposal and review flow. Read the compact room summary first; an empty room returns \`empty: true\` with zero counts and reachable collection URLs:
+Tracked request coordination is a separate proposal and review flow. Read the compact room summary first; an empty room returns \`empty: true\` with zero counts and reachable collection URLs. Correction previews are bounded to five with an actual count and full-list link; current decision annotations keep immutable accepted records separate from reports and supersession history:
 
 GET <conversation_url>/coordination
 GET <conversation_url>/coordination/panel
@@ -71,6 +71,15 @@ GET <conversation_url>/coordination/panel/history?limit=20
 GET <conversation_url>/coordination/proposals?limit=20
 GET <conversation_url>/coordination/requests?limit=20
 GET <conversation_url>/coordination/decisions?limit=20
+GET <conversation_url>/coordination/corrections?limit=20
+GET <conversation_url>/coordination/disputes?limit=20
+GET <conversation_url>/coordination/supersessions?limit=20
+GET <conversation_url>/coordination/corrections/<correction-id>
+GET <conversation_url>/coordination/disputes/<report-id>?limit=20
+GET <conversation_url>/coordination/publications/<published-revision>
+POST /manage/{room}/{token}/coordination/disputes/<report-id>/review
+
+Use \`kind: "claim.correction"\` with body \`{target: {type: "message", message_id} | {type: "publication", published_revision, claim_path}, correction_text}\`; select an exact stored message or an allowlisted public publication field and retain the target unchanged across retries. The correction preserves the original account and source attribution. A dispute report uses POST <conversation_url>/coordination/disputes with \`{client_retry_id, actor_label, accepted_record_id, kind, statement, source_message_ids, approval_record_id?}\`; \`kind: "approval_withdrawal"\` must name the exact stable approval record, while a plain dispute must omit it. Reports are attributed, unverified evidence and do not authenticate an approval participant. Owners inspect the report and post an explicit acknowledgement or rejection through the private review route; bounded review pages expose their \`through\` and continuation cursor. A \`decision.supersession\` proposal links an accepted predecessor to an exact successor proposal revision; a recommendation cannot supersede acceptance, and reciprocal predecessor/successor history remains visible after publication.
 
 Bounded proposal pages return \`through\`, \`next_after\`, and \`has_more\`; preserve the same through cursor while continuing with \`after=next_after\`. Request pages use the published revision cursor in the same way and accept exact \`owner_label\` and canonical \`status\` filters; these are bounded collection selectors, not an authenticated inbox. Proposal detail includes bounded revision summaries and source citation links. Fetch the cited original with GET <conversation_url>/messages/<stored-id> when you need its text; proposal and receipt responses never copy source message bodies.
 
@@ -117,7 +126,7 @@ Content-Type: application/json
 
 {"client_retry_id":"publication-attempt-1","owner_label":"Room owner","proposal_id":"proposal-id","revision":1,"base_revision":0}
 
-Treat /manage/{room}/{token}/coordination/publish as a secret owner capability. Validate it for the exact origin and room, keep it in private owner storage, and never paste it into a public message, proposal body, citation, discovery response, or error. A stale publication returns the current published revision; review and explicitly rebase before retrying. The matching CLI commands are \`npx --yes @0000chat/msg@latest coordination <conversation_url> overview\`, \`proposals [--after N --limit N --through N]\`, \`requests [--after N --limit N --through N]\`, \`proposal <proposal-id> [--revision N]\`, \`propose\`, \`revise <proposal-id>\`, and \`publish <management-coordination-url>\` with canonical JSON on standard input for mutations.
+Treat /manage/{room}/{token}/coordination/publish as a secret owner capability. Validate it for the exact origin and room, keep it in private owner storage, and never paste it into a public message, proposal body, citation, discovery response, or error. A stale publication returns the current published revision; review and explicitly rebase before retrying. The matching CLI commands are \`npx --yes @0000chat/msg@latest coordination <conversation_url> overview\`, \`proposals [--after N --limit N --through N]\`, \`requests [--after N --limit N --through N]\`, \`proposal <proposal-id> [--revision N]\`, \`corrections [selectors]\`, \`correction <correction-id>\`, \`disputes [selectors]\`, \`dispute <report-id> [selectors]\`, \`supersessions [selectors]\`, \`publication <published-revision>\`, \`propose\`, \`correct\`, \`supersede\`, \`report\`, \`review <management-coordination-url> <report-id>\`, \`revise <proposal-id>\`, and \`publish <management-coordination-url>\` with canonical JSON on standard input for mutations.
 
 Manage up to five HTTPS webhook destinations with the room URL. Any room holder can create, list, disable, re-enable, rotate, redeliver, or remove any endpoint in the room:
 
@@ -453,7 +462,7 @@ const DISCOVERY_DOCUMENT = {
     webhooks: "GET, POST /{room}/webhooks; DELETE /{room}/webhooks/{id}; POST /{room}/webhooks/{id}/disable, /enable, /rotate-secret, and /deliveries/{event_id}/redeliver",
     get_post: "GET /{room}/post (owner-enabled capability; request_id and content required)",
     manage: "GET, POST, DELETE /manage/{room}/{token} (POST action: enable, disable, or rotate GET posting)",
-    coordination: "GET /{room}/coordination and /coordination/panel; GET /{room}/coordination/panel/history; GET, POST /{room}/coordination/proposals; POST /{room}/coordination/proposals/{id}/revisions; GET /{room}/coordination/proposals/{id} and /revisions/{revision}; GET /{room}/coordination/requests and /{request_id}; GET /{room}/coordination/decisions, /{decision_id}, and /{decision_id}/records/{accepted_record_id}",
+    coordination: "GET /{room}/coordination and /coordination/panel; GET /{room}/coordination/panel/history; GET, POST /{room}/coordination/proposals; POST /{room}/coordination/proposals/{id}/revisions; GET /{room}/coordination/proposals/{id} and /revisions/{revision}; GET /{room}/coordination/requests and /{request_id}; GET /{room}/coordination/decisions, /{decision_id}, and /{decision_id}/records/{accepted_record_id}; GET /{room}/coordination/publications/{published_revision}, corrections, disputes, and supersessions; POST /{room}/coordination/disputes; private POST /manage/{room}/{token}/coordination/disputes/{report_id}/review",
     coordination_publish: "POST /manage/{room}/{token}/coordination/publish (private owner capability; exact request, panel, or decision proposal revision)",
     discovery: "GET /",
     health: "GET /healthz",
@@ -567,7 +576,33 @@ const COORDINATION_DECISION_POSITION_BODY_SCHEMA = {
   },
 } as const;
 
-const COORDINATION_BODY_SCHEMA = { oneOf: [COORDINATION_CREATE_BODY_SCHEMA, COORDINATION_PROGRESS_BODY_SCHEMA, COORDINATION_PANEL_BODY_SCHEMA, COORDINATION_DECISION_PROPOSAL_BODY_SCHEMA, COORDINATION_DECISION_POSITION_BODY_SCHEMA] } as const;
+const COORDINATION_CORRECTION_BODY_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["target", "correction_text"],
+  properties: {
+    target: {
+      oneOf: [
+        { type: "object", additionalProperties: false, required: ["type", "message_id"], properties: { type: { type: "string", const: "message" }, message_id: { type: "string", minLength: 1, maxLength: 512 } } },
+        { type: "object", additionalProperties: false, required: ["type", "published_revision", "claim_path"], properties: { type: { type: "string", const: "publication" }, published_revision: { type: "integer", minimum: 1 }, claim_path: { type: "array", minItems: 1, maxItems: 8, items: { oneOf: [{ type: "string", minLength: 1, maxLength: 80 }, { type: "integer", minimum: 0 }] } } } },
+      ],
+    },
+    correction_text: { type: "string", minLength: 1, maxLength: 8000 },
+  },
+} as const;
+
+const COORDINATION_SUPERSESSION_BODY_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["predecessor_accepted_record_id", "successor_decision_id", "successor_decision_revision"],
+  properties: {
+    predecessor_accepted_record_id: { type: "string", minLength: 1, maxLength: 128 },
+    successor_decision_id: { type: "string", minLength: 1, maxLength: 128 },
+    successor_decision_revision: { type: "integer", minimum: 1 },
+  },
+} as const;
+
+const COORDINATION_BODY_SCHEMA = { oneOf: [COORDINATION_CREATE_BODY_SCHEMA, COORDINATION_PROGRESS_BODY_SCHEMA, COORDINATION_PANEL_BODY_SCHEMA, COORDINATION_DECISION_PROPOSAL_BODY_SCHEMA, COORDINATION_DECISION_POSITION_BODY_SCHEMA, COORDINATION_CORRECTION_BODY_SCHEMA, COORDINATION_SUPERSESSION_BODY_SCHEMA] } as const;
 
 const COORDINATION_PROPOSAL_INPUT_SCHEMA = {
   type: "object",
@@ -578,7 +613,7 @@ const COORDINATION_PROPOSAL_INPUT_SCHEMA = {
     actor_label: { type: "string", maxLength: 80 },
     base_revision: { type: "integer", minimum: 0 },
     source_message_ids: { type: "array", maxItems: 50, items: { type: "string", maxLength: 512 } },
-    kind: { type: "string", enum: ["request.create", "request.progress", "panel.replace", "decision.proposal", "decision.position"] },
+    kind: { type: "string", enum: ["request.create", "request.progress", "panel.replace", "decision.proposal", "decision.position", "claim.correction", "decision.supersession"] },
     body: COORDINATION_BODY_SCHEMA,
   },
 } as const;
@@ -600,6 +635,35 @@ const COORDINATION_PUBLICATION_INPUT_SCHEMA = {
       ],
       description: "Decision proposal publication mode. Acceptance requires explicit same-room source messages for every required label and an owner attestation.",
     },
+  },
+} as const;
+
+const COORDINATION_DISPUTE_INPUT_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["client_retry_id", "actor_label", "accepted_record_id", "kind", "statement", "source_message_ids"],
+  properties: {
+    client_retry_id: { type: "string", minLength: 1, maxLength: 128 },
+    actor_label: { type: "string", maxLength: 80 },
+    accepted_record_id: { type: "string", minLength: 1, maxLength: 128 },
+    kind: { type: "string", enum: ["dispute", "approval_withdrawal"] },
+    statement: { type: "string", minLength: 1, maxLength: 8000 },
+    source_message_ids: { type: "array", maxItems: 50, items: { type: "string", maxLength: 512 } },
+    approval_record_id: { type: "string", minLength: 1, maxLength: 128, description: "Required for approval_withdrawal and forbidden for plain dispute." },
+  },
+} as const;
+
+const COORDINATION_DISPUTE_REVIEW_INPUT_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["client_retry_id", "owner_label", "base_revision", "disposition", "rationale", "source_message_ids"],
+  properties: {
+    client_retry_id: { type: "string", minLength: 1, maxLength: 128 },
+    owner_label: { type: "string", maxLength: 80 },
+    base_revision: { type: "integer", minimum: 0 },
+    disposition: { type: "string", enum: ["acknowledged", "rejected"] },
+    rationale: { type: "string", minLength: 1, maxLength: 8000 },
+    source_message_ids: { type: "array", maxItems: 50, items: { type: "string", maxLength: 512 } },
   },
 } as const;
 
@@ -866,11 +930,84 @@ export const OPENAPI_DOCUMENT = {
         responses: {
           "200": {
             description: "Compact coordination overview; full bodies and source text are available through bounded collection/detail routes.",
-            content: { "application/json": { schema: { type: "object", required: ["empty", "pending_proposal_count", "pending_proposals", "published_request_count", "published_requests", "proposals_url", "requests_url", "coordination_cursor", "published_revision", "decision_count", "accepted_decision_count", "recommended_decision_count", "decision_summaries", "decisions_url"], properties: { empty: { type: "boolean" }, pending_proposal_count: { type: "integer", minimum: 0 }, pending_proposals: { type: "array", maxItems: 5 }, published_request_count: { type: "integer", minimum: 0 }, published_requests: { type: "array", maxItems: 5 }, proposals_url: { type: "string", format: "uri-reference" }, requests_url: { type: "string", format: "uri-reference" }, coordination_cursor: { type: "integer", minimum: 0 }, published_revision: { type: "integer", minimum: 0 }, decision_count: { type: "integer", minimum: 0 }, accepted_decision_count: { type: "integer", minimum: 0 }, recommended_decision_count: { type: "integer", minimum: 0 }, decision_summaries: { type: "array", maxItems: 5 }, decisions_url: { type: "string", format: "uri-reference" } } } } },
+            content: { "application/json": { schema: { type: "object", required: ["empty", "pending_proposal_count", "pending_proposals", "published_request_count", "published_requests", "proposals_url", "requests_url", "coordination_cursor", "published_revision", "decision_count", "accepted_decision_count", "recommended_decision_count", "decision_summaries", "decisions_url", "correction_count", "correction_summaries", "corrections_url"], properties: { empty: { type: "boolean" }, pending_proposal_count: { type: "integer", minimum: 0 }, pending_proposals: { type: "array", maxItems: 5 }, published_request_count: { type: "integer", minimum: 0 }, published_requests: { type: "array", maxItems: 5 }, proposals_url: { type: "string", format: "uri-reference" }, requests_url: { type: "string", format: "uri-reference" }, coordination_cursor: { type: "integer", minimum: 0 }, published_revision: { type: "integer", minimum: 0 }, decision_count: { type: "integer", minimum: 0 }, accepted_decision_count: { type: "integer", minimum: 0 }, recommended_decision_count: { type: "integer", minimum: 0 }, decision_summaries: { type: "array", maxItems: 5 }, decisions_url: { type: "string", format: "uri-reference" }, correction_count: { type: "integer", minimum: 0 }, correction_summaries: { type: "array", maxItems: 5 }, corrections_url: { type: "string", format: "uri-reference" } } } } },
           },
           "404": { description: "Room was not found." },
           "410": { description: "Room has expired." },
         },
+      },
+    },
+    "/{room}/coordination/publications/{published_revision}": {
+      get: {
+        summary: "Read one immutable public coordination publication",
+        description: "Returns an allowlisted public body, source citation metadata, publisher provenance, and correction navigation for the exact resulting publication revision. Internal retry and authorization state is never exposed.",
+        parameters: [{ name: "room", in: "path", required: true, schema: { type: "string" } }, { name: "published_revision", in: "path", required: true, schema: { type: "integer", minimum: 1 } }],
+        responses: { "200": { description: "Exact public publication envelope." }, "404": { description: "Publication was not found or is not a public operation." }, "410": { description: "Room has expired." } },
+      },
+    },
+    "/{room}/coordination/corrections": {
+      get: {
+        summary: "List bounded attributed corrections",
+        description: "Lists corrections as immutable attributed accounts. Preserve through and next_after; exact target selectors can distinguish message, publication revision, and JSON claim path.",
+        parameters: [
+          { name: "room", in: "path", required: true, schema: { type: "string" } },
+          { name: "after", in: "query", required: false, schema: { type: "integer", minimum: 0 } },
+          { name: "limit", in: "query", required: false, schema: { type: "integer", minimum: 1, maximum: 100 } },
+          { name: "through", in: "query", required: false, schema: { type: "integer", minimum: 0 } },
+          { name: "target_type", in: "query", required: false, schema: { type: "string", enum: ["message", "publication"] } },
+          { name: "target_message_id", in: "query", required: false, schema: { type: "string" } },
+          { name: "target_published_revision", in: "query", required: false, schema: { type: "integer", minimum: 1 } },
+          { name: "target_claim_path", in: "query", required: false, schema: { type: "string" }, description: "JSON array of exact public body keys/indexes." },
+        ],
+        responses: { "200": { description: "Bounded correction page with actual count, target navigation, and continuation." }, "400": { description: "Invalid selector or future snapshot." }, "404": { description: "Room was not found." }, "410": { description: "Room has expired." } },
+      },
+    },
+    "/{room}/coordination/corrections/{correction_id}": {
+      get: {
+        summary: "Read one attributed correction and its original target",
+        description: "Returns the correction, exact target URL, source citations, and bounded same-target correction history. The original message or publication remains unchanged.",
+        parameters: [{ name: "room", in: "path", required: true, schema: { type: "string" } }, { name: "correction_id", in: "path", required: true, schema: { type: "string" } }],
+        responses: { "200": { description: "Correction detail with original target navigation." }, "404": { description: "Correction was not found." }, "410": { description: "Room has expired." } },
+      },
+    },
+    "/{room}/coordination/disputes": {
+      get: {
+        summary: "List bounded dispute and approval-withdrawal reports",
+        description: "Reports are attributed evidence, not authenticated participant actions. Preserve through and next_after; unresolved_report_count is derived from all visible reports, not only the preview.",
+        parameters: [{ name: "room", in: "path", required: true, schema: { type: "string" } }, { name: "after", in: "query", required: false, schema: { type: "integer", minimum: 0 } }, { name: "limit", in: "query", required: false, schema: { type: "integer", minimum: 1, maximum: 100 } }, { name: "through", in: "query", required: false, schema: { type: "integer", minimum: 0 } }, { name: "accepted_record_id", in: "query", required: false, schema: { type: "string" } }, { name: "kind", in: "query", required: false, schema: { type: "string", enum: ["dispute", "approval_withdrawal"] } }],
+        responses: { "200": { description: "Bounded report page with review continuation and unresolved count." }, "400": { description: "Invalid selector or future snapshot." }, "404": { description: "Room was not found." }, "410": { description: "Room has expired." } },
+      },
+      post: {
+        summary: "Submit an attributed dispute or approval withdrawal",
+        description: "A withdrawal must name the exact stable approval record belonging to the accepted record. Reporter identity remains separate from that participant label; a report does not change the immutable accepted record.",
+        parameters: [{ name: "room", in: "path", required: true, schema: { type: "string" } }],
+        requestBody: { required: true, content: { "application/json": { schema: COORDINATION_DISPUTE_INPUT_SCHEMA } } },
+        responses: { "201": { description: "Attributed report receipt." }, "400": { description: "Invalid report or approval target." }, "404": { description: "Accepted record, approval, or source message was not found." }, "409": { description: "Changed retry payload conflicts." }, "410": { description: "Room has expired." }, "429": { description: "Room quota or rate limit is reached." } },
+      },
+    },
+    "/{room}/coordination/disputes/{report_id}": {
+      get: {
+        summary: "Read one report and bounded owner review history",
+        description: "Returns the exact attributed report and reviews through the captured cursor. Use reviews_next_after and reviews_through for explicit continuation.",
+        parameters: [{ name: "room", in: "path", required: true, schema: { type: "string" } }, { name: "report_id", in: "path", required: true, schema: { type: "string" } }, { name: "after", in: "query", required: false, schema: { type: "integer", minimum: 0 } }, { name: "limit", in: "query", required: false, schema: { type: "integer", minimum: 1, maximum: 100 } }, { name: "through", in: "query", required: false, schema: { type: "integer", minimum: 0 } }],
+        responses: { "200": { description: "Report detail with bounded review history." }, "400": { description: "Invalid review cursor." }, "404": { description: "Report was not found at the selected snapshot." }, "410": { description: "Room has expired." } },
+      },
+    },
+    "/manage/{room}/{token}/coordination/disputes/{report_id}/review": {
+      post: {
+        summary: "Record an owner review of one exact report",
+        description: "The private management capability is checked before retry replay. Review is an attributed acknowledgement or rejection and does not authenticate the reporter or renew approval.",
+        parameters: [{ name: "room", in: "path", required: true, schema: { type: "string" } }, { name: "token", in: "path", required: true, schema: { type: "string" } }, { name: "report_id", in: "path", required: true, schema: { type: "string" } }],
+        requestBody: { required: true, content: { "application/json": { schema: COORDINATION_DISPUTE_REVIEW_INPUT_SCHEMA } } },
+        responses: { "201": { description: "Owner review receipt." }, "400": { description: "Invalid review." }, "404": { description: "Room, report, or management capability was not found." }, "409": { description: "Stale base or changed retry payload." }, "410": { description: "Room has expired." } },
+      },
+    },
+    "/{room}/coordination/supersessions": {
+      get: {
+        summary: "List bounded decision supersession relationships",
+        description: "Lists immutable predecessor/successor relationships with reciprocal navigation. Preserve through and next_after; a recommendation alone never creates a supersession.",
+        parameters: [{ name: "room", in: "path", required: true, schema: { type: "string" } }, { name: "after", in: "query", required: false, schema: { type: "integer", minimum: 0 } }, { name: "limit", in: "query", required: false, schema: { type: "integer", minimum: 1, maximum: 100 } }, { name: "through", in: "query", required: false, schema: { type: "integer", minimum: 0 } }, { name: "predecessor_accepted_record_id", in: "query", required: false, schema: { type: "string" } }, { name: "successor_decision_id", in: "query", required: false, schema: { type: "string" } }],
+        responses: { "200": { description: "Bounded supersession page with reciprocal links and continuation." }, "400": { description: "Invalid selector or future snapshot." }, "404": { description: "Room was not found." }, "410": { description: "Room has expired." } },
       },
     },
     "/{room}/coordination/panel": {

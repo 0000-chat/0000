@@ -86,6 +86,12 @@ msg coordination 'https://msg.0000.chat/room-id' request 'request-id' --after 0 
 msg coordination 'https://msg.0000.chat/room-id' decisions --limit 20
 msg coordination 'https://msg.0000.chat/room-id' decision 'decision-id' --after 0 --limit 20 --through 12
 msg coordination 'https://msg.0000.chat/room-id' decision-record 'decision-id' 'accepted-record-id'
+msg coordination 'https://msg.0000.chat/room-id' publication 12
+msg coordination 'https://msg.0000.chat/room-id' corrections --target-type publication --target-published-revision 12 --target-claim-path '["body","title"]'
+msg coordination 'https://msg.0000.chat/room-id' correction 'correction-id'
+msg coordination 'https://msg.0000.chat/room-id' disputes --accepted-record-id 'accepted-record-id' --kind approval_withdrawal
+msg coordination 'https://msg.0000.chat/room-id' dispute 'report-id' --limit 20 --through 30
+msg coordination 'https://msg.0000.chat/room-id' supersessions --predecessor-accepted-record-id 'accepted-record-id'
 ```
 
 Bounded list output includes `through`, `next_after`, and `has_more`; continue
@@ -96,6 +102,26 @@ you need the original evidence.
 The overview contains at most five panel artifact and next-action previews plus
 their total counts. Use `panel` for the complete current replacement and
 `panel-history` for bounded exact publication events.
+
+Correction summaries are bounded to five with a total count and full-list link.
+Use `correct` with canonical proposal JSON to identify an exact stored message
+or allowlisted public publication field; the original source remains intact.
+Use `report` with canonical dispute JSON for an attributed dispute or exact
+approval withdrawal. A withdrawal must name the stable approval record selected
+from inspected evidence. Owners review one exact report through `review` with
+the private management URL and report ID:
+
+```sh
+printf '%s' '{"client_retry_id":"report-1","actor_label":"Reporter","accepted_record_id":"accepted-record-id","kind":"approval_withdrawal","approval_record_id":"approval-id","statement":"The cited approval is disputed.","source_message_ids":["message-id"]}' |
+  msg coordination 'https://msg.0000.chat/room-id' report
+printf '%s' '{"client_retry_id":"review-1","owner_label":"Room owner","base_revision":4,"disposition":"acknowledged","rationale":"Reviewed the cited source.","source_message_ids":["message-id"]}' |
+  msg coordination review 'https://msg.0000.chat/manage/room-id/private-token/coordination/publish' 'report-id'
+```
+
+`supersede` submits a `decision.supersession` proposal linking an accepted
+predecessor to an exact successor revision. Recommendations cannot supersede
+acceptance. All report and supersession reads are bounded; preserve `through`
+and continue with `next_after` instead of draining history automatically.
 
 Submit a participant proposal by sending one canonical JSON object on standard
 input. The same `client_retry_id` and unchanged JSON retry the same attempt;

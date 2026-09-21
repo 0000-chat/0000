@@ -1,6 +1,6 @@
 import { validateConversationUrl } from "./wait.js";
 
-const USAGE = "Usage: msg coordination <conversation-url> overview | panel [--revision N] | panel-history [--after N] [--limit N] [--through N] | proposals [--after N] [--limit N] [--through N] | proposal <proposal-id> [--revision N] | requests [--after N] [--limit N] [--through N] [--owner-label LABEL] [--status STATUS] | request <request-id> [--after N] [--limit N] [--through N] | decisions [--after N] [--limit N] [--through N] | decision <decision-id> [--after N] [--limit N] [--through N] | decision-record <decision-id> <accepted-record-id> | propose | revise <proposal-id> | publish <management-coordination-url>";
+const USAGE = "Usage: msg coordination <conversation-url> overview | panel [--revision N] | panel-history [--after N] [--limit N] [--through N] | proposals [--after N] [--limit N] [--through N] | proposal <proposal-id> [--revision N] | requests [--after N] [--limit N] [--through N] [--owner-label LABEL] [--status STATUS] | request <request-id> [--after N] [--limit N] [--through N] | decisions [--after N] [--limit N] [--through N] | decision <decision-id> [--after N] [--limit N] [--through N] | decision-record <decision-id> <accepted-record-id> | publication <published-revision> | corrections [selectors] | correction <correction-id> | disputes [selectors] | dispute <report-id> [selectors] | supersessions [selectors] | propose | correct | supersede | report | revise <proposal-id> | review <management-coordination-url> <report-id> | publish <management-coordination-url>";
 
 const COORDINATION_STATUSES = new Set(["open", "in_progress", "blocked", "done", "withdrawn"]);
 
@@ -11,10 +11,18 @@ export type CoordinationCommand =
   | { readonly after?: number; readonly conversationUrl: string; readonly limit?: number; readonly operation: "proposals" | "requests"; readonly ownerLabel?: string; readonly status?: string; readonly through?: number }
   | { readonly after?: number; readonly conversationUrl: string; readonly id: string; readonly limit?: number; readonly operation: "proposal" | "request"; readonly revision?: number; readonly through?: number }
   | { readonly after?: number; readonly conversationUrl: string; readonly id: string; readonly limit?: number; readonly operation: "decision"; readonly through?: number }
+  | { readonly conversationUrl: string; readonly operation: "publication"; readonly revision: number }
+  | { readonly after?: number; readonly conversationUrl: string; readonly limit?: number; readonly operation: "corrections"; readonly targetClaimPath?: readonly (string | number)[]; readonly targetMessageId?: string; readonly targetPublishedRevision?: number; readonly targetType?: "message" | "publication"; readonly through?: number }
+  | { readonly conversationUrl: string; readonly id: string; readonly operation: "correction" }
+  | { readonly acceptedRecordId?: string; readonly after?: number; readonly conversationUrl: string; readonly kind?: "dispute" | "approval_withdrawal"; readonly limit?: number; readonly operation: "disputes"; readonly through?: number }
+  | { readonly after?: number; readonly conversationUrl: string; readonly id: string; readonly limit?: number; readonly operation: "dispute"; readonly through?: number }
+  | { readonly after?: number; readonly conversationUrl: string; readonly limit?: number; readonly operation: "supersessions"; readonly predecessorAcceptedRecordId?: string; readonly successorDecisionId?: string; readonly through?: number }
   | { readonly conversationUrl: string; readonly decisionId: string; readonly operation: "decision-record"; readonly recordId: string }
   | { readonly after?: number; readonly conversationUrl: string; readonly limit?: number; readonly operation: "decisions"; readonly through?: number }
   | { readonly conversationUrl: string; readonly operation: "propose" }
+  | { readonly conversationUrl: string; readonly operation: "correct" | "supersede" | "report" }
   | { readonly conversationUrl: string; readonly operation: "revise"; readonly id: string }
+  | { readonly managementUrl: string; readonly operation: "review"; readonly reportId: string }
   | { readonly managementUrl: string; readonly operation: "publish" };
 
 export type CoordinationOptions = CoordinationCommand & {
@@ -32,11 +40,15 @@ export function parseCoordinationCommand(args: readonly string[]): CoordinationC
   if (args[1] === "publish" && args.length === 3 || args[2] === "publish" && args.length === 4) {
     return { managementUrl: validateManagementCoordinationUrl(args[1] === "publish" ? args[2] ?? "" : args[3] ?? ""), operation: "publish" };
   }
+  if (args[1] === "review" && args.length === 4) {
+    return { managementUrl: validateManagementCoordinationUrl(args[2] ?? ""), operation: "review", reportId: parseIdentifier(args[3] ?? "") };
+  }
   const conversationUrl = validateConversationUrl(args[1] ?? "");
   const operation = args[2];
-  if (operation === "overview" || operation === "propose" || operation === "revise" && args.length === 4) {
+  if (operation === "overview" || operation === "propose" || operation === "correct" || operation === "supersede" || operation === "report" || operation === "revise" && args.length === 4) {
     if (operation === "overview" && args.length === 3) return { conversationUrl, operation };
     if (operation === "propose" && args.length === 3) return { conversationUrl, operation };
+    if ((operation === "correct" || operation === "supersede" || operation === "report") && args.length === 3) return { conversationUrl, operation };
     if (operation === "revise" && args.length === 4 && args[3]) return { conversationUrl, id: args[3], operation };
   }
   if (operation === "panel") {
@@ -56,6 +68,31 @@ export function parseCoordinationCommand(args: readonly string[]): CoordinationC
       else if (flag === "--after") selectors.after = parseNonnegativeInteger(raw);
       else selectors.through = parseNonnegativeInteger(raw);
     }
+    return { conversationUrl, operation, ...selectors };
+  }
+  if (operation === "publication") {
+    if (args.length !== 4) throw new Error(USAGE);
+    return { conversationUrl, operation, revision: parsePositiveInteger(args[3] ?? "") };
+  }
+  if (operation === "correction") {
+    if (args.length !== 4 || !args[3]) throw new Error(USAGE);
+    return { conversationUrl, id: parseIdentifier(args[3]), operation };
+  }
+  if (operation === "corrections") {
+    const selectors = parseCoordinationSelectors(args, { target: true });
+    return { conversationUrl, operation, ...selectors };
+  }
+  if (operation === "dispute") {
+    if (args.length < 4 || !args[3]) throw new Error(USAGE);
+    const selectors = parseCoordinationSelectors(args.slice(4), { target: false });
+    return { conversationUrl, id: parseIdentifier(args[3]), operation, ...selectors };
+  }
+  if (operation === "disputes") {
+    const selectors = parseCoordinationSelectors(args, { target: false, dispute: true });
+    return { conversationUrl, operation, ...selectors };
+  }
+  if (operation === "supersessions") {
+    const selectors = parseCoordinationSelectors(args, { target: false, supersession: true });
     return { conversationUrl, operation, ...selectors };
   }
   if (operation === "proposals" || operation === "requests" || operation === "decisions") {
@@ -103,23 +140,32 @@ export function parseCoordinationCommand(args: readonly string[]): CoordinationC
 export async function runCoordination(options: CoordinationOptions): Promise<unknown> {
   throwIfAborted(options.signal);
   const endpoint = coordinationEndpoint(options);
-  const body = options.operation === "propose" || options.operation === "revise" || options.operation === "publish"
+  const body = options.operation === "propose" || options.operation === "revise" || options.operation === "correct" || options.operation === "supersede" || options.operation === "report" || options.operation === "review" || options.operation === "publish"
     ? await readMutationBody(options)
     : undefined;
   const response = await fetchCoordination(options, endpoint, body);
   const value = await readJson(response, options.signal);
   if (!response.ok) throw new Error(responseMessage(response.status, value));
-  if (options.operation === "propose" || options.operation === "revise" || options.operation === "publish") return validateMutationReceipt(options.operation, value);
+  if (options.operation === "propose" || options.operation === "revise" || options.operation === "correct" || options.operation === "supersede" || options.operation === "report" || options.operation === "review" || options.operation === "publish") return validateMutationReceipt(options.operation, value);
   return value;
 }
 
 function coordinationEndpoint(options: CoordinationOptions): URL {
   if (options.operation === "publish") return new URL(options.managementUrl);
+  if (options.operation === "review") {
+    const url = new URL(options.managementUrl);
+    url.pathname = url.pathname.replace(/\/coordination\/publish$/u, `/coordination/disputes/${encodeURIComponent(options.reportId)}/review`);
+    return url;
+  }
   const url = new URL(validateConversationUrl(options.conversationUrl));
   if (options.operation === "overview") url.pathname += "/coordination";
   else if (options.operation === "panel") url.pathname += "/coordination/panel";
   else if (options.operation === "panel-history") url.pathname += "/coordination/panel/history";
-  else if (options.operation === "proposals" || options.operation === "propose") url.pathname += "/coordination/proposals";
+  else if (options.operation === "proposals" || options.operation === "propose" || options.operation === "correct" || options.operation === "supersede") url.pathname += "/coordination/proposals";
+  else if (options.operation === "corrections" || options.operation === "correction") url.pathname += "/coordination/corrections";
+  else if (options.operation === "disputes" || options.operation === "dispute" || options.operation === "report") url.pathname += "/coordination/disputes";
+  else if (options.operation === "supersessions") url.pathname += "/coordination/supersessions";
+  else if (options.operation === "publication") url.pathname += "/coordination/publications";
   else if (options.operation === "proposal" || options.operation === "revise") url.pathname += `/coordination/proposals/${encodeURIComponent(options.id)}`;
   else if (options.operation === "requests") url.pathname += "/coordination/requests";
   else if (options.operation === "request") url.pathname += `/coordination/requests/${encodeURIComponent(options.id)}`;
@@ -129,14 +175,33 @@ function coordinationEndpoint(options: CoordinationOptions): URL {
   if (options.operation === "revise") url.pathname += "/revisions";
   if (options.operation === "proposal" && options.revision !== undefined) url.pathname += `/revisions/${options.revision}`;
   if (options.operation === "panel" && options.revision !== undefined) url.searchParams.set("revision", String(options.revision));
-  if (options.operation === "proposals" || options.operation === "requests" || options.operation === "decisions" || options.operation === "panel-history") {
+  if (options.operation === "proposals" || options.operation === "requests" || options.operation === "decisions" || options.operation === "panel-history" || options.operation === "corrections" || options.operation === "disputes" || options.operation === "supersessions") {
     if (options.after !== undefined) url.searchParams.set("after", String(options.after));
     if (options.limit !== undefined) url.searchParams.set("limit", String(options.limit));
     if (options.operation === "requests" && options.ownerLabel !== undefined) url.searchParams.set("owner_label", options.ownerLabel);
     if (options.operation === "requests" && options.status !== undefined) url.searchParams.set("status", options.status);
+    if (options.operation === "corrections") {
+      if (options.targetType !== undefined) url.searchParams.set("target_type", options.targetType);
+      if (options.targetMessageId !== undefined) url.searchParams.set("target_message_id", options.targetMessageId);
+      if (options.targetPublishedRevision !== undefined) url.searchParams.set("target_published_revision", String(options.targetPublishedRevision));
+      if (options.targetClaimPath !== undefined) url.searchParams.set("target_claim_path", JSON.stringify(options.targetClaimPath));
+    }
+    if (options.operation === "disputes") {
+      if (options.acceptedRecordId !== undefined) url.searchParams.set("accepted_record_id", options.acceptedRecordId);
+      if (options.kind !== undefined) url.searchParams.set("kind", options.kind);
+    }
+    if (options.operation === "supersessions") {
+      if (options.predecessorAcceptedRecordId !== undefined) url.searchParams.set("predecessor_accepted_record_id", options.predecessorAcceptedRecordId);
+      if (options.successorDecisionId !== undefined) url.searchParams.set("successor_decision_id", options.successorDecisionId);
+    }
     if (options.through !== undefined) url.searchParams.set("through", String(options.through));
   }
   if (options.operation === "request") {
+    if (options.after !== undefined) url.searchParams.set("after", String(options.after));
+    if (options.limit !== undefined) url.searchParams.set("limit", String(options.limit));
+    if (options.through !== undefined) url.searchParams.set("through", String(options.through));
+  }
+  if (options.operation === "dispute") {
     if (options.after !== undefined) url.searchParams.set("after", String(options.after));
     if (options.limit !== undefined) url.searchParams.set("limit", String(options.limit));
     if (options.through !== undefined) url.searchParams.set("through", String(options.through));
@@ -147,6 +212,9 @@ function coordinationEndpoint(options: CoordinationOptions): URL {
     if (options.through !== undefined) url.searchParams.set("through", String(options.through));
   }
   if (options.operation === "decision-record") url.pathname += `/records/${encodeURIComponent(options.recordId)}`;
+  if (options.operation === "publication") url.pathname += `/${options.revision}`;
+  if (options.operation === "correction") url.pathname += `/${encodeURIComponent(options.id)}`;
+  if (options.operation === "dispute") url.pathname += `/${encodeURIComponent(options.id)}`;
   return url;
 }
 
@@ -229,6 +297,43 @@ function parseStatus(value: string): string {
   return value;
 }
 
+function parseIdentifier(value: string): string {
+  if (value.length === 0 || value.length > 512) throw new Error(USAGE);
+  return value;
+}
+
+function parseCoordinationSelectors(args: readonly string[], options: { readonly dispute?: boolean; readonly supersession?: boolean; readonly target?: boolean }): Record<string, unknown> {
+  const start = args[0]?.startsWith("--") === true ? 0 : 3;
+  const result: Record<string, unknown> = {};
+  const seen = new Set<string>();
+  const flags = new Set(["--after", "--limit", "--through"]);
+  if (options.target) for (const flag of ["--target-type", "--target-message-id", "--target-published-revision", "--target-claim-path"]) flags.add(flag);
+  if (options.dispute) for (const flag of ["--accepted-record-id", "--kind"]) flags.add(flag);
+  if (options.supersession) for (const flag of ["--predecessor-accepted-record-id", "--successor-decision-id"]) flags.add(flag);
+  for (let index = start; index < args.length; index += 2) {
+    const flag = args[index]; const raw = args[index + 1];
+    if (!flag || !flags.has(flag) || raw === undefined || seen.has(flag)) throw new Error(USAGE);
+    seen.add(flag);
+    if (flag === "--after") result.after = parseNonnegativeInteger(raw);
+    else if (flag === "--limit") result.limit = parseLimit(raw);
+    else if (flag === "--through") result.through = parseNonnegativeInteger(raw);
+    else if (flag === "--target-type") { if (raw !== "message" && raw !== "publication") throw new Error(USAGE); result.targetType = raw; }
+    else if (flag === "--target-message-id") result.targetMessageId = parseIdentifier(raw);
+    else if (flag === "--target-published-revision") result.targetPublishedRevision = parsePositiveInteger(raw);
+    else if (flag === "--target-claim-path") {
+      let value: unknown;
+      try { value = JSON.parse(raw); } catch { throw new Error(USAGE); }
+      if (!Array.isArray(value) || value.length === 0 || value.length > 8 || value.some((part) => typeof part !== "string" && !(typeof part === "number" && Number.isSafeInteger(part) && part >= 0))) throw new Error(USAGE);
+      result.targetClaimPath = value;
+    } else if (flag === "--accepted-record-id") result.acceptedRecordId = parseIdentifier(raw);
+    else if (flag === "--kind") { if (raw !== "dispute" && raw !== "approval_withdrawal") throw new Error(USAGE); result.kind = raw; }
+    else if (flag === "--predecessor-accepted-record-id") result.predecessorAcceptedRecordId = parseIdentifier(raw);
+    else if (flag === "--successor-decision-id") result.successorDecisionId = parseIdentifier(raw);
+  }
+  if (options.target && result.targetType === "message" && result.targetClaimPath !== undefined) throw new Error(USAGE);
+  return result;
+}
+
 function throwIfAborted(signal: AbortSignal | undefined): void {
   if (signal?.aborted) throw new CoordinationSignalError();
 }
@@ -238,8 +343,17 @@ function responseMessage(status: number, value: unknown): string {
   return `The msg service returned HTTP ${status}.`;
 }
 
-function validateMutationReceipt(operation: "propose" | "revise" | "publish", value: unknown): Record<string, unknown> {
+function validateMutationReceipt(operation: "propose" | "revise" | "correct" | "supersede" | "report" | "review" | "publish", value: unknown): Record<string, unknown> {
   if (!isRecord(value) || typeof value.replayed !== "boolean") throw new Error("The coordination response was incomplete.");
+  if (operation === "report") {
+    const report = value.report ?? value.dispute;
+    if (!isRecord(report) || !nonemptyString(report.report_id)) throw new Error("The coordination report response was incomplete.");
+    return value;
+  }
+  if (operation === "review") {
+    if (!isRecord(value.review) || !nonemptyString(value.review.review_id) || !nonemptyString(value.review.report_id)) throw new Error("The coordination review response was incomplete.");
+    return value;
+  }
   if (operation === "publish") {
     const proposal = value.proposal;
     const request = value.request;
@@ -247,14 +361,16 @@ function validateMutationReceipt(operation: "propose" | "revise" | "publish", va
     const decision = value.decision;
     const position = value.position;
     const acceptedRecord = value.accepted_record;
+    const correction = value.correction;
+    const supersession = value.supersession;
     const hasDecisionResult = isRecord(decision) && nonemptyString(decision.decision_id) && (isRecord(acceptedRecord) && nonemptyString(acceptedRecord.accepted_record_id) || isRecord(position) && nonemptyString(position.position_id) || typeof decision.state === "string");
-    if (!isRecord(proposal) || !nonemptyString(proposal.proposal_id) || !positiveInteger(proposal.revision) || !positiveInteger(value.published_revision) || !((isRecord(request) && nonemptyString(request.request_id)) || (isRecord(panel) && nonemptyString(panel.proposal_id)) || hasDecisionResult)) {
+    if (!isRecord(proposal) || !nonemptyString(proposal.proposal_id) || !positiveInteger(proposal.revision) || !positiveInteger(value.published_revision) || !((isRecord(request) && nonemptyString(request.request_id)) || (isRecord(panel) && nonemptyString(panel.proposal_id)) || (isRecord(correction) && nonemptyString(correction.correction_id)) || (isRecord(supersession) && nonemptyString(supersession.supersession_id)) || hasDecisionResult)) {
       throw new Error("The coordination publication response was incomplete.");
     }
     return value;
   }
   const proposal = value.proposal;
-  if (!isRecord(proposal) || !nonemptyString(proposal.proposal_id) || !positiveInteger(proposal.revision) || !(nonemptyString(proposal.request_id) || typeof proposal.kind === "string" && proposal.kind.startsWith("decision."))) {
+  if (!isRecord(proposal) || !nonemptyString(proposal.proposal_id) || !positiveInteger(proposal.revision) || !(nonemptyString(proposal.request_id) || typeof proposal.kind === "string" && (proposal.kind.startsWith("decision.") || proposal.kind === "claim.correction"))) {
     throw new Error("The coordination proposal response was incomplete.");
   }
   return value;

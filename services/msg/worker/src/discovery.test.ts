@@ -72,6 +72,11 @@ Accept: application/json
   expect(AGENT_INSTRUCTIONS).toContain("request.create");
   expect(AGENT_INSTRUCTIONS).toContain("/manage/{room}/{token}/coordination/publish");
   expect(AGENT_INSTRUCTIONS).toContain("proposal-attempt-1");
+  expect(AGENT_INSTRUCTIONS).toContain("/coordination/corrections?limit=20");
+  expect(AGENT_INSTRUCTIONS).toContain("kind: \"claim.correction\"");
+  expect(AGENT_INSTRUCTIONS).toContain("approval_withdrawal");
+  expect(AGENT_INSTRUCTIONS).toContain("/coordination/disputes/<report-id>");
+  expect(AGENT_INSTRUCTIONS).toContain("decision.supersession");
 });
 
 test("renders root discovery in every supported representation", async () => {
@@ -192,16 +197,23 @@ test("documents responses for every OpenAPI operation", () => {
   expect(OPENAPI_DOCUMENT.paths["/{room}/coordination/panel/history"].get).toBeDefined();
   expect(OPENAPI_DOCUMENT.paths["/{room}/coordination/proposals"].post.requestBody.content["application/json"].schema.additionalProperties).toBe(false);
   const coordinationSchema = OPENAPI_DOCUMENT.paths["/{room}/coordination/proposals"].post.requestBody.content["application/json"].schema;
-  expect(coordinationSchema.properties.kind.enum).toEqual(["request.create", "request.progress", "panel.replace", "decision.proposal", "decision.position"]);
-  expect(coordinationSchema.properties.body.oneOf).toHaveLength(5);
+  expect(coordinationSchema.properties.kind.enum).toEqual(["request.create", "request.progress", "panel.replace", "decision.proposal", "decision.position", "claim.correction", "decision.supersession"]);
+  expect(coordinationSchema.properties.body.oneOf).toHaveLength(7);
   expect(coordinationSchema.properties.body.oneOf[1].properties.status.enum).toEqual(["open", "in_progress", "blocked", "done", "withdrawn"]);
   expect(coordinationSchema.properties.body.oneOf[2].required).toEqual(["purpose", "phase", "artifacts", "next_actions"]);
   expect(coordinationSchema.properties.body.oneOf[2].properties.artifacts.maxItems).toBe(50);
   expect(coordinationSchema.properties.body.oneOf[2].properties.next_actions.maxItems).toBe(50);
   expect(coordinationSchema.properties.body.oneOf[3].required).toEqual(["title", "proposal_text", "required_approver_labels"]);
   expect(coordinationSchema.properties.body.oneOf[4].required).toEqual(["decision_proposal_id", "decision_revision", "participant_label", "statement"]);
+  expect(coordinationSchema.properties.body.oneOf[5].required).toEqual(["target", "correction_text"]);
+  expect(coordinationSchema.properties.body.oneOf[6].required).toEqual(["predecessor_accepted_record_id", "successor_decision_id", "successor_decision_revision"]);
+  expect(OPENAPI_DOCUMENT.paths["/{room}/coordination/publications/{published_revision}"].get).toBeDefined();
+  expect(OPENAPI_DOCUMENT.paths["/{room}/coordination/corrections"].get.parameters.map((parameter) => parameter.name)).toContain("target_claim_path");
+  expect(OPENAPI_DOCUMENT.paths["/{room}/coordination/disputes"].post.requestBody.content["application/json"].schema.required).toEqual(["client_retry_id", "actor_label", "accepted_record_id", "kind", "statement", "source_message_ids"]);
+  expect(OPENAPI_DOCUMENT.paths["/manage/{room}/{token}/coordination/disputes/{report_id}/review"].post.requestBody.content["application/json"].schema.properties).not.toHaveProperty("report_id");
+  expect(OPENAPI_DOCUMENT.paths["/{room}/coordination/supersessions"].get.parameters.map((parameter) => parameter.name)).toContain("successor_decision_id");
   expect(OPENAPI_DOCUMENT.paths["/{room}/coordination/requests"].get.parameters.map((parameter) => parameter.name)).toEqual(["room", "after", "limit", "through", "owner_label", "status"]);
   expect(OPENAPI_DOCUMENT.paths["/{room}/coordination/requests"].get.description).toContain("not an authenticated inbox");
   expect(OPENAPI_DOCUMENT.paths["/manage/{room}/{token}/coordination/publish"].post.description).toContain("Never expose this URL");
-  expect(Object.keys(OPENAPI_DOCUMENT.paths).sort()).toEqual(["/", "/healthz", "/manage/{room}/{token}", "/manage/{room}/{token}/coordination/publish", "/{room}", "/{room}/agent", "/{room}/coordination", "/{room}/coordination/decisions", "/{room}/coordination/decisions/{decision_id}", "/{room}/coordination/decisions/{decision_id}/records/{accepted_record_id}", "/{room}/coordination/panel", "/{room}/coordination/panel/history", "/{room}/coordination/proposals", "/{room}/coordination/proposals/{id}", "/{room}/coordination/proposals/{id}/revisions", "/{room}/coordination/proposals/{id}/revisions/{revision}", "/{room}/coordination/requests", "/{room}/coordination/requests/{request_id}", "/{room}/export.json", "/{room}/export.md", "/{room}/live", "/{room}/messages/{id}", "/{room}/post", "/{room}/webhooks", "/{room}/webhooks/{id}", "/{room}/webhooks/{id}/deliveries/{event_id}/redeliver", "/{room}/webhooks/{id}/disable", "/{room}/webhooks/{id}/enable", "/{room}/webhooks/{id}/rotate-secret"]);
+  expect(Object.keys(OPENAPI_DOCUMENT.paths).sort()).toEqual(["/", "/healthz", "/manage/{room}/{token}", "/manage/{room}/{token}/coordination/disputes/{report_id}/review", "/manage/{room}/{token}/coordination/publish", "/{room}", "/{room}/agent", "/{room}/coordination", "/{room}/coordination/corrections", "/{room}/coordination/corrections/{correction_id}", "/{room}/coordination/decisions", "/{room}/coordination/decisions/{decision_id}", "/{room}/coordination/decisions/{decision_id}/records/{accepted_record_id}", "/{room}/coordination/disputes", "/{room}/coordination/disputes/{report_id}", "/{room}/coordination/panel", "/{room}/coordination/panel/history", "/{room}/coordination/proposals", "/{room}/coordination/proposals/{id}", "/{room}/coordination/proposals/{id}/revisions", "/{room}/coordination/proposals/{id}/revisions/{revision}", "/{room}/coordination/publications/{published_revision}", "/{room}/coordination/requests", "/{room}/coordination/requests/{request_id}", "/{room}/coordination/supersessions", "/{room}/export.json", "/{room}/export.md", "/{room}/live", "/{room}/messages/{id}", "/{room}/post", "/{room}/webhooks", "/{room}/webhooks/{id}", "/{room}/webhooks/{id}/deliveries/{event_id}/redeliver", "/{room}/webhooks/{id}/disable", "/{room}/webhooks/{id}/enable", "/{room}/webhooks/{id}/rotate-secret"]);
 });

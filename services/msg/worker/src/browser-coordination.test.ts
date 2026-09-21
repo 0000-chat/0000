@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 
 import { browserAsset, renderBrowserPage } from "./browser";
 import { bootCoordinationBrowser, createCoordinationBrowserHelpers, normalizeCoordinationManagementUrl, readCoordinationManagementUrl, retainCoordinationManagementUrl } from "./browser-coordination";
+import { parseCoordinationDispute, parseCoordinationDisputeReview, parseCoordinationProposal } from "./coordination-domain";
 
 function memoryStorage(initial: Record<string, string> = {}) {
   const values = new Map(Object.entries(initial));
@@ -218,6 +219,7 @@ test("submits a real progress report with an operation-specific frozen retry", a
   const storage = memoryStorage();
   const documentObject = {
     body: { dataset: { room: "room-a" } },
+    documentElement: { dataset: {} as Record<string, string> },
     createElement: () => new Element(),
     querySelector<T extends Element>(selector: string) { return elements.get(selector.slice(1)) as T | undefined ?? null; },
     querySelectorAll: () => [] as Element[],
@@ -373,6 +375,7 @@ test("restores a frozen progress revision target across an ambiguous reload", as
   const storage = memoryStorage({ "0000:coordination-progress-attempt:v1:room-a": JSON.stringify({ client_retry_id: "revision-retry", payload: frozenPayload, revision_proposal_id: "proposal-progress", revision_kind: "request.progress" }) });
   const documentObject = {
     body: { dataset: { room: "room-a" } },
+    documentElement: { dataset: {} as Record<string, string> },
     createElement: () => new Element(),
     querySelector<T extends Element>(selector: string) { return elements.get(selector.slice(1)) as T | undefined ?? null; },
     querySelectorAll: () => [] as Element[],
@@ -757,6 +760,297 @@ test("executes the served labelled decision flow with frozen retries, positions,
     expect(elements.get("coordination-review")!.children.some((child) => child.textContent?.includes("Immutable accepted record"))).toBe(true);
   } finally {
     for (const socket of TestSocket.instances) socket.close();
+    Object.assign(globals, saved);
+  }
+});
+
+test("served correction, withdrawal, owner review, and supersession controls preserve exact targets and attribution", async () => {
+  const source = await browserAsset("client.js")?.text();
+  class Element {
+    value = "";
+    textContent: string | null = "";
+    disabled = false;
+    hidden = false;
+    className = "";
+    dataset: Record<string, string> = {};
+    href = "";
+    target = "";
+    rel = "";
+    type = "";
+    checked = false;
+    children: Element[] = [];
+    onclick: (() => void) | null = null;
+    listeners = new Map<string, (event: { preventDefault(): void }) => void>();
+    addEventListener(type: string, listener: (event: { preventDefault(): void }) => void) { this.listeners.set(type, listener); }
+    append(...nodes: Element[]) { this.children.push(...nodes); }
+    replaceChildren(...nodes: Element[]) { this.children = [...nodes]; }
+    select() {}
+    async submit() { await this.listeners.get("submit")?.({ preventDefault() {} }); }
+  }
+  const names = [
+    "coordination-panel", "coordination-overview", "coordination-pinned-panel", "coordination-review", "coordination-status", "coordination-refresh", "coordination-filter-form", "coordination-filter-owner-label", "coordination-filter-status",
+    "coordination-owner-form", "coordination-owner-url", "coordination-owner-save",
+    "coordination-correction-form", "coordination-correction-actor", "coordination-correction-target-type", "coordination-correction-message-id", "coordination-correction-publication-revision", "coordination-correction-claim-path", "coordination-correction-inspect", "coordination-correction-review", "coordination-correction-text", "coordination-correction-sources", "coordination-correction-submit", "coordination-correction-new",
+    "coordination-dispute-form", "coordination-dispute-actor", "coordination-dispute-accepted-record", "coordination-dispute-kind", "coordination-dispute-approval-record", "coordination-dispute-statement", "coordination-dispute-sources", "coordination-dispute-inspect", "coordination-dispute-review", "coordination-dispute-submit", "coordination-dispute-new",
+    "coordination-dispute-review-form", "coordination-dispute-review-report", "coordination-dispute-review-disposition", "coordination-dispute-review-rationale", "coordination-dispute-review-sources", "coordination-dispute-review-submit", "coordination-dispute-review-new",
+    "coordination-supersession-form", "coordination-supersession-actor", "coordination-supersession-predecessor", "coordination-supersession-successor", "coordination-supersession-revision", "coordination-supersession-sources", "coordination-supersession-inspect", "coordination-supersession-review", "coordination-supersession-submit", "coordination-supersession-new",
+  ];
+  const elements = new Map(names.map((name) => [name, new Element()]));
+  const storage = memoryStorage({ "0000:coordination-management-url:v1:room-a": "https://msg.0000.chat/manage/room-a/owner-token" });
+  const calls: { url: string; body?: string }[] = [];
+  let correctionAttempts = 0;
+  const documentObject = {
+    body: { dataset: { room: "room-a" } },
+    documentElement: { dataset: {} as Record<string, string> },
+    createElement: () => new Element(),
+    querySelector<T extends Element>(selector: string) { return elements.get(selector.slice(1)) as T | undefined ?? null; },
+    querySelectorAll: () => [] as Element[],
+  };
+  class TestSocket {
+    static readonly instances: TestSocket[] = [];
+    readyState = 1;
+    onclose: (() => void) | null = null;
+    onerror: (() => void) | null = null;
+    onmessage: ((event: { data: string }) => void) | null = null;
+    onopen: (() => void) | null = null;
+    constructor(readonly url: unknown) { TestSocket.instances.push(this); }
+    close() { this.readyState = 3; this.onclose = null; this.onerror = null; this.onopen = null; }
+  }
+  const globals = globalThis as unknown as Record<string, unknown>;
+  const saved = Object.fromEntries(["WebSocket", "addEventListener", "document", "fetch", "location", "localStorage", "matchMedia", "navigator", "sessionStorage"].map((key) => [key, globals[key]]));
+  const tick = async () => { await new Promise((resolve) => setTimeout(resolve, 0)); await new Promise((resolve) => setTimeout(resolve, 0)); };
+  globals.document = documentObject;
+  globals.location = { origin: "https://msg.0000.chat", pathname: "/room-a", href: "https://msg.0000.chat/room-a", protocol: "https:" };
+  globals.navigator = { onLine: true };
+  globals.matchMedia = () => ({ matches: false, addEventListener() {} });
+  globals.localStorage = { getItem: () => null, setItem: () => {} };
+  globals.sessionStorage = storage;
+  globals.addEventListener = () => {};
+  globals.WebSocket = TestSocket;
+  globals.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input); const body = typeof init?.body === "string" ? init.body : undefined; calls.push({ url, body });
+    if (url.endsWith("/coordination")) return new Response(JSON.stringify({ coordination_cursor: 5, correction_count: 1, correction_summaries: [{ correction_id: "old-correction", correction_text: "Earlier account", detail_url: "/coordination/corrections/old-correction", owner_label: "owner", publication_revision: 3, reporter_label: "reporter", target: { type: "message", message_id: "message-1" } }], corrections_url: "/coordination/corrections?limit=20", decision_count: 0, empty: false, pending_proposal_count: 0, pending_proposals: [], published_request_count: 0, published_requests: [], published_revision: 5, proposals_url: "/coordination/proposals", requests_url: "/coordination/requests" }), { status: 200 });
+    if (url.endsWith("/coordination/publications/4")) return new Response(JSON.stringify({ publication: { body: { claim: { title: "Original title", status: "open" } }, source_messages: [{ id: "source-publication", author: "source-author", display_name: "Source", citation_url: "/room-a/messages/source-publication" }] } }), { status: 200 });
+    if (url.endsWith("/coordination/proposals")) {
+      const parsed = JSON.parse(body ?? "{}");
+      if (parsed.kind === "claim.correction") { parseCoordinationProposal(parsed); correctionAttempts += 1; if (correctionAttempts === 1) throw new Error("ambiguous correction result"); return new Response(JSON.stringify({ proposal: { proposal_id: "correction-1", revision: 1 } }), { status: 201 }); }
+      if (parsed.kind === "decision.supersession") { parseCoordinationProposal(parsed); return new Response(JSON.stringify({ proposal: { proposal_id: "supersession-1", revision: 1 } }), { status: 201 }); }
+    }
+    if (url.endsWith("/coordination/disputes")) { parseCoordinationDispute(JSON.parse(body ?? "{}")); return new Response(JSON.stringify({ dispute: { report_id: "report-1" }, report: { report_id: "report-1" }, replayed: false }), { status: 201 }); }
+    if (url.includes("/coordination/disputes/report-1?")) return new Response(JSON.stringify({ dispute: { accepted_record_id: "accepted-1", actor_label: "reporter", kind: "approval_withdrawal", report_id: "report-1", reviews: [], reviews_has_more: false, statement: "Reporter account" } }), { status: 200 });
+    if (url.endsWith("/coordination/disputes/report-1/review")) { parseCoordinationDisputeReview(JSON.parse(body ?? "{}")); return new Response(JSON.stringify({ replayed: false, review: { report_id: "report-1", review_id: "review-1" } }), { status: 201 }); }
+    if (url.includes("/messages/")) return new Response(JSON.stringify({ message: { author: "reporter", content: "Source report", display_name: "Reporter", id: url.split("/").at(-1), sequence: 1 } }), { status: 200 });
+    return new Response(JSON.stringify({ latest_message: 0, messages: [], expires_at: null }), { status: 200 });
+  };
+  try {
+    new Function(source ?? "")();
+    await tick();
+    elements.get("coordination-correction-actor")!.value = "reporter";
+    elements.get("coordination-correction-target-type")!.value = "publication";
+    elements.get("coordination-correction-publication-revision")!.value = "4";
+    elements.get("coordination-correction-text")!.value = "Corrected title";
+    elements.get("coordination-correction-sources")!.value = "source-publication";
+    elements.get("coordination-correction-inspect")!.listeners.get("click")?.({ preventDefault() {} });
+    await tick();
+    expect(elements.get("coordination-correction-claim-path")!.children.some((child) => child.textContent?.includes("claim.title"))).toBe(true);
+    elements.get("coordination-correction-claim-path")!.value = JSON.stringify(["claim", "title"]);
+    await elements.get("coordination-correction-form")!.submit(); await tick();
+    const firstCorrection = JSON.parse(calls.find(({ body }) => body?.includes('"claim.correction"'))?.body ?? "{}");
+    expect(firstCorrection).toMatchObject({ kind: "claim.correction", body: { target: { type: "publication", published_revision: 4, claim_path: ["claim", "title"] } } });
+    elements.get("coordination-correction-publication-revision")!.value = "5";
+    await elements.get("coordination-correction-form")!.submit(); await tick();
+    expect(elements.get("coordination-correction-new")!.hidden).toBe(false);
+    elements.get("coordination-correction-new")!.listeners.get("click")?.({ preventDefault() {} });
+    elements.get("coordination-correction-inspect")!.listeners.get("click")?.({ preventDefault() {} }); await tick();
+    elements.get("coordination-correction-claim-path")!.value = JSON.stringify(["claim", "title"]);
+    await elements.get("coordination-correction-form")!.submit(); await tick();
+    const corrections = calls.filter(({ body }) => body?.includes('"claim.correction"'));
+    expect(corrections).toHaveLength(2);
+    expect(JSON.parse(corrections[1]!.body ?? "{}").body.target.published_revision).toBe(5);
+
+    elements.get("coordination-dispute-actor")!.value = "reporter";
+    elements.get("coordination-dispute-accepted-record")!.value = "accepted-1";
+    elements.get("coordination-dispute-kind")!.value = "approval_withdrawal";
+    elements.get("coordination-dispute-approval-record")!.value = "approval-alice";
+    elements.get("coordination-dispute-statement")!.value = "Reporter disputes Alice approval.";
+    elements.get("coordination-dispute-sources")!.value = "report-source";
+    await elements.get("coordination-dispute-form")!.submit(); await tick();
+    const report = JSON.parse(calls.find(({ url }) => url.endsWith("/coordination/disputes"))?.body ?? "{}");
+    expect(report).toMatchObject({ actor_label: "reporter", accepted_record_id: "accepted-1", kind: "approval_withdrawal", approval_record_id: "approval-alice" });
+    elements.get("coordination-dispute-review-report")!.value = "report-1";
+    elements.get("coordination-dispute-review-rationale")!.value = "Reviewed source.";
+    await elements.get("coordination-dispute-review-form")!.submit(); await tick();
+    const review = calls.find(({ url }) => url.endsWith("/coordination/disputes/report-1/review"));
+    expect(review?.url).toBe("https://msg.0000.chat/manage/room-a/owner-token/coordination/disputes/report-1/review");
+    expect(JSON.parse(review?.body ?? "{}")).toMatchObject({ owner_label: "Room owner", disposition: "acknowledged" });
+    expect(JSON.parse(review?.body ?? "{}")).not.toHaveProperty("report_id");
+
+    elements.get("coordination-supersession-actor")!.value = "reporter";
+    elements.get("coordination-supersession-predecessor")!.value = "accepted-1";
+    elements.get("coordination-supersession-successor")!.value = "decision-2";
+    elements.get("coordination-supersession-revision")!.value = "2";
+    await elements.get("coordination-supersession-form")!.submit(); await tick();
+    const supersession = JSON.parse(calls.find(({ body }) => body?.includes('"decision.supersession"'))?.body ?? "{}");
+    expect(supersession).toMatchObject({ kind: "decision.supersession", body: { predecessor_accepted_record_id: "accepted-1", successor_decision_id: "decision-2", successor_decision_revision: 2 } });
+  } finally {
+    for (const socket of TestSocket.instances) socket.close();
+    Object.assign(globals, saved);
+  }
+});
+
+test("served structured attempts restore exact correction and owner-review payloads across fresh runtimes", async () => {
+  const source = await browserAsset("client.js")?.text();
+  class Element {
+    value = "";
+    textContent: string | null = "";
+    disabled = false;
+    hidden = false;
+    className = "";
+    dataset: Record<string, string> = {};
+    href = "";
+    target = "";
+    rel = "";
+    type = "";
+    checked = false;
+    children: Element[] = [];
+    onclick: (() => void) | null = null;
+    listeners = new Map<string, (event: { preventDefault(): void }) => void>();
+    addEventListener(type: string, listener: (event: { preventDefault(): void }) => void) { this.listeners.set(type, listener); }
+    append(...nodes: Element[]) { this.children.push(...nodes); }
+    replaceChildren(...nodes: Element[]) { this.children = [...nodes]; }
+    select() {}
+    async submit() { await this.listeners.get("submit")?.({ preventDefault() {} }); }
+  }
+  const names = [
+    "coordination-panel", "coordination-overview", "coordination-pinned-panel", "coordination-review", "coordination-status", "coordination-refresh", "coordination-filter-form", "coordination-filter-owner-label", "coordination-filter-status",
+    "coordination-owner-form", "coordination-owner-url", "coordination-owner-save", "coordination-owner",
+    "coordination-correction-form", "coordination-correction-actor", "coordination-correction-target-type", "coordination-correction-message-id", "coordination-correction-publication-revision", "coordination-correction-claim-path", "coordination-correction-inspect", "coordination-correction-review", "coordination-correction-text", "coordination-correction-sources", "coordination-correction-submit", "coordination-correction-new",
+    "coordination-dispute-form", "coordination-dispute-actor", "coordination-dispute-accepted-record", "coordination-dispute-kind", "coordination-dispute-approval-record", "coordination-dispute-statement", "coordination-dispute-sources", "coordination-dispute-inspect", "coordination-dispute-submit", "coordination-dispute-new",
+    "coordination-dispute-review-form", "coordination-dispute-review-report", "coordination-dispute-review-disposition", "coordination-dispute-review-rationale", "coordination-dispute-review-sources", "coordination-dispute-review-submit", "coordination-dispute-review-new",
+    "coordination-supersession-form", "coordination-supersession-actor", "coordination-supersession-predecessor", "coordination-supersession-successor", "coordination-supersession-revision", "coordination-supersession-sources", "coordination-supersession-inspect", "coordination-supersession-review", "coordination-supersession-submit", "coordination-supersession-new",
+  ];
+  const storage = memoryStorage({ "0000:coordination-management-url:v1:room-a": "https://msg.0000.chat/manage/room-a/owner-token" });
+  const calls: Array<{ url: string; body?: string }> = [];
+  let correctionAttempts = 0;
+  let reviewAttempts = 0;
+  let staleReviewAttempts = 0;
+  let currentRevision = 4;
+  const overviewPayload = () => ({ coordination_cursor: currentRevision, correction_count: 0, correction_summaries: [], corrections_url: "/room-a/coordination/corrections?limit=20", decision_count: 0, empty: false, pending_proposal_count: 1, pending_proposals: [{ detail_url: "/room-a/coordination/proposals/request-1", kind: "request.create", proposal_id: "request-1", revision: 1, status: "pending", title: "Unrelated request" }], published_request_count: 0, published_requests: [], published_revision: currentRevision, proposals_url: "/room-a/coordination/proposals?limit=20", requests_url: "/room-a/coordination/requests?limit=20" });
+  const fetchImpl = async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input); const body = typeof init?.body === "string" ? init.body : undefined; calls.push({ url, body });
+    if (url.endsWith("/coordination")) return new Response(JSON.stringify(overviewPayload()), { status: 200 });
+    if (url.endsWith("/coordination/proposals/request-1/revisions/1")) return new Response(JSON.stringify({ proposal: { actor_label: "requester", base_revision: 0, body: { completion_criteria: [], decision_impact: "none", owner_label: "owner", purpose: "purpose", requested_output: "output", title: "Unrelated request", unknowns: [] }, kind: "request.create", proposal_id: "request-1", revision: 1, source_messages: [], status: "pending" } }), { status: 200 });
+    if (url.endsWith("/coordination/proposals")) {
+      const parsed = JSON.parse(body ?? "{}"); parseCoordinationProposal(parsed);
+      if (parsed.kind === "claim.correction") {
+        correctionAttempts += 1;
+        if (correctionAttempts === 1) throw new Error("ambiguous correction result");
+        return new Response(JSON.stringify({ replayed: false, proposal: { kind: "claim.correction", proposal_id: `correction-${correctionAttempts}`, revision: 1 } }), { status: 201 });
+      }
+    }
+    if (url.endsWith("/coordination/disputes/report-reload/review")) {
+      parseCoordinationDisputeReview(JSON.parse(body ?? "{}")); reviewAttempts += 1;
+      if (reviewAttempts === 1) throw new Error("ambiguous owner review result");
+      return new Response(JSON.stringify({ replayed: false, review: { report_id: "report-reload", review_id: "review-reload" } }), { status: 201 });
+    }
+    if (url.endsWith("/coordination/disputes/report-stale/review")) {
+      parseCoordinationDisputeReview(JSON.parse(body ?? "{}")); staleReviewAttempts += 1;
+      if (staleReviewAttempts === 1) return new Response(JSON.stringify({ error: { code: "stale_revision", current_revision: 5, message: "stale base" } }), { status: 409 });
+      return new Response(JSON.stringify({ replayed: false, review: { report_id: "report-stale", review_id: "review-stale" } }), { status: 201 });
+    }
+    return new Response(JSON.stringify({ latest_message: 0, messages: [], expires_at: null }), { status: 200 });
+  };
+  const globals = globalThis as unknown as Record<string, unknown>;
+  const saved = Object.fromEntries(["WebSocket", "addEventListener", "document", "fetch", "location", "localStorage", "matchMedia", "navigator", "sessionStorage"].map((key) => [key, globals[key]]));
+  const sockets: Array<{ close(): void }> = [];
+  const tick = async () => { await new Promise((resolve) => setTimeout(resolve, 0)); await new Promise((resolve) => setTimeout(resolve, 0)); };
+  const boot = () => {
+    const elements = new Map(names.map((name) => [name, new Element()]));
+    const documentObject = {
+      body: { dataset: { room: "room-a" } },
+      documentElement: { dataset: {} as Record<string, string> },
+      createElement: () => new Element(),
+      querySelector<T extends Element>(selector: string) { return elements.get(selector.slice(1)) as T | undefined ?? null; },
+      querySelectorAll: () => [] as Element[],
+    };
+    class TestSocket {
+      readyState = 1;
+      onclose: (() => void) | null = null;
+      onerror: (() => void) | null = null;
+      onmessage: ((event: { data: string }) => void) | null = null;
+      onopen: (() => void) | null = null;
+      constructor() { sockets.push(this); }
+      close() { this.readyState = 3; this.onclose = null; this.onerror = null; this.onopen = null; }
+    }
+    globals.document = documentObject; globals.location = { origin: "https://msg.0000.chat", pathname: "/room-a", href: "https://msg.0000.chat/room-a", protocol: "https:" }; globals.navigator = { onLine: true }; globals.matchMedia = () => ({ matches: false, addEventListener() {} }); globals.localStorage = { getItem: () => null, setItem: () => {} }; globals.sessionStorage = storage; globals.addEventListener = () => {}; globals.WebSocket = TestSocket; globals.fetch = fetchImpl;
+    new Function(source ?? "")();
+    return elements;
+  };
+  try {
+    let elements = boot(); await tick();
+    elements.get("coordination-correction-actor")!.value = "reporter";
+    elements.get("coordination-correction-target-type")!.value = "message";
+    elements.get("coordination-correction-message-id")!.value = "message-reload";
+    elements.get("coordination-correction-text")!.value = "Corrected after reload.";
+    elements.get("coordination-correction-sources")!.value = "source-reload";
+    await elements.get("coordination-correction-form")!.submit(); await tick();
+    const firstCorrection = calls.find(({ body }) => body?.includes('"claim.correction"'))!;
+    expect(firstCorrection?.url).toBe("/room-a/coordination/proposals");
+    const firstCorrectionPayload = JSON.parse(firstCorrection.body ?? "{}");
+    const firstRetryId = firstCorrectionPayload.client_retry_id;
+    sockets.splice(0).forEach((socket) => socket.close());
+
+    elements = boot(); await tick();
+    expect(elements.get("coordination-correction-message-id")!.value).toBe("message-reload");
+    expect(elements.get("coordination-correction-text")!.value).toBe("Corrected after reload.");
+    await elements.get("coordination-correction-form")!.submit(); await tick();
+    const correctionCalls = calls.filter(({ body }) => body?.includes('"claim.correction"'));
+    expect(correctionCalls).toHaveLength(2);
+    expect(JSON.parse(correctionCalls[1]!.body ?? "{}")).toEqual(firstCorrectionPayload);
+    expect(JSON.parse(correctionCalls[1]!.body ?? "{}").client_retry_id).toBe(firstRetryId);
+
+    const reviewButton = elements.get("coordination-overview")!.children.flatMap((child) => child.children).find((child) => child.textContent === "Review exact revision");
+    reviewButton?.onclick?.(); await tick();
+    elements.get("coordination-review")!.children.find((child) => child.textContent === "Edit as explicit new revision")?.onclick?.();
+    elements.get("coordination-correction-target-type")!.value = "message";
+    elements.get("coordination-correction-message-id")!.value = "message-cross-form";
+    elements.get("coordination-correction-text")!.value = "A correction must not reuse request-1.";
+    await elements.get("coordination-correction-form")!.submit(); await tick();
+    const crossFormCorrection = calls.filter(({ body }) => body?.includes('"claim.correction"')).at(-1);
+    expect(crossFormCorrection?.url).toBe("/room-a/coordination/proposals");
+
+    elements.get("coordination-dispute-review-report")!.value = "report-reload";
+    elements.get("coordination-dispute-review-rationale")!.value = "Owner review after reload.";
+    await elements.get("coordination-dispute-review-form")!.submit(); await tick();
+    const firstReview = calls.find(({ url }) => url.endsWith("/coordination/disputes/report-reload/review"));
+    const firstReviewPayload = JSON.parse(firstReview?.body ?? "{}");
+    sockets.splice(0).forEach((socket) => socket.close());
+
+    elements = boot(); await tick();
+    expect(elements.get("coordination-dispute-review-report")!.value).toBe("report-reload");
+    expect(elements.get("coordination-dispute-review-rationale")!.value).toBe("Owner review after reload.");
+    await elements.get("coordination-dispute-review-form")!.submit(); await tick();
+    const reviewCalls = calls.filter(({ url }) => url.endsWith("/coordination/disputes/report-reload/review"));
+    expect(reviewCalls).toHaveLength(2);
+    expect(JSON.parse(reviewCalls[1]!.body ?? "{}")).toEqual(firstReviewPayload);
+    expect(JSON.parse(reviewCalls[1]!.body ?? "{}")).not.toHaveProperty("report_id");
+
+    elements.get("coordination-dispute-review-report")!.value = "report-stale";
+    elements.get("coordination-dispute-review-rationale")!.value = "Rebase this owner review.";
+    await elements.get("coordination-dispute-review-form")!.submit(); await tick();
+    expect(elements.get("coordination-dispute-review-new")!.hidden).toBe(false);
+    currentRevision = 5;
+    elements.get("coordination-dispute-review-new")!.listeners.get("click")?.({ preventDefault() {} }); await tick();
+    await elements.get("coordination-dispute-review-form")!.submit(); await tick();
+    const staleReviewCalls = calls.filter(({ url }) => url.endsWith("/coordination/disputes/report-stale/review"));
+    expect(staleReviewCalls).toHaveLength(2);
+    const staleFirstPayload = JSON.parse(staleReviewCalls[0]!.body ?? "{}");
+    const staleRebasedPayload = JSON.parse(staleReviewCalls[1]!.body ?? "{}");
+    expect(staleRebasedPayload.base_revision).toBe(5);
+    expect(staleRebasedPayload.client_retry_id).not.toBe(staleFirstPayload.client_retry_id);
+    expect(staleRebasedPayload).not.toHaveProperty("report_id");
+  } finally {
+    sockets.splice(0).forEach((socket) => socket.close());
     Object.assign(globals, saved);
   }
 });

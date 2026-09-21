@@ -17,9 +17,14 @@ export const COORDINATION_PROGRESS_KIND = "request.progress" as const;
 export const COORDINATION_PANEL_KIND = "panel.replace" as const;
 export const DECISION_PROPOSAL_KIND = "decision.proposal" as const;
 export const DECISION_POSITION_KIND = "decision.position" as const;
-export const COORDINATION_KINDS = [COORDINATION_KIND, COORDINATION_PROGRESS_KIND, COORDINATION_PANEL_KIND, DECISION_PROPOSAL_KIND, DECISION_POSITION_KIND] as const;
+export const CLAIM_CORRECTION_KIND = "claim.correction" as const;
+export const DECISION_SUPERSESSION_KIND = "decision.supersession" as const;
+export const DISPUTE_REPORTED_EVENT_KIND = "dispute.reported" as const;
+export const DISPUTE_REVIEWED_EVENT_KIND = "dispute.reviewed" as const;
+export const COORDINATION_KINDS = [COORDINATION_KIND, COORDINATION_PROGRESS_KIND, COORDINATION_PANEL_KIND, DECISION_PROPOSAL_KIND, DECISION_POSITION_KIND, CLAIM_CORRECTION_KIND, DECISION_SUPERSESSION_KIND] as const;
 
 export type CoordinationKind = (typeof COORDINATION_KINDS)[number];
+export type CoordinationEventKind = CoordinationKind | typeof DISPUTE_REPORTED_EVENT_KIND | typeof DISPUTE_REVIEWED_EVENT_KIND;
 export type CoordinationStatus = "open" | "in_progress" | "blocked" | "done" | "withdrawn";
 
 export type CoordinationAuthority = "management" | "participant";
@@ -81,7 +86,22 @@ export interface DecisionPositionBody {
   readonly statement: string;
 }
 
-export type CoordinationProposalBody = CoordinationRequestBody | CoordinationProgressBody | CoordinationPanelBody | DecisionProposalBody | DecisionPositionBody;
+export type CoordinationClaimTarget =
+  | { readonly type: "message"; readonly message_id: string }
+  | { readonly type: "publication"; readonly published_revision: number; readonly claim_path: readonly (string | number)[] };
+
+export interface ClaimCorrectionBody {
+  readonly target: CoordinationClaimTarget;
+  readonly correction_text: string;
+}
+
+export interface DecisionSupersessionBody {
+  readonly predecessor_accepted_record_id: string;
+  readonly successor_decision_id: string;
+  readonly successor_decision_revision: number;
+}
+
+export type CoordinationProposalBody = CoordinationRequestBody | CoordinationProgressBody | CoordinationPanelBody | DecisionProposalBody | DecisionPositionBody | ClaimCorrectionBody | DecisionSupersessionBody;
 
 export interface CoordinationProposalInput {
   readonly actor_label: string;
@@ -122,6 +142,27 @@ export interface CoordinationListSelectors {
   readonly through?: number;
 }
 
+export type CoordinationDisputeKind = "dispute" | "approval_withdrawal";
+
+export interface CoordinationDisputeInput {
+  readonly client_retry_id: string;
+  readonly actor_label: string;
+  readonly accepted_record_id: string;
+  readonly kind: CoordinationDisputeKind;
+  readonly statement: string;
+  readonly source_message_ids: readonly string[];
+  readonly approval_record_id?: string;
+}
+
+export interface CoordinationDisputeReviewInput {
+  readonly client_retry_id: string;
+  readonly owner_label: string;
+  readonly base_revision: number;
+  readonly disposition: "acknowledged" | "rejected";
+  readonly rationale: string;
+  readonly source_message_ids: readonly string[];
+}
+
 export function parseCoordinationProposal(value: unknown): CoordinationProposalInput {
   const record = object(value, "The coordination proposal must be a JSON object.");
   allowlist(record, ["client_retry_id", "actor_label", "base_revision", "source_message_ids", "kind", "body"]);
@@ -139,7 +180,11 @@ export function parseCoordinationProposal(value: unknown): CoordinationProposalI
         ? parsePanelBody(record.body)
         : kind === DECISION_PROPOSAL_KIND
           ? parseDecisionProposalBody(record.body)
-          : parseDecisionPositionBody(record.body);
+          : kind === DECISION_POSITION_KIND
+            ? parseDecisionPositionBody(record.body)
+            : kind === CLAIM_CORRECTION_KIND
+              ? parseClaimCorrectionBody(record.body)
+              : parseDecisionSupersessionBody(record.body);
   return {
     actor_label: bounded(actorLabel, "actor_label", COORDINATION_MAX_LABEL_CHARS, COORDINATION_MAX_LABEL_BYTES),
     base_revision: baseRevision,
@@ -184,6 +229,40 @@ export function parseCoordinationListSelectors(url: URL): CoordinationListSelect
   const statusValue = url.searchParams.get("status");
   const status = statusValue === null ? undefined : parseStatus(statusValue);
   return { after, limit, ...(ownerLabel === undefined ? {} : { owner_label: ownerLabel }), ...(status === undefined ? {} : { status }), ...(through === undefined ? {} : { through }) };
+}
+
+export function parseCoordinationDispute(value: unknown): CoordinationDisputeInput {
+  const record = object(value, "The coordination dispute must be a JSON object.");
+  allowlist(record, ["client_retry_id", "actor_label", "accepted_record_id", "kind", "statement", "source_message_ids", "approval_record_id"]);
+  const kind = record.kind;
+  if (kind !== "dispute" && kind !== "approval_withdrawal") throw invalid("The coordination report kind is not supported.");
+  const approvalRecordId = record.approval_record_id === undefined ? undefined : bounded(stringField(record.approval_record_id, "approval_record_id"), "approval_record_id", 128, 512);
+  if (kind === "approval_withdrawal" && approvalRecordId === undefined) throw invalid("An approval withdrawal requires an approval_record_id.");
+  if (kind === "dispute" && approvalRecordId !== undefined) throw invalid("A dispute must not include approval_record_id.");
+  return {
+    accepted_record_id: bounded(stringField(record.accepted_record_id, "accepted_record_id"), "accepted_record_id", 128, 512),
+    actor_label: bounded(requiredString(record.actor_label, "actor_label"), "actor_label", COORDINATION_MAX_LABEL_CHARS, COORDINATION_MAX_LABEL_BYTES),
+    client_retry_id: validateRequestId(requiredString(record.client_retry_id, "client_retry_id")),
+    ...(approvalRecordId === undefined ? {} : { approval_record_id: approvalRecordId }),
+    kind,
+    source_message_ids: parseSourceIds(record.source_message_ids),
+    statement: bounded(requiredString(record.statement, "statement"), "statement", COORDINATION_MAX_FIELD_CHARS, COORDINATION_MAX_FIELD_BYTES),
+  };
+}
+
+export function parseCoordinationDisputeReview(value: unknown): CoordinationDisputeReviewInput {
+  const record = object(value, "The coordination dispute review must be a JSON object.");
+  allowlist(record, ["client_retry_id", "owner_label", "base_revision", "disposition", "rationale", "source_message_ids"]);
+  const disposition = record.disposition;
+  if (disposition !== "acknowledged" && disposition !== "rejected") throw invalid("The coordination review disposition is not supported.");
+  return {
+    base_revision: nonnegativeInteger(record.base_revision, "base_revision"),
+    client_retry_id: validateRequestId(requiredString(record.client_retry_id, "client_retry_id")),
+    disposition,
+    owner_label: bounded(requiredString(record.owner_label, "owner_label"), "owner_label", COORDINATION_MAX_LABEL_CHARS, COORDINATION_MAX_LABEL_BYTES),
+    rationale: bounded(requiredString(record.rationale, "rationale"), "rationale", COORDINATION_MAX_FIELD_CHARS, COORDINATION_MAX_FIELD_BYTES),
+    source_message_ids: parseSourceIds(record.source_message_ids),
+  };
 }
 
 export function coordinationMutationFingerprint(input: unknown): string {
@@ -285,6 +364,56 @@ function parseDecisionPositionBody(value: unknown): DecisionPositionBody {
   return { decision_proposal_id: decisionProposalId, decision_revision: decisionRevision, participant_label: participantLabel, statement };
 }
 
+function parseClaimCorrectionBody(value: unknown): ClaimCorrectionBody {
+  const record = object(value, "The claim correction body must be a JSON object.");
+  allowlist(record, ["target", "correction_text"]);
+  const targetValue = object(record.target, "The correction target must be a JSON object.");
+  const targetType = targetValue.type;
+  if (targetType === "message") {
+    allowlist(targetValue, ["type", "message_id"]);
+    return {
+      correction_text: bounded(requiredString(record.correction_text, "correction_text"), "correction_text", COORDINATION_MAX_FIELD_CHARS, COORDINATION_MAX_FIELD_BYTES),
+      target: { message_id: bounded(stringField(targetValue.message_id, "message_id"), "message_id", COORDINATION_MAX_SOURCE_ID_CHARS, COORDINATION_MAX_SOURCE_ID_BYTES), type: "message" },
+    };
+  }
+  if (targetType !== "publication") throw invalid("The correction target type is not supported.");
+  allowlist(targetValue, ["type", "published_revision", "claim_path"]);
+  const publishedRevision = positiveInteger(targetValue.published_revision, "published_revision");
+  const claimPath = parseClaimPath(targetValue.claim_path);
+  return {
+    correction_text: bounded(requiredString(record.correction_text, "correction_text"), "correction_text", COORDINATION_MAX_FIELD_CHARS, COORDINATION_MAX_FIELD_BYTES),
+    target: { claim_path: claimPath, published_revision: publishedRevision, type: "publication" },
+  };
+}
+
+function parseDecisionSupersessionBody(value: unknown): DecisionSupersessionBody {
+  const record = object(value, "The decision supersession body must be a JSON object.");
+  allowlist(record, ["predecessor_accepted_record_id", "successor_decision_id", "successor_decision_revision"]);
+  return {
+    predecessor_accepted_record_id: bounded(stringField(record.predecessor_accepted_record_id, "predecessor_accepted_record_id"), "predecessor_accepted_record_id", 128, 512),
+    successor_decision_id: bounded(stringField(record.successor_decision_id, "successor_decision_id"), "successor_decision_id", 128, 512),
+    successor_decision_revision: positiveInteger(record.successor_decision_revision, "successor_decision_revision"),
+  };
+}
+
+function parseClaimPath(value: unknown): (string | number)[] {
+  if (!Array.isArray(value) || value.length === 0 || value.length > 8) throw invalid("A publication correction claim_path must contain between 1 and 8 own-property segments.");
+  const path = value.map((segment) => {
+    if (typeof segment === "number") {
+      if (!Number.isSafeInteger(segment) || segment < 0) throw invalid("A publication correction claim_path contains an invalid array index.");
+      return segment;
+    }
+    if (typeof segment !== "string" || segment.length === 0 || segment.length > COORDINATION_MAX_FIELD_CHARS || segment === "__proto__" || segment === "prototype" || segment === "constructor") throw invalid("A publication correction claim_path contains an invalid object key.");
+    return segment;
+  });
+  if (byteLength(JSON.stringify(path)) > 512) throw new ProtocolError(ERROR_CODES.bodyTooLarge, "The publication correction claim_path is too large.", 413);
+  return path;
+}
+
+export function parseCoordinationClaimPath(value: unknown): readonly (string | number)[] {
+  return parseClaimPath(value);
+}
+
 function parseDecisionPublication(value: unknown): CoordinationDecisionPublication {
   const record = object(value, "The decision publication must be a JSON object.");
   const mode = record.mode;
@@ -370,7 +499,7 @@ function stringArray(value: unknown, field: string): string[] {
 
 function allowlist(value: Record<string, unknown>, fields: readonly string[]): void {
   const allowed = new Set(fields);
-  if (Object.keys(value).some((field) => !allowed.has(field))) throw invalid("The coordination mutation contains an unsupported field.");
+  if (Object.keys(value).some((field) => !allowed.has(field)) || fields.some((field) => field in value && !Object.prototype.hasOwnProperty.call(value, field))) throw invalid("The coordination mutation contains an unsupported field.");
 }
 
 function object(value: unknown, message: string): Record<string, unknown> {
