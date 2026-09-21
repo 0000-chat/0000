@@ -3,11 +3,25 @@ import { join } from "node:path";
 import { test } from "bun:test";
 
 const workerEntry = new URL("../src/worker.ts", import.meta.url).pathname;
+const mcpUseClientStub = new URL(
+  "../src/mcp-use-client-unavailable.ts",
+  import.meta.url,
+).pathname;
 
-test("GET /health responds through the Worker runtime", async () => {
+test("Gateway health and MCP diagnostics respond through the Worker runtime", async () => {
   const build = await Bun.build({
     entrypoints: [workerEntry],
     format: "esm",
+    plugins: [
+      {
+        name: "mcp-use-client-unavailable",
+        setup(build) {
+          build.onResolve({ filter: /^@mcp-use\/client$/ }, () => ({
+            path: mcpUseClientStub,
+          }));
+        },
+      },
+    ],
     target: "browser",
   });
 

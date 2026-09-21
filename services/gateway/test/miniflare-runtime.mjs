@@ -1,4 +1,9 @@
+import { strict as assert } from "node:assert";
 import { readFile } from "node:fs/promises";
+import {
+  Client,
+  StreamableHTTPClientTransport,
+} from "@modelcontextprotocol/client";
 import { Miniflare } from "miniflare";
 
 const [workerPath, configPath] = process.argv.slice(2);
@@ -31,6 +36,50 @@ try {
   ) {
     throw new Error(`Unexpected /health response: ${JSON.stringify(body)}`);
   }
+
+  const callGatewayInfo = async () => {
+    const transport = new StreamableHTTPClientTransport(
+      new URL("https://gateway.0000.chat/mcp"),
+      {
+        fetch: (input, init) => {
+          const requestUrl =
+            typeof input === "string"
+              ? input
+              : input instanceof URL
+                ? input.href
+                : input.url;
+          return runtime.dispatchFetch(requestUrl, init);
+        },
+      },
+    );
+    const client = new Client({
+      name: "gateway-runtime-test",
+      version: "0.0.0",
+    });
+
+    try {
+      await client.connect(transport);
+      const tools = await client.listTools();
+      assert.deepEqual(
+        tools.tools.map(({ name }) => name),
+        ["gateway_info"],
+      );
+
+      const result = await client.callTool({
+        name: "gateway_info",
+        arguments: {},
+      });
+      assert.notEqual(result.isError, true);
+      assert.deepEqual(result.content, [
+        { type: "text", text: '{"status":"ok","service":"gateway"}' },
+      ]);
+    } finally {
+      await client.close();
+    }
+  };
+
+  await callGatewayInfo();
+  await callGatewayInfo();
 } finally {
   await runtime.dispose();
 }
