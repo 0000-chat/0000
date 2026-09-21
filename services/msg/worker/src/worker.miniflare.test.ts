@@ -11,6 +11,7 @@ import { createMsgMiniflareTempDirectory, SHORT_LIVED_TEST_ROOM_LIMITS, startMsg
 
 const jsonHeaders = { accept: "application/json", "content-type": "application/json" };
 const fixtureTemporaryDirectory = fileURLToPath(new URL("../.miniflare-tests/", import.meta.url));
+const MINIFLARE_TEST_TIMEOUT_MS = 60_000;
 
 let sharedFixture: Awaited<ReturnType<typeof startMsgMiniflare>> | undefined;
 let sharedPersistenceDirectory: string | undefined;
@@ -436,7 +437,7 @@ async function readPushStatus(
   });
 }
 
-test.serial("uses a private startup file and cleans it after Node runtime success or failure", { timeout: 20_000 }, async () => {
+test.serial("uses a private startup file and cleans it after Node runtime success or failure", { timeout: MINIFLARE_TEST_TIMEOUT_MS }, async () => {
   await disposeSharedRuntime();
   const persistenceDirectory = await createMsgMiniflareTempDirectory("startup-handoff-state");
   const before = await nodeRuntimeConfigurationDirectories();
@@ -471,7 +472,7 @@ test.serial("uses a private startup file and cleans it after Node runtime succes
   }
 });
 
-test.serial("push send barriers stay unavailable outside test mode and public Worker routes", { timeout: 15_000 }, async () => {
+test.serial("push send barriers stay unavailable outside test mode and public Worker routes", { timeout: MINIFLARE_TEST_TIMEOUT_MS }, async () => {
   await withRuntime(async (miniflare) => {
     let error: unknown;
     try { await miniflare.armPushSendGate("uninitialized-room"); } catch (caught) { error = caught; }
@@ -487,7 +488,7 @@ test.serial("push send barriers stay unavailable outside test mode and public Wo
   }, TEST_ROOM_LIMITS, undefined, false);
 });
 
-test.serial("delivers an encrypted, VAPID-signed generic push through Worker HTTP and the SQLite alarm queue", { timeout: 15_000 }, async () => {
+test.serial("delivers an encrypted, VAPID-signed generic push through Worker HTTP and the SQLite alarm queue", { timeout: MINIFLARE_TEST_TIMEOUT_MS }, async () => {
   const fakeNow = 4_000_000_000_000;
   await withRestartedRuntime(async (initial, restart) => {
     const { room } = await createRoom(initial, "before push enrollment");
@@ -554,7 +555,7 @@ test.serial("delivers an encrypted, VAPID-signed generic push through Worker HTT
   }, TEST_ROOM_LIMITS, fakeNow);
 });
 
-test.serial("suppresses only the source browser while keeping another browser's pending alert", { timeout: 20_000 }, async () => {
+test.serial("suppresses only the source browser while keeping another browser's pending alert", { timeout: MINIFLARE_TEST_TIMEOUT_MS }, async () => {
   const fakeNow = 4_000_000_000_000;
   const browserA = crypto.randomUUID();
   const browserB = crypto.randomUUID();
@@ -624,7 +625,7 @@ test.serial("suppresses only the source browser while keeping another browser's 
   }, TEST_ROOM_LIMITS, fakeNow);
 });
 
-test.serial("collapses unsent room alerts separately for each enrolled browser", { timeout: 15_000 }, async () => {
+test.serial("collapses unsent room alerts separately for each enrolled browser", { timeout: MINIFLARE_TEST_TIMEOUT_MS }, async () => {
   const fakeNow = 4_000_000_000_000;
   const browserA = crypto.randomUUID();
   const browserB = crypto.randomUUID();
@@ -645,7 +646,7 @@ test.serial("collapses unsent room alerts separately for each enrolled browser",
   }, TEST_ROOM_LIMITS, fakeNow);
 });
 
-test.serial("gives a replacement room alert its own 24-hour delivery deadline", { timeout: 20_000 }, async () => {
+test.serial("gives a replacement room alert its own 24-hour delivery deadline", { timeout: MINIFLARE_TEST_TIMEOUT_MS }, async () => {
   const fakeNow = 4_000_000_000_000;
   const browserId = crypto.randomUUID();
 
@@ -681,7 +682,7 @@ test.serial("gives a replacement room alert its own 24-hour delivery deadline", 
   }, TEST_ROOM_LIMITS, fakeNow);
 });
 
-test.serial("uses send-time TTL after encryption and skips work that expires before send", { timeout: 20_000 }, async () => {
+test.serial("uses send-time TTL after encryption and skips work that expires before send", { timeout: MINIFLARE_TEST_TIMEOUT_MS }, async () => {
   const fakeNow = 4_000_000_000_000;
 
   await withRestartedRuntime(async (initial, restart) => {
@@ -727,7 +728,7 @@ test.serial("uses send-time TTL after encryption and skips work that expires bef
   }, TEST_ROOM_LIMITS, fakeNow);
 });
 
-test.serial("does not retry an in-flight push after a newer eligible delivery replaces it", { timeout: 20_000 }, async () => {
+test.serial("does not retry an in-flight push after a newer eligible delivery replaces it", { timeout: MINIFLARE_TEST_TIMEOUT_MS }, async () => {
   const fakeNow = 4_000_000_000_000;
   const subscribedBrowser = crypto.randomUUID();
   const otherBrowser = crypto.randomUUID();
@@ -762,7 +763,7 @@ test.serial("does not retry an in-flight push after a newer eligible delivery re
   }, TEST_ROOM_LIMITS, fakeNow);
 });
 
-test.serial("provider-held alerts replace by room Topic but remain separate across rooms", { timeout: 20_000 }, async () => {
+test.serial("provider-held alerts replace by room Topic but remain separate across rooms", { timeout: MINIFLARE_TEST_TIMEOUT_MS }, async () => {
   await withRuntime(async (miniflare) => {
     const firstRoom = await createRoom(miniflare, "first provider-held room");
     const secondRoom = await createRoom(miniflare, "second provider-held room");
@@ -829,7 +830,7 @@ test.serial("provider-held alerts replace by room Topic but remain separate acro
   });
 });
 
-test.serial("removes one room enrollment while preserving the same browser subscription in another room", { timeout: 15_000 }, async () => {
+test.serial("removes one room enrollment while preserving the same browser subscription in another room", { timeout: MINIFLARE_TEST_TIMEOUT_MS }, async () => {
   const fakeNow = 4_000_000_000_000;
   await withRuntime(async (miniflare) => {
     const firstRoom = await createRoom(miniflare, "first room before enrollment");
@@ -855,7 +856,7 @@ test.serial("removes one room enrollment while preserving the same browser subsc
   }, TEST_ROOM_LIMITS, fakeNow);
 });
 
-test.serial("unsubscribing or deleting a room during push encryption prevents the provider fetch", { timeout: 25_000 }, async () => {
+test.serial("unsubscribing or deleting a room during push encryption prevents the provider fetch", { timeout: MINIFLARE_TEST_TIMEOUT_MS }, async () => {
   const fakeNow = 4_000_000_000_000;
   await withRestartedRuntime(async (initial, restart) => {
     let miniflare = initial;
@@ -904,7 +905,7 @@ test.serial("unsubscribing or deleting a room during push encryption prevents th
   }, TEST_ROOM_LIMITS, fakeNow);
 });
 
-test.serial("cleans up a provider-rejected push subscription without creating another delivery", { timeout: 15_000 }, async () => {
+test.serial("cleans up a provider-rejected push subscription without creating another delivery", { timeout: MINIFLARE_TEST_TIMEOUT_MS }, async () => {
   const fakeNow = 4_000_000_000_000;
   await withRestartedRuntime(async (initial, restart) => {
     const { room } = await createRoom(initial, "before push enrollment");
@@ -922,7 +923,7 @@ test.serial("cleans up a provider-rejected push subscription without creating an
   }, TEST_ROOM_LIMITS, fakeNow);
 });
 
-test.serial("retries offline push independently and stops at the original 24-hour deadline", { timeout: 20_000 }, async () => {
+test.serial("retries offline push independently and stops at the original 24-hour deadline", { timeout: MINIFLARE_TEST_TIMEOUT_MS }, async () => {
   const fakeNow = 4_000_000_000_000;
   await withRestartedRuntime(async (initial, restart) => {
     const { room } = await createRoom(initial, "before push enrollment");
@@ -957,7 +958,7 @@ test.serial("retries offline push independently and stops at the original 24-hou
   }, TEST_ROOM_LIMITS, fakeNow);
 });
 
-test.serial("an old 410 cannot remove a same-endpoint enrollment whose keys changed in flight", { timeout: 25_000 }, async () => {
+test.serial("an old 410 cannot remove a same-endpoint enrollment whose keys changed in flight", { timeout: MINIFLARE_TEST_TIMEOUT_MS }, async () => {
   const fakeNow = 4_000_000_000_000;
   const replacementPrivateKey = new Uint8Array(Buffer.alloc(32, 1));
   const replacementReceiver = {
@@ -1012,7 +1013,7 @@ test.serial("an old 410 cannot remove a same-endpoint enrollment whose keys chan
   }, TEST_ROOM_LIMITS, fakeNow);
 });
 
-test.serial("recovers an unsuperseded push with the current same-endpoint keys", { timeout: 25_000 }, async () => {
+test.serial("recovers an unsuperseded push with the current same-endpoint keys", { timeout: MINIFLARE_TEST_TIMEOUT_MS }, async () => {
   const fakeNow = 4_000_000_000_000;
   const replacementPrivateKey = new Uint8Array(Buffer.alloc(32, 1));
   const replacementReceiver = {
@@ -1060,7 +1061,7 @@ test.serial("recovers an unsuperseded push with the current same-endpoint keys",
   }, TEST_ROOM_LIMITS, fakeNow);
 });
 
-test.serial("room deletion and inactivity expiry clear subscriptions and pending push work", { timeout: 20_000 }, async () => {
+test.serial("room deletion and inactivity expiry clear subscriptions and pending push work", { timeout: MINIFLARE_TEST_TIMEOUT_MS }, async () => {
   const fakeNow = 4_000_000_000_000;
   const shortRoomLimits = { ...TEST_ROOM_LIMITS, inactivityTtlMs: 1_000 };
   await withRestartedRuntime(async (initial, restart) => {
@@ -1086,7 +1087,7 @@ test.serial("room deletion and inactivity expiry clear subscriptions and pending
   }, shortRoomLimits, fakeNow);
 });
 
-test.serial("delivers one signed full-message webhook from a durable outbox after restart", { timeout: 15_000 }, async () => {
+test.serial("delivers one signed full-message webhook from a durable outbox after restart", { timeout: MINIFLARE_TEST_TIMEOUT_MS }, async () => {
   const persistenceDirectory = await createMsgMiniflareTempDirectory("webhook-restart");
   const fakeNow = 4_000_000_000_000;
   let first: Awaited<ReturnType<typeof startMsgMiniflare>> | undefined;
@@ -1179,7 +1180,7 @@ test.serial("delivers one signed full-message webhook from a durable outbox afte
   if (failed) throw failure;
 });
 
-test.serial("persists rooms across workerd restarts", { timeout: 15_000 }, async () => {
+test.serial("persists rooms across workerd restarts", { timeout: MINIFLARE_TEST_TIMEOUT_MS }, async () => {
   const persistenceDirectory = await createMsgMiniflareTempDirectory("state");
   let first: Awaited<ReturnType<typeof startMsgMiniflare>> | undefined;
   let second: Awaited<ReturnType<typeof startMsgMiniflare>> | undefined;
@@ -1232,7 +1233,7 @@ test.serial("persists rooms across workerd restarts", { timeout: 15_000 }, async
   if (failed) throw failure;
 });
 
-test.serial("reads bounded pages through a stable snapshot without changing legacy reads", { timeout: 20_000 }, async () => {
+test.serial("reads bounded pages through a stable snapshot without changing legacy reads", { timeout: MINIFLARE_TEST_TIMEOUT_MS }, async () => {
   await withRuntime(async (miniflare) => {
     const { room } = await createRoom(miniflare, "message-1");
     for (let sequence = 2; sequence <= 26; sequence += 1) {
@@ -1310,7 +1311,7 @@ test.serial("reads bounded pages through a stable snapshot without changing lega
   }, { ...TEST_ROOM_LIMITS, maxMessages: 100 });
 });
 
-test.serial("returns a control-heavy oversized message alone within bounded pagination", { timeout: 20_000 }, async () => {
+test.serial("returns a control-heavy oversized message alone within bounded pagination", { timeout: MINIFLARE_TEST_TIMEOUT_MS }, async () => {
   await withRuntime(async (miniflare) => {
     const { room } = await createRoom(miniflare, "small");
     const content = "\u0001".repeat(64 * 1024);
@@ -1330,7 +1331,7 @@ test.serial("returns a control-heavy oversized message alone within bounded pagi
   });
 });
 
-test.serial("runs the production Worker against SQLite Durable Objects", { timeout: 15_000 }, async () => {
+test.serial("runs the production Worker against SQLite Durable Objects", { timeout: MINIFLARE_TEST_TIMEOUT_MS }, async () => {
   await withSharedRuntime(async (miniflare) => {
     const created = await createRoom(miniflare);
     const room = created.room.id;
@@ -1344,7 +1345,7 @@ test.serial("runs the production Worker against SQLite Durable Objects", { timeo
   });
 });
 
-test.serial("serves the agent representation through a real Durable Object", { timeout: 15_000 }, async () => {
+test.serial("serves the agent representation through a real Durable Object", { timeout: MINIFLARE_TEST_TIMEOUT_MS }, async () => {
   await withSharedRuntime(async (miniflare) => {
     const { room } = await createRoom(miniflare, "participant message");
     const text = await miniflare.dispatchFetch(`https://msg.0000.chat/${room.id}/agent`);
@@ -1363,7 +1364,7 @@ test.serial("serves the agent representation through a real Durable Object", { t
   });
 });
 
-test.serial("looks up stored IDs and validates reply targets through the real Worker and Durable Object", { timeout: 15_000 }, async () => {
+test.serial("looks up stored IDs and validates reply targets through the real Worker and Durable Object", { timeout: MINIFLARE_TEST_TIMEOUT_MS }, async () => {
   await withRuntime(async (miniflare) => {
     const created = await createRoom(miniflare, "first <script>alert(1)</script>");
     const room = created.room.id;
@@ -1405,7 +1406,7 @@ test.serial("looks up stored IDs and validates reply targets through the real Wo
   });
 });
 
-test.serial("serializes concurrent posts with unique consecutive sequences", { timeout: 15_000 }, async () => {
+test.serial("serializes concurrent posts with unique consecutive sequences", { timeout: MINIFLARE_TEST_TIMEOUT_MS }, async () => {
   await withSharedRuntime(async (miniflare) => {
     const { room } = await createRoom(miniflare);
     const responses = await Promise.all(Array.from({ length: 3 }, (_, index) => post(miniflare, room.id, `message-${index}`)));
@@ -1413,7 +1414,7 @@ test.serial("serializes concurrent posts with unique consecutive sequences", { t
   });
 });
 
-test.serial("replays exact idempotent posts and rejects changed retries", { timeout: 15_000 }, async () => {
+test.serial("replays exact idempotent posts and rejects changed retries", { timeout: MINIFLARE_TEST_TIMEOUT_MS }, async () => {
   await withSharedRuntime(async (miniflare) => {
     const { room } = await createRoom(miniflare);
     const first = await post(miniflare, room.id, "retry me", "retry-key");
@@ -1428,7 +1429,7 @@ test.serial("replays exact idempotent posts and rejects changed retries", { time
   });
 });
 
-test.serial("creates, replays, rotates, and disables delegated GET posts through the real Worker and Durable Object", { timeout: 20_000 }, async () => {
+test.serial("creates, replays, rotates, and disables delegated GET posts through the real Worker and Durable Object", { timeout: MINIFLARE_TEST_TIMEOUT_MS }, async () => {
   await withRuntime(async (miniflare) => {
     const created = await createRoom(miniflare, "first");
     const room = created.room.id;
@@ -1506,7 +1507,7 @@ test.serial("creates, replays, rotates, and disables delegated GET posts through
   });
 });
 
-test.serial("rejects stale JSON posts atomically and carries the review cursor through the actual route", { timeout: 20_000 }, async () => {
+test.serial("rejects stale JSON posts atomically and carries the review cursor through the actual route", { timeout: MINIFLARE_TEST_TIMEOUT_MS }, async () => {
   await withRuntime(async (miniflare) => {
     const created = await createRoom(miniflare, "snapshot one");
     const room = created.room.id;
@@ -1559,7 +1560,7 @@ test.serial("rejects stale JSON posts atomically and carries the review cursor t
   });
 });
 
-test.serial("applies stale review and authorization semantics to delegated GET posting", { timeout: 20_000 }, async () => {
+test.serial("applies stale review and authorization semantics to delegated GET posting", { timeout: MINIFLARE_TEST_TIMEOUT_MS }, async () => {
   await withRuntime(async (miniflare) => {
     const created = await createRoom(miniflare, "delegated snapshot");
     const enabled = await miniflare.dispatchFetch(created.manage_url, {
@@ -1600,7 +1601,7 @@ test.serial("applies stale review and authorization semantics to delegated GET p
   });
 });
 
-test.serial("renders Durable Object export errors in the negotiated public representation", { timeout: 15_000 }, async () => {
+test.serial("renders Durable Object export errors in the negotiated public representation", { timeout: MINIFLARE_TEST_TIMEOUT_MS }, async () => {
   await withRuntime(async (miniflare) => {
     const deleted = await createRoom(miniflare);
     expect((await miniflare.dispatchFetch(deleted.manage_url, { headers: { accept: "application/json" }, method: "DELETE" })).status).toBe(200);
@@ -1616,7 +1617,7 @@ test.serial("renders Durable Object export errors in the negotiated public repre
   }, { ...TEST_ROOM_LIMITS, tombstoneTtlMs: 5_000 });
 });
 
-test.serial("streams a captured complete export over the public HTTP route", { timeout: 30_000 }, async () => {
+test.serial("streams a captured complete export over the public HTTP route", { timeout: MINIFLARE_TEST_TIMEOUT_MS }, async () => {
   await withRuntime(async (miniflare) => {
     const created = await createRoom(miniflare, "first");
     for (let index = 0; index < 105; index += 1) {
@@ -1649,7 +1650,7 @@ test.serial("streams a captured complete export over the public HTTP route", { t
   }, { ...TEST_ROOM_LIMITS, maxMessages: 200 });
 });
 
-test.serial("returns gone after management deletion and enforces the test quota", { timeout: 15_000 }, async () => {
+test.serial("returns gone after management deletion and enforces the test quota", { timeout: MINIFLARE_TEST_TIMEOUT_MS }, async () => {
   await withRuntime(async (miniflare) => {
     const quotaRoom = await createRoom(miniflare);
     expect((await post(miniflare, quotaRoom.room.id, "second")).status).toBe(201);
@@ -1664,7 +1665,7 @@ test.serial("returns gone after management deletion and enforces the test quota"
   }, { ...TEST_ROOM_LIMITS, tombstoneTtlMs: 1_000 });
 });
 
-test.serial("sends live metadata frames and rejects client socket messages", { timeout: 15_000 }, async () => {
+test.serial("sends live metadata frames and rejects client socket messages", { timeout: MINIFLARE_TEST_TIMEOUT_MS }, async () => {
   await withSharedRuntime(async (miniflare) => {
     const { room } = await createRoom(miniflare);
     const live = await openSocket(socketUrl(await miniflare.ready, room.id));
@@ -1679,7 +1680,7 @@ test.serial("sends live metadata frames and rejects client socket messages", { t
   });
 });
 
-test.serial("uses workerd alarms to tombstone then purge expired rooms", { timeout: 15_000 }, async () => {
+test.serial("uses workerd alarms to tombstone then purge expired rooms", { timeout: MINIFLARE_TEST_TIMEOUT_MS }, async () => {
   await withRuntime(async (miniflare) => {
     const { room } = await createRoom(miniflare);
     const live = await openSocket(socketUrl(await miniflare.ready, room.id));
@@ -1695,7 +1696,7 @@ test.serial("uses workerd alarms to tombstone then purge expired rooms", { timeo
 });
 
 
-test.serial("creates five concurrent webhooks atomically and hides URL credentials in management responses", { timeout: 15_000 }, async () => {
+test.serial("creates five concurrent webhooks atomically and hides URL credentials in management responses", { timeout: MINIFLARE_TEST_TIMEOUT_MS }, async () => {
   await withRuntime(async (miniflare) => {
     const { room } = await createRoom(miniflare);
     const destinations = Array.from({ length: 6 }, (_, index) => `https://user-${index}:pass-${index}@receiver.example.com/hooks/${index}?token=query-secret-${index}&audience=internal-${index}`);
@@ -1754,7 +1755,7 @@ test.serial("creates five concurrent webhooks atomically and hides URL credentia
   });
 });
 
-test.serial("sends an unchanged 64 KiB control-heavy message beyond the former envelope limit", { timeout: 15_000 }, async () => {
+test.serial("sends an unchanged 64 KiB control-heavy message beyond the former envelope limit", { timeout: MINIFLARE_TEST_TIMEOUT_MS }, async () => {
   await withRuntime(async (miniflare) => {
     const { room } = await createRoom(miniflare);
     const registration = await registerWebhook(miniflare, room.id, "https://receiver.example.com/full-message");
@@ -1785,7 +1786,7 @@ test.serial("sends an unchanged 64 KiB control-heavy message beyond the former e
   });
 });
 
-test.serial("cancels queued deliveries when an endpoint is removed or its room is deleted", { timeout: 15_000 }, async () => {
+test.serial("cancels queued deliveries when an endpoint is removed or its room is deleted", { timeout: MINIFLARE_TEST_TIMEOUT_MS }, async () => {
   const fakeNow = 4_000_000_000_000;
   const limits = { ...TEST_ROOM_LIMITS, tombstoneTtlMs: 10_000 };
   await withRestartedRuntime(async (first, restart) => {
@@ -1819,7 +1820,7 @@ test.serial("cancels queued deliveries when an endpoint is removed or its room i
   }, limits, fakeNow);
 });
 
-test.serial("manual disable cancels queued work and re-enable starts with only later messages across restart", { timeout: 20_000 }, async () => {
+test.serial("manual disable cancels queued work and re-enable starts with only later messages across restart", { timeout: MINIFLARE_TEST_TIMEOUT_MS }, async () => {
   const fakeNow = 4_000_000_000_000;
   await withRestartedRuntime(async (first, restart) => {
     const { room } = await createRoom(first);
@@ -1863,7 +1864,7 @@ test.serial("manual disable cancels queued work and re-enable starts with only l
   }, TEST_ROOM_LIMITS, fakeNow);
 });
 
-test.serial("a disable followed by re-enable does not resurrect an automatic request already in flight", { timeout: 20_000 }, async () => {
+test.serial("a disable followed by re-enable does not resurrect an automatic request already in flight", { timeout: MINIFLARE_TEST_TIMEOUT_MS }, async () => {
   const fakeNow = 4_000_000_000_000;
   await withRestartedRuntime(async (first, restart) => {
     const { room } = await createRoom(first);
@@ -1903,7 +1904,7 @@ test.serial("a disable followed by re-enable does not resurrect an automatic req
   }, TEST_ROOM_LIMITS, fakeNow);
 });
 
-test.serial("secret rotation reveals once and signs later dispatches with the current key", { timeout: 20_000 }, async () => {
+test.serial("secret rotation reveals once and signs later dispatches with the current key", { timeout: MINIFLARE_TEST_TIMEOUT_MS }, async () => {
   const fakeNow = 4_000_000_000_000;
   await withRestartedRuntime(async (first, restart) => {
     const { room } = await createRoom(first);
@@ -1947,7 +1948,7 @@ test.serial("secret rotation reveals once and signs later dispatches with the cu
   }, TEST_ROOM_LIMITS, fakeNow);
 });
 
-test.serial("redelivers one retained failed event while disabled after its automatic window without an automatic backlog", { timeout: 20_000 }, async () => {
+test.serial("redelivers one retained failed event while disabled after its automatic window without an automatic backlog", { timeout: MINIFLARE_TEST_TIMEOUT_MS }, async () => {
   const fakeNow = 4_000_000_000_000;
   const dayMs = 24 * 60 * 60 * 1_000;
   await withRestartedRuntime(async (first, restart) => {
@@ -2040,7 +2041,7 @@ test.serial("redelivers one retained failed event while disabled after its autom
   }, TEST_ROOM_LIMITS, fakeNow);
 });
 
-test.serial("rejects redelivery when a failed event or its source is no longer retained", { timeout: 25_000 }, async () => {
+test.serial("rejects redelivery when a failed event or its source is no longer retained", { timeout: MINIFLARE_TEST_TIMEOUT_MS }, async () => {
   const fakeNow = 4_000_000_000_000;
   const dayMs = 24 * 60 * 60 * 1_000;
   await withRestartedRuntime(async (first, restart) => {
@@ -2105,7 +2106,7 @@ test.serial("rejects redelivery when a failed event or its source is no longer r
   }, TEST_ROOM_LIMITS, fakeNow);
 });
 
-test.serial("expires a room with pending webhook work without extending its message lifetime", { timeout: 15_000 }, async () => {
+test.serial("expires a room with pending webhook work without extending its message lifetime", { timeout: MINIFLARE_TEST_TIMEOUT_MS }, async () => {
   const fakeNow = 4_000_000_000_000;
   const limits = { ...TEST_ROOM_LIMITS, inactivityTtlMs: 1_000 };
   await withRestartedRuntime(async (first, restart) => {
@@ -2125,7 +2126,7 @@ test.serial("expires a room with pending webhook work without extending its mess
   }, limits, fakeNow);
 });
 
-test.serial("accepts a message before an unavailable webhook receiver fails", { timeout: 15_000 }, async () => {
+test.serial("accepts a message before an unavailable webhook receiver fails", { timeout: MINIFLARE_TEST_TIMEOUT_MS }, async () => {
   await withRuntime(async (miniflare) => {
     await miniflare.setOutboundResponse(503);
     const { room } = await createRoom(miniflare);
@@ -2149,7 +2150,7 @@ test.serial("accepts a message before an unavailable webhook receiver fails", { 
 });
 
 
-test.serial("does not follow webhook redirects and cancels response bodies", { timeout: 15_000 }, async () => {
+test.serial("does not follow webhook redirects and cancels response bodies", { timeout: MINIFLARE_TEST_TIMEOUT_MS }, async () => {
   await withRuntime(async (miniflare) => {
     await miniflare.setOutboundResponse(302, "https://redirected.example.com/other");
     const { room } = await createRoom(miniflare);
@@ -2166,7 +2167,7 @@ test.serial("does not follow webhook redirects and cancels response bodies", { t
   });
 });
 
-test.serial("times out a webhook fetch without changing the accepted message", { timeout: 15_000 }, async () => {
+test.serial("times out a webhook fetch without changing the accepted message", { timeout: MINIFLARE_TEST_TIMEOUT_MS }, async () => {
   await withRuntime(async (miniflare) => {
     await miniflare.setOutboundResponse(200, undefined, 5_500);
     const { room } = await createRoom(miniflare);
@@ -2181,7 +2182,7 @@ test.serial("times out a webhook fetch without changing the accepted message", {
   });
 });
 
-test.serial("retries each event on increasing durable delays and preserves its event ID across duplicates", { timeout: 20_000 }, async () => {
+test.serial("retries each event on increasing durable delays and preserves its event ID across duplicates", { timeout: MINIFLARE_TEST_TIMEOUT_MS }, async () => {
   const fakeNow = 4_000_000_000_000;
   await withRestartedRuntime(async (first, restart) => {
     const { room } = await createRoom(first);
@@ -2233,7 +2234,7 @@ test.serial("retries each event on increasing durable delays and preserves its e
   }, TEST_ROOM_LIMITS, fakeNow);
 });
 
-test.serial("a newer success resets endpoint health before an older event expires", { timeout: 20_000 }, async () => {
+test.serial("a newer success resets endpoint health before an older event expires", { timeout: MINIFLARE_TEST_TIMEOUT_MS }, async () => {
   const fakeNow = 4_000_000_000_000;
   await withRestartedRuntime(async (first, restart) => {
     const { room } = await createRoom(first);
@@ -2277,7 +2278,7 @@ test.serial("a newer success resets endpoint health before an older event expire
   }, TEST_ROOM_LIMITS, fakeNow);
 });
 
-test.serial("a newer success survives recovery of an expired persisted sending lease", { timeout: 20_000 }, async () => {
+test.serial("a newer success survives recovery of an expired persisted sending lease", { timeout: MINIFLARE_TEST_TIMEOUT_MS }, async () => {
   const fakeNow = 4_000_000_000_000;
   await withRestartedRuntime(async (first, restart) => {
     const { room } = await createRoom(first);
@@ -2317,7 +2318,7 @@ test.serial("a newer success survives recovery of an expired persisted sending l
   }, TEST_ROOM_LIMITS, fakeNow);
 });
 
-test.serial("keeps the health deadline after an event expires and preserves cancelled history on automatic disable", { timeout: 20_000 }, async () => {
+test.serial("keeps the health deadline after an event expires and preserves cancelled history on automatic disable", { timeout: MINIFLARE_TEST_TIMEOUT_MS }, async () => {
   const fakeNow = 4_000_000_000_000;
   await withRestartedRuntime(async (first, restart) => {
     const { room } = await createRoom(first);
@@ -2355,7 +2356,7 @@ test.serial("keeps the health deadline after an event expires and preserves canc
   }, TEST_ROOM_LIMITS, fakeNow);
 });
 
-test.serial("retains webhook delivery and health metadata for seven days, then prunes it without re-enabling the endpoint", { timeout: 20_000 }, async () => {
+test.serial("retains webhook delivery and health metadata for seven days, then prunes it without re-enabling the endpoint", { timeout: MINIFLARE_TEST_TIMEOUT_MS }, async () => {
   const fakeNow = 4_000_000_000_000;
   const dayMs = 24 * 60 * 60 * 1_000;
   await withRestartedRuntime(async (first, restart) => {
@@ -2414,7 +2415,7 @@ test.serial("retains webhook delivery and health metadata for seven days, then p
   }, TEST_ROOM_LIMITS, fakeNow);
 });
 
-test.serial("room deletion during an outbound await removes notification state and allows the in-flight request to finish", { timeout: 15_000 }, async () => {
+test.serial("room deletion during an outbound await removes notification state and allows the in-flight request to finish", { timeout: MINIFLARE_TEST_TIMEOUT_MS }, async () => {
   const limits = { ...TEST_ROOM_LIMITS, tombstoneTtlMs: 10_000 };
   await withRuntime(async (miniflare) => {
     await miniflare.setOutboundResponse(204, undefined, 750);
