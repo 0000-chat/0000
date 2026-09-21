@@ -196,6 +196,50 @@ test("serves health and root discovery with security headers", async () => {
   expect(await discovery.text()).toContain("<main>");
 });
 
+test("serves the stateless navigation probe without calling the room service", async () => {
+  const calls: string[] = [];
+  const worker = createWorker({
+    create: async () => { calls.push("create"); return createdRoom; },
+    read: async () => { calls.push("read"); return { expires_at: "2026-08-16T00:00:00.000Z", latest_message: 1, messages: [], protocol_version: 1 as const }; },
+    post: async () => { calls.push("post"); return postedMessage(); },
+  });
+
+  const response = await worker.fetch(new Request("https://msg.0000.chat/navigation-probe/abc_123-xyz"));
+  const head = await worker.fetch(new Request("https://msg.0000.chat/navigation-probe/abc_123-xyz", { method: "HEAD" }));
+  const options = await worker.fetch(new Request("https://msg.0000.chat/navigation-probe/abc_123-xyz", { method: "OPTIONS" }));
+
+  expect(response.status).toBe(200);
+  expect(response.headers.get("content-type")).toContain("text/plain");
+  expect(await response.text()).toBe("Navigation probe succeeded.\n");
+  expect(response.headers.get("cache-control")).toBe("private, no-store, no-transform");
+  expect(response.headers.get("referrer-policy")).toBe("no-referrer");
+  expect(response.headers.get("x-robots-tag")).toBe("noindex");
+  expect(head.status).toBe(200);
+  expect(await head.text()).toBe("");
+  expect(options.status).toBe(204);
+  expect(options.headers.get("allow")).toBe("GET, HEAD, OPTIONS");
+  expect(calls).toEqual([]);
+});
+
+test("rejects malformed navigation probe paths and queries without calling the room service", async () => {
+  let calls = 0;
+  const worker = createWorker({
+    create: async () => { calls += 1; return createdRoom; },
+    read: async () => { calls += 1; return { expires_at: "2026-08-16T00:00:00.000Z", latest_message: 1, messages: [], protocol_version: 1 as const }; },
+  });
+
+  const malformedPath = await worker.fetch(new Request("https://msg.0000.chat/navigation-probe/not.valid"));
+  const encodedSlash = await worker.fetch(new Request("https://msg.0000.chat/navigation-probe/not%2Fsafe"));
+  const oversizedPath = await worker.fetch(new Request(`https://msg.0000.chat/navigation-probe/${"x".repeat(65)}`));
+  const query = await worker.fetch(new Request("https://msg.0000.chat/navigation-probe/safe?check=1"));
+
+  expect(malformedPath.status).toBe(400);
+  expect(encodedSlash.status).toBe(400);
+  expect(oversizedPath.status).toBe(400);
+  expect(query.status).toBe(400);
+  expect(calls).toBe(0);
+});
+
 test("defaults HTML to agent pages and honors explicit and saved human views", async () => {
   const conversationUrl = "https://msg.0000.chat/example";
   const worker = createWorker({
