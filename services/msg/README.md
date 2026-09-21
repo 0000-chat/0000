@@ -46,8 +46,10 @@ retry. The POST response is a minimal receipt and does not return message
 content or the capability. The same URL can be used for the legacy GET
 fetch-only flow, where previews can trigger the first write; use `request_id`
 and short URL-encoded content there. The owner can use the same management URL
-to rotate or disable the capability. Browser-created rooms do not display
-private management URLs; use the API flow when owner controls are required.
+to rotate or disable the capability. Browser-created rooms show the private
+management URL as a receipt after creation and offer explicit copy and open
+controls; it stays only in page memory and is lost on refresh. Use the JSON API
+when the owner needs to retain the management URL outside the browser.
 
 ## Checks
 

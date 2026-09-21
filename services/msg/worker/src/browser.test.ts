@@ -229,12 +229,16 @@ test("renders a private creation receipt shell without capability values", async
   expect(html).toContain("Private owner link");
   expect(html).toContain("Save the private owner link now");
   expect(html).toContain("Enable agent posting");
+  expect(html).toContain("Copy private owner link");
+  expect(html).toContain("Open private owner controls");
   expect(html).toContain("Copy agent invitation");
   expect(html).toContain("Anyone holding an agent posting capability can write");
   expect(html).not.toContain("/manage/");
   expect(html).not.toContain("post?token=");
   expect(source).toContain("createOwnerControlsController");
+  expect(source).toContain("normalizeOwnerManagementUrl");
   expect(source).toContain("data.manage_url");
+  expect(source).not.toContain("ownerLink.href");
   expect(source).toContain("owner-post-rotate");
   expect(source).toContain("owner-post-disable");
   expect(source).toContain("X-0000-Post-Token");
@@ -254,13 +258,19 @@ test("does not render private creation controls on a public room page", () => {
 test("keeps the creation receipt private in page memory and enables clipboard setup", async () => {
   const source = await browserAsset("client.js")?.text();
   const globals = globalThis as Record<string, unknown>;
-  const saved = Object.fromEntries(["WebSocket", "addEventListener", "document", "fetch", "innerHeight", "localStorage", "location", "matchMedia", "navigator", "scrollTo", "scrollY"].map((key) => [key, globals[key]]));
+  const saved = Object.fromEntries(["WebSocket", "addEventListener", "document", "fetch", "innerHeight", "localStorage", "location", "matchMedia", "navigator", "open", "scrollTo", "scrollY"].map((key) => [key, globals[key]]));
   let submit: ((event: { preventDefault(): void }) => Promise<void>) | undefined;
   let copied = "";
   let managerCalls = 0;
-  const createForm = { hidden: false, addEventListener: (_event: string, callback: (event: { preventDefault(): void }) => Promise<void>) => { submit = callback; }, querySelector: () => null };
+  let createCalls = 0;
+  let opened: string[] = [];
+  let createHeaders: Headers | undefined;
+  const submitButton = { disabled: false };
+  const createForm = { hidden: false, addEventListener: (_event: string, callback: (event: { preventDefault(): void }) => Promise<void>) => { submit = callback; }, querySelector: (selector: string) => selector === 'button[type="submit"]' ? submitButton : null, setAttribute: () => {} };
   const field = { value: "first message", focus: () => {} };
   const receipt = { hidden: true };
+  let receiptFocusCount = 0;
+  const receiptHeading = { focus: () => { receiptFocusCount += 1; } };
   const publicLink = { href: "", textContent: "" };
   const ownerLink = { href: "", textContent: "" };
   const continueLink = { href: "", textContent: "" };
@@ -268,15 +278,20 @@ test("keeps the creation receipt private in page memory and enables clipboard se
   const enable = { disabled: false, onclick: undefined as (() => void) | undefined, addEventListener: (_event: string, callback: () => void) => { enable.onclick = callback; } };
   const rotate = { disabled: true, onclick: undefined as (() => void) | undefined, addEventListener: (_event: string, callback: () => void) => { rotate.onclick = callback; } };
   const disable = { disabled: true, onclick: undefined as (() => void) | undefined, addEventListener: (_event: string, callback: () => void) => { disable.onclick = callback; } };
+  const copyOwner = { disabled: true, onclick: undefined as (() => void) | undefined, addEventListener: (_event: string, callback: () => void) => { copyOwner.onclick = callback; } };
+  const openOwner = { disabled: true, onclick: undefined as (() => void) | undefined, addEventListener: (_event: string, callback: () => void) => { openOwner.onclick = callback; } };
   const copy = { disabled: true, onclick: undefined as (() => void) | undefined, addEventListener: (_event: string, callback: () => void) => { copy.onclick = callback; } };
   const notice = { textContent: "", className: "", hidden: true };
   const map: Record<string, unknown> = {
     "#create-room": createForm,
     "#creation-receipt": receipt,
+    "#creation-receipt-title": receiptHeading,
     "#initial-message": field,
+    "#owner-post-copy-owner": copyOwner,
     "#owner-post-copy": copy,
     "#owner-post-disable": disable,
     "#owner-post-enable": enable,
+    "#owner-post-open": openOwner,
     "#owner-post-rotate": rotate,
     "#owner-post-status": ownerStatus,
     "#receipt-continue": continueLink,
@@ -292,7 +307,11 @@ test("keeps the creation receipt private in page memory and enables clipboard se
       querySelectorAll: () => [],
     };
     globals.fetch = async (input: string, init?: RequestInit) => {
-      if (input === "/") return Response.json({ conversation_url: "https://msg.0000.chat/room", manage_url: "https://msg.0000.chat/manage/room/owner", room: { id: "room" } });
+      if (input === "/") {
+        createCalls += 1;
+        createHeaders = new Headers(init?.headers);
+        return Response.json({ conversation_url: "https://msg.0000.chat/room", manage_url: "https://msg.0000.chat/manage/room/owner", room: { id: "room" } });
+      }
       managerCalls += 1;
       expect(init?.method).toBe("POST");
       expect(JSON.parse(String(init?.body))).toEqual({ action: "enable" });
@@ -304,19 +323,26 @@ test("keeps the creation receipt private in page memory and enables clipboard se
     globals.location = { href: "https://msg.0000.chat/", origin: "https://msg.0000.chat", pathname: "/", protocol: "https:" };
     globals.matchMedia = () => ({ matches: false, addEventListener: () => {} });
     globals.navigator = { onLine: true, clipboard: { writeText: async (value: string) => { copied = value; } } };
+    globals.open = (url: string, target: string, features: string) => { opened = [url, target, features]; };
     globals.innerHeight = 800;
     globals.scrollTo = () => {};
     globals.scrollY = 0;
 
     new Function(source ?? "")();
-    await submit?.({ preventDefault: () => {} });
+    const firstSubmission = submit?.({ preventDefault: () => {} });
+    const duplicateSubmission = submit?.({ preventDefault: () => {} });
+    await firstSubmission;
+    await duplicateSubmission;
     expect(receipt.hidden).toBe(false);
     expect(createForm.hidden).toBe(true);
     expect(publicLink.href).toBe("https://msg.0000.chat/room");
-    expect(ownerLink.href).toBe("https://msg.0000.chat/manage/room/owner");
+    expect(ownerLink.href).toBe("");
     expect(ownerLink.textContent).toBe("https://msg.0000.chat/manage/room/owner");
-    expect(ownerLink.href).not.toContain("post?token=");
+    expect(receiptFocusCount).toBe(1);
+    expect(submitButton.disabled).toBe(true);
     expect(managerCalls).toBe(0);
+    expect(createCalls).toBe(1);
+    expect(createHeaders?.get("idempotency-key")).toMatch(/^[A-Za-z0-9-]{20,}$/u);
 
     enable.onclick?.();
     await Promise.resolve();
@@ -330,6 +356,13 @@ test("keeps the creation receipt private in page memory and enables clipboard se
     expect(copied).toContain("X-0000-Post-Token");
     expect(copied).toContain("Authentication value: delegated");
     expect(ownerLink.textContent).not.toContain("delegated");
+
+    copyOwner.onclick?.();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(copied).toBe("https://msg.0000.chat/manage/room/owner");
+    openOwner.onclick?.();
+    expect(opened).toEqual(["https://msg.0000.chat/manage/room/owner", "_blank", "noopener,noreferrer"]);
   } finally {
     Object.assign(globals, saved);
   }

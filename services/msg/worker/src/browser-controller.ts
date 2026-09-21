@@ -588,13 +588,36 @@ export interface OwnerControlsControllerOptions {
   readonly publicRoomUrl: string;
 }
 
+/** Validates and canonicalizes the private management URL against its public room. */
+export function normalizeOwnerManagementUrl(value: unknown, publicRoomUrl: string): string {
+  if (typeof value !== "string") throw new Error("The service returned an invalid private owner link.");
+  let publicRoom: URL;
+  let management: URL;
+  try {
+    publicRoom = new URL(publicRoomUrl);
+    management = new URL(value, publicRoom);
+  } catch {
+    throw new Error("The service returned an invalid private owner link.");
+  }
+  const roomPath = publicRoom.pathname.slice(1);
+  if (
+    management.origin !== publicRoom.origin
+    || management.username
+    || management.password
+    || management.pathname.split("/")[2] !== roomPath
+    || !/^\/manage\/[^/]+\/[^/]+$/u.test(management.pathname)
+    || management.search
+    || management.hash
+  ) {
+    throw new Error("The service returned an invalid private owner link.");
+  }
+  return management.toString();
+}
+
 /** Keeps the owner capability and delegated posting token in page memory only. */
 export function createOwnerControlsController(options: OwnerControlsControllerOptions) {
   const publicRoom = new URL(options.publicRoomUrl);
-  const management = new URL(options.manageUrl, publicRoom);
-  if (management.origin !== publicRoom.origin || !/^\/manage\/[^/]+\/[^/]+$/u.test(management.pathname) || management.search || management.hash) {
-    throw new Error("The service returned an invalid private owner link.");
-  }
+  const managementUrl = normalizeOwnerManagementUrl(options.manageUrl, options.publicRoomUrl);
   let busy = false;
   let delegatedToken: string | undefined;
   let currentState: OwnerPostingState = {
@@ -651,10 +674,16 @@ export function createOwnerControlsController(options: OwnerControlsControllerOp
 
   async function request(action: "disable" | "enable" | "rotate"): Promise<OwnerPostingState> {
     if (busy) return currentState;
+    if (action === "rotate") delegatedToken = undefined;
     setBusy(true);
-    setState({ ...currentState, busy: true, message: action === "disable" ? "Disabling agent posting…" : action === "rotate" ? "Rotating agent posting…" : "Enabling agent posting…" });
+    setState({
+      ...currentState,
+      busy: true,
+      invitationAvailable: action === "rotate" ? false : currentState.invitationAvailable,
+      message: action === "disable" ? "Disabling agent posting…" : action === "rotate" ? "Rotating agent posting…" : "Enabling agent posting…",
+    });
     try {
-      const response = await options.fetch(options.manageUrl, {
+      const response = await options.fetch(managementUrl, {
         body: JSON.stringify({ action }),
         headers: { accept: "application/json", "content-type": "application/json" },
         method: "POST",
@@ -675,6 +704,10 @@ export function createOwnerControlsController(options: OwnerControlsControllerOp
       delegatedToken = delegatedTokenFromUrl(value.get_post_url);
       return setState({ busy: false, enabled: true, invitationAvailable: true, message: action === "rotate" ? "Agent posting was rotated. Copy the new invitation for the agent." : "Agent posting is enabled. Copy the invitation for the agent.", status: "enabled" });
     } catch (error) {
+      if (action === "rotate") {
+        delegatedToken = undefined;
+        return setState({ busy: false, enabled: false, invitationAvailable: false, message: error instanceof Error ? error.message : "The owner control request failed while rotating agent posting.", status: "error" });
+      }
       return setState({ ...currentState, busy: false, message: error instanceof Error ? error.message : "The owner control request failed.", status: "error" });
     } finally {
       setBusy(false);
@@ -684,12 +717,18 @@ export function createOwnerControlsController(options: OwnerControlsControllerOp
 
   setState(currentState);
   return {
+    copyManagement: async (copy: (value: string) => Promise<void>): Promise<void> => {
+      await copy(managementUrl);
+    },
     copyInvitation: async (copy: (value: string) => Promise<void>): Promise<void> => {
       await copy(invitation());
     },
     disable: async () => await request("disable"),
     enable: async () => await request("enable"),
     invitation,
+    openManagement: (open: (value: string) => void): void => {
+      open(managementUrl);
+    },
     rotate: async () => await request("rotate"),
     state: () => currentState,
   };

@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 
-import { browserFailureState, copyText, createLiveController, createOwnerControlsController, createPushEnrollmentController, createThemeController, handleAgentPromptCopy, readPushBrowserId } from "./browser-controller";
+import { browserFailureState, copyText, createLiveController, createOwnerControlsController, createPushEnrollmentController, createThemeController, handleAgentPromptCopy, normalizeOwnerManagementUrl, readPushBrowserId } from "./browser-controller";
 
 const pushBrowserId = "123e4567-e89b-42d3-a456-426614174000";
 const pushPublicKey = btoa(String.fromCharCode(4, ...Array.from({ length: 64 }, (_, index) => index + 1)))
@@ -222,6 +222,32 @@ test("keeps owner controls in memory and rotates, disables, and copies the deleg
   expect(requests.every((request) => request.headers.get("content-type") === "application/json")).toBe(true);
   expect(states).toContain("enabled:true");
   expect(states).toContain("disabled:false");
+});
+
+test("validates management URLs before use and clears a stale invitation when rotation is uncertain", async () => {
+  expect(normalizeOwnerManagementUrl("/manage/room/owner-token", "https://msg.0000.chat/room")).toBe("https://msg.0000.chat/manage/room/owner-token");
+  expect(() => normalizeOwnerManagementUrl("https://evil.example/manage/room/owner-token", "https://msg.0000.chat/room")).toThrow("invalid private owner link");
+  expect(() => normalizeOwnerManagementUrl("https://msg.0000.chat/manage/other/owner-token", "https://msg.0000.chat/room")).toThrow("invalid private owner link");
+
+  let calls = 0;
+  const controller = createOwnerControlsController({
+    fetch: async () => {
+      calls += 1;
+      if (calls === 1) return Response.json({ get_post_enabled: true, get_post_url: "https://msg.0000.chat/room/post?token=first-token", protocol_version: 1 });
+      throw new Error("The owner request timed out.");
+    },
+    manageUrl: "https://msg.0000.chat/manage/room/owner-token",
+    onState: () => {},
+    openApiUrl: "https://msg.0000.chat/openapi.json",
+    publicRoomId: "room",
+    publicRoomUrl: "https://msg.0000.chat/room",
+  });
+
+  await controller.enable();
+  await controller.copyInvitation(async () => {});
+  await controller.rotate();
+  expect(controller.state()).toMatchObject({ enabled: false, invitationAvailable: false, status: "error" });
+  await expect(controller.copyInvitation(async () => {})).rejects.toThrow("Enable agent posting");
 });
 
 test("waits for an active room-scope service worker before creating and registering a native subscription", async () => {
