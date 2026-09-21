@@ -1764,7 +1764,7 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
       const receiptText = JSON.stringify(response);
       const retryBytes = coordinationStorageBytes({ operation, retry_id: input.client_retry_id, fingerprint, receipt: receiptText });
       const projectionDelta = previousProjection === undefined ? projection.byte_count : projection.byte_count - previousProjection.byte_count;
-      this.ensureCoordinationCapacity(state, Math.max(0, projectionDelta) + eventBytes + retryBytes);
+      this.ensureCoordinationCapacity(state, projectionDelta + eventBytes + retryBytes);
       this.ctx.storage.sql.exec(
         "INSERT OR REPLACE INTO coordination_decisions (decision_id, latest_proposal_revision, title, proposal_text, required_approver_labels, state, recommendation_cursor, recommendation_published_revision, accepted_record_id, updated_at, byte_count) VALUES (?, ?, ?, ?, ?, 'recommended', ?, ?, NULL, ?, ?)",
         projection.decision_id, projection.latest_proposal_revision, projection.title, projection.proposal_text, projection.required_approver_labels, projection.recommendation_cursor, projection.recommendation_published_revision, projection.updated_at, projection.byte_count,
