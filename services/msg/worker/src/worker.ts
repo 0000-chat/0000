@@ -16,6 +16,7 @@ import {
   type RequestBody,
   type ManageRoomResponse,
   type ReadRoomResponse,
+  type RetentionExtensionResponse,
   type RoomService,
 } from "./protocol";
 import { byteLength, compareCapabilities, DEFAULT_READ_LIMIT, MAX_ROOM_REQUEST_BYTES, parseBasedOnSequence, roomEtag, validateBasedOnSequenceQuery, validateBoundedCursor, validateCursor, validateIdempotencyKey, validateReadLimit, validateRequestId, validateThrough } from "./room-domain";
@@ -668,10 +669,10 @@ async function route(request: Request, service: RoomService, options: MsgWorkerO
         return htmlResponse(page.html, 200, page.styleNonce);
       }
       const etag = selectors.bounded
-        ? roomEtag(result.latest_message, selectors.after, { expiresAt: result.expires_at, mode: "bounded", limit: selectors.limit ?? DEFAULT_READ_LIMIT, through: result.through, ...(result.coordination_cursor === undefined ? {} : { coordinationCursor: result.coordination_cursor }), ...(result.published_revision === undefined ? {} : { publishedRevision: result.published_revision }) })
+        ? roomEtag(result.latest_message, selectors.after, { expiresAt: result.expires_at, mode: "bounded", limit: selectors.limit ?? DEFAULT_READ_LIMIT, through: result.through, ...(result.coordination_cursor === undefined ? {} : { coordinationCursor: result.coordination_cursor }), ...(result.published_revision === undefined ? {} : { publishedRevision: result.published_revision }), ...(result.retention === undefined ? {} : { inactivityWindowMs: result.retention.inactivity_window_ms, retentionMode: result.retention.mode, retentionPolicy: result.retention.policy }) })
         : result.coordination_cursor === undefined && result.published_revision === undefined
           ? roomEtag(result.latest_message, selectors.after)
-          : roomEtag(result.latest_message, selectors.after, { coordinationCursor: result.coordination_cursor, expiresAt: result.expires_at, mode: "unbounded", publishedRevision: result.published_revision });
+          : roomEtag(result.latest_message, selectors.after, { coordinationCursor: result.coordination_cursor, expiresAt: result.expires_at, mode: "unbounded", publishedRevision: result.published_revision, ...(result.retention === undefined ? {} : { inactivityWindowMs: result.retention.inactivity_window_ms, retentionMode: result.retention.mode, retentionPolicy: result.retention.policy }) });
       if (request.headers.get("if-none-match") === etag) {
         return new Response(null, { headers: { etag, "retry-after": "5" }, status: 304 });
       }
@@ -707,6 +708,13 @@ async function route(request: Request, service: RoomService, options: MsgWorkerO
   }
 
   const manageMatch = /^\/manage\/([^/]+)\/([^/]+)$/.exec(url.pathname);
+  const retentionMatch = /^\/manage\/([^/]+)\/([^/]+)\/retention$/.exec(url.pathname);
+  if (retentionMatch && request.method === "POST") {
+    if (!service.extendRetention) return notFound();
+    await enforceRateLimit(request, options.rateLimits?.posts);
+    const result = await service.extendRetention({ body: await parseRequestBody(request, { maxBytes: 4 * 1024 }), room: retentionMatch[1]!, token: decodePathSegment(retentionMatch[2]!) });
+    return retentionResponse(result, negotiateRepresentation(request.headers.get("accept")));
+  }
   if (manageMatch && (request.method === "GET" || request.method === "DELETE" || request.method === "POST")) {
     if (!service.manage) return notFound();
     if (request.method === "POST") await enforceRateLimit(request, options.rateLimits?.posts);
@@ -879,7 +887,7 @@ function coordinationPanelHistoryEtag(result: unknown, selectors: { readonly aft
 }
 
 function coordinationMessageEtag(result: ReadMessageResponse): string {
-  return `W/"message-${result.message.id}-coordination-${result.coordination_cursor}-published-${result.published_revision}-corrections-${result.correction_count}-expires-${result.expires_at}"`;
+  return `W/"message-${result.message.id}-coordination-${result.coordination_cursor}-published-${result.published_revision}-corrections-${result.correction_count}-expires-${result.expires_at}-retention-window-${result.retention?.inactivity_window_ms ?? ""}-retention-mode-${result.retention?.mode ?? ""}-retention-policy-${result.retention?.policy ?? ""}"`;
 }
 
 async function enforceRateLimit(request: Request, binding: MsgRateLimit | undefined): Promise<void> {
@@ -1098,17 +1106,32 @@ function getPostResponse(result: GetPostMessageResponse): Response {
 }
 
 function manageResponse(result: ManageRoomResponse, method: "DELETE" | "GET" | "POST", representation: ReturnType<typeof negotiateRepresentation>, url: URL): Response {
-  if (representation === "json") return jsonResponse(result, 200);
+  if (representation === "json") {
+    const response = jsonResponse(result, 200);
+    response.headers.set("cache-control", "no-store");
+    return response;
+  }
   if (method === "DELETE") {
     const body = "# Conversation deleted\n";
-    return new Response(representation === "html" ? "<!doctype html><html lang=\"en\"><body><main><h1>Conversation deleted</h1></main></body></html>" : body, { headers: { "content-type": representation === "html" ? "text/html; charset=utf-8" : "text/markdown; charset=utf-8" } });
+    return new Response(representation === "html" ? "<!doctype html><html lang=\"en\"><body><main><h1>Conversation deleted</h1></main></body></html>" : body, { headers: { "cache-control": "no-store", "content-type": representation === "html" ? "text/html; charset=utf-8" : "text/markdown; charset=utf-8" } });
   }
   const enabled = result.get_post_enabled === true;
   const delegated = result.get_post_url ? `<section><h2>GET posting capability</h2><p>${escapeHtml(result.get_post_url_warning ?? "Treat this URL as a secret write capability.")}</p><pre>${escapeHtml(result.get_post_url)}</pre></section>` : "";
   const controls = `<section><h2>GET posting capability</h2><p>Status: ${enabled ? "enabled" : "disabled"}.</p><form method="post" action="${escapeHtml(url.toString())}"><button name="action" value="enable" type="submit">Enable</button> <button name="action" value="rotate" type="submit">Rotate</button> <button name="action" value="disable" type="submit">Disable</button></form><p>This capability lets a fetch-only agent write short text. URL previews can trigger a write, so keep the URL secret.</p></section>`;
   const body = method === "POST" && result.get_post_url ? `${delegated}${controls}` : controls;
-  if (representation === "html") return new Response(`<!doctype html><html lang="en"><body><main><h1>Conversation management</h1>${body}</main></body></html>`, { headers: { "content-type": "text/html; charset=utf-8", "x-msg-management-forms": "1" } });
-  return new Response(`# Conversation management\n\nGET posting: ${enabled ? "enabled" : "disabled"}.\n\n${result.get_post_url ? `${result.get_post_url_warning ?? "Treat this URL as a secret write capability."}\n\n${result.get_post_url}\n` : "Use the management URL to enable or rotate the GET posting capability.\n"}`, { headers: { "content-type": "text/markdown; charset=utf-8" } });
+  if (representation === "html") return new Response(`<!doctype html><html lang="en"><body><main><h1>Conversation management</h1>${body}</main></body></html>`, { headers: { "cache-control": "no-store", "content-type": "text/html; charset=utf-8", "x-msg-management-forms": "1" } });
+  return new Response(`# Conversation management\n\nGET posting: ${enabled ? "enabled" : "disabled"}.\n\n${result.get_post_url ? `${result.get_post_url_warning ?? "Treat this URL as a secret write capability."}\n\n${result.get_post_url}\n` : "Use the management URL to enable or rotate the GET posting capability.\n"}`, { headers: { "cache-control": "no-store", "content-type": "text/markdown; charset=utf-8" } });
+}
+
+function retentionResponse(result: RetentionExtensionResponse, representation: ReturnType<typeof negotiateRepresentation>): Response {
+  const status = result.replayed ? 200 : 201;
+  if (representation === "json") {
+    const response = jsonResponse(result, status);
+    response.headers.set("cache-control", "no-store");
+    return response;
+  }
+  const summary = `Retention ${result.replayed ? "replayed" : "extended"}.\n\nOld expiry: ${result.old_expires_at}\nRequested expiry: ${result.requested_expires_at}\nResult expiry: ${result.result_expires_at}\nCoordination cursor: ${result.coordination_cursor}\nEvent: ${result.event_id}\n`;
+  return new Response(representation === "html" ? `<!doctype html><html lang="en"><body><main><h1>Retention ${result.replayed ? "replay" : "extended"}</h1><dl><dt>Old expiry</dt><dd>${escapeHtml(result.old_expires_at)}</dd><dt>Requested expiry</dt><dd>${escapeHtml(result.requested_expires_at)}</dd><dt>Result expiry</dt><dd>${escapeHtml(result.result_expires_at)}</dd><dt>Coordination cursor</dt><dd>${result.coordination_cursor}</dd><dt>Event</dt><dd>${escapeHtml(result.event_id)}</dd></dl></main></body></html>` : summary, { headers: { "cache-control": "no-store", "content-type": representation === "html" ? "text/html; charset=utf-8" : "text/markdown; charset=utf-8" }, status });
 }
 
 function escapeHtml(value: string): string {

@@ -1,7 +1,7 @@
 import { Database } from "bun:sqlite";
 import { expect, mock, test } from "bun:test";
 
-import { hashCapability } from "./room-domain";
+import { hashCapability, ROOM_LIMITS } from "./room-domain";
 import { DurableRoomService } from "./room-service";
 import { createWorker } from "./worker";
 
@@ -31,9 +31,9 @@ class Context {
   waitUntil() {}
 }
 
-async function room(environment: Record<string, string> = {}) {
+async function room(environment: Record<string, string> = {}, existingDatabase?: Database) {
   const { ConversationRoom } = await import("./conversation-room");
-  const database = new Database(":memory:");
+  const database = existingDatabase ?? new Database(":memory:");
   let now = 10_000;
   const context = new Context(database);
   return { context, database, room: new ConversationRoom(context as never, { MSG_TEST_MODE: "1", MSG_TEST_ROOM_LIMITS: "{}", ...environment }, () => now), setNow: (value: number) => { now = value; } };
@@ -184,6 +184,177 @@ test("routes a complete panel replacement through pending review, exact publicat
   expect(history.events).toHaveLength(1);
   const read = await (await durable.fetch(new Request("https://room/read?after=0&limit=20"))).json() as { coordination_overview: { panel_published_revision: number } };
   expect(read.coordination_overview.panel_published_revision).toBe(1);
+});
+
+test("routes bounded retention inspection and extension without changing chat state", async () => {
+  const { room: durable, database, setNow } = await room({ MSG_TEST_ROOM_LIMITS: JSON.stringify({ inactivityTtlMs: 1_000 }) });
+  const initialized = await durable.fetch(json("/initialize", { management_hash: await hashCapability("owner-token"), initial: { content: "source", author: "a", display_name: "A", semantic_type: "message" } }));
+  expect(initialized.status).toBe(200);
+  const service = new DurableRoomService({ getByName: () => ({ fetch: (request: Request) => durable.fetch(request) }) }, "https://msg.0000.chat");
+  const worker = createWorker(service);
+
+  const before = await worker.fetch(new Request("https://msg.0000.chat/room", { headers: { accept: "application/json" } }));
+  const beforeValue = await before.json() as { expires_at: string; latest_message: number; message_count?: number; coordination_cursor: number; retention: { inactivity_window_ms: number; mode: string; policy: string } };
+  expect(beforeValue).toMatchObject({ latest_message: 1, coordination_cursor: 0, retention: { inactivity_window_ms: 1_000, mode: "temporary", policy: "sliding_inactivity" } });
+  const beforeEtag = before.headers.get("etag");
+
+  const inspect = await worker.fetch(new Request("https://msg.0000.chat/manage/room/owner-token", { headers: { accept: "application/json" } }));
+  expect(inspect.status).toBe(200);
+  expect(inspect.headers.get("cache-control")).toContain("no-store");
+  const bounds = await inspect.json() as { expires_at: string; maximum_expires_at: string; minimum_expires_at: string; retention: { inactivity_window_ms: number }; server_now: string };
+  expect(bounds).toMatchObject({ expires_at: bounds.minimum_expires_at, retention: { inactivity_window_ms: 1_000 }, server_now: new Date(10_000).toISOString() });
+
+  const extension = await worker.fetch(workerJson("/manage/room/owner-token/retention", { client_retry_id: "retention-1", expires_at: bounds.maximum_expires_at }));
+  expect(extension.status).toBe(201);
+  const receipt = await extension.json() as { client_retry_id: string; event_id: string; old_expires_at: string; requested_expires_at: string; result_expires_at: string; expires_at: string; replayed: boolean; coordination_cursor: number; latest_message: number };
+  expect(receipt).toMatchObject({ client_retry_id: "retention-1", old_expires_at: beforeValue.expires_at, requested_expires_at: bounds.maximum_expires_at, result_expires_at: bounds.maximum_expires_at, expires_at: bounds.maximum_expires_at, replayed: false, coordination_cursor: 1, latest_message: 1 });
+  expect(receipt.event_id).toMatch(/[0-9a-f-]{36}/u);
+  expect(database.query("SELECT kind, operation, actor_label, authority_class, proposal_id, request_id, resulting_revision, source_message_ids, base_revision FROM coordination_events").all()).toEqual([{
+    kind: "retention.extended", operation: "retention.extended", actor_label: "Management capability holder", authority_class: "management", proposal_id: null, request_id: null, resulting_revision: null, source_message_ids: "[]", base_revision: 0,
+  }]);
+
+  setNow(10_001);
+  const post = await worker.fetch(workerJson("/room", { content: "activity", author: "b", display_name: "B", semantic_type: "message" }));
+  expect(post.status).toBe(201);
+  const afterPost = await post.json() as { message: { sequence: number }; expires_at: string };
+  expect(afterPost.message.sequence).toBe(2);
+  const replay = await worker.fetch(workerJson("/manage/room/owner-token/retention", { client_retry_id: "retention-1", expires_at: new Date(Date.parse(receipt.requested_expires_at) - 1).toISOString() }));
+  expect(replay.status).toBe(409);
+  const exactReplay = await worker.fetch(workerJson("/manage/room/owner-token/retention", { client_retry_id: "retention-1", expires_at: new Date(Date.parse(receipt.requested_expires_at)).toISOString() }));
+  expect(exactReplay.status).toBe(200);
+  expect(await exactReplay.json()).toMatchObject({ replayed: true, event_id: receipt.event_id, result_expires_at: receipt.result_expires_at, current_expires_at: afterPost.expires_at, current_coordination_cursor: 1 });
+
+  const after = await worker.fetch(new Request("https://msg.0000.chat/room", { headers: { accept: "application/json", ...(beforeEtag === null ? {} : { "if-none-match": beforeEtag }) } }));
+  expect(after.status).toBe(200);
+  expect(await after.json()).toMatchObject({ latest_message: 2, coordination_cursor: 1 });
+});
+
+test("invalidates room and exact-message validators when the configured retention window changes", async () => {
+  const database = new Database(":memory:");
+  const first = await room({ MSG_TEST_ROOM_LIMITS: JSON.stringify({ inactivityTtlMs: 1_000 }) }, database);
+  const initialized = await first.room.fetch(json("/initialize", { management_hash: await hashCapability("owner-token"), initial: { content: "source", author: "a", display_name: "A", semantic_type: "message" } }));
+  const messageId = (await initialized.json() as { id: string }).id;
+  const firstService = new DurableRoomService({ getByName: () => ({ fetch: (request: Request) => first.room.fetch(request) }) }, "https://msg.0000.chat");
+  const firstWorker = createWorker(firstService);
+  const firstRoomRead = await firstWorker.fetch(new Request("https://msg.0000.chat/room", { headers: { accept: "application/json" } }));
+  const firstMessageRead = await firstWorker.fetch(new Request(`https://msg.0000.chat/room/messages/${messageId}`, { headers: { accept: "application/json" } }));
+  const firstRoomEtag = firstRoomRead.headers.get("etag");
+  const firstMessageEtag = firstMessageRead.headers.get("etag");
+  expect(await firstRoomRead.json()).toMatchObject({ retention: { inactivity_window_ms: 1_000 } });
+  expect(await firstMessageRead.json()).toMatchObject({ retention: { inactivity_window_ms: 1_000 } });
+
+  const second = await room({ MSG_TEST_ROOM_LIMITS: JSON.stringify({ inactivityTtlMs: 2_000 }) }, database);
+  const secondService = new DurableRoomService({ getByName: () => ({ fetch: (request: Request) => second.room.fetch(request) }) }, "https://msg.0000.chat");
+  const secondWorker = createWorker(secondService);
+  const secondRoomRead = await secondWorker.fetch(new Request("https://msg.0000.chat/room", { headers: { accept: "application/json", "if-none-match": firstRoomEtag ?? "" } }));
+  const secondMessageRead = await secondWorker.fetch(new Request(`https://msg.0000.chat/room/messages/${messageId}`, { headers: { accept: "application/json", "if-none-match": firstMessageEtag ?? "" } }));
+  expect(secondRoomRead.status).toBe(200);
+  expect(secondMessageRead.status).toBe(200);
+  expect(await secondRoomRead.json()).toMatchObject({ retention: { inactivity_window_ms: 2_000 } });
+  expect(await secondMessageRead.json()).toMatchObject({ retention: { inactivity_window_ms: 2_000 } });
+  expect(secondRoomRead.headers.get("etag")).not.toBe(firstRoomEtag);
+  expect(secondMessageRead.headers.get("etag")).not.toBe(firstMessageEtag);
+});
+
+test("keeps retention extension quota failures atomic", async () => {
+  const { room: durable, database } = await room({ MSG_TEST_ROOM_LIMITS: JSON.stringify({ inactivityTtlMs: 1_000 }) });
+  await durable.fetch(json("/initialize", { management_hash: await hashCapability("owner-token"), initial: { content: "source", author: "a", display_name: "A", semantic_type: "message" } }));
+  const service = new DurableRoomService({ getByName: () => ({ fetch: (request: Request) => durable.fetch(request) }) }, "https://msg.0000.chat");
+  const worker = createWorker(service);
+  const inspect = await worker.fetch(new Request("https://msg.0000.chat/manage/room/owner-token", { headers: { accept: "application/json" } }));
+  const bounds = await inspect.json() as { maximum_expires_at: string };
+  const before = database.query("SELECT inactivity_expires_at, coordination_cursor, total_bytes FROM room_state WHERE singleton = 1").get() as Record<string, number>;
+  database.query("UPDATE room_state SET total_bytes = ? WHERE singleton = 1").run(ROOM_LIMITS.maxRoomBytes - 1);
+  const response = await worker.fetch(workerJson("/manage/room/owner-token/retention", { client_retry_id: "quota-retention", expires_at: bounds.maximum_expires_at }));
+  expect(response.status).toBe(429);
+  expect(database.query("SELECT inactivity_expires_at, coordination_cursor, total_bytes FROM room_state WHERE singleton = 1").get()).toMatchObject({ inactivity_expires_at: before.inactivity_expires_at, coordination_cursor: before.coordination_cursor, total_bytes: ROOM_LIMITS.maxRoomBytes - 1 });
+  expect(database.query("SELECT COUNT(*) AS count FROM coordination_events").get()).toEqual({ count: 0 });
+  expect(database.query("SELECT COUNT(*) AS count FROM coordination_retries").get()).toEqual({ count: 0 });
+});
+
+test("rejects malformed retention timestamps before fingerprinting", async () => {
+  const { room: durable } = await room();
+  await durable.fetch(json("/initialize", { management_hash: await hashCapability("owner-token"), initial: { content: "source", author: "a", display_name: "A", semantic_type: "message" } }));
+  const service = new DurableRoomService({ getByName: () => ({ fetch: (request: Request) => durable.fetch(request) }) }, "https://msg.0000.chat");
+  const worker = createWorker(service);
+  const response = await worker.fetch(workerJson("/room/owner-token/retention", { client_retry_id: "bad-date", expires_at: "2026-02-30T00:00:00Z" }));
+  expect(response.status).toBe(404);
+  const valid = await worker.fetch(workerJson("/manage/room/owner-token/retention", { client_retry_id: "bad-date", expires_at: "2026-02-30T00:00:00Z" }));
+  expect(valid.status).toBe(400);
+});
+
+test("enforces fresh retention authorization and inclusive bounds, including a recorded no-op", async () => {
+  const { room: durable, database } = await room({ MSG_TEST_ROOM_LIMITS: JSON.stringify({ inactivityTtlMs: 1_000 }) });
+  await durable.fetch(json("/initialize", { management_hash: await hashCapability("owner-token"), initial: { content: "source", author: "a", display_name: "A", semantic_type: "message" } }));
+  const service = new DurableRoomService({ getByName: () => ({ fetch: (request: Request) => durable.fetch(request) }) }, "https://msg.0000.chat");
+  const worker = createWorker(service);
+
+  const beforeState = database.query("SELECT last_message_at, next_sequence, message_count, published_revision FROM room_state WHERE singleton = 1").get();
+  expect((await worker.fetch(new Request("https://msg.0000.chat/manage/room/wrong-token", { headers: { accept: "application/json" } }))).status).toBe(404);
+  const inspect = await worker.fetch(new Request("https://msg.0000.chat/manage/room/owner-token", { headers: { accept: "application/json" } }));
+  const bounds = await inspect.json() as { expires_at: string; minimum_expires_at: string; maximum_expires_at: string };
+  expect(inspect.status).toBe(200);
+  expect(bounds.expires_at).toBe(bounds.minimum_expires_at);
+  const belowMinimum = await worker.fetch(workerJson("/manage/room/owner-token/retention", { client_retry_id: "retention-below", expires_at: new Date(Date.parse(bounds.minimum_expires_at) - 1).toISOString() }));
+  const aboveMaximum = await worker.fetch(workerJson("/manage/room/owner-token/retention", { client_retry_id: "retention-above", expires_at: new Date(Date.parse(bounds.maximum_expires_at) + 1).toISOString() }));
+  expect(belowMinimum.status).toBe(400);
+  expect(aboveMaximum.status).toBe(400);
+
+  const noOp = await worker.fetch(workerJson("/manage/room/owner-token/retention", { client_retry_id: "retention-no-op", expires_at: bounds.expires_at }));
+  expect(noOp.status).toBe(201);
+  const receipt = await noOp.json() as { old_expires_at: string; requested_expires_at: string; result_expires_at: string; expires_at: string; replayed: boolean; coordination_cursor: number; event_id: string };
+  expect(receipt).toMatchObject({ old_expires_at: bounds.expires_at, requested_expires_at: bounds.expires_at, result_expires_at: bounds.expires_at, expires_at: bounds.expires_at, replayed: false, coordination_cursor: 1 });
+  expect(receipt.event_id).toMatch(/[0-9a-f-]{36}/u);
+  const afterState = database.query("SELECT last_message_at, next_sequence, message_count, published_revision, coordination_cursor, inactivity_expires_at FROM room_state WHERE singleton = 1").get() as Record<string, number>;
+  expect(afterState).toMatchObject({ ...(beforeState as Record<string, number>), coordination_cursor: 1, inactivity_expires_at: Date.parse(bounds.expires_at) });
+  const event = database.query("SELECT body FROM coordination_events WHERE event_id = ?").get(receipt.event_id) as { body: string };
+  expect(JSON.parse(event.body)).toEqual({ configured_inactivity_window_ms: 1_000, new_expires_at: bounds.expires_at, old_expires_at: bounds.expires_at });
+});
+
+test("serializes racing retention extensions into bounded immutable receipts", async () => {
+  const { room: durable, database, setNow } = await room({ MSG_TEST_ROOM_LIMITS: JSON.stringify({ inactivityTtlMs: 1_000 }) });
+  await durable.fetch(json("/initialize", { management_hash: await hashCapability("owner-token"), initial: { content: "source", author: "a", display_name: "A", semantic_type: "message" } }));
+  const service = new DurableRoomService({ getByName: () => ({ fetch: (request: Request) => durable.fetch(request) }) }, "https://msg.0000.chat");
+  const worker = createWorker(service);
+  setNow(10_500);
+  const inspect = await worker.fetch(new Request("https://msg.0000.chat/manage/room/owner-token", { headers: { accept: "application/json" } }));
+  const maximum = (await inspect.json() as { maximum_expires_at: string }).maximum_expires_at;
+  const responses = await Promise.all([
+    worker.fetch(workerJson("/manage/room/owner-token/retention", { client_retry_id: "retention-race-a", expires_at: maximum })),
+    worker.fetch(workerJson("/manage/room/owner-token/retention", { client_retry_id: "retention-race-b", expires_at: maximum })),
+  ]);
+  expect(responses.map((response) => response.status).sort()).toEqual([201, 201]);
+  const receipts = await Promise.all(responses.map(async (response) => await response.json() as { client_retry_id: string; event_id: string; old_expires_at: string; result_expires_at: string; coordination_cursor: number; maximum_expires_at: string }));
+  expect(new Set(receipts.map((receipt) => receipt.event_id)).size).toBe(2);
+  expect(receipts.map((receipt) => receipt.coordination_cursor).sort()).toEqual([1, 2]);
+  expect(receipts.every((receipt) => receipt.result_expires_at === maximum && receipt.maximum_expires_at === maximum)).toBe(true);
+  expect(new Set(receipts.map((receipt) => receipt.old_expires_at))).toEqual(new Set([new Date(11_000).toISOString(), maximum]));
+  expect(database.query("SELECT coordination_cursor, inactivity_expires_at, last_message_at, next_sequence, message_count, published_revision FROM room_state WHERE singleton = 1").get()).toMatchObject({ coordination_cursor: 2, inactivity_expires_at: Date.parse(maximum), last_message_at: 10_000, next_sequence: 2, message_count: 1, published_revision: 0 });
+  expect(database.query("SELECT COUNT(*) AS count FROM coordination_events WHERE kind = 'retention.extended'").get()).toEqual({ count: 2 });
+  expect(database.query("SELECT COUNT(*) AS count FROM coordination_retries WHERE operation = 'retention.extend'").get()).toEqual({ count: 2 });
+});
+
+test("cannot resurrect a room after expiry or explicit deletion", async () => {
+  const fixture = async () => {
+    const value = await room({ MSG_TEST_ROOM_LIMITS: JSON.stringify({ inactivityTtlMs: 1_000 }) });
+    await value.room.fetch(json("/initialize", { management_hash: await hashCapability("owner-token"), initial: { content: "source", author: "a", display_name: "A", semantic_type: "message" } }));
+    const service = new DurableRoomService({ getByName: () => ({ fetch: (request: Request) => value.room.fetch(request) }) }, "https://msg.0000.chat");
+    return { ...value, worker: createWorker(service) };
+  };
+
+  const expired = await fixture();
+  expired.setNow(11_001);
+  const expiryAttempt = await expired.worker.fetch(workerJson("/manage/room/owner-token/retention", { client_retry_id: "retention-after-expiry", expires_at: new Date(12_000).toISOString() }));
+  expect(expiryAttempt.status).toBe(410);
+  expect(expired.database.query("SELECT status FROM room_state WHERE singleton = 1").get()).toEqual({ status: "deleted" });
+  expect(expired.database.query("SELECT COUNT(*) AS count FROM coordination_events").get()).toEqual({ count: 0 });
+  expect((await expired.worker.fetch(workerJson("/manage/room/owner-token/retention", { client_retry_id: "retention-after-delete", expires_at: new Date(12_000).toISOString() }))).status).toBe(404);
+
+  const deleted = await fixture();
+  const deleteResponse = await deleted.worker.fetch(new Request("https://msg.0000.chat/manage/room/owner-token", { method: "DELETE", headers: { accept: "application/json" } }));
+  expect(deleteResponse.status).toBe(200);
+  expect(await deleteResponse.json()).toMatchObject({ deleted: true });
+  expect((await deleted.worker.fetch(workerJson("/manage/room/owner-token/retention", { client_retry_id: "retention-after-explicit-delete", expires_at: new Date(12_000).toISOString() }))).status).toBe(404);
 });
 
 test("runs proposal, review, exact publication, retries, and revisions inside the room route", async () => {

@@ -21,10 +21,11 @@ export const CLAIM_CORRECTION_KIND = "claim.correction" as const;
 export const DECISION_SUPERSESSION_KIND = "decision.supersession" as const;
 export const DISPUTE_REPORTED_EVENT_KIND = "dispute.reported" as const;
 export const DISPUTE_REVIEWED_EVENT_KIND = "dispute.reviewed" as const;
+export const RETENTION_EXTENDED_EVENT_KIND = "retention.extended" as const;
 export const COORDINATION_KINDS = [COORDINATION_KIND, COORDINATION_PROGRESS_KIND, COORDINATION_PANEL_KIND, DECISION_PROPOSAL_KIND, DECISION_POSITION_KIND, CLAIM_CORRECTION_KIND, DECISION_SUPERSESSION_KIND] as const;
 
 export type CoordinationKind = (typeof COORDINATION_KINDS)[number];
-export type CoordinationEventKind = CoordinationKind | typeof DISPUTE_REPORTED_EVENT_KIND | typeof DISPUTE_REVIEWED_EVENT_KIND;
+export type CoordinationEventKind = CoordinationKind | typeof DISPUTE_REPORTED_EVENT_KIND | typeof DISPUTE_REVIEWED_EVENT_KIND | typeof RETENTION_EXTENDED_EVENT_KIND;
 export type CoordinationStatus = "open" | "in_progress" | "blocked" | "done" | "withdrawn";
 
 export type CoordinationAuthority = "management" | "participant";

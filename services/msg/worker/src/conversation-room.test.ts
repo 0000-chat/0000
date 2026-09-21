@@ -602,6 +602,51 @@ test("purges a tombstone and safely repeats alarm delivery", async () => {
   expect((await durable.fetch(new Request("https://room/read?after=0"))).status).toBe(404);
 });
 
+test.serial("keeps an earlier delivery deadline when retention extends room lifetime", async () => {
+  const database = new Database(":memory:");
+  let now = 10_000;
+  const limits = { MSG_TEST_MODE: "1", MSG_TEST_ROOM_LIMITS: JSON.stringify({ inactivityTtlMs: 1_000 }) };
+  const { context, room: durable } = await room(database, () => now, limits);
+  const management = "owner-token";
+  const originalFetch = globalThis.fetch;
+  try {
+    await durable.fetch(request("/initialize", { management_hash: await hashCapability(management), initial: { content: "source", author: "a", display_name: "A", semantic_type: "message" } }));
+    const endpointResponse = await durable.fetch(request("/webhooks", { url: "https://receiver.example.com/retention-deadline" }));
+    const endpointId = (await endpointResponse.json() as { webhook: { id: string } }).webhook.id;
+    const posted = await durable.fetch(request("/messages", { input: { content: "queued", author: "b", display_name: "B", semantic_type: "message" } }));
+    const messageId = (await posted.json() as { message: { id: string } }).message.id;
+    const delivery = database.query("SELECT id FROM webhook_deliveries WHERE endpoint_id = ? AND message_id = ?").get(endpointId, messageId) as { id: string };
+    database.query("UPDATE webhook_deliveries SET due_at = ?, retry_expires_at = ? WHERE id = ?").run(10_999, 100_000, delivery.id);
+
+    now = 10_500;
+    const extension = await durable.fetch(new Request(`https://room/manage/retention?token=${management}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ client_retry_id: "retention-deadline", expires_at: new Date(11_500).toISOString() }) }));
+    expect(extension.status).toBe(201);
+    expect(context.alarmAt).toBe(10_999);
+
+    globalThis.fetch = (async () => new Response(null, { status: 500 })) as typeof fetch;
+    now = 11_000;
+    await durable.alarm();
+    expect(database.query("SELECT status, inactivity_expires_at FROM room_state WHERE singleton = 1").get()).toEqual({ status: "active", inactivity_expires_at: 11_500 });
+    expect(database.query("SELECT status FROM webhook_deliveries WHERE id = ?").get(delivery.id)).toEqual({ status: "retrying" });
+    expect(database.query("SELECT COUNT(*) AS count FROM coordination_events").get()).toEqual({ count: 1 });
+    expect(database.query("SELECT COUNT(*) AS count FROM coordination_retries").get()).toEqual({ count: 1 });
+
+    now = 11_501;
+    await durable.alarm();
+    expect(database.query("SELECT status FROM room_state WHERE singleton = 1").get()).toEqual({ status: "deleted" });
+    expect(database.query("SELECT COUNT(*) AS count FROM webhook_deliveries").get()).toEqual({ count: 0 });
+    expect(database.query("SELECT COUNT(*) AS count FROM coordination_events").get()).toEqual({ count: 0 });
+    expect(database.query("SELECT COUNT(*) AS count FROM coordination_retries").get()).toEqual({ count: 0 });
+
+    now = 11_500 + ROOM_LIMITS.tombstoneTtlMs + 1;
+    await durable.alarm();
+    expect(database.query("SELECT singleton FROM room_state WHERE singleton = 1").get()).toBeNull();
+  } finally {
+    globalThis.fetch = originalFetch;
+    database.close();
+  }
+});
+
 test("limits live sockets and emits only metadata frames", async () => {
   const { context, room: durable } = await room();
   const now = Date.now();

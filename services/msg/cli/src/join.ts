@@ -14,6 +14,7 @@ interface AgentMessage {
 interface AgentRepresentation {
   readonly conversation_url: string;
   readonly expires_at: string;
+  readonly retention?: { readonly expires_at: string; readonly inactivity_window_ms: number; readonly mode: "temporary"; readonly policy: "sliding_inactivity" };
   readonly has_more: boolean;
   readonly instructions: readonly string[];
   readonly latest_message: number;
@@ -93,6 +94,9 @@ function validateAgentRepresentation(value: unknown, conversationUrl: string, co
   if (!isRecord(value) || value.protocol_version !== 1 || value.conversation_url !== conversationUrl || typeof value.expires_at !== "string") {
     throw new Error("The msg service returned an invalid agent representation.");
   }
+  if (value.retention !== undefined && (!isRecord(value.retention) || value.retention.mode !== "temporary" || value.retention.policy !== "sliding_inactivity" || value.retention.expires_at !== value.expires_at || !isSafePositiveInteger(value.retention.inactivity_window_ms))) {
+    throw new Error("The msg service returned invalid retention metadata.");
+  }
   if (!Object.hasOwn(value, "next_after") || !Object.hasOwn(value, "has_more") || !Object.hasOwn(value, "through")) {
     throw new Error("The msg service does not support bounded reads; update the server before joining.");
   }
@@ -165,6 +169,7 @@ function renderJoin(value: AgentRepresentation, command: JoinCommand): string {
     `Conversation: ${value.conversation_url}`,
     `Latest message: ${value.latest_message}`,
     `Expires: ${value.expires_at}`,
+    ...(value.retention === undefined ? [] : [`Retention: ${value.retention.mode}; policy ${value.retention.policy}; inactivity window ${value.retention.inactivity_window_ms} ms.`]),
     "",
     `Bounded page: through ${value.through}; next_after ${value.next_after}; has_more ${value.has_more}`,
     ...(value.has_more

@@ -1,7 +1,7 @@
 import { ERROR_CODES, isStaleRevisionDetails, isStaleSequenceDetails, ProtocolError } from "./errors";
 import { parseCoordinationDispute, parseCoordinationDisputeReview, parseCoordinationProposal, parseCoordinationPublish, parseCoordinationRevision } from "./coordination-domain";
-import { hashCapability, parseBasedOnSequence, parseMessageInput, randomCapability, validateIdempotencyKey, validateRequestId } from "./room-domain";
-import { buildShareMessage, foregroundWait, PROTOCOL_VERSION, stripLegacyAbsoluteExpiry, type CoordinationAcceptedRecordInput, type CoordinationAcceptedRecordResponse, type CoordinationCorrectionDetailInput, type CoordinationCorrectionListInput, type CoordinationCorrectionListResponse, type CoordinationCorrectionResponse, type CoordinationDecisionDetailInput, type CoordinationDecisionListInput, type CoordinationDecisionListResponse, type CoordinationDecisionResponse, type CoordinationDisputeDetailInput, type CoordinationDisputeInput, type CoordinationDisputeListInput, type CoordinationDisputeListResponse, type CoordinationDisputeResponse, type CoordinationDisputeReviewInput, type CoordinationDisputeReviewResponse, type CoordinationListInput, type CoordinationOverviewResponse, type CoordinationPanelDetailInput, type CoordinationPanelHistoryInput, type CoordinationPanelHistoryResponse, type CoordinationPanelResponse, type CoordinationProposalDetailInput, type CoordinationProposalInput, type CoordinationProposalResponse, type CoordinationProposalRevisionInput, type CoordinationProposalListResponse, type CoordinationPublishInput, type CoordinationPublishResponse, type CoordinationPublicationInput, type CoordinationPublicationResponse, type CoordinationRequestDetailInput, type CoordinationRequestListResponse, type CoordinationRequestResponse, type CoordinationSupersessionListInput, type CoordinationSupersessionListResponse, type CreateRoomInput, type CreateRoomResponse, type CreateWebhookInput, type CreateWebhookResponse, type EnrollPushInput, type ExportRoomInput, type GetPostMessageInput, type GetPostMessageResponse, type ListWebhooksInput, type ListWebhooksResponse, type LiveRoomInput, type ManageRoomInput, type ManageRoomResponse, type ManageWebhookInput, type ManageWebhookResponse, type PostMessageInput, type PostMessageResponse, type PushEnrollmentInput, type PushEnrollmentResponse, type ReadMessageInput, type ReadMessageResponse, type ReadRoomInput, type ReadRoomResponse, type RedeliverWebhookInput, type RedeliverWebhookResponse, type RemovePushEnrollmentResponse, type RemoveWebhookInput, type RemoveWebhookResponse, type RotateWebhookSecretResponse, type RoomService } from "./protocol";
+import { hashCapability, parseBasedOnSequence, parseMessageInput, parseRetentionExtension, randomCapability, validateIdempotencyKey, validateRequestId } from "./room-domain";
+import { buildShareMessage, foregroundWait, PROTOCOL_VERSION, stripLegacyAbsoluteExpiry, type CoordinationAcceptedRecordInput, type CoordinationAcceptedRecordResponse, type CoordinationCorrectionDetailInput, type CoordinationCorrectionListInput, type CoordinationCorrectionListResponse, type CoordinationCorrectionResponse, type CoordinationDecisionDetailInput, type CoordinationDecisionListInput, type CoordinationDecisionListResponse, type CoordinationDecisionResponse, type CoordinationDisputeDetailInput, type CoordinationDisputeInput, type CoordinationDisputeListInput, type CoordinationDisputeListResponse, type CoordinationDisputeResponse, type CoordinationDisputeReviewInput, type CoordinationDisputeReviewResponse, type CoordinationListInput, type CoordinationOverviewResponse, type CoordinationPanelDetailInput, type CoordinationPanelHistoryInput, type CoordinationPanelHistoryResponse, type CoordinationPanelResponse, type CoordinationProposalDetailInput, type CoordinationProposalInput, type CoordinationProposalResponse, type CoordinationProposalRevisionInput, type CoordinationProposalListResponse, type CoordinationPublishInput, type CoordinationPublishResponse, type CoordinationPublicationInput, type CoordinationPublicationResponse, type CoordinationRequestDetailInput, type CoordinationRequestListResponse, type CoordinationRequestResponse, type CoordinationSupersessionListInput, type CoordinationSupersessionListResponse, type CreateRoomInput, type CreateRoomResponse, type CreateWebhookInput, type CreateWebhookResponse, type EnrollPushInput, type ExportRoomInput, type ExtendRetentionInput, type GetPostMessageInput, type GetPostMessageResponse, type ListWebhooksInput, type ListWebhooksResponse, type LiveRoomInput, type ManageRoomInput, type ManageRoomResponse, type ManageWebhookInput, type ManageWebhookResponse, type PostMessageInput, type PostMessageResponse, type PushEnrollmentInput, type PushEnrollmentResponse, type ReadMessageInput, type ReadMessageResponse, type ReadRoomInput, type ReadRoomResponse, type RedeliverWebhookInput, type RedeliverWebhookResponse, type RemovePushEnrollmentResponse, type RemoveWebhookInput, type RemoveWebhookResponse, type RetentionExtensionResponse, type RotateWebhookSecretResponse, type RoomService } from "./protocol";
 
 export interface RoomStub { fetch(request: Request): Promise<Response>; }
 export interface RoomNamespace { getByName(name: string): RoomStub; }
@@ -31,12 +31,13 @@ export class DurableRoomService implements RoomService {
     const manage_url = `${this.origin}/manage/${room}/${management}`;
     return {
       protocol_version: PROTOCOL_VERSION,
-      room: { id: room, created_at: value.created_at as string, expires_at: value.expires_at as string, protocol_version: PROTOCOL_VERSION },
+      room: { id: room, created_at: value.created_at as string, expires_at: value.expires_at as string, protocol_version: PROTOCOL_VERSION, ...(value.retention === undefined || value.retention === null ? {} : { retention: value.retention as CreateRoomResponse["retention"] }) },
       conversation_url,
       share_message: buildShareMessage(conversation_url),
       manage_url,
       latest_message: 1,
       expires_at: value.expires_at as string,
+      ...(value.retention === undefined || value.retention === null ? {} : { retention: value.retention as CreateRoomResponse["retention"] }),
       wait: foregroundWait(this.origin, room, 1),
     };
   }
@@ -128,6 +129,15 @@ export class DurableRoomService implements RoomService {
       };
     }
     return result;
+  }
+
+  async extendRetention(input: ExtendRetentionInput): Promise<RetentionExtensionResponse> {
+    if (input.body.kind !== "json") throw new ProtocolError(ERROR_CODES.invalidBody, "The retention extension must be JSON.", 400);
+    const body = parseRetentionExtension(input.body.value);
+    return responseJson(await this.room(input.room).fetch(jsonRequest(`/manage/retention?token=${encodeURIComponent(input.token)}`, {
+      client_retry_id: body.client_retry_id,
+      expires_at: body.expires_at,
+    }))) as unknown as RetentionExtensionResponse;
   }
 
   async createWebhook(input: CreateWebhookInput): Promise<CreateWebhookResponse> {

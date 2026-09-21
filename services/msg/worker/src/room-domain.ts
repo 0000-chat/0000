@@ -22,6 +22,23 @@ const maxClientMessageIdChars = 128;
 const maxClientMessageIdBytes = 512;
 const recordOverheadBytes = 64;
 const semanticTypes = new Set(["question", "proposal", "answer", "result", "status", "decision", "note", "message"]);
+const ABSOLUTE_ISO_TIMESTAMP = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,9}))?(Z|[+-]\d{2}:\d{2})$/u;
+
+export const RETENTION_MODE = "temporary" as const;
+export const RETENTION_POLICY = "sliding_inactivity" as const;
+
+export interface RetentionMetadata {
+  readonly expires_at: string;
+  readonly inactivity_window_ms: number;
+  readonly mode: typeof RETENTION_MODE;
+  readonly policy: typeof RETENTION_POLICY;
+}
+
+export interface RetentionExtensionInput {
+  readonly client_retry_id: string;
+  readonly expires_at: string;
+  readonly expires_at_ms: number;
+}
 
 export interface MessageInput {
   readonly author: string;
@@ -110,7 +127,10 @@ function validateNonnegativeInteger(value: string | null, field: "after" | "thro
 }
 
 export interface RoomEtagOptions {
+  readonly inactivityWindowMs?: number;
   readonly mode?: "bounded" | "unbounded";
+  readonly retentionMode?: string;
+  readonly retentionPolicy?: string;
   readonly coordinationCursor?: number;
   readonly expiresAt?: string;
   readonly limit?: number;
@@ -125,6 +145,7 @@ export function roomEtag(latestSequence: number, after: number, options?: RoomEt
     `coordination=${options.coordinationCursor ?? ""}`,
     `limit=${options.mode === "unbounded" ? "all" : options.limit ?? DEFAULT_READ_LIMIT}`,
     `published=${options.publishedRevision ?? ""}`,
+    `retention=${options.retentionMode ?? ""}-${options.retentionPolicy ?? ""}-${options.inactivityWindowMs ?? ""}`,
     `through=${options.mode === "unbounded" ? "all" : options.through ?? latestSequence}`,
     `expires=${options.expiresAt ?? ""}`,
   ].join("&");
@@ -145,6 +166,49 @@ export function validateRequestId(value: string): string {
   validateBoundedString(value, "request_id", maxClientMessageIdChars, maxClientMessageIdBytes);
   if (!value) throw invalidMessage("The request_id field is required.");
   return value;
+}
+
+/** Parse the private retention mutation and normalize an absolute instant. */
+export function parseRetentionExtension(value: unknown): RetentionExtensionInput {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw invalidMessage("The retention extension must be a JSON object.");
+  }
+  const record = value as Record<string, unknown>;
+  if (Object.keys(record).some((key) => key !== "client_retry_id" && key !== "expires_at") || Object.keys(record).length !== 2) {
+    throw invalidMessage("The retention extension must contain only client_retry_id and expires_at.");
+  }
+  if (typeof record.client_retry_id !== "string") throw invalidMessage("The client_retry_id field must be a string.");
+  const clientRetryId = validateRequestId(record.client_retry_id);
+  if (typeof record.expires_at !== "string") {
+    throw invalidMessage("The expires_at field must be an absolute ISO timestamp.");
+  }
+  const match = ABSOLUTE_ISO_TIMESTAMP.exec(record.expires_at);
+  if (!match) throw invalidMessage("The expires_at field must be an absolute ISO timestamp.");
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const hour = Number(match[4]);
+  const minute = Number(match[5]);
+  const second = Number(match[6]);
+  const zone = match[8]!;
+  const daysInMonth = month === 2 ? (year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0) ? 29 : 28) : [4, 6, 9, 11].includes(month) ? 30 : 31;
+  const offsetHours = zone === "Z" ? 0 : Number(zone.slice(1, 3));
+  const offsetMinutes = zone === "Z" ? 0 : Number(zone.slice(4, 6));
+  if (month < 1 || month > 12 || day < 1 || day > daysInMonth || hour > 23 || minute > 59 || second > 59 || offsetHours > 23 || offsetMinutes > 59) {
+    throw invalidMessage("The expires_at field must be a valid absolute ISO timestamp.");
+  }
+  const expiresAtMs = Date.parse(record.expires_at);
+  if (!Number.isSafeInteger(expiresAtMs)) throw invalidMessage("The expires_at field must be a valid absolute ISO timestamp.");
+  return { client_retry_id: clientRetryId, expires_at: new Date(expiresAtMs).toISOString(), expires_at_ms: expiresAtMs };
+}
+
+export function retentionMetadata(expiresAt: number | string, inactivityWindowMs: number): RetentionMetadata {
+  return {
+    expires_at: typeof expiresAt === "number" ? new Date(expiresAt).toISOString() : expiresAt,
+    inactivity_window_ms: inactivityWindowMs,
+    mode: RETENTION_MODE,
+    policy: RETENTION_POLICY,
+  };
 }
 
 export function messageStorageBytes(input: MessageInput, idempotencyKey?: string, generatedId?: string): number {

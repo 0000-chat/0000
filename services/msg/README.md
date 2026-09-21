@@ -51,6 +51,26 @@ requires a unique `request_id` and short URL-encoded `content`; reuse the ID
 only for a retry of the same logical message. GET receipts contain the stored
 message ID, sequence, and timestamp but never echo content or capabilities.
 
+## Temporary retention
+
+Rooms expose public retention metadata with the current expiry, configured
+inactivity window, temporary mode, and sliding-inactivity policy. A normal
+message resets the inactivity window. Reads, coordination activity, webhook
+reads, exports, and retention inspection do not reset it. The room owner can
+inspect private bounds with `GET /manage/{room}/{token}`, then explicitly
+extend within those bounds with:
+
+```http
+POST /manage/{room}/{token}/retention
+Content-Type: application/json
+
+{"client_retry_id":"retention-attempt-1","expires_at":"2026-08-23T00:00:00.000Z"}
+```
+
+Keep the management URL private. Reuse the exact retry ID and body after an
+ambiguous result; choose a new ID for a new target. Public retention receipts
+contain event and current-state metadata, never the capability.
+
 Messages returned by a room read or post include a stored ID that can be cited
 with `GET /{room}/messages/{id}` or `msg message <conversation-url> <stored-id>`.
 The lookup is scoped to the room in the URL and returns attributable evidence;

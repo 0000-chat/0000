@@ -77,6 +77,9 @@ Accept: application/json
   expect(AGENT_INSTRUCTIONS).toContain("approval_withdrawal");
   expect(AGENT_INSTRUCTIONS).toContain("/coordination/disputes/<report-id>");
   expect(AGENT_INSTRUCTIONS).toContain("decision.supersession");
+  expect(AGENT_INSTRUCTIONS).toContain("POST /manage/{room}/{token}/retention");
+  expect(AGENT_INSTRUCTIONS).toContain("retention <management-url> inspect");
+  expect(AGENT_INSTRUCTIONS).toContain("Normal messages reset the inactivity window");
 });
 
 test("renders root discovery in every supported representation", async () => {
@@ -189,6 +192,9 @@ test("documents responses for every OpenAPI operation", () => {
   expect(OPENAPI_DOCUMENT.paths["/{room}/post"].get.responses["200"]).toBeDefined();
   expect(OPENAPI_DOCUMENT.paths["/{room}/post"].get.responses["200"].content["application/json"].schema.required).toEqual(["accepted", "message", "protocol_version", "replayed", "request_id", "sequence"]);
   expect(OPENAPI_DOCUMENT.paths["/manage/{room}/{token}"].post.responses["200"]).toBeDefined();
+  expect(OPENAPI_DOCUMENT.paths["/manage/{room}/{token}"].get.responses["200"].content["application/json"].schema.properties.retention).toBeDefined();
+  expect(OPENAPI_DOCUMENT.paths["/manage/{room}/{token}/retention"].post.requestBody.content["application/json"].schema).toMatchObject({ additionalProperties: false, required: ["client_retry_id", "expires_at"] });
+  expect(OPENAPI_DOCUMENT.paths["/manage/{room}/{token}/retention"].post.responses["201"].content["application/json"].schema.properties.current_retention).toBeDefined();
   expect(OPENAPI_DOCUMENT.paths["/{room}/messages/{id}"].get.responses["200"]).toBeDefined();
   expect(OPENAPI_DOCUMENT.paths["/{room}/messages/{id}"].get.responses["200"].content["application/json"].schema.required).toEqual(["protocol_version", "conversation_url", "message", "latest_message", "expires_at"]);
   expect(OPENAPI_DOCUMENT.paths["/{room}"].get.responses["304"].description).toContain("normalized after cursor");
@@ -215,5 +221,5 @@ test("documents responses for every OpenAPI operation", () => {
   expect(OPENAPI_DOCUMENT.paths["/{room}/coordination/requests"].get.parameters.map((parameter) => parameter.name)).toEqual(["room", "after", "limit", "through", "owner_label", "status"]);
   expect(OPENAPI_DOCUMENT.paths["/{room}/coordination/requests"].get.description).toContain("not an authenticated inbox");
   expect(OPENAPI_DOCUMENT.paths["/manage/{room}/{token}/coordination/publish"].post.description).toContain("Never expose this URL");
-  expect(Object.keys(OPENAPI_DOCUMENT.paths).sort()).toEqual(["/", "/healthz", "/manage/{room}/{token}", "/manage/{room}/{token}/coordination/disputes/{report_id}/review", "/manage/{room}/{token}/coordination/publish", "/{room}", "/{room}/agent", "/{room}/coordination", "/{room}/coordination/corrections", "/{room}/coordination/corrections/{correction_id}", "/{room}/coordination/decisions", "/{room}/coordination/decisions/{decision_id}", "/{room}/coordination/decisions/{decision_id}/records/{accepted_record_id}", "/{room}/coordination/disputes", "/{room}/coordination/disputes/{report_id}", "/{room}/coordination/panel", "/{room}/coordination/panel/history", "/{room}/coordination/proposals", "/{room}/coordination/proposals/{id}", "/{room}/coordination/proposals/{id}/revisions", "/{room}/coordination/proposals/{id}/revisions/{revision}", "/{room}/coordination/publications/{published_revision}", "/{room}/coordination/requests", "/{room}/coordination/requests/{request_id}", "/{room}/coordination/supersessions", "/{room}/export.json", "/{room}/export.md", "/{room}/live", "/{room}/messages/{id}", "/{room}/post", "/{room}/webhooks", "/{room}/webhooks/{id}", "/{room}/webhooks/{id}/deliveries/{event_id}/redeliver", "/{room}/webhooks/{id}/disable", "/{room}/webhooks/{id}/enable", "/{room}/webhooks/{id}/rotate-secret"]);
+  expect(Object.keys(OPENAPI_DOCUMENT.paths).sort()).toEqual(["/", "/healthz", "/manage/{room}/{token}", "/manage/{room}/{token}/coordination/disputes/{report_id}/review", "/manage/{room}/{token}/coordination/publish", "/manage/{room}/{token}/retention", "/{room}", "/{room}/agent", "/{room}/coordination", "/{room}/coordination/corrections", "/{room}/coordination/corrections/{correction_id}", "/{room}/coordination/decisions", "/{room}/coordination/decisions/{decision_id}", "/{room}/coordination/decisions/{decision_id}/records/{accepted_record_id}", "/{room}/coordination/disputes", "/{room}/coordination/disputes/{report_id}", "/{room}/coordination/panel", "/{room}/coordination/panel/history", "/{room}/coordination/proposals", "/{room}/coordination/proposals/{id}", "/{room}/coordination/proposals/{id}/revisions", "/{room}/coordination/proposals/{id}/revisions/{revision}", "/{room}/coordination/publications/{published_revision}", "/{room}/coordination/requests", "/{room}/coordination/requests/{request_id}", "/{room}/coordination/supersessions", "/{room}/export.json", "/{room}/export.md", "/{room}/live", "/{room}/messages/{id}", "/{room}/post", "/{room}/webhooks", "/{room}/webhooks/{id}", "/{room}/webhooks/{id}/deliveries/{event_id}/redeliver", "/{room}/webhooks/{id}/disable", "/{room}/webhooks/{id}/enable", "/{room}/webhooks/{id}/rotate-secret"]);
 });

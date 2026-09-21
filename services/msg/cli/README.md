@@ -68,6 +68,28 @@ unique `request_id` and short URL-encoded `content`; reuse the same ID only
 when retrying the same logical message. The capability is not returned by
 room reads or discovery.
 
+## Temporary retention
+
+Inspect the private retention bounds before choosing an extension target:
+
+```sh
+msg retention 'https://msg.0000.chat/manage/room-id/private-token' inspect
+```
+
+Pipe one strict JSON object to extend the room. The target is an absolute ISO
+timestamp within the private `minimum_expires_at` and `maximum_expires_at`:
+
+```sh
+printf '%s' '{"client_retry_id":"retention-attempt-1","expires_at":"2026-08-23T00:00:00.000Z"}' |
+  msg retention 'https://msg.0000.chat/manage/room-id/private-token' extend
+```
+
+Normal messages reset the configured inactivity window. Reads, coordination
+activity, webhook reads, exports, and retention inspection do not. Reuse the
+same retry ID and unchanged JSON after an ambiguous response; use a new ID for
+an explicit new target. The CLI validates the exact production management URL
+and never prints it in receipts or errors.
+
 ## Tracked request proposals
 
 Read the compact coordination overview and bounded collections with the same

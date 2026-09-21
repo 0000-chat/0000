@@ -477,14 +477,15 @@ test("refreshes after a reconnect ready frame advances the room", async () => {
   const saved = Object.fromEntries(["WebSocket", "addEventListener", "clearTimeout", "document", "fetch", "localStorage", "location", "matchMedia", "navigator", "scrollTo", "setTimeout"].map((key) => [key, globals[key]]));
   const box = { innerHTML: "", replaceChildren: () => {} };
   const expiry = { textContent: "" };
+  const retention = { textContent: "" };
   const field = { value: "", focus: () => {} };
   const sockets: Array<{ onclose: (() => void) | null; onerror: (() => void) | null; onmessage: ((event: { data: string }) => void) | null; onopen: (() => void) | null; readyState: number }> = [];
   const timers: Array<() => void> = [];
   let reads = 0;
 
   try {
-    globals.document = { body: { dataset: { room: "race" } }, documentElement: { dataset: {}, scrollHeight: 0 }, querySelector: (selector: string) => ({ "#messages": box, "#expiry": expiry, "#reply": field }[selector] ?? null), querySelectorAll: () => [] };
-    globals.fetch = async () => ({ ok: true, json: async () => ({ latest_message: ++reads, messages: [], expires_at: reads === 1 ? "2026-08-10T00:00:00.000Z" : "2026-08-11T00:00:00.000Z" }) });
+    globals.document = { body: { dataset: { room: "race" } }, documentElement: { dataset: {}, scrollHeight: 0 }, querySelector: (selector: string) => ({ "#messages": box, "#expiry": expiry, "#reply": field }[selector] ?? null), querySelectorAll: (selector: string) => selector === ".js-retention" ? [retention] : [] };
+    globals.fetch = async () => ({ ok: true, json: async () => ({ latest_message: ++reads, messages: [], expires_at: reads === 1 ? "2026-08-10T00:00:00.000Z" : "2026-08-11T00:00:00.000Z", retention: { inactivity_window_ms: 1000, mode: "temporary", policy: "sliding_inactivity" } }) });
     globals.WebSocket = class { onclose = null; onerror = null; onmessage = null; onopen = null; readyState = 0; constructor() { sockets.push(this); } };
     globals.addEventListener = () => {};
     globals.clearTimeout = () => {};
@@ -506,7 +507,9 @@ test("refreshes after a reconnect ready frame advances the room", async () => {
     await Promise.resolve();
 
     expect(reads).toBe(2);
-    expect(expiry.textContent).toBe(`Deletes ${new Date("2026-08-11T00:00:00.000Z").toLocaleString()}`);
+    expect(expiry.textContent).toBe(`Expires ${new Date("2026-08-11T00:00:00.000Z").toLocaleString()}`);
+    expect(retention.textContent).toContain("1000 ms inactivity window");
+    expect(retention.textContent).toContain("sliding_inactivity");
   } finally {
     Object.assign(globals, saved);
   }
@@ -551,7 +554,7 @@ test("ignores an older load response after a newer refresh completes", async () 
     await Promise.resolve();
     await Promise.resolve();
 
-    expect(expiry.textContent).toBe(`Deletes ${new Date("2026-08-11T00:00:00.000Z").toLocaleString()}`);
+    expect(expiry.textContent).toBe(`Expires ${new Date("2026-08-11T00:00:00.000Z").toLocaleString()}`);
   } finally {
     Object.assign(globals, saved);
   }

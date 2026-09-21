@@ -1,8 +1,8 @@
 import { DurableObject } from "cloudflare:workers";
 
 import { ERROR_CODES, isStaleRevisionDetails, isStaleSequenceDetails, ProtocolError, type StaleRevisionDetails, type StaleSequenceDetails } from "./errors";
-import { CLAIM_CORRECTION_KIND, coordinationMutationFingerprint, coordinationStorageBytes, COORDINATION_DEFAULT_LIMIT, COORDINATION_KIND, COORDINATION_MAX_LIMIT, COORDINATION_PANEL_KIND, COORDINATION_PROGRESS_KIND, DECISION_POSITION_KIND, DECISION_PROPOSAL_KIND, DECISION_SUPERSESSION_KIND, DISPUTE_REPORTED_EVENT_KIND, DISPUTE_REVIEWED_EVENT_KIND, MAX_COORDINATION_PAGE_BYTES, parseCoordinationClaimPath, parseCoordinationDispute, parseCoordinationDisputeReview, parseCoordinationListSelectors, parseCoordinationProposal, parseCoordinationPublish, parseCoordinationRevision, type ClaimCorrectionBody, type CoordinationClaimTarget, type CoordinationDecisionApproval, type CoordinationDisputeInput, type CoordinationDisputeReviewInput, type CoordinationEventKind, type CoordinationKind, type CoordinationPanelBody, type CoordinationProgressBody, type CoordinationProposalBody, type CoordinationProposalInput, type CoordinationPublishInput, type CoordinationRequestBody, type CoordinationStatus, type DecisionPositionBody, type DecisionProposalBody, type DecisionSupersessionBody } from "./coordination-domain";
-import { byteLength, compareCapabilities, DEFAULT_READ_LIMIT, MAX_READ_MESSAGE_BYTES, messageStorageBytes, ROOM_LIMITS, validateBasedOnSequence, validateBoundedCursor, validateCursor, validateReadLimit, validateRequestId, validateThrough } from "./room-domain";
+import { CLAIM_CORRECTION_KIND, coordinationMutationFingerprint, coordinationStorageBytes, COORDINATION_DEFAULT_LIMIT, COORDINATION_KIND, COORDINATION_MAX_LIMIT, COORDINATION_PANEL_KIND, COORDINATION_PROGRESS_KIND, DECISION_POSITION_KIND, DECISION_PROPOSAL_KIND, DECISION_SUPERSESSION_KIND, DISPUTE_REPORTED_EVENT_KIND, DISPUTE_REVIEWED_EVENT_KIND, MAX_COORDINATION_PAGE_BYTES, parseCoordinationClaimPath, parseCoordinationDispute, parseCoordinationDisputeReview, parseCoordinationListSelectors, parseCoordinationProposal, parseCoordinationPublish, parseCoordinationRevision, RETENTION_EXTENDED_EVENT_KIND, type ClaimCorrectionBody, type CoordinationClaimTarget, type CoordinationDecisionApproval, type CoordinationDisputeInput, type CoordinationDisputeReviewInput, type CoordinationEventKind, type CoordinationKind, type CoordinationPanelBody, type CoordinationProgressBody, type CoordinationProposalBody, type CoordinationProposalInput, type CoordinationPublishInput, type CoordinationRequestBody, type CoordinationStatus, type DecisionPositionBody, type DecisionProposalBody, type DecisionSupersessionBody } from "./coordination-domain";
+import { byteLength, compareCapabilities, DEFAULT_READ_LIMIT, MAX_READ_MESSAGE_BYTES, messageStorageBytes, parseRetentionExtension, retentionMetadata, ROOM_LIMITS, validateBasedOnSequence, validateBoundedCursor, validateCursor, validateReadLimit, validateRequestId, validateThrough } from "./room-domain";
 import type { MessageInput } from "./room-domain";
 import { PROTOCOL_VERSION, type CoordinationAcceptedRecord, type CoordinationAcceptedRecordAnnotations, type CoordinationCorrection, type CoordinationDecision, type CoordinationDecisionApprovalEvidence, type CoordinationDecisionHistoryEntry, type CoordinationDecisionPosition, type CoordinationDisputeReport, type CoordinationDisputeReview, type CoordinationEvidenceItem, type CoordinationPanel, type CoordinationPanelHistoryEntry, type CoordinationProgress, type CoordinationProposal, type CoordinationProposalSummary, type CoordinationRequest, type CoordinationRequestSummary, type CoordinationSourceMessage, type CoordinationSupersession, type CreateWebhookResponse, type ManageWebhookResponse, type RedeliverWebhookResponse, type RotateWebhookSecretResponse, type WebhookAttemptMetadata, type WebhookDeliveryMetadata, type WebhookSummary } from "./protocol";
 import { CURRENT_ROOM_SCHEMA_VERSION, migrateRoomSchema } from "./room-schema";
@@ -431,6 +431,7 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
       if (request.method === "GET" && requestMatch) return await this.readCoordinationRequest(decodePathSegment(requestMatch[1]!), url);
       if (request.method === "POST" && url.pathname === "/coordination/publish") return await this.publishCoordination(request);
       if (request.method === "POST" && url.pathname === "/messages") return await this.post(request);
+      if (request.method === "POST" && url.pathname === "/manage/retention") return await this.manageRetention(request);
       if (request.method === "GET" && url.pathname === "/manage") return await this.manage(request, false);
       if (request.method === "DELETE" && url.pathname === "/manage") return await this.manage(request, true);
       if (request.method === "POST" && url.pathname === "/manage") return await this.managePost(request);
@@ -545,7 +546,7 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
       return { created: true, message: this.messageBySequence(1), state: this.requireState() };
     });
     await this.schedule();
-    return this.json({ ...this.toMessage(result.message), created: result.created, created_at: iso(result.state.created_at), expires_at: iso(result.state.inactivity_expires_at) });
+    return this.json({ ...this.toMessage(result.message), created: result.created, created_at: iso(result.state.created_at), expires_at: iso(result.state.inactivity_expires_at), retention: retentionMetadata(result.state.inactivity_expires_at, this.limits.inactivityTtlMs) });
   }
 
   private async read(url: URL): Promise<Response> {
@@ -555,7 +556,7 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
     const after = bounded ? validateBoundedCursor(url.searchParams.get("after"), "after") : validateCursor(url.searchParams.get("after"));
     if (!bounded) {
       const messages = rows<StoredMessage>(this.ctx.storage.sql.exec("SELECT * FROM messages WHERE sequence > ? ORDER BY sequence ASC", after)).map((message) => this.toMessage(message));
-      return this.json({ protocol_version: PROTOCOL_VERSION, messages, latest_message: state.next_sequence - 1, expires_at: iso(state.inactivity_expires_at), coordination_cursor: state.coordination_cursor, published_revision: state.published_revision, coordination_overview: this.coordinationOverviewValue(state), access_warning: "All authors and display names are self-declared and unverified." });
+      return this.json({ protocol_version: PROTOCOL_VERSION, messages, latest_message: state.next_sequence - 1, expires_at: iso(state.inactivity_expires_at), retention: retentionMetadata(state.inactivity_expires_at, this.limits.inactivityTtlMs), coordination_cursor: state.coordination_cursor, published_revision: state.published_revision, coordination_overview: this.coordinationOverviewValue(state), access_warning: "All authors and display names are self-declared and unverified." });
     }
 
     const limit = validateReadLimit(url.searchParams.get("limit")) ?? DEFAULT_READ_LIMIT;
@@ -593,6 +594,7 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
       messages,
       latest_message: latest,
       expires_at: iso(state.inactivity_expires_at),
+      retention: retentionMetadata(state.inactivity_expires_at, this.limits.inactivityTtlMs),
       coordination_cursor: state.coordination_cursor,
       published_revision: state.published_revision,
       coordination_overview: this.coordinationOverviewValue(state),
@@ -617,6 +619,7 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
       message: this.toMessage(message),
       latest_message: state.next_sequence - 1,
       expires_at: iso(state.inactivity_expires_at),
+      retention: retentionMetadata(state.inactivity_expires_at, this.limits.inactivityTtlMs),
       published_revision: state.published_revision,
     });
   }
@@ -1942,17 +1945,133 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
 
   private async manage(request: Request, deleteRoom: boolean): Promise<Response> {
     const token = new URL(request.url).searchParams.get("token") ?? "";
-    const state = this.state();
-    if (!state || !state.management_hash || !compareCapabilities(await hashToken(token), state.management_hash)) {
-      throw new ProtocolError(ERROR_CODES.notFound, "The requested resource was not found.", 404);
-    }
+    const managementHash = await hashToken(token);
     if (deleteRoom) {
+      this.ctx.storage.transactionSync(() => {
+        const current = this.requireState();
+        if (!current.management_hash || !compareCapabilities(managementHash, current.management_hash)) throw new ProtocolError(ERROR_CODES.notFound, "The requested resource was not found.", 404);
+      });
       await this.expire(this.now(), "Conversation deleted");
       const deleted = this.requireState();
       await this.schedule();
       return this.json({ protocol_version: PROTOCOL_VERSION, deleted: true, expires_at: iso(deleted.tombstone_expires_at!) });
     }
-    return this.json({ protocol_version: PROTOCOL_VERSION, expires_at: iso(state.inactivity_expires_at), get_post_enabled: state.get_post_enabled === 1 });
+    const now = this.now();
+    const result = this.ctx.storage.transactionSync(() => {
+      const state = this.requireState();
+      if (!state.management_hash || !compareCapabilities(managementHash, state.management_hash)) throw new ProtocolError(ERROR_CODES.notFound, "The requested resource was not found.", 404);
+      if (state.status !== "active" || now >= state.inactivity_expires_at) return { expired: true as const };
+      const maximum = Math.max(state.inactivity_expires_at, now + this.limits.inactivityTtlMs);
+      return { expired: false as const, maximum, state };
+    });
+    if (result.expired) {
+      await this.expire(now, "Conversation expired");
+      throw new ProtocolError(ERROR_CODES.gone, "The conversation has expired.", 410);
+    }
+    return this.json({
+      protocol_version: PROTOCOL_VERSION,
+      expires_at: iso(result.state.inactivity_expires_at),
+      get_post_enabled: result.state.get_post_enabled === 1,
+      maximum_expires_at: iso(result.maximum),
+      minimum_expires_at: iso(result.state.inactivity_expires_at),
+      retention: retentionMetadata(result.state.inactivity_expires_at, this.limits.inactivityTtlMs),
+      server_now: iso(now),
+    });
+  }
+
+  private async manageRetention(request: Request): Promise<Response> {
+    const url = new URL(request.url);
+    const token = url.searchParams.get("token") ?? "";
+    const input = parseRetentionExtension(await request.json());
+    const managementHash = await hashToken(token);
+    const now = this.now();
+    const result = this.commitRetentionExtension(input, managementHash, now);
+    if (result.expired) {
+      await this.expire(now, "Conversation expired");
+      throw new ProtocolError(ERROR_CODES.gone, "The conversation has expired.", 410);
+    }
+    await this.schedule();
+    return this.json(result.response, result.replayed ? 200 : 201);
+  }
+
+  private commitRetentionExtension(input: ReturnType<typeof parseRetentionExtension>, managementHash: string, now: number) {
+    return this.ctx.storage.transactionSync(() => {
+      const state = this.requireState();
+      if (!state.management_hash || !compareCapabilities(managementHash, state.management_hash)) throw new ProtocolError(ERROR_CODES.notFound, "The requested resource was not found.", 404);
+      if (state.status !== "active" || now >= state.inactivity_expires_at) return { expired: true as const };
+
+      const operation = "retention.extend";
+      const eventOperation = "retention.extended";
+      const fingerprint = coordinationMutationFingerprint({ client_retry_id: input.client_retry_id, expires_at: input.expires_at });
+      const existingRetry = this.coordinationRetry(operation, input.client_retry_id);
+      if (existingRetry) {
+        if (existingRetry.fingerprint !== fingerprint) throw new ProtocolError(ERROR_CODES.conflict, "The retention retry identifier is already used for another mutation.", 409);
+        const original = JSON.parse(existingRetry.receipt) as Record<string, unknown>;
+        return {
+          expired: false as const,
+          replayed: true as const,
+          response: {
+            ...original,
+            current_coordination_cursor: state.coordination_cursor,
+            current_expires_at: iso(state.inactivity_expires_at),
+            current_latest_message: state.next_sequence - 1,
+            current_retention: retentionMetadata(state.inactivity_expires_at, this.limits.inactivityTtlMs),
+            replayed: true,
+          },
+        };
+      }
+
+      const minimum = state.inactivity_expires_at;
+      const maximum = Math.max(minimum, now + this.limits.inactivityTtlMs);
+      if (input.expires_at_ms < minimum || input.expires_at_ms > maximum) {
+        throw new ProtocolError(ERROR_CODES.invalidBody, "The requested expiry must be within the room's current retention bounds.", 400);
+      }
+      const cursor = state.coordination_cursor + 1;
+      const eventId = crypto.randomUUID();
+      const eventBody = JSON.stringify({
+        configured_inactivity_window_ms: this.limits.inactivityTtlMs,
+        new_expires_at: input.expires_at,
+        old_expires_at: iso(minimum),
+      });
+      const eventBytes = coordinationStorageBytes({
+        actor_label: "Management capability holder",
+        authority_class: "management",
+        base_revision: state.published_revision,
+        body: eventBody,
+        event_id: eventId,
+        kind: RETENTION_EXTENDED_EVENT_KIND,
+        operation: eventOperation,
+        source_message_ids: [],
+      }, eventId);
+      const response = {
+        client_retry_id: input.client_retry_id,
+        coordination_cursor: cursor,
+        event_id: eventId,
+        expires_at: input.expires_at,
+        inactivity_window_ms: this.limits.inactivityTtlMs,
+        latest_message: state.next_sequence - 1,
+        maximum_expires_at: iso(maximum),
+        minimum_expires_at: iso(minimum),
+        observed_base_revision: state.published_revision,
+        old_expires_at: iso(minimum),
+        protocol_version: PROTOCOL_VERSION,
+        replayed: false,
+        requested_expires_at: input.expires_at,
+        result_expires_at: input.expires_at,
+        retention: retentionMetadata(input.expires_at, this.limits.inactivityTtlMs),
+        server_now: iso(now),
+      };
+      const receiptText = JSON.stringify(response);
+      const retryBytes = coordinationStorageBytes({ operation, retry_id: input.client_retry_id, fingerprint, receipt: receiptText });
+      this.ensureCoordinationCapacity(state, eventBytes + retryBytes);
+      this.ctx.storage.sql.exec(
+        "INSERT INTO coordination_events (cursor, event_id, operation, proposal_id, proposal_revision, request_id, kind, actor_label, authority_class, source_message_ids, base_revision, resulting_revision, body, created_at, byte_count) VALUES (?, ?, ?, NULL, NULL, NULL, ?, ?, 'management', ?, ?, NULL, ?, ?, ?)",
+        cursor, eventId, eventOperation, RETENTION_EXTENDED_EVENT_KIND, "Management capability holder", JSON.stringify([]), state.published_revision, eventBody, now, eventBytes,
+      );
+      this.ctx.storage.sql.exec("INSERT INTO coordination_retries (operation, retry_id, fingerprint, receipt, created_at, byte_count) VALUES (?, ?, ?, ?, ?, ?)", operation, input.client_retry_id, fingerprint, receiptText, now, retryBytes);
+      this.ctx.storage.sql.exec("UPDATE room_state SET inactivity_expires_at = ?, coordination_cursor = ?, total_bytes = total_bytes + ? WHERE singleton = 1", input.expires_at_ms, cursor, eventBytes + retryBytes);
+      return { expired: false as const, replayed: false as const, response };
+    });
   }
 
   private async managePost(request: Request): Promise<Response> {

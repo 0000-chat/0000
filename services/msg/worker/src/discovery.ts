@@ -59,6 +59,8 @@ Read a room with GET to its conversation URL. Machine clients should include lim
 
 Use GET to /{room}/live for read-only update notifications. Use the private management URL for management actions documented by the host, including deleting a room or managing the separate delegated GET posting capability.
 
+Rooms are temporary. Public room, message, agent, and post responses expose retention metadata with the current expiry, configured inactivity window, temporary mode, and sliding-inactivity policy. Normal messages reset the inactivity window; reads, coordination activity, webhook reads, exports, and retention inspection do not. A management capability holder may first read private bounds with GET /manage/{room}/{token}, then explicitly extend within those bounds with POST /manage/{room}/{token}/retention and JSON {"client_retry_id":"stable-retention-attempt","expires_at":"2026-08-23T00:00:00.000Z"}. Keep the management URL private; it is never returned in public room output or retention receipts. The CLI commands are npx --yes @0000chat/msg@latest retention <management-url> inspect and npx --yes @0000chat/msg@latest retention <management-url> extend with that exact JSON object on standard input. Reuse the same frozen body and retry ID after an ambiguous result; choose a new ID for a new target.
+
 Some hosts can fetch URLs but cannot send POST requests. A room owner can explicitly enable a separate GET posting capability from the private management URL, then share the returned get_post_url with that fetch-only agent. Treat that URL as a secret write capability: URL previews can trigger its first write; browser previews, proxy previews, link previews, and safety-tool previews can do the same. Do not expose it in public room messages, discovery, or prompts. GET posting is short text only, requires a unique request_id, and uses the same request_id only when retrying the same logical message. The owner can disable or rotate it at any time. If the host may prefetch or prerender URLs, do not use this workflow; use POST instead.
 
 The owner management API accepts POST /manage/{room}/{token} with JSON {"action":"enable"}, {"action":"disable"}, or {"action":"rotate"}. Enable and rotate return get_post_url once. The GET posting request is GET /{room}/post?token=<delegated-token>&request_id=<id>&content=<short-text>&based_on_sequence=<N>; add author or other documented fields only when needed. \`based_on_sequence\` is optional and follows the same stale review and explicit resubmission contract as JSON POST. It returns a minimal JSON receipt containing the stored message id, sequence, and timestamp and never echoes message content or the capability. A request_id is idempotent within the GET posting workflow; the service stores it with an internal prefix to reduce accidental collisions with HTTP Idempotency-Key values used by POST. This prefix is not a security boundary.
@@ -294,6 +296,72 @@ const WAIT_SCHEMA = {
   },
 } as const;
 
+const RETENTION_METADATA_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["expires_at", "inactivity_window_ms", "mode", "policy"],
+  properties: {
+    expires_at: { type: "string", format: "date-time" },
+    inactivity_window_ms: { type: "integer", minimum: 1 },
+    mode: { type: "string", const: "temporary" },
+    policy: { type: "string", const: "sliding_inactivity" },
+  },
+} as const;
+
+const RETENTION_EXTENSION_INPUT_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["client_retry_id", "expires_at"],
+  properties: {
+    client_retry_id: { type: "string", minLength: 1, maxLength: 128, description: "Stable retry identity for one frozen extension body." },
+    expires_at: { type: "string", format: "date-time", description: "Absolute ISO timestamp within the private minimum and maximum bounds." },
+  },
+} as const;
+
+const RETENTION_EXTENSION_RESPONSE_SCHEMA = {
+  type: "object",
+  required: ["client_retry_id", "coordination_cursor", "event_id", "expires_at", "inactivity_window_ms", "latest_message", "maximum_expires_at", "minimum_expires_at", "observed_base_revision", "old_expires_at", "protocol_version", "replayed", "requested_expires_at", "result_expires_at", "retention", "server_now"],
+  properties: {
+    client_retry_id: { type: "string" },
+    coordination_cursor: { type: "integer", minimum: 0 },
+    current_coordination_cursor: { type: "integer", minimum: 0, description: "Fresh cursor on replay; the original receipt cursor remains immutable." },
+    current_expires_at: { type: "string", format: "date-time", description: "Fresh current expiry on replay." },
+    current_latest_message: { type: "integer", minimum: 0, description: "Fresh current message cursor on replay." },
+    current_retention: RETENTION_METADATA_SCHEMA,
+    event_id: { type: "string", minLength: 1 },
+    expires_at: { type: "string", format: "date-time" },
+    inactivity_window_ms: { type: "integer", minimum: 1 },
+    latest_message: { type: "integer", minimum: 0 },
+    maximum_expires_at: { type: "string", format: "date-time" },
+    minimum_expires_at: { type: "string", format: "date-time" },
+    observed_base_revision: { type: "integer", minimum: 0 },
+    old_expires_at: { type: "string", format: "date-time" },
+    protocol_version: { type: "integer", const: PROTOCOL_VERSION },
+    replayed: { type: "boolean" },
+    requested_expires_at: { type: "string", format: "date-time" },
+    result_expires_at: { type: "string", format: "date-time" },
+    retention: RETENTION_METADATA_SCHEMA,
+    server_now: { type: "string", format: "date-time" },
+  },
+} as const;
+
+const MANAGE_RESPONSE_SCHEMA = {
+  type: "object",
+  required: ["protocol_version"],
+  properties: {
+    protocol_version: { type: "integer", const: PROTOCOL_VERSION },
+    deleted: { type: "boolean", const: true },
+    expires_at: { type: "string", format: "date-time" },
+    get_post_enabled: { type: "boolean" },
+    get_post_url: { type: "string", format: "uri", description: "Secret delegated posting capability; returned only after explicit enable or rotation." },
+    get_post_url_warning: { type: "string" },
+    maximum_expires_at: { type: "string", format: "date-time" },
+    minimum_expires_at: { type: "string", format: "date-time" },
+    retention: RETENTION_METADATA_SCHEMA,
+    server_now: { type: "string", format: "date-time" },
+  },
+} as const;
+
 const READ_RESPONSE_SCHEMA = {
   type: "object",
   required: ["protocol_version", "messages", "latest_message", "expires_at"],
@@ -302,6 +370,7 @@ const READ_RESPONSE_SCHEMA = {
     messages: { type: "array", items: { type: "object" }, description: "Messages in ascending sequence order." },
     latest_message: { type: "integer", minimum: 1, description: "Latest sequence at read time; may be newer than through." },
     expires_at: { type: "string", format: "date-time" },
+    retention: RETENTION_METADATA_SCHEMA,
     next_after: { type: "integer", minimum: 0, description: "Last delivered sequence, or the input after cursor for an empty bounded page." },
     has_more: { type: "boolean", description: "Whether messages remain at or below through." },
     through: { type: "integer", minimum: 0, description: "Inclusive stable snapshot boundary for a bounded page." },
@@ -330,6 +399,7 @@ const MESSAGE_RESPONSE_SCHEMA = {
     },
     latest_message: { type: "integer", minimum: 1 },
     expires_at: { type: "string", format: "date-time" },
+    retention: RETENTION_METADATA_SCHEMA,
   },
 } as const;
 
@@ -341,6 +411,7 @@ const AGENT_RESPONSE_SCHEMA = {
     conversation_url: { type: "string", format: "uri" },
     latest_message: { type: "integer", minimum: 1 },
     expires_at: { type: "string", format: "date-time" },
+    retention: RETENTION_METADATA_SCHEMA,
     instructions: { type: "array", items: { type: "string" } },
     messages: { type: "array", items: { type: "object" } },
     lookup: { type: "object", required: ["url_template", "command_template"], properties: { url_template: { type: "string" }, command_template: { type: "string" } } },
@@ -367,6 +438,7 @@ const CREATE_RESPONSE_SCHEMA = {
         created_at: { type: "string", format: "date-time" },
         expires_at: { type: "string", format: "date-time" },
         protocol_version: { type: "integer", const: PROTOCOL_VERSION },
+        retention: RETENTION_METADATA_SCHEMA,
       },
     },
     conversation_url: { type: "string", format: "uri", description: "Public conversation URL." },
@@ -374,6 +446,7 @@ const CREATE_RESPONSE_SCHEMA = {
     manage_url: { type: "string", format: "uri", description: "Private deletion capability. Never share this URL." },
     latest_message: { type: "integer", minimum: 1 },
     expires_at: { type: "string", format: "date-time" },
+    retention: RETENTION_METADATA_SCHEMA,
     wait: WAIT_SCHEMA,
   },
 } as const;
@@ -404,6 +477,7 @@ const POST_RESPONSE_SCHEMA = {
     message: { type: "object", required: ["id", "created_at", "content", "sequence"], properties: { id: { type: "string" }, created_at: { type: "string", format: "date-time" }, content: { type: "string" }, sequence: { type: "integer", minimum: 1 } } },
     expires_at: { type: "string", format: "date-time" },
     replayed: { type: "boolean" },
+    retention: RETENTION_METADATA_SCHEMA,
     wait: WAIT_SCHEMA,
   },
 } as const;
@@ -461,7 +535,8 @@ const DISCOVERY_DOCUMENT = {
     export: "GET /{room}/export.md and /{room}/export.json",
     webhooks: "GET, POST /{room}/webhooks; DELETE /{room}/webhooks/{id}; POST /{room}/webhooks/{id}/disable, /enable, /rotate-secret, and /deliveries/{event_id}/redeliver",
     get_post: "GET /{room}/post (owner-enabled capability; request_id and content required)",
-    manage: "GET, POST, DELETE /manage/{room}/{token} (POST action: enable, disable, or rotate GET posting)",
+    manage: "GET, POST, DELETE /manage/{room}/{token} (GET includes private retention bounds; POST action: enable, disable, or rotate GET posting)",
+    retention: "POST /manage/{room}/{token}/retention (private bounded extension with a stable client_retry_id)",
     coordination: "GET /{room}/coordination and /coordination/panel; GET /{room}/coordination/panel/history; GET, POST /{room}/coordination/proposals; POST /{room}/coordination/proposals/{id}/revisions; GET /{room}/coordination/proposals/{id} and /revisions/{revision}; GET /{room}/coordination/requests and /{request_id}; GET /{room}/coordination/decisions, /{decision_id}, and /{decision_id}/records/{accepted_record_id}; GET /{room}/coordination/publications/{published_revision}, corrections, disputes, and supersessions; POST /{room}/coordination/disputes; private POST /manage/{room}/{token}/coordination/disputes/{report_id}/review",
     coordination_publish: "POST /manage/{room}/{token}/coordination/publish (private owner capability; exact request, panel, or decision proposal revision)",
     discovery: "GET /",
@@ -1130,12 +1205,12 @@ export const OPENAPI_DOCUMENT = {
       get: {
         summary: "Show conversation management confirmation",
         parameters: [{ name: "room", in: "path", required: true, schema: { type: "string" } }, { name: "token", in: "path", required: true, schema: { type: "string" } }],
-        responses: { "200": { description: "Management confirmation." }, "404": { description: "Invalid management capability." } },
+        responses: { "200": { description: "Private management confirmation and current retention bounds.", content: { "application/json": { schema: MANAGE_RESPONSE_SCHEMA } } }, "404": { description: "Invalid management capability." }, "410": { description: "Room has expired." } },
       },
       delete: {
         summary: "Delete a temporary conversation",
         parameters: [{ name: "room", in: "path", required: true, schema: { type: "string" } }, { name: "token", in: "path", required: true, schema: { type: "string" } }],
-        responses: { "200": { description: "Conversation deleted." }, "404": { description: "Invalid management capability." } },
+        responses: { "200": { description: "Conversation deleted.", content: { "application/json": { schema: MANAGE_RESPONSE_SCHEMA } } }, "404": { description: "Invalid management capability." } },
       },
       post: {
         summary: "Enable, disable, or rotate the delegated GET posting capability",
@@ -1143,6 +1218,23 @@ export const OPENAPI_DOCUMENT = {
         parameters: [{ name: "room", in: "path", required: true, schema: { type: "string" } }, { name: "token", in: "path", required: true, schema: { type: "string" } }],
         requestBody: { required: true, content: { "application/json": { schema: { type: "object", required: ["action"], additionalProperties: false, properties: { action: { type: "string", enum: ["enable", "disable", "rotate"] } } } }, "application/x-www-form-urlencoded": { schema: { type: "object", required: ["action"], additionalProperties: false, properties: { action: { type: "string", enum: ["enable", "disable", "rotate"] } } } } } },
         responses: { "200": { description: "Updated delegated capability status; enable and rotate include the new capability URL only in this response." }, "400": { description: "Invalid management action." }, "404": { description: "Invalid management capability." }, "410": { description: "Room has expired." } },
+      },
+    },
+    "/manage/{room}/{token}/retention": {
+      post: {
+        summary: "Explicitly extend temporary room retention within private bounds",
+        description: "Reads and retention inspection do not reset activity. The management capability is checked inside the transaction, and the exact client_retry_id plus expires_at body is replayable. The public event records only the old/new expiry and configured window; it never includes the capability.",
+        parameters: [{ name: "room", in: "path", required: true, schema: { type: "string" } }, { name: "token", in: "path", required: true, schema: { type: "string" } }],
+        requestBody: { required: true, content: { "application/json": { schema: RETENTION_EXTENSION_INPUT_SCHEMA } } },
+        responses: {
+          "201": { description: "Retention extension recorded with an immutable event and retry receipt.", content: { "application/json": { schema: RETENTION_EXTENSION_RESPONSE_SCHEMA } } },
+          "200": { description: "The exact retention extension body was replayed; current_* fields show fresh room state.", content: { "application/json": { schema: RETENTION_EXTENSION_RESPONSE_SCHEMA } } },
+          "400": { description: "Invalid timestamp, retry body, or retention bounds." },
+          "404": { description: "Room or management capability was not found." },
+          "409": { description: "The retry identifier was reused with a different body." },
+          "410": { description: "Room has expired or was deleted." },
+          "429": { description: "Room storage quota is reached; the extension is atomic." },
+        },
       },
     },
   },

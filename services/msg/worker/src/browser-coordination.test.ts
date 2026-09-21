@@ -44,7 +44,154 @@ test("served browser wiring contains the real coordination runtime and private r
   expect(source).toContain("Review exact revision");
   expect(source).toContain("Source evidence");
   expect(source).toContain("Save this private owner access URL");
+  expect(source).toContain("retention-extension-attempt");
+  expect(source).toContain("coordination-retention-refresh");
+  expect(source).toContain("/retention");
+  expect(source).toContain("Retry target frozen");
   expect(() => new Function(source ?? "")).not.toThrow();
+});
+
+test("freezes retention retry body and client ID across a fresh DOM reload", async () => {
+  class Element {
+    value = "";
+    textContent: string | null = "";
+    disabled = false;
+    hidden = false;
+    className = "";
+    dataset: Record<string, string> = {};
+    href = "";
+    target = "";
+    rel = "";
+    type = "";
+    listeners = new Map<string, (event: { preventDefault(): void }) => void>();
+    addEventListener(type: string, listener: (event: { preventDefault(): void }) => void) { this.listeners.set(type, listener); }
+    append() {}
+    replaceChildren() {}
+    select() {}
+  }
+  const ownerUrl = "https://msg.0000.chat/manage/room-a/owner-token";
+  const target = "2026-08-23T12:34:56.123+12:00";
+  const storage = memoryStorage({
+    "0000:coordination-management-url:v1:room-a": ownerUrl,
+    "0000:retention-extension-attempt:v1:room-a": JSON.stringify({ client_retry_id: "frozen-1", expires_at: target }),
+  });
+  const saved = Object.fromEntries(["document", "location", "sessionStorage", "fetch", "__msgCoordinationHelpers"].map((key) => [key, (globalThis as unknown as Record<string, unknown>)[key]]));
+  const retentionBodies: string[] = [];
+  let dom = new Map<string, Element>();
+  let retentionCall = 0;
+  const makeDocument = () => {
+    const names = ["coordination-panel", "coordination-status", "coordination-retention-current", "coordination-retention-bounds", "coordination-retention-target", "coordination-retention-refresh", "coordination-retention-extend", "coordination-retention-new", "coordination-retention-status"];
+    dom = new Map(names.map((name) => [name, new Element()]));
+    return {
+      body: { dataset: { room: "room-a" } },
+      createElement: () => new Element(),
+      querySelector<T extends Element>(selector: string) { return dom.get(selector.slice(1)) as T | undefined ?? null; },
+      querySelectorAll: () => [] as Element[],
+    };
+  };
+  const fetcher = async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    if (url.endsWith("/retention")) {
+      retentionBodies.push(String(init?.body));
+      retentionCall += 1;
+      if (retentionCall === 1) throw new Error(`network failed for ${ownerUrl}`);
+      return Response.json({ client_retry_id: "frozen-1", event_id: "event-1", result_expires_at: target, current_expires_at: target, maximum_expires_at: target, minimum_expires_at: target }, { status: 201 });
+    }
+    if (url === ownerUrl) return Response.json({ expires_at: "2026-08-16T00:00:00.000Z", minimum_expires_at: "2026-08-16T00:00:00.000Z", maximum_expires_at: "2026-08-23T00:00:00.000Z", retention: { expires_at: "2026-08-16T00:00:00.000Z", inactivity_window_ms: 604800000, mode: "temporary", policy: "sliding_inactivity" } });
+    return Response.json({ pending_proposals: [], published_requests: [], published_revision: 0, coordination_cursor: 0 });
+  };
+  const boot = async () => {
+    (globalThis as unknown as Record<string, unknown>).document = makeDocument();
+    (globalThis as unknown as Record<string, unknown>).location = { origin: "https://msg.0000.chat" };
+    (globalThis as unknown as Record<string, unknown>).sessionStorage = storage;
+    (globalThis as unknown as Record<string, unknown>).fetch = fetcher;
+    (globalThis as unknown as Record<string, unknown>).__msgCoordinationHelpers = createCoordinationBrowserHelpers();
+    bootCoordinationBrowser();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  };
+  try {
+    await boot();
+    expect(dom.get("coordination-retention-target")?.value).toBe(target);
+    await dom.get("coordination-retention-extend")?.listeners.get("click")?.({ preventDefault() {} });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(dom.get("coordination-retention-status")?.textContent).toContain("same target remains frozen");
+    expect(storage.getItem("0000:retention-extension-attempt:v1:room-a")).toContain("frozen-1");
+    const firstBody = retentionBodies[0];
+    await boot();
+    expect(dom.get("coordination-retention-target")?.value).toBe(target);
+    await dom.get("coordination-retention-extend")?.listeners.get("click")?.({ preventDefault() {} });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(retentionBodies[1]).toBe(firstBody);
+    expect(dom.get("coordination-retention-status")?.textContent).toContain("Retention extension recorded");
+  } finally { Object.assign(globalThis as unknown as Record<string, unknown>, saved); }
+});
+
+test("does not discard a pending retention write and refreshes bounds for an explicit new target", async () => {
+  class Element {
+    value = "";
+    textContent: string | null = "";
+    disabled = false;
+    hidden = false;
+    className = "";
+    dataset: Record<string, string> = {};
+    href = "";
+    target = "";
+    rel = "";
+    type = "";
+    listeners = new Map<string, (event: { preventDefault(): void }) => void>();
+    addEventListener(type: string, listener: (event: { preventDefault(): void }) => void) { this.listeners.set(type, listener); }
+    append() {}
+    replaceChildren() {}
+    select() {}
+  }
+  const ownerUrl = "https://msg.0000.chat/manage/room-b/owner-token";
+  const storage = memoryStorage({ "0000:coordination-management-url:v1:room-b": ownerUrl });
+  const names = ["coordination-panel", "coordination-status", "coordination-retention-current", "coordination-retention-bounds", "coordination-retention-target", "coordination-retention-refresh", "coordination-retention-extend", "coordination-retention-new", "coordination-retention-status"];
+  const elements = new Map(names.map((name) => [name, new Element()]));
+  const documentObject = { body: { dataset: { room: "room-b" } }, createElement: () => new Element(), querySelector<T extends Element>(selector: string) { return elements.get(selector.slice(1)) as T | undefined ?? null; }, querySelectorAll: () => [] as Element[] };
+  const saved = Object.fromEntries(["document", "location", "sessionStorage", "fetch", "__msgCoordinationHelpers"].map((key) => [key, (globalThis as unknown as Record<string, unknown>)[key]]));
+  let release!: (response: Response) => void;
+  let postPending = false;
+  let postCalls = 0;
+  const maximum = "2026-08-23T00:00:00.000Z";
+  const fetcher = async (input: RequestInfo | URL) => {
+    const url = String(input);
+    if (url === ownerUrl) return Response.json({ expires_at: "2026-08-16T00:00:00.000Z", minimum_expires_at: "2026-08-16T00:00:00.000Z", maximum_expires_at: maximum, retention: { expires_at: "2026-08-16T00:00:00.000Z", inactivity_window_ms: 604800000, mode: "temporary", policy: "sliding_inactivity" } });
+    if (url.endsWith("/retention")) {
+      postCalls += 1;
+      if (postPending) return new Promise<Response>((resolve) => { release = resolve; });
+      return Response.json({ error: { message: "temporary" } }, { status: 503 });
+    }
+    return Response.json({ pending_proposals: [], published_requests: [], published_revision: 0, coordination_cursor: 0 });
+  };
+  try {
+    const globals = globalThis as unknown as Record<string, unknown>;
+    globals.document = documentObject; globals.location = { origin: "https://msg.0000.chat" }; globals.sessionStorage = storage; globals.fetch = fetcher; globals.__msgCoordinationHelpers = createCoordinationBrowserHelpers();
+    bootCoordinationBrowser();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await elements.get("coordination-retention-extend")?.listeners.get("click")?.({ preventDefault() {} });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(elements.get("coordination-retention-target")?.value).toBe(maximum);
+    elements.get("coordination-retention-target")!.value = "2026-08-22T00:00:00.000Z";
+    postPending = true;
+    const pending = elements.get("coordination-retention-extend")?.listeners.get("click")?.({ preventDefault() {} });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const beforeNew = storage.getItem("0000:retention-extension-attempt:v1:room-b");
+    await elements.get("coordination-retention-new")?.listeners.get("click")?.({ preventDefault() {} });
+    expect(storage.getItem("0000:retention-extension-attempt:v1:room-b")).toBe(beforeNew);
+    release(Response.json({ client_retry_id: JSON.parse(beforeNew!).client_retry_id, event_id: "event-2", result_expires_at: "2026-08-22T00:00:00.000Z" }, { status: 201 }));
+    await pending;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    postPending = false;
+    await elements.get("coordination-retention-extend")?.listeners.get("click")?.({ preventDefault() {} });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(elements.get("coordination-retention-new")?.hidden).toBe(false);
+    await elements.get("coordination-retention-new")?.listeners.get("click")?.({ preventDefault() {} });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(storage.getItem("0000:retention-extension-attempt:v1:room-b")).toBe("");
+    expect(elements.get("coordination-retention-target")?.value).toBe(maximum);
+    expect(postCalls).toBe(2);
+  } finally { Object.assign(globalThis as unknown as Record<string, unknown>, saved); }
 });
 
 test("renders the pinned compact panel and labelled replacement form", () => {

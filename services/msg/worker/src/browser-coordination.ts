@@ -240,6 +240,13 @@ export function bootCoordinationBrowser(): void {
   const supersessionSubmit = get<CoordinationElement>("#coordination-supersession-submit");
   const supersessionNew = get<CoordinationElement>("#coordination-supersession-new");
   const supersessionReview = get<CoordinationElement>("#coordination-supersession-review");
+  const retentionCurrent = get<CoordinationElement>("#coordination-retention-current");
+  const retentionBounds = get<CoordinationElement>("#coordination-retention-bounds");
+  const retentionTarget = get<CoordinationElement>("#coordination-retention-target");
+  const retentionRefresh = get<CoordinationElement>("#coordination-retention-refresh");
+  const retentionExtend = get<CoordinationElement>("#coordination-retention-extend");
+  const retentionNew = get<CoordinationElement>("#coordination-retention-new");
+  const retentionStatus = get<CoordinationElement>("#coordination-retention-status");
   const proposalRetryKey = `0000:coordination-proposal-attempt:v1:${room}`;
   const progressRetryKey = `0000:coordination-progress-attempt:v1:${room}`;
   const panelRetryKey = `0000:coordination-panel-attempt:v1:${room}`;
@@ -252,6 +259,7 @@ export function bootCoordinationBrowser(): void {
   const disputeRetryKey = `0000:coordination-dispute-attempt:v1:${room}`;
   const disputeReviewRetryKey = `0000:coordination-dispute-review-attempt:v1:${room}`;
   const supersessionRetryKey = `0000:coordination-supersession-attempt:v1:${room}`;
+  const retentionRetryKey = `0000:retention-extension-attempt:v1:${room}`;
   let currentOverview: Record<string, unknown> | undefined;
   let currentProposal: { proposal_id: string; revision: number; base_revision: number; kind?: string } | undefined;
   let currentDecision: { decision_id: string; revision: number; base_revision: number; title: string; state: "recommended" | "accepted"; required_approver_labels: string[]; accepted_record_id?: string } | undefined;
@@ -271,6 +279,9 @@ export function bootCoordinationBrowser(): void {
   let memorySupersessionAttempt: CoordinationAttempt | undefined;
   let busy = false;
   let ownerManagementUrl = helpers.read(location.origin, room, storage);
+  let retentionBusy = false;
+  let retentionBoundsValue: { readonly expires_at?: string; readonly minimum_expires_at?: string; readonly maximum_expires_at?: string; readonly retention?: { readonly expires_at?: string; readonly inactivity_window_ms?: number; readonly mode?: string; readonly policy?: string } } | undefined;
+  let memoryRetentionAttempt: { readonly client_retry_id: string; readonly expires_at: string } | undefined;
 
   const say = (message: string) => { if (status) status.textContent = message; };
   const retryKeyFor = (operation: CoordinationRetryOperation) => operation === "proposal" ? proposalRetryKey : operation === "progress" ? progressRetryKey : operation === "panel" ? panelRetryKey : operation === "publication" ? publicationRetryKey : operation === "decision-proposal" ? decisionProposalRetryKey : operation === "decision-position" ? decisionPositionRetryKey : operation === "decision-publication" ? decisionPublicationRetryKey : operation === "approval-message" ? approvalMessageRetryKey : operation === "correction" ? correctionRetryKey : operation === "dispute" ? disputeRetryKey : operation === "dispute-review" ? disputeReviewRetryKey : supersessionRetryKey;
@@ -309,6 +320,111 @@ export function bootCoordinationBrowser(): void {
     if (value.error?.code === "stale_revision" && typeof value.error.current_revision === "number") return `The published revision is now ${value.error.current_revision}. Review and explicitly rebase before retrying.`;
     if (typeof value.error?.message === "string" && value.error.message.length > 0 && value.error.message.length <= 240) return value.error.message;
     return "The coordination request could not be completed. The same attempt is preserved for retry.";
+  };
+  const parseRetentionAttempt = () => {
+    if (memoryRetentionAttempt) return memoryRetentionAttempt;
+    try {
+      const value = JSON.parse(browserGlobal.sessionStorage.getItem(retentionRetryKey) ?? "null") as { client_retry_id?: unknown; expires_at?: unknown } | null;
+      if (typeof value?.client_retry_id === "string" && value.client_retry_id.length > 0 && typeof value.expires_at === "string" && value.expires_at.length > 0) return memoryRetentionAttempt = { client_retry_id: value.client_retry_id, expires_at: value.expires_at };
+    } catch { /* Ignore unavailable or stale browser storage. */ }
+    return undefined;
+  };
+  const saveRetentionAttempt = (attempt: { readonly client_retry_id: string; readonly expires_at: string }) => {
+    memoryRetentionAttempt = attempt;
+    try { browserGlobal.sessionStorage.setItem(retentionRetryKey, JSON.stringify(attempt)); } catch { /* Keep the frozen attempt in memory for this page. */ }
+  };
+  const clearRetentionAttempt = () => {
+    memoryRetentionAttempt = undefined;
+    try { browserGlobal.sessionStorage.setItem(retentionRetryKey, ""); } catch { /* Ignore unavailable storage. */ }
+  };
+  const renderRetention = () => {
+    const attempt = parseRetentionAttempt();
+    const current = retentionBoundsValue?.expires_at ?? retentionBoundsValue?.retention?.expires_at;
+    if (retentionCurrent) retentionCurrent.textContent = current ? `Current expiry: ${current}` : "Current expiry: unavailable until private owner access is inspected.";
+    if (retentionBounds) {
+      const minimum = retentionBoundsValue?.minimum_expires_at;
+      const maximum = retentionBoundsValue?.maximum_expires_at;
+      retentionBounds.textContent = minimum && maximum ? `Private bounds: ${minimum} through ${maximum}. Reads and retention inspection do not reset activity.` : "Private bounds are loaded only after owner access is saved.";
+    }
+    if (retentionTarget && attempt) retentionTarget.value = attempt.expires_at;
+    if (retentionNew) retentionNew.hidden = !attempt;
+    if (retentionStatus && attempt) retentionStatus.textContent = `Retry target frozen at ${attempt.expires_at}. The same client request will be retried until you choose a new target.`;
+  };
+  const retentionErrorMessage = async (response: Response) => {
+    const value = await response.json().catch(() => ({})) as { error?: { message?: string } };
+    if (typeof value.error?.message === "string" && value.error.message.length > 0 && value.error.message.length <= 240 && !/https?:\/\//iu.test(value.error.message)) return value.error.message;
+    return `The retention request could not be completed (HTTP ${response.status}). The same target remains frozen for retry.`;
+  };
+  const loadRetentionBounds = async () => {
+    if (!ownerManagementUrl) { if (retentionStatus) retentionStatus.textContent = "Save the private owner management URL before inspecting retention bounds."; return false; }
+    if (retentionRefresh) retentionRefresh.disabled = true;
+    let response: Response;
+    try {
+      response = await fetch(ownerManagementUrl, { headers: { accept: "application/json" } });
+    } catch {
+      if (retentionStatus) retentionStatus.textContent = "Private retention bounds could not be loaded. Check the room connection and retry.";
+      if (retentionRefresh) retentionRefresh.disabled = false;
+      return false;
+    }
+    try {
+      if (!response.ok) throw Error(await retentionErrorMessage(response));
+      let value: { expires_at?: unknown; minimum_expires_at?: unknown; maximum_expires_at?: unknown; retention?: unknown };
+      try { value = await response.json() as { expires_at?: unknown; minimum_expires_at?: unknown; maximum_expires_at?: unknown; retention?: unknown }; } catch { throw Error("The private retention bounds response was invalid."); }
+      const retention = value.retention && typeof value.retention === "object" && !Array.isArray(value.retention) ? value.retention as { expires_at?: unknown; inactivity_window_ms?: unknown; mode?: unknown; policy?: unknown } : undefined;
+      if (typeof value.expires_at !== "string" || typeof value.minimum_expires_at !== "string" || typeof value.maximum_expires_at !== "string" || !retention || typeof retention.expires_at !== "string" || typeof retention.inactivity_window_ms !== "number" || typeof retention.mode !== "string" || typeof retention.policy !== "string") throw Error("The private retention bounds response was incomplete.");
+      retentionBoundsValue = { expires_at: value.expires_at, minimum_expires_at: value.minimum_expires_at, maximum_expires_at: value.maximum_expires_at, retention: { expires_at: retention.expires_at, inactivity_window_ms: retention.inactivity_window_ms, mode: retention.mode, policy: retention.policy } };
+      const attempt = parseRetentionAttempt();
+      if (retentionTarget && !attempt) retentionTarget.value = value.maximum_expires_at;
+      renderRetention();
+      if (retentionStatus && !attempt) retentionStatus.textContent = "Private bounds loaded. Choose an absolute target and select Extend room.";
+      return true;
+    } catch (error) {
+      if (retentionStatus) retentionStatus.textContent = error instanceof Error && error.message && !/https?:\/\//iu.test(error.message) ? error.message : "Private retention bounds could not be loaded.";
+      return false;
+    } finally { if (retentionRefresh) retentionRefresh.disabled = false; }
+  };
+  const submitRetention = async () => {
+    if (retentionBusy) return;
+    if (!ownerManagementUrl) { if (retentionStatus) retentionStatus.textContent = "Save the private owner management URL before extending retention."; return; }
+    let attempt = parseRetentionAttempt();
+    if (!attempt) {
+      if (!retentionBoundsValue) { if (!(await loadRetentionBounds())) return; if (retentionStatus) retentionStatus.textContent = "Private bounds loaded. Choose an absolute target and select Extend room again."; return; }
+      const expiresAt = retentionTarget?.value.trim() || retentionBoundsValue?.maximum_expires_at || "";
+      if (!expiresAt) { if (retentionStatus) retentionStatus.textContent = "Choose an absolute expiry after inspecting the private bounds."; return; }
+      attempt = { client_retry_id: browserGlobal.crypto.randomUUID(), expires_at: expiresAt };
+      saveRetentionAttempt(attempt);
+      renderRetention();
+    }
+    retentionBusy = true;
+    if (retentionExtend) retentionExtend.disabled = true;
+    if (retentionRefresh) retentionRefresh.disabled = true;
+    if (retentionNew) retentionNew.disabled = true;
+    let response: Response;
+    try {
+      response = await fetch(`${ownerManagementUrl}/retention`, { method: "POST", headers: { accept: "application/json", "content-type": "application/json" }, body: JSON.stringify(attempt) });
+    } catch {
+      renderRetention();
+      if (retentionStatus) retentionStatus.textContent = "Retention extension could not be completed. The same target remains frozen for retry.";
+      retentionBusy = false;
+      if (retentionExtend) retentionExtend.disabled = false;
+      if (retentionRefresh) retentionRefresh.disabled = false;
+      if (retentionNew) retentionNew.disabled = false;
+      return;
+    }
+    try {
+      if (!response.ok) throw Error(await retentionErrorMessage(response));
+      let receipt: { client_retry_id?: unknown; event_id?: unknown; result_expires_at?: unknown; current_expires_at?: unknown; maximum_expires_at?: unknown; minimum_expires_at?: unknown; retention?: unknown };
+      try { receipt = await response.json() as { client_retry_id?: unknown; event_id?: unknown; result_expires_at?: unknown; current_expires_at?: unknown; maximum_expires_at?: unknown; minimum_expires_at?: unknown; retention?: unknown }; } catch { throw Error("The retention receipt was invalid. The same target remains frozen for retry."); }
+      if (receipt.client_retry_id !== attempt.client_retry_id || typeof receipt.event_id !== "string" || typeof receipt.result_expires_at !== "string") throw Error("The retention receipt was incomplete. The same target remains frozen for retry.");
+      clearRetentionAttempt();
+      retentionBoundsValue = { expires_at: typeof receipt.current_expires_at === "string" ? receipt.current_expires_at : receipt.result_expires_at, minimum_expires_at: typeof receipt.minimum_expires_at === "string" ? receipt.minimum_expires_at : retentionBoundsValue?.minimum_expires_at, maximum_expires_at: typeof receipt.maximum_expires_at === "string" ? receipt.maximum_expires_at : retentionBoundsValue?.maximum_expires_at, retention: retentionBoundsValue?.retention };
+      renderRetention();
+      if (retentionTarget) retentionTarget.value = receipt.result_expires_at;
+      if (retentionStatus) retentionStatus.textContent = `Retention extension recorded through ${receipt.result_expires_at}. Event ${receipt.event_id} is immutable.`;
+    } catch (error) {
+      renderRetention();
+      if (retentionStatus) retentionStatus.textContent = error instanceof Error && error.message && !/https?:\/\//iu.test(error.message) ? error.message : "Retention extension is pending. The same target remains frozen for retry.";
+    } finally { retentionBusy = false; if (retentionExtend) retentionExtend.disabled = false; if (retentionRefresh) retentionRefresh.disabled = false; if (retentionNew) retentionNew.disabled = false; }
   };
   const renderOverview = (value: Record<string, unknown>, panelDetail?: Record<string, unknown>) => {
     if (!overview && !pinnedOverview) return;
@@ -1142,11 +1258,17 @@ export function bootCoordinationBrowser(): void {
       if (supersessionSources) supersessionSources.value = Array.isArray(payload.source_message_ids) ? payload.source_message_ids.map(String).join("\n") : "";
       say("A saved supersession attempt is ready; its predecessor, successor, and revision remain frozen for retry.");
     }
+    const retentionAttempt = parseRetentionAttempt();
+    if (retentionAttempt) {
+      if (retentionTarget) retentionTarget.value = retentionAttempt.expires_at;
+      if (retentionStatus) retentionStatus.textContent = `Retry target frozen at ${retentionAttempt.expires_at}. Inspect bounds only when choosing a new target.`;
+    }
+    renderRetention();
   };
   if (ownerUrl) { ownerUrl.value = ownerManagementUrl ?? ""; }
   for (const button of documentObject.querySelectorAll("[data-coordination-open]")) button.onclick = () => { (panel as CoordinationElement & { showModal?: () => void }).showModal?.(); };
   for (const button of documentObject.querySelectorAll("[data-coordination-close]")) button.onclick = () => { (panel as CoordinationElement & { close?: () => void }).close?.(); };
-  ownerForm?.addEventListener("submit", (event: { preventDefault(): void }) => { event.preventDefault(); const result = helpers.retain(ownerUrl?.value.trim() ?? "", location.origin, room, storage); ownerManagementUrl = result.normalized; if (result.retained) say(result.message); else { say(result.message); if (result.saveUrl && ownerUrl) { ownerUrl.value = result.saveUrl; ownerUrl.select(); } } void loadOverview(); });
+  ownerForm?.addEventListener("submit", (event: { preventDefault(): void }) => { event.preventDefault(); const result = helpers.retain(ownerUrl?.value.trim() ?? "", location.origin, room, storage); ownerManagementUrl = result.normalized; if (result.retained) say(result.message); else { say(result.message); if (result.saveUrl && ownerUrl) { ownerUrl.value = result.saveUrl; ownerUrl.select(); } } void loadOverview(); void loadRetentionBounds(); });
   proposalForm?.addEventListener("submit", (event: { preventDefault(): void }) => { event.preventDefault(); void submitProposal(); });
   progressForm?.addEventListener("submit", (event: { preventDefault(): void }) => { event.preventDefault(); void submitProgress(); });
   panelForm?.addEventListener("submit", (event: { preventDefault(): void }) => { event.preventDefault(); void submitPanel(); });
@@ -1173,10 +1295,14 @@ export function bootCoordinationBrowser(): void {
   approvalMessageNew?.addEventListener("click", () => useEditedFields("approval-message"));
   correctionNew?.addEventListener("click", () => { useEditedFields("correction"); revisionProposalId = undefined; revisionKind = undefined; });
   disputeNew?.addEventListener("click", () => useEditedFields("dispute"));
-  disputeReviewNew?.addEventListener("click", () => { useEditedFields("dispute-review"); void loadOverview().then(() => say("The previous owner review remains preserved; the current publication base is loaded for this explicit rebased review.")); });
+  disputeReviewNew?.addEventListener("click", () => { useEditedFields("dispute-review"); void loadOverview().then(() => say("The current publication base is loaded for this explicit rebased review.")); });
+  retentionRefresh?.addEventListener("click", () => { void loadRetentionBounds(); });
+  retentionExtend?.addEventListener("click", () => { void submitRetention(); });
+  retentionNew?.addEventListener("click", () => { if (retentionBusy) return; clearRetentionAttempt(); retentionBoundsValue = undefined; if (retentionTarget) retentionTarget.value = ""; renderRetention(); if (retentionStatus) retentionStatus.textContent = "Choose a new target after the private bounds are refreshed."; void loadRetentionBounds(); });
   supersessionNew?.addEventListener("click", () => { useEditedFields("supersession"); revisionProposalId = undefined; revisionKind = undefined; });
   coordinationRefresh?.addEventListener("click", () => { void loadOverview(); });
   filterForm?.addEventListener("submit", (event: { preventDefault(): void }) => { event.preventDefault(); void loadOverview(); });
   restoreStructuredAttempts();
+  renderRetention();
   void loadOverview();
 }

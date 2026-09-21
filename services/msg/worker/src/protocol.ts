@@ -1,4 +1,5 @@
 import type { CoordinationDecisionApproval, CoordinationDecisionPublication, CoordinationDisputeKind, CoordinationEventKind, CoordinationEvidence, CoordinationKind, CoordinationPanelBody as DomainCoordinationPanelBody, CoordinationProgressBody, CoordinationRequestBody as DomainCoordinationRequestBody, DecisionPositionBody, DecisionProposalBody, CoordinationStatus } from "./coordination-domain";
+import type { RetentionMetadata } from "./room-domain";
 
 export const PROTOCOL_VERSION = 1 as const;
 
@@ -16,7 +17,11 @@ export interface RoomMetadata {
   readonly created_at: string;
   readonly expires_at: string;
   readonly protocol_version: typeof PROTOCOL_VERSION;
+  /** Optional so clients can consume older protocol-1 room responses. */
+  readonly retention?: RetentionMetadata;
 }
+
+export type { RetentionExtensionInput, RetentionMetadata } from "./room-domain";
 
 export interface Message {
   readonly id: string;
@@ -41,6 +46,7 @@ export interface CreateRoomResponse {
   readonly manage_url?: string;
   readonly latest_message?: number;
   readonly expires_at?: string;
+  readonly retention?: RetentionMetadata;
   readonly wait: WaitMetadata;
 }
 
@@ -135,6 +141,7 @@ export interface RoomService {
   readMessage?(input: ReadMessageInput): Promise<ReadMessageResponse>;
   post?(input: PostMessageInput): Promise<PostMessageResponse>;
   manage?(input: ManageRoomInput): Promise<ManageRoomResponse>;
+  extendRetention?(input: ExtendRetentionInput): Promise<RetentionExtensionResponse>;
   createWebhook?(input: CreateWebhookInput): Promise<CreateWebhookResponse>;
   listWebhooks?(input: ListWebhooksInput): Promise<ListWebhooksResponse>;
   removeWebhook?(input: RemoveWebhookInput): Promise<RemoveWebhookResponse>;
@@ -214,6 +221,8 @@ export interface RoomReadResult {
   readonly protocol_version: typeof PROTOCOL_VERSION;
   readonly published_revision?: number;
   readonly coordination_overview?: CoordinationOverviewResponse;
+  /** Optional so clients can consume older protocol-1 room responses. */
+  readonly retention?: RetentionMetadata;
   readonly share_message: string;
   /** Present only for bounded reads. */
   readonly through?: number;
@@ -232,6 +241,7 @@ export interface ReadMessageResponse {
   readonly message: RoomMessage;
   readonly published_revision: number;
   readonly protocol_version: typeof PROTOCOL_VERSION;
+  readonly retention?: RetentionMetadata;
 }
 
 export type CoordinationRequestBody = DomainCoordinationRequestBody;
@@ -922,6 +932,7 @@ export interface PostMessageResponse {
   readonly protocol_version: typeof PROTOCOL_VERSION;
   readonly replayed: boolean;
   readonly wait: WaitMetadata;
+  readonly retention?: RetentionMetadata;
 }
 
 export interface GetPostMessageInput {
@@ -949,13 +960,46 @@ export interface ManageRoomInput {
   readonly token: string;
 }
 
+export interface ExtendRetentionInput {
+  readonly body: RequestBody;
+  readonly room: string;
+  readonly token: string;
+}
+
+export interface RetentionExtensionResponse {
+  readonly client_retry_id: string;
+  readonly coordination_cursor: number;
+  readonly current_coordination_cursor?: number;
+  readonly current_expires_at?: string;
+  readonly current_latest_message?: number;
+  readonly current_retention?: RetentionMetadata;
+  readonly event_id: string;
+  readonly expires_at: string;
+  readonly inactivity_window_ms: number;
+  readonly latest_message: number;
+  readonly maximum_expires_at: string;
+  readonly minimum_expires_at: string;
+  readonly observed_base_revision: number;
+  readonly old_expires_at: string;
+  readonly protocol_version: typeof PROTOCOL_VERSION;
+  readonly replayed: boolean;
+  readonly requested_expires_at: string;
+  readonly result_expires_at: string;
+  readonly retention: RetentionMetadata;
+  readonly server_now: string;
+}
+
 export interface ManageRoomResponse {
   readonly deleted?: boolean;
   readonly expires_at?: string;
   readonly get_post_enabled?: boolean;
   readonly get_post_url?: string;
   readonly get_post_url_warning?: string;
+  readonly maximum_expires_at?: string;
+  readonly minimum_expires_at?: string;
   readonly protocol_version: typeof PROTOCOL_VERSION;
+  readonly retention?: RetentionMetadata;
+  readonly server_now?: string;
 }
 
 export interface CreateWebhookInput {

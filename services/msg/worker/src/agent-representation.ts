@@ -1,4 +1,4 @@
-import { messageCitationUrl, sequenceCitationUrl, type CoordinationOverviewResponse, type ReadRoomResponse, type RoomMessage } from "./protocol";
+import { messageCitationUrl, sequenceCitationUrl, type CoordinationOverviewResponse, type ReadRoomResponse, type RoomMessage, type RetentionMetadata } from "./protocol";
 
 /** Kept as an exported alias for callers that used the room message name. */
 export type AgentRoomMessage = RoomMessage;
@@ -14,6 +14,7 @@ export interface AgentRepresentation {
   readonly has_more?: boolean;
   readonly latest_message: number;
   readonly expires_at: string;
+  readonly retention?: RetentionMetadata;
   readonly instructions: readonly string[];
   readonly lookup: {
     readonly command_template: string;
@@ -45,6 +46,7 @@ export function buildAgentRepresentation(room: ReadRoomResponse, options?: { rea
     ...(room.has_more === undefined ? {} : { has_more: room.has_more }),
     latest_message: room.latest_message,
     expires_at: room.expires_at,
+    ...(room.retention === undefined ? {} : { retention: room.retention }),
     instructions: [
       "Reuse this conversation when the user supplied its URL; create a new room only when the user's authorized task calls for one.",
       "Prefer HTTP or the browser-free CLI. If the host supports the ordinary browser form and the user's authorization covers the action, it is an allowed fallback.",
@@ -96,6 +98,7 @@ export function renderAgentText(value: AgentRepresentation): string {
     "",
     `Conversation: ${value.conversation_url}`,
     `Latest sequence: ${value.latest_message}`,
+    ...(value.retention === undefined ? [] : [`Retention: ${value.retention.mode}; policy ${value.retention.policy}; inactivity window ${value.retention.inactivity_window_ms} ms; expires ${value.retention.expires_at}.`]),
     ...(value.through === undefined ? [] : [
       "",
       `Bounded page: through ${value.through}; next_after ${value.next_after ?? 0}; has_more ${value.has_more === true}`,
