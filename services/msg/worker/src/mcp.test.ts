@@ -37,7 +37,7 @@ function rpcRequest(message: unknown, init: RequestInit = {}): Request {
   });
 }
 
-function modernRpcRequest(method: string, params: Record<string, unknown> = {}, id: string | number = 1): Request {
+function modernRpcRequest(method: string, params: Record<string, unknown> = {}, id: string | number = 1, headerOverrides: Record<string, string> = {}): Request {
   return new Request(`${origin}/mcp`, {
     method: "POST",
     headers: {
@@ -45,6 +45,7 @@ function modernRpcRequest(method: string, params: Record<string, unknown> = {}, 
       "content-type": "application/json",
       "mcp-method": method,
       "mcp-protocol-version": "2026-07-28",
+      ...headerOverrides,
     },
     body: JSON.stringify({
       jsonrpc: "2.0",
@@ -138,6 +139,20 @@ describe("stateless MCP endpoint", () => {
     expect(listen.status).toBe(405);
     expect(listen.headers.get("content-type")).not.toContain("text/event-stream");
     expect(await listen.text()).not.toContain("event: message");
+
+    const methodMismatch = await handleMcpRequest(
+      modernRpcRequest("tools/list", {}, "method-mismatch", { "mcp-method": "subscriptions/listen" }),
+      baseService(),
+    );
+    expect(methodMismatch.status).toBe(400);
+    expect((await json(methodMismatch)).error.code).toBe(-32020);
+
+    const nameMismatch = await handleMcpRequest(
+      modernRpcRequest("tools/call", { name: "read_room", arguments: {} }, "name-mismatch", { "mcp-name": "post_message" }),
+      baseService(),
+    );
+    expect(nameMismatch.status).toBe(400);
+    expect((await json(nameMismatch)).error.code).toBe(-32020);
   });
 
   test("serves discovery and tool calls to the v2 modern client", async () => {

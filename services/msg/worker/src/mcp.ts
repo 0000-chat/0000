@@ -420,16 +420,32 @@ async function requestWithinLimit(request: Request): Promise<boolean> {
 }
 
 async function isSubscriptionListenRequest(request: Request): Promise<boolean> {
-  if (request.headers.get("mcp-method") === "subscriptions/listen") return true;
   try {
     const body: unknown = await request.clone().json();
     const messages = Array.isArray(body) ? body : [body];
-    return messages.some((message) => (
+    const methods = messages.flatMap((message) => (
       message !== null
       && typeof message === "object"
       && "method" in message
-      && message.method === "subscriptions/listen"
+      && typeof message.method === "string"
+        ? [message.method]
+        : []
     ));
+    if (methods.length === 0) return false;
+
+    // The SDK's modern classifier is body-primary. Let it produce the
+    // current-spec HeaderMismatch response before rejecting a subscription.
+    const methodHeader = request.headers.get("mcp-method")?.trim();
+    if (methodHeader !== undefined && methods.some((method) => method !== methodHeader)) return false;
+    const modernEnvelope = messages.some((message) => {
+      if (message === null || typeof message !== "object" || !("params" in message)) return false;
+      const params = message.params;
+      if (params === null || typeof params !== "object" || !("_meta" in params)) return false;
+      const meta = params._meta;
+      return meta !== null && typeof meta === "object" && meta["io.modelcontextprotocol/protocolVersion"] === "2026-07-28";
+    });
+    if (methodHeader === undefined && (modernEnvelope || request.headers.get("mcp-protocol-version") === "2026-07-28")) return false;
+    return methods.includes("subscriptions/listen");
   } catch {
     return false;
   }
