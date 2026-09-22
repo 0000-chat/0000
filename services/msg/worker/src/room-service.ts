@@ -1,3 +1,4 @@
+import { chatTitle } from "./organization-domain";
 import { ERROR_CODES, isStaleRevisionDetails, isStaleSequenceDetails, ProtocolError } from "./errors";
 import { parseCoordinationDispute, parseCoordinationDisputeReview, parseCoordinationProposal, parseCoordinationPublish, parseCoordinationRevision } from "./coordination-domain";
 import { hashCapability, parseBasedOnSequence, parseMessageInput, parseRetentionExtension, randomCapability, validateIdempotencyKey, validateRequestId } from "./room-domain";
@@ -22,8 +23,10 @@ export class DurableRoomService implements RoomService {
     const room = input.plan?.room ?? randomCapability(this.random);
     const management = input.plan?.management ?? randomCapability(this.random);
     const initial = parseMessageInput(input.body);
+    const valueBody = input.body.kind === "json" && typeof input.body.value === "object" && input.body.value !== null && !Array.isArray(input.body.value) ? input.body.value : {};
     const response = await this.room(room).fetch(jsonRequest("/initialize", {
       initial,
+      title: chatTitle(valueBody.title, initial.content),
       management_hash: await hashCapability(management),
     }));
     const value = stripLegacyAbsoluteExpiry(await responseJson(response));
@@ -54,6 +57,7 @@ export class DurableRoomService implements RoomService {
     return {
       ...value,
       conversation_url,
+      links_url: `${conversation_url}/links`,
       share_message: buildShareMessage(conversation_url),
       wait: foregroundWait(this.origin, input.room, waitAfter),
     } as unknown as ReadRoomResponse;

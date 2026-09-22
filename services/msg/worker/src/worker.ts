@@ -33,6 +33,7 @@ import { emitMsgEvent } from "./observability";
 import { normalizeWebhookUrl } from "./webhooks";
 import { PUSH_SERVICE_WORKER_PATH, pushServiceWorkerResponse } from "./push-service-worker";
 import { parsePushBrowserId, parsePushSubscription } from "./push-subscriptions";
+import type { OrganizationService } from "./organization-service";
 
 export interface MsgWorker {
   fetch(request: Request): Promise<Response>;
@@ -54,6 +55,7 @@ export interface MsgStaticAssets {
 }
 
 export interface MsgWorkerOptions {
+  readonly organization?: OrganizationService;
   readonly assets?: MsgStaticAssets;
   readonly createDisabled?: boolean;
   readonly operations?: Operations;
@@ -265,6 +267,37 @@ async function route(request: Request, service: RoomService, options: MsgWorkerO
     }
     const page = renderBrowserDocument({ title: "Start a temporary conversation", url });
     return htmlResponse(page.html, 200, page.styleNonce);
+  }
+  const groupMatch = /^\/(groups|g)\/([A-Za-z0-9_-]{43})(?:\/chats(?:\/([A-Za-z0-9_-]{43}))?)?$/u.exec(url.pathname);
+  const linkMatch = /^\/([A-Za-z0-9_-]{43})\/links(?:\/([A-Za-z0-9_-]{43}))?$/u.exec(url.pathname);
+  if (url.pathname === "/groups" || groupMatch || linkMatch) {
+    const organization = options.organization;
+    if (!organization) throw new ProtocolError(ERROR_CODES.serviceUnavailable, "Connected conversations are not configured.", 503);
+    const creating = url.pathname === "/groups" && request.method === "POST";
+    if ((creating && options.createDisabled) || (request.method !== "GET" && options.postDisabled)) throw new ProtocolError(ERROR_CODES.serviceUnavailable, "Conversation changes are temporarily unavailable.", 503);
+    await enforceRateLimit(request, creating ? options.rateLimits?.creation : request.method === "GET" ? options.rateLimits?.reads : options.rateLimits?.posts);
+    const body = async () => { const parsed = await parseRequestBody(request, { maxBytes: 4096 }); return parsed.kind === "json" ? parsed.value : undefined; };
+    if (creating) return jsonResponse(await organization.createGroup(await body()), 201);
+    if (groupMatch) {
+      const group = groupMatch[2], chat = groupMatch[3], collection = url.pathname.endsWith("/chats");
+      if (groupMatch[1] === "g") {
+        if (request.method !== "GET" || chat || collection) return notFound();
+        const result = await organization.readGroup(group);
+        if (negotiateRepresentation(request.headers.get("accept")) !== "html") return jsonResponse(result);
+        const page = renderBrowserDocument({ group, title: result.name, url });
+        return htmlResponse(page.html, 200, page.styleNonce);
+      }
+      if (request.method === "GET" && !chat && !collection) return jsonResponse(await organization.readGroup(group));
+      if (request.method === "PATCH" && !chat && !collection) return jsonResponse(await organization.renameGroup(group, await body()));
+      if (request.method === "POST" && collection) return jsonResponse(await organization.addToGroup(group, await body()));
+      if (request.method === "DELETE" && chat) return jsonResponse(await organization.removeFromGroup(group, chat));
+    }
+    if (linkMatch) {
+      if (request.method === "GET" && !linkMatch[2]) return jsonResponse(await organization.readLinks(linkMatch[1]));
+      if (request.method === "POST" && !linkMatch[2]) return jsonResponse(await organization.link(linkMatch[1], await body()));
+      if (request.method === "DELETE" && linkMatch[2]) return jsonResponse(await organization.unlink(linkMatch[1], linkMatch[2]));
+    }
+    return notFound();
   }
   if (request.method === "POST" && url.pathname === "/") {
     if (options.createDisabled) {
@@ -665,7 +698,7 @@ async function route(request: Request, service: RoomService, options: MsgWorkerO
         if (selectBrowserView(url, request.headers.get("cookie")) === "agent") {
           return htmlResponse(renderAgentRoomPage(result, url));
         }
-        const page = renderBrowserDocument({ pushPublicKey: options.pushConfigured ? options.pushVapidPublicKey : undefined, room, title: "Temporary conversation", url });
+        const page = renderBrowserDocument({ pushPublicKey: options.pushConfigured ? options.pushVapidPublicKey : undefined, room, title: result.title ?? "Temporary conversation", url });
         return htmlResponse(page.html, 200, page.styleNonce);
       }
       const etag = selectors.bounded

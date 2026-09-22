@@ -23,6 +23,14 @@
       {
         "name": "ConversationRoom",
         "class_name": "ConversationRoom"
+      },
+      {
+        "name": "ChatGroup",
+        "class_name": "ChatGroup"
+      },
+      {
+        "name": "ChatConnection",
+        "class_name": "ChatConnection"
       }
     ]
   },
@@ -30,6 +38,10 @@
     {
       "tag": "v1",
       "new_sqlite_classes": ["ConversationRoom"]
+    },
+    {
+      "tag": "v2-chat-groups",
+      "new_sqlite_classes": ["ChatGroup", "ChatConnection"]
     }
   ],
   "d1_databases": [

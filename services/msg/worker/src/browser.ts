@@ -5,10 +5,12 @@ import link from "./assets/icons/link.svg" with { type: "text" };
 import userPlusWhite from "./assets/icons/user-plus-white.svg" with { type: "text" };
 import { browserFailureState, copyText, createLiveController, createPushEnrollmentController, createThemeController, createWebhookPanelController, handleAgentPromptCopy, readPushBrowserId, type PushEnrollmentState, type WebhookPanelEntry } from "./browser-controller";
 import { viewSwitchHref } from "./browser-view";
+import { cliCommandPrefix, shellQuote } from "./protocol";
+import { connectionsPanel, groupPage, organizationScript, organizationStyles, organizerDialog, workspaceNavigation, workspacePanel } from "./organization-browser";
 import { bootCoordinationBrowser, createCoordinationBrowserHelpers } from "./browser-coordination";
 
 /** The public browser has no access to a room management capability. */
-export interface BrowserPageOptions { readonly pushPublicKey?: string; readonly room?: string; readonly title: string; readonly url?: URL; }
+export interface BrowserPageOptions { readonly group?: string; readonly pushPublicKey?: string; readonly room?: string; readonly title: string; readonly url?: URL; }
 export interface BrowserPageDocument { readonly html: string; readonly styleNonce: string; }
 
 export const MERMAID_ASSET_PATH = "/_msg/asset/mermaid-11.17.2.min.js";
@@ -180,7 +182,7 @@ const mobileComposerContract = String.raw`@media(max-width:760px){.shell{--mobil
 export function browserAsset(name: string): Response | undefined {
   if (name === "client.css") {
     const responsiveStyles = `${styles}${humanBannerStyles}${mobileLayoutContract}${mobileComposerContract}${mermaidStyles}${notificationPanelStyles}${coordinationPanelStyles}${coordinationControlStyles}`.replaceAll("@media(max-width:760px)", "@media(max-width:820px)").replace(".intro-eyebrow{", ".agent-join-notice{display:flex;flex-wrap:wrap;gap:6px 10px;margin:18px 0 2px;padding:12px 14px;border:1px solid var(--accent-line);border-radius:8px;background:var(--blue);color:var(--muted-strong);font-size:13px}.agent-join-notice strong{color:var(--ink)}.agent-join-notice code{overflow-wrap:anywhere;font:12px/1.4 ui-monospace,monospace}.intro-eyebrow{").replace(".author{", ".message-citation{margin-left:auto;color:var(--accent);font-size:11px}.author{");
-    return new Response(responsiveStyles, { headers: { "content-type": "text/css; charset=utf-8" } });
+    return new Response(responsiveStyles + organizationStyles, { headers: { "content-type": "text/css; charset=utf-8" } });
   }
   if (name !== "client.js") return undefined;
   const nameHelper = 'const __name=(target,value)=>Object.defineProperty(target,"name",{value,configurable:true});';
@@ -188,6 +190,11 @@ export function browserAsset(name: string): Response | undefined {
   const helpers = `const MERMAID_MAX_BLOCKS_PER_MESSAGE=${MERMAID_MAX_BLOCKS_PER_MESSAGE},MERMAID_MAX_SOURCE_BYTES=${MERMAID_MAX_SOURCE_BYTES},MERMAID_MAX_TOTAL_SOURCE_BYTES=${MERMAID_MAX_TOTAL_SOURCE_BYTES},MERMAID_MAX_LINES=${MERMAID_MAX_LINES},PUSH_BROWSER_ID_STORAGE_KEY="0000:push-browser-id:v1";`
     + [escapeHtml, safeLink, renderInlineMarkdown, startsMarkdownBlock, supportsMermaidSource, renderMermaidBlock, renderMarkdown, createLiveController, browserFailureState, createThemeController, copyText, createWebhookPanelController, createPushEnrollmentController, readPushBrowserId, handleAgentPromptCopy].map((fn) => `const ${fn.name}=${fn.toString()};`).join("");
   const client = productionBrowserClient
+    .replace("copyText(location.href,", "copyText(location.origin+location.pathname,")
+    .replace("collapse(content);box.append(node)", "collapse(content);node.id='message-'+message.sequence;const branch=document.createElement('button');branch.type='button';branch.className='message-branch';branch.setAttribute('data-branch-message',String(message.sequence));branch.textContent='Discuss in a separate chat';node.querySelector('.message-body').append(branch);box.append(node)")
+    .replace("if(frame.type==='message.created')", "if(frame.type==='conversation.updated')document.dispatchEvent(new CustomEvent('msg:links-changed'));if(frame.type==='message.created')")
+    .replace("const expiry=document.querySelector('#expiry');", "document.dispatchEvent(new CustomEvent('msg:room-loaded',{detail:data}));const expiry=document.querySelector('#expiry');")
+    .replace("body:JSON.stringify({content:field.value,author:'Anonymous'", "body:JSON.stringify({...(document.querySelector('#chat-title')?.value.trim()?{title:document.querySelector('#chat-title').value.trim()}:{}),content:field.value,author:'Anonymous'")
     .replace("if(typeof document==='undefined')return;", `if(typeof document==='undefined')return;${productionMermaidRuntime}${productionMermaidSvgSizing}`)
     .replace("if(!sanitizeMermaidSvg(diagram,result.svg,id))throw Error('unsafe renderer output');", "if(!sanitizeMermaidSvg(diagram,result.svg,id)||!preserveMermaidSvgSize(diagram,id))throw Error('unsafe renderer output');")
     .replace("if(content.scrollHeight<=480)return;content.classList.add('is-collapsible');const card=document.createElement('div');", "const existing=content.nextElementSibling;if(content.scrollHeight<=480){content.classList.remove('is-collapsible','is-expanded');if(existing?.classList.contains('message-collapse-card'))existing.remove();return}content.classList.add('is-collapsible');if(existing?.classList.contains('message-collapse-card'))return;const card=document.createElement('div');")
@@ -203,7 +210,7 @@ export function browserAsset(name: string): Response | undefined {
     .replace("const created=document.querySelector('#room-created');if(created&&loaded[0])created.textContent=date(loaded[0].created_at);", "const createdText=loaded[0]?date(loaded[0].created_at):'';const created=document.querySelector('#room-created');if(created&&createdText)created.textContent=createdText;document.querySelectorAll('.js-room-created').forEach(node=>node.textContent=createdText);")
     .replace("location.assign((await response.json()).conversation_url)", "const created=await response.json(),ownerUrl=created.manage_url,ownerRoom=created.room?.id;if(ownerUrl&&ownerRoom&&globalThis.__msgCoordinationHelpers){try{const retained=globalThis.__msgCoordinationHelpers.retain(ownerUrl,location.origin,ownerRoom,{getItem:key=>sessionStorage.getItem(key),setItem:(key,value)=>sessionStorage.setItem(key,value)});if(!retained.retained&&retained.saveUrl){const save=document.querySelector('#state-notice');if(save){save.hidden=false;save.textContent=retained.message;const privateLink=document.createElement('a');privateLink.href=retained.saveUrl;privateLink.textContent=' Save this private owner access URL';privateLink.target='_blank';privateLink.rel='noreferrer';save.append(privateLink);return}}}catch{const save=document.querySelector('#state-notice');if(save){save.hidden=false;save.textContent='Save the private owner access URL before leaving this page.';return}}}location.assign(created.conversation_url)")
     .replace("headers:{accept:'application/json','content-type':'application/json','idempotency-key':idempotencyKey},body:JSON.stringify({content,author:'Anonymous',display_name:'Anonymous',semantic_type:'message'})", "headers:(()=>{const headers=new Headers({accept:'application/json','content-type':'application/json','idempotency-key':idempotencyKey});const browserId=readPushBrowserId({getItem:key=>localStorage.getItem(key)});if(browserId)headers.set('x-msg-browser-id',browserId);return headers})(),body:JSON.stringify({content,author:'Anonymous',display_name:'Anonymous',semantic_type:'message'})");
-  return new Response(`${nameHelper}${helpers}${coordinationHelpers}${client};(${bootWebhookPanel.toString()})();(${bootPushPanel.toString()})();(${bootCoordinationBrowser.toString()})();`, { headers: { "content-type": "text/javascript; charset=utf-8" } });
+  return new Response(`${nameHelper}${helpers}${coordinationHelpers}${client};(${bootWebhookPanel.toString()})();(${bootPushPanel.toString()})();(${bootCoordinationBrowser.toString()})();${organizationScript}`, { headers: { "content-type": "text/javascript; charset=utf-8" } });
 }
 
 interface BrowserPanelTarget {
@@ -506,11 +513,16 @@ function bootPushPanel(): void {
 
 export function renderBrowserDocument(options: BrowserPageOptions): BrowserPageDocument {
   const styleNonce = browserStyleNonce();
+  const pageUrl = options.url ?? new URL(`https://msg.0000.chat/${options.room ?? ""}`);
+  const cliUrl = options.group ? `${pageUrl.origin}/g/${options.group}` : `${pageUrl.origin}/${options.room ?? ""}`;
+  const cliPrefix = cliCommandPrefix(cliUrl);
+  const cliCommand = options.group ? `${cliPrefix} groups ${shellQuote(cliUrl)} list` : `${cliPrefix} join ${shellQuote(cliUrl)}`;
+  const cliNotice = `<aside class="agent-join-notice" aria-label="Instructions for AI agents"><strong>Using an AI agent?</strong><span>Use the CLI to read, post, branch discussions and manage connected chats. The browser form is an allowed fallback when your host supports the action and the user authorizes it.</span><code data-cli-command>${escapeHtml(cliCommand)}</code><button class="button compact" type="button" data-copy-cli-command>Copy CLI command</button>${cliPrefix.startsWith("node ") ? '<small>Local preview: run from the repository root after building the CLI. The npm release does not include this local work yet.</small>' : '<small>Join returns instructions and commands for this conversation. No browser automation needed.</small>'}</aside>`;
   let html = renderBrowserPageLegacy(options, styleNonce);
   if (options.room) {
     html = html.replace(
       '<div class="date-rule" id="date-divider">',
-      '<aside class="agent-join-notice" aria-label="Instructions for AI agents"><strong>Using an AI agent?</strong><span>Reuse this room with <code>npx --yes @0000chat/msg@latest join ROOM_URL</code>. The browser form is an allowed fallback when your host supports the action and the user authorizes it.</span></aside><div class="date-rule" id="date-divider">',
+      `${cliNotice}<div class="date-rule" id="date-divider">`,
     );
     const desktopNotifications = '<section class="rail-section notifications-section"><h2 class="rail-title">Notifications</h2><p class="rail-copy">Choose browser alerts or a trusted HTTPS service.</p><button class="button full" type="button" data-notifications-open>Manage notifications</button></section>';
     const mobileNotifications = '<section class="mobile-details-section"><h2 class="rail-title">Notifications</h2><p class="rail-copy">Choose browser alerts or a trusted HTTPS service.</p><button class="button full" type="button" data-notifications-open>Manage notifications</button></section>';
@@ -538,7 +550,11 @@ export function renderBrowserDocument(options: BrowserPageOptions): BrowserPageD
   }
   const url = options.url ?? new URL(`https://msg.0000.chat/${options.room ?? ""}`);
   const switcher = `<aside class="view-banner human-view-banner" aria-label="Human interface"><div><strong>Viewing the human interface</strong><span>A focused interface is available for agents.</span></div><a class="button compact" data-msg-view="agent" href="${escapeHtml(viewSwitchHref(url, "agent"))}">I'm an agent</a></aside>`;
-  return { html: html.replace(/(<body[^>]*>)/, `$1${switcher}`), styleNonce };
+  html = html.replace('<form class="composer" id="create-room">', '<form class="composer" id="create-room"><input class="chat-title-input" id="chat-title" aria-label="Conversation title (optional)" placeholder="Conversation title (optional)" maxlength="120">');
+  if (options.room) html = html.replace('<aside class="agent-join-notice"', `${connectionsPanel}<aside class="agent-join-notice"`);
+  if (options.group) html = html.replace(/<section class="home"[\s\S]*?<\/section><\/section>/u, groupPage()).replace('<body>', `<body data-group="${escapeHtml(options.group)}">`).replace('<ul class="group-chat-list"', `${cliNotice}<ul class="group-chat-list"`);
+  html = html.replace('<main>', `${workspaceNavigation}${workspacePanel}<main>`).replace(`<script nonce="${styleNonce}" src="/_msg/asset/client.js">`, `${organizerDialog}<script nonce="${styleNonce}" src="/_msg/asset/client.js">`);
+  return { html: html.replace(/(<body[^>]*>)/, `$1${options.group ? "" : switcher}`), styleNonce };
 }
 
 export function renderBrowserPage(options: BrowserPageOptions): string {

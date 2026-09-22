@@ -25,4 +25,15 @@ describe("browser view preference", () => {
     expect(browserViewRedirect(new URL("https://msg.0000.chat/_msg/view/human?next=https://evil.test/"))).toBeUndefined();
     expect(browserViewRedirect(new URL("https://msg.0000.chat/_msg/view/human?next=%2F%5Cevil.test%2F"))).toBeUndefined();
   });
+
+  test.each(["localhost", "127.0.0.1", "[::1]"])("persists the human view over local HTTP on %s", (host) => {
+    const response = browserViewRedirect(new URL(`http://${host}:8791/_msg/view/human?next=%2F`));
+    expect(response?.headers.get("location")).toBe("/");
+    expect(response?.headers.get("set-cookie")).toBe("msg_view=human; Path=/; Max-Age=31536000; SameSite=Lax");
+  });
+
+  test.each(["https://localhost:8791", "http://localhost.example", "http://msg.0000.chat"])("retains Secure outside local HTTP on %s", (origin) => {
+    const response = browserViewRedirect(new URL(`${origin}/_msg/view/human?next=%2F`));
+    expect(response?.headers.get("set-cookie")).toContain("; Secure");
+  });
 });

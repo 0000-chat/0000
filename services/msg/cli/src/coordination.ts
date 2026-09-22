@@ -1,4 +1,5 @@
 import { validateConversationUrl } from "./wait.js";
+import { allowedOrigin } from "./urls.js";
 
 const USAGE = "Usage: msg coordination <conversation-url> overview | panel [--revision N] | panel-history [--after N] [--limit N] [--through N] | proposals [--after N] [--limit N] [--through N] | proposal <proposal-id> [--revision N] | requests [--after N] [--limit N] [--through N] [--owner-label LABEL] [--status STATUS] | request <request-id> [--after N] [--limit N] [--through N] | decisions [--after N] [--limit N] [--through N] | decision <decision-id> [--after N] [--limit N] [--through N] | decision-record <decision-id> <accepted-record-id> | publication <published-revision> | corrections [selectors] | correction <correction-id> | disputes [selectors] | dispute <report-id> [selectors] | supersessions [selectors] | propose | correct | supersede | report | revise <proposal-id> | review <management-coordination-url> <report-id> | publish <management-coordination-url>";
 
@@ -151,9 +152,9 @@ export async function runCoordination(options: CoordinationOptions): Promise<unk
 }
 
 function coordinationEndpoint(options: CoordinationOptions): URL {
-  if (options.operation === "publish") return new URL(options.managementUrl);
+  if (options.operation === "publish") return new URL(validateManagementCoordinationUrl(options.managementUrl));
   if (options.operation === "review") {
-    const url = new URL(options.managementUrl);
+    const url = new URL(validateManagementCoordinationUrl(options.managementUrl));
     url.pathname = url.pathname.replace(/\/coordination\/publish$/u, `/coordination/disputes/${encodeURIComponent(options.reportId)}/review`);
     return url;
   }
@@ -261,7 +262,7 @@ async function readJson(response: Response, signal?: AbortSignal): Promise<unkno
 function validateManagementCoordinationUrl(value: string): string {
   let url: URL;
   try { url = new URL(value); } catch { throw new Error("The coordination management URL is invalid."); }
-  if (url.protocol !== "https:" || url.username || url.password || url.search || url.hash || !/^\/manage\/[^/]+\/[^/]+\/coordination\/publish$/u.test(url.pathname)) {
+  if (!allowedOrigin(url) || url.username || url.password || url.search || url.hash || !/^\/manage\/[^/]+\/[^/]+\/coordination\/publish$/u.test(url.pathname)) {
     throw new Error("The coordination management URL is invalid.");
   }
   return url.toString();

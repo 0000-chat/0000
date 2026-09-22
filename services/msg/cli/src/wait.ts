@@ -1,3 +1,4 @@
+import { validateChatUrl as validateConversationUrl } from "./urls.js";
 export const DEFAULT_WAIT_TIMEOUT_MS = 60_000;
 export const MAX_WAIT_TIMEOUT_MS = 5 * 60_000;
 export const WAIT_READ_LIMIT = 20;
@@ -267,7 +268,7 @@ function readUrl(conversationUrl: string, after: number): string {
 
 function liveUrl(conversationUrl: string, after: number): string {
   const url = new URL(conversationUrl);
-  url.protocol = "wss:";
+  url.protocol = url.protocol === "http:" ? "ws:" : "wss:";
   url.pathname = `${url.pathname}/live`;
   url.search = "";
   url.searchParams.set("after", String(after));
@@ -278,6 +279,7 @@ async function read(options: WaitOptions): Promise<ReadPage> {
   const response = await options.fetch(readUrl(options.conversationUrl, options.after), {
     headers: { accept: "application/json" },
     signal: options.signal,
+    redirect: "error",
   });
   if (!response.ok) {
     await response.body?.cancel().catch(() => {});
@@ -383,11 +385,4 @@ function sleep(delayMs: number, options: WaitOptions, registerCancel: (cancel: (
   });
 }
 
-export function validateConversationUrl(value: string): string {
-  let url: URL;
-  try { url = new URL(value); } catch { throw new Error("The conversation URL must be https://msg.0000.chat/{room}."); }
-  if (url.protocol !== "https:" || url.hostname !== "msg.0000.chat" || url.port || url.username || url.password || url.search || url.hash || !/^\/[^/]+$/.test(url.pathname)) {
-    throw new Error("The conversation URL must be https://msg.0000.chat/{room}.");
-  }
-  return url.toString();
-}
+export { validateChatUrl as validateConversationUrl } from "./urls.js";

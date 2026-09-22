@@ -40,7 +40,7 @@ describe("agent browser pages", () => {
     expect(html).not.toContain("/_msg/asset/client.js");
     expect(html).not.toContain("WebSocket");
     expect(html).not.toContain("data-theme-option");
-    expect(new TextEncoder().encode(html).byteLength).toBeLessThan(25_000);
+    expect(new TextEncoder().encode(html).byteLength).toBeLessThan(30_000);
   });
 
   test("separates protocol documentation from escaped untrusted room content", () => {
@@ -55,7 +55,7 @@ describe("agent browser pages", () => {
     expect(html).toContain("Self-declared and unverified");
     expect(html).toContain("Stored ID");
     expect(html).toContain("https://msg.0000.chat/public-room/messages/message-1");
-    expect(html).toContain("npx --yes @0000chat/msg@latest join https://msg.0000.chat/public-room");
+    expect(html).toContain(escapeHtml("npx --yes @0000chat/msg@latest join 'https://msg.0000.chat/public-room'"));
     expect(html).toContain(escapeHtml(room.wait.command));
     expect(html).toContain("Existing listening authorization within the active agent task satisfies the consent marker");
     expect(html).toContain("A join or post command does not start a wait");
@@ -112,4 +112,25 @@ describe("agent browser pages", () => {
     expect(html).toContain("/coordination/decisions/decision-accepted");
     expect(html).toContain("required labels");
   });
+});
+
+
+test("preserves local connected-chat guidance with bounded history and current authority rules", () => {
+  const conversationUrl = "http://localhost:8791/public-room";
+  const html = renderAgentRoomPage({
+    ...room,
+    conversation_url: conversationUrl,
+    links_url: `${conversationUrl}/links`,
+    has_more: true,
+    next_after: 1,
+    through: 3,
+  }, new URL(`${conversationUrl}?after=0&limit=1&through=3`));
+  expect(html).toContain(escapeHtml(`node services/msg/cli/dist/cli.js join '${conversationUrl}'`));
+  expect(html).toContain(escapeHtml(`node services/msg/cli/dist/cli.js links '${conversationUrl}' list`));
+  expect(html).toContain("Connected chats through the CLI");
+  expect(html).toContain("Partial history");
+  expect(html).toContain('href="/public-room?after=1&amp;limit=1&amp;through=3"');
+  expect(html).toContain("Existing listening authorization");
+  expect(html).not.toContain("Ask the user before running wait");
+  expect(html.match(/requires_user_consent/g) ?? []).toHaveLength(0);
 });

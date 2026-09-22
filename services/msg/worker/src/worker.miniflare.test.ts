@@ -5,6 +5,7 @@ import { afterAll, expect, test } from "bun:test";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import WebSocketClient from "ws";
+import { runCli } from "../../cli/src/cli";
 
 import { PUSH_DELIVERY_LEASE_MS, PUSH_INITIAL_DELAY_MS, PUSH_RETRY_INITIAL_DELAY_MS, PUSH_RETRY_WINDOW_MS } from "./push-policy";
 import { createMsgMiniflareTempDirectory, SHORT_LIVED_TEST_ROOM_LIMITS, startMsgMiniflare, TEST_ROOM_LIMITS, TEST_VAPID_PUBLIC_KEY, TEST_VAPID_SUBJECT } from "../test-fixtures/msg-worker.miniflare-fixture";
@@ -12,6 +13,91 @@ import { createMsgMiniflareTempDirectory, SHORT_LIVED_TEST_ROOM_LIMITS, startMsg
 const jsonHeaders = { accept: "application/json", "content-type": "application/json" };
 const fixtureTemporaryDirectory = fileURLToPath(new URL("../.miniflare-tests/", import.meta.url));
 const MINIFLARE_TEST_TIMEOUT_MS = 60_000;
+
+test("agents can create, branch, group, join and return a summary entirely through the CLI", async () => {
+  await withSharedRuntime(async runtime => {
+    async function cli(args: string[]) {
+      const stdout: string[] = [], stderr: string[] = [];
+      const code = await runCli(args, {
+        fetch: async (url, init) => runtime.dispatchFetch(String(url), init as never) as unknown as Promise<Response>,
+        generatedClientMessageId: () => crypto.randomUUID(), readStdin: async () => "", stdinIsTTY: true, sleep: async () => {},
+        stdout: text => stdout.push(text), stderr: text => stderr.push(text),
+        websocket: () => { throw Error("No automatic listening"); },
+      });
+      expect(stderr).toEqual([]);
+      expect(code).toBe(0);
+      return stdout.join("");
+    }
+    const source = JSON.parse(await cli(["create", "--title", "CLI strategy", "--author", "Agent A", "--content", "Discuss strategy here."]));
+    const detail = JSON.parse(await cli(["branch", source.conversation_url, "--from", "1", "--title", "CLI detail", "--author", "Agent A", "--content", "Only selected context goes here."]));
+    expect(detail.linked).toBe(true);
+    const group = JSON.parse(await cli(["groups", "create", "--name", "CLI project"]));
+    await cli(["groups", group.group_url, "add", source.conversation_url]);
+    await cli(["groups", group.group_url, "add", detail.conversation_url]);
+    const listed = JSON.parse(await cli(["groups", group.group_url, "list"]));
+    expect(listed.chats).toHaveLength(2);
+    const joined = await cli(["join", detail.conversation_url]);
+    expect(joined).toContain("CONNECTED CHAT COMMANDS");
+    expect(joined).toContain("Kind: source; source message: 1");
+    expect(joined).toContain(source.conversation_url);
+    expect(joined).not.toContain("Discuss strategy here.");
+    await cli(["post", source.conversation_url, "--author", "Agent A", "--reply-to", "1", "--type", "result", "--content", "The chosen summary."]);
+    const parentRead = await runtime.dispatchFetch(source.conversation_url, { headers: jsonHeaders });
+    const messages = (await parentRead.json() as { messages: { content: string; semantic_type: string; reply_to: string }[] }).messages;
+    expect(messages).toHaveLength(2);
+    expect(messages[1]).toMatchObject({ content: "The chosen summary.", reply_to: "1", semantic_type: "result" });
+    await cli(["links", source.conversation_url, "remove", detail.conversation_url]);
+    expect(JSON.parse(await cli(["links", detail.conversation_url, "list"])).links).toHaveLength(0);
+  });
+}, 120_000);
+
+test("serializes concurrent opposite branches and link removal for each room pair", async () => {
+  await withSharedRuntime(async runtime => {
+    const a = await createRoom(runtime, "Concurrent source"), b = await createRoom(runtime, "Concurrent detail");
+    const connect = (source: string, target: string, branch = false) => runtime.dispatchFetch(source + "/links", { method: "POST", headers: jsonHeaders, body: JSON.stringify({ conversation_url: target, ...(branch ? { source_message: 1 } : {}) }) });
+    const remove = () => runtime.dispatchFetch(a.conversation_url + "/links/" + b.room.id, { method: "DELETE", headers: jsonHeaders });
+    const links = async (url: string) => (await (await runtime.dispatchFetch(url + "/links", { headers: jsonHeaders })).json() as { links: { kind: string }[] }).links;
+    const branches = await Promise.all([connect(a.conversation_url, b.conversation_url, true), connect(b.conversation_url, a.conversation_url, true)]);
+    expect(branches.map(response => response.status).sort()).toEqual([200, 409]);
+    const first = await links(a.conversation_url), second = await links(b.conversation_url);
+    expect(first).toHaveLength(1);
+    expect(second).toHaveLength(1);
+    expect([first[0].kind, second[0].kind].sort()).toEqual(["branch", "source"]);
+    expect((await remove()).status).toBe(200);
+    const edits = await Promise.all([connect(a.conversation_url, b.conversation_url), remove()]);
+    expect(edits.map(response => response.status)).toEqual([200, 200]);
+    expect((await links(a.conversation_url)).length).toBe((await links(b.conversation_url)).length);
+  });
+}, 120_000);
+
+test("connected conversations survive restart and return summaries only as explicit posts", async () => {
+  await withRestartedRuntime(async (runtime, restart) => {
+    const send = (url: string, method = "GET", value?: unknown) => runtime.dispatchFetch(url, { method, headers: jsonHeaders, ...(value === undefined ? {} : { body: JSON.stringify(value) }) });
+    const source = await createRoom(runtime, "Strategy"), branch = await createRoom(runtime, "Pricing details");
+    const createdGroup = await send("https://msg.0000.chat/groups", "POST", { name: "Launch" });
+    expect(createdGroup.status).toBe(201);
+    const group = await createdGroup.json() as { group_url: string };
+    const groupApi = group.group_url.replace("/g/", "/groups/");
+    expect((await send(groupApi + "/chats", "POST", { conversation_url: source.conversation_url })).status).toBe(200);
+    expect((await send(source.conversation_url + "/links", "POST", { conversation_url: branch.conversation_url, source_message: 1 })).status).toBe(200);
+    const foreign = await runtime.dispatchFetch(groupApi + "/chats", { method: "POST", headers: { ...jsonHeaders, origin: "https://evil.test" }, body: JSON.stringify({ conversation_url: branch.conversation_url }) });
+    expect(foreign.status).toBe(403);
+    const reopened = await restart(4_000_000_001_000);
+    const read = async (url: string) => (await reopened.dispatchFetch(url, { headers: jsonHeaders })).json() as Promise<any>;
+    expect((await read(groupApi)).chats[0].title).toBe("Strategy");
+    expect((await read(branch.conversation_url + "/links")).links[0]).toMatchObject({ conversation_url: source.conversation_url, kind: "source", source_message: 1 });
+    const before = await read(source.conversation_url);
+    expect(before.messages).toHaveLength(1);
+    expect(JSON.stringify(before)).not.toContain(group.group_url);
+    const summary = { content: "Pricing conclusion", semantic_type: "result", reply_to: "1", client_message_id: "summary-test-1" };
+    for (let i = 0; i < 2; i++) expect((await reopened.dispatchFetch(source.conversation_url, { method: "POST", headers: jsonHeaders, body: JSON.stringify(summary) })).status).toBe(201);
+    expect((await read(source.conversation_url)).messages).toHaveLength(2);
+    expect((await read(branch.conversation_url)).messages).toHaveLength(1);
+    const page = await reopened.dispatchFetch(group.group_url, { headers: { accept: "text/html" } });
+    expect(await page.text()).toContain('id="group-chats"');
+    expect(page.headers.get("content-security-policy")).toContain("script-src 'self'");
+  });
+}, 120_000);
 
 let sharedFixture: Awaited<ReturnType<typeof startMsgMiniflare>> | undefined;
 let sharedPersistenceDirectory: string | undefined;

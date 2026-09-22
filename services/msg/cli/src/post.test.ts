@@ -129,13 +129,16 @@ test("preserves an explicit client message ID", async () => {
   expect(receipt).toEqual(publicReceipt("caller-owned-id", false));
 });
 
-test("sends based_on_sequence and reports stale conflicts without retrying", async () => {
+test.each([
+  [conversationUrl, "msg"],
+  ["http://localhost:8791/room-1", "node services/msg/cli/dist/cli.js"],
+])("sends based_on_sequence and reports stale conflicts without retrying at %s", async (url, commandPrefix) => {
   let attempts = 0;
   const stale = postMessage({
     author: "Agent A",
     basedOnSequence: 12,
     content: "Hello",
-    conversationUrl,
+    conversationUrl: url,
     fetch: async (_input, init) => {
       attempts += 1;
       expect(JSON.parse(String(init?.body))).toEqual({ author: "Agent A", based_on_sequence: 12, client_message_id: "generated-id", content: "Hello" });
@@ -146,7 +149,7 @@ test("sends based_on_sequence and reports stale conflicts without retrying", asy
   });
   const error = await stale.then(() => undefined, (reason: unknown) => reason);
   expect(error).toBeInstanceOf(Error);
-  expect((error as Error).message).toContain("msg join 'https://msg.0000.chat/room-1' --after 12 --through 14 --limit 20");
+  expect((error as Error).message).toContain(`${commandPrefix} join '${url}' --after 12 --through 14 --limit 20`);
   expect((error as Error).message).toContain("explicitly resubmit");
   expect(attempts).toBe(1);
 });

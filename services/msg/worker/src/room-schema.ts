@@ -1,7 +1,7 @@
 import { ROOM_LIMITS } from "./room-domain";
 import { WEBHOOK_RETRY_INITIAL_DELAY_MS, WEBHOOK_RETRY_WINDOW_MS } from "./webhook-policy";
 
-export const CURRENT_ROOM_SCHEMA_VERSION = 12;
+export const CURRENT_ROOM_SCHEMA_VERSION = 13;
 
 interface SqlStorage {
   exec(query: string, ...values: unknown[]): Iterable<unknown>;
@@ -34,6 +34,12 @@ export function migrateRoomSchema(storage: TransactionalStorage, inactivityTtlMs
 }
 
 function applyMigration(sql: SqlStorage, version: number, inactivityTtlMs: number): void {
+  if (version === 13) {
+    if (!rows<{ name: string }>(sql.exec("PRAGMA table_info(room_state)")).some(column => column.name === "title")) sql.exec("ALTER TABLE room_state ADD COLUMN title TEXT");
+    sql.exec("CREATE TABLE IF NOT EXISTS chat_links (room TEXT PRIMARY KEY, kind TEXT NOT NULL CHECK(kind IN ('related', 'source', 'branch')), source_message INTEGER)");
+    sql.exec("UPDATE room_state SET schema_version = ? WHERE singleton = 1", CURRENT_ROOM_SCHEMA_VERSION);
+    return;
+  }
   if (version === 1) {
     sql.exec(`
       CREATE TABLE IF NOT EXISTS room_state (

@@ -85,3 +85,11 @@ test("maps an aborted response-body read to the established interrupted exit", a
   const response = { ok: true, status: 200, json: async () => { controller.abort(); throw new DOMException("Aborted", "AbortError"); } } as unknown as Response;
   await expect(runRetention({ fetch: async () => response, managementUrl, operation: "inspect", signal: controller.signal })).rejects.toBeInstanceOf(RetentionSignalError);
 });
+
+
+test("accepts literal loopback management origins for CLI-created preview rooms", () => {
+  for (const origin of ["http://localhost:8791", "http://127.0.0.1:8791", "https://[::1]:8791"]) {
+    const localManagementUrl = origin + "/manage/room-1/owner-token";
+    expect(parseRetentionCommand(["retention", localManagementUrl, "inspect"])).toEqual({ managementUrl: localManagementUrl, operation: "inspect" });
+  }
+});

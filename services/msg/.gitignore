@@ -3,6 +3,7 @@ node_modules/
 dist/
 .wrangler/
 worker/.miniflare-tests/
+worker/test-fixtures/.miniflare-tests/
 worker/.wrangler/
 cli/dist/
 worker/public/_msg/asset/mermaid-11.17.2.min.js

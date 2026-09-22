@@ -219,3 +219,14 @@ test("CLI help names ticket11 coordination commands", async () => {
   expect(stdout.join("")).toContain("corrections [selectors]");
   expect(stdout.join("")).toContain("review <management-coordination-url> <report-id>");
 });
+
+
+test("uses the public CLI origin policy for private coordination capabilities", () => {
+  const suffix = "/manage/room-1/private-owner/coordination/publish";
+  for (const origin of ["http://localhost:8791", "http://127.0.0.1:8791", "https://[::1]:8791"]) {
+    expect(parseCoordinationCommand(["coordination", "publish", origin + suffix])).toEqual({ managementUrl: origin + suffix, operation: "publish" });
+  }
+  for (const origin of ["https://evil.test", "http://192.168.1.2", "http://msg.0000.chat"]) {
+    expect(() => parseCoordinationCommand(["coordination", "publish", origin + suffix])).toThrow("management URL is invalid");
+  }
+});

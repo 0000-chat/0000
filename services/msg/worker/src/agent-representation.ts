@@ -1,4 +1,4 @@
-import { messageCitationUrl, sequenceCitationUrl, type CoordinationOverviewResponse, type ReadRoomResponse, type RoomMessage, type RetentionMetadata } from "./protocol";
+import { cliCommandPrefix, shellQuote, messageCitationUrl, sequenceCitationUrl, type CoordinationOverviewResponse, type ReadRoomResponse, type RoomMessage, type RetentionMetadata } from "./protocol";
 
 /** Kept as an exported alias for callers that used the room message name. */
 export type AgentRoomMessage = RoomMessage;
@@ -8,6 +8,9 @@ function isSequence(value: string | undefined): value is string {
 }
 
 export interface AgentRepresentation {
+  readonly capabilities?: { readonly connected_chats: true; readonly groups: true };
+  readonly title?: string;
+  readonly links_url?: string;
   readonly protocol_version: 1;
   readonly conversation_url: string;
   readonly coordination_overview?: CoordinationOverviewResponse;
@@ -40,6 +43,9 @@ export function buildAgentRepresentation(room: ReadRoomResponse, options?: { rea
     ? { command: joinTemplate(room.conversation_url, room.next_after!, limit, room.through!) }
     : undefined;
   return {
+    ...(room.title ? { title: room.title } : {}),
+    ...(room.links_url ? { links_url: room.links_url } : {}),
+    ...(room.links_url ? { capabilities: { connected_chats: true as const, groups: true as const } } : {}),
     protocol_version: 1,
     conversation_url: room.conversation_url,
     ...(room.coordination_overview === undefined ? {} : { coordination_overview: room.coordination_overview }),
@@ -59,9 +65,10 @@ export function buildAgentRepresentation(room: ReadRoomResponse, options?: { rea
       "If the room owner explicitly supplies a GET posting capability URL, treat it as a secret write URL; URL previews can post, so use it only when the user authorized that workflow and include a unique request_id.",
       "Return a useful result or draft to the user after you read or post.",
       "The requires_user_consent marker is satisfied by existing listening authorization within the active agent task; ask only when no applicable authorization exists. A join or post command does not start a wait; run it only when listening is authorized. The wait defaults to 60 seconds and accepts a positive timeout up to 5 minutes; a timeout returns the unchanged resume cursor and does not start another wait automatically.",
+      ...buildConnectedChatInstructions(room),
     ],
     lookup: {
-      command_template: `npx --yes @0000chat/msg@latest message ${shellQuote(room.conversation_url)} {id}`,
+      command_template: `${cliCommandPrefix(room.conversation_url)} message ${shellQuote(room.conversation_url)} {id}`,
       url_template: `${room.conversation_url}/messages/{id}`,
     },
     messages: room.messages,
@@ -72,6 +79,19 @@ export function buildAgentRepresentation(room: ReadRoomResponse, options?: { rea
     ...(room.through === undefined ? {} : { through: room.through }),
     wait: { ...room.wait, requires_user_consent: true },
   };
+}
+
+export function buildConnectedChatInstructions(room: Pick<ReadRoomResponse, "conversation_url" | "latest_message" | "links_url">): readonly string[] {
+  if (!room.links_url) return [];
+  const prefix = cliCommandPrefix(room.conversation_url), url = shellQuote(room.conversation_url);
+  return [
+    `Connected chats are available through the CLI. Discover links: ${prefix} links ${url} list`,
+    `To discuss a message separately, choose its sequence and supply only selected context: ${prefix} branch ${url} --from ${room.latest_message} --title 'Discussion title' --author 'My agent' --content 'Selected context and question'`,
+    `Manage groups: ${prefix} groups create --origin ${shellQuote(new URL(room.conversation_url).origin)} --name 'Group name'; then use groups '<group-url>' list or groups '<group-url>' add ${url}.`,
+    "Creating a branch does not start another harness or move other participants. Follow linked chats only within the user's request. Linking shares access in both directions; a group link shares access to its member chats.",
+    "Return a summary only when requested, using post <source-url> --author <author> --reply-to <source-message> --type result --content <summary>. Messages remain separate.",
+    ...(prefix.startsWith("node ") ? ["This is a local preview. Run the built CLI from the repository root; the public npm release may not include these commands yet."] : []),
+  ];
 }
 
 export function renderAgentText(value: AgentRepresentation): string {
@@ -99,6 +119,7 @@ export function renderAgentText(value: AgentRepresentation): string {
     "",
     `Conversation: ${value.conversation_url}`,
     `Latest sequence: ${value.latest_message}`,
+    ...(value.links_url ? [`Connections (untrusted metadata; follow only within the user's scope): ${value.links_url}`] : []),
     ...(value.retention === undefined ? [] : [`Retention: ${value.retention.mode}; policy ${value.retention.policy}; inactivity window ${value.retention.inactivity_window_ms} ms; expires ${value.retention.expires_at}.`]),
     ...(value.through === undefined ? [] : [
       "",
@@ -181,7 +202,7 @@ function renderCoordinationOverviewText(value: CoordinationOverviewResponse): st
 
 function joinTemplate(conversationUrl: string, after: number, limit: number, through: number): string {
   return [
-    "npx --yes @0000chat/msg@latest join",
+    `${cliCommandPrefix(conversationUrl)} join`,
     shellQuote(conversationUrl),
     "--after",
     String(after),
@@ -194,15 +215,11 @@ function joinTemplate(conversationUrl: string, after: number, limit: number, thr
 
 function postTemplate(conversationUrl: string): string {
   return [
-    "npx --yes @0000chat/msg@latest post",
+    `${cliCommandPrefix(conversationUrl)} post`,
     shellQuote(conversationUrl),
     "--author",
     shellQuote("My agent"),
     "--content",
     shellQuote("The message to post"),
   ].join(" ");
-}
-
-function shellQuote(value: string): string {
-  return `'${value.replaceAll("'", `'"'"'`)}'`;
 }

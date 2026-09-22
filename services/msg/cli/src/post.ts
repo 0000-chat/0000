@@ -1,9 +1,15 @@
 import { validateConversationUrl } from "./wait.js";
+import { cliPrefix, PRODUCTION_ORIGIN } from "./urls.js";
+import { sequence } from "./organization.js";
+
+const SEMANTIC_TYPES = ["message", "question", "proposal", "answer", "result", "status", "decision", "note"];
 
 const RETRYABLE_STATUSES = new Set([408, 425, 429, 500, 502, 503, 504]);
 const RETRY_DELAYS_MS = [250, 1_000] as const;
 
 export interface PostCommand {
+  readonly replyTo?: string;
+  readonly semanticType?: string;
   readonly author: string;
   readonly basedOnSequence?: number;
   readonly clientMessageId?: string;
@@ -41,13 +47,13 @@ export class PostSignalError extends Error {
 }
 
 export function parsePostCommand(args: readonly string[]): PostCommand {
-  if (args[0] !== "post" || args.length < 4) throw new Error("Usage: msg post <conversation-url> --author <author> [--content <content>] [--client-message-id <id>] [--based-on-sequence N]");
+  if (args[0] !== "post" || args.length < 4) throw new Error("Usage: msg post <conversation-url> --author <author> [--content <content>] [--client-message-id <id>] [--based-on-sequence N] [--reply-to <sequence>] [--type <message|question|proposal|answer|result|status|decision|note>]");
   const conversationUrl = validateConversationUrl(args[1] ?? "");
-  const values: Partial<Record<"--author" | "--based-on-sequence" | "--content" | "--client-message-id", string>> = {};
+  const values: Partial<Record<"--based-on-sequence" | "--author" | "--content" | "--client-message-id" | "--reply-to" | "--type", string>> = {};
   for (let index = 2; index < args.length; index += 2) {
     const flag = args[index];
     const value = args[index + 1];
-    if (flag !== "--author" && flag !== "--based-on-sequence" && flag !== "--content" && flag !== "--client-message-id") throw new Error(`Unknown post option: ${flag ?? ""}.`);
+    if (flag !== "--based-on-sequence" && flag !== "--author" && flag !== "--content" && flag !== "--client-message-id" && flag !== "--reply-to" && flag !== "--type") throw new Error(`Unknown post option: ${flag ?? ""}.`);
     if (value === undefined) throw new Error(`${flag} requires a value.`);
     if (values[flag] !== undefined) throw new Error(`${flag} may be provided only once.`);
     values[flag] = value;
@@ -59,8 +65,11 @@ export function parsePostCommand(args: readonly string[]): PostCommand {
   if (content !== undefined) validateNonempty(content, "--content");
   const clientMessageId = values["--client-message-id"];
   if (clientMessageId !== undefined) validateClientMessageId(clientMessageId);
+  const replyTo = values["--reply-to"], semanticType = values["--type"];
+  if (replyTo !== undefined) sequence(replyTo);
+  if (semanticType !== undefined && !SEMANTIC_TYPES.includes(semanticType)) throw Error("Unknown --type. Use message, question, proposal, answer, result, status, decision or note.");
   const basedOnSequence = values["--based-on-sequence"] === undefined ? undefined : parseBasedOnSequence(values["--based-on-sequence"]!);
-  return { author, ...(basedOnSequence === undefined ? {} : { basedOnSequence }), ...(clientMessageId === undefined ? {} : { clientMessageId }), ...(content === undefined ? {} : { content }), conversationUrl };
+  return { author, ...(replyTo === undefined ? {} : { replyTo }), ...(semanticType === undefined ? {} : { semanticType }), ...(basedOnSequence === undefined ? {} : { basedOnSequence }), ...(clientMessageId === undefined ? {} : { clientMessageId }), ...(content === undefined ? {} : { content }), conversationUrl };
 }
 
 export async function postMessage(options: PostOptions): Promise<PostReceipt> {
@@ -70,10 +79,12 @@ export async function postMessage(options: PostOptions): Promise<PostReceipt> {
   validateNonempty(options.content, "content");
   const clientMessageId = options.clientMessageId ?? options.generatedClientMessageId();
   validateClientMessageId(clientMessageId);
+  if (options.replyTo !== undefined) sequence(options.replyTo);
+  if (options.semanticType !== undefined && !SEMANTIC_TYPES.includes(options.semanticType)) throw Error("Unknown message type.");
   if (options.basedOnSequence !== undefined && (!Number.isSafeInteger(options.basedOnSequence) || options.basedOnSequence < 0)) {
     throw new Error("--based-on-sequence must be a nonnegative safe integer.");
   }
-  const requestBody = JSON.stringify({ author: options.author, content: options.content, ...(options.basedOnSequence === undefined ? {} : { based_on_sequence: options.basedOnSequence }), client_message_id: clientMessageId });
+  const requestBody = JSON.stringify({ author: options.author, content: options.content, ...(options.basedOnSequence === undefined ? {} : { based_on_sequence: options.basedOnSequence }), client_message_id: clientMessageId, ...(options.replyTo === undefined ? {} : { reply_to: options.replyTo }), ...(options.semanticType === undefined ? {} : { semantic_type: options.semanticType }) });
 
   for (let attempt = 0; attempt <= RETRY_DELAYS_MS.length; attempt += 1) {
     throwIfAborted(options.signal);
@@ -83,6 +94,7 @@ export async function postMessage(options: PostOptions): Promise<PostReceipt> {
         body: requestBody,
         headers: { accept: "application/json", "content-type": "application/json" },
         method: "POST",
+        redirect: "error",
         signal: options.signal,
       });
     } catch (error) {
@@ -178,7 +190,7 @@ function receiptFromResponse(value: unknown, conversationUrl: string, clientMess
 function foregroundWait(conversationUrl: string, after: number): PostReceipt["wait"] {
   return {
     after,
-    command: `npx --yes @0000chat/msg@latest wait ${shellQuote(conversationUrl)} --after ${after}`,
+    command: `${cliPrefix(conversationUrl)} wait ${shellQuote(conversationUrl)} --after ${after}`,
     requires_user_consent: true,
   };
 }
@@ -222,7 +234,8 @@ async function readStalePostError(
   const latestMessage = value.error.latest_message;
   const reviewAfter = value.error.review_after;
   if (!isNonnegativeSafeInteger(latestMessage) || !isNonnegativeSafeInteger(reviewAfter) || reviewAfter >= latestMessage || basedOnSequence !== undefined && reviewAfter !== basedOnSequence) return undefined;
-  const reviewCommand = `msg join ${shellQuote(conversationUrl)} --after ${reviewAfter} --through ${latestMessage} --limit 20`;
+  const prefix = new URL(conversationUrl).origin === PRODUCTION_ORIGIN ? "msg" : cliPrefix(conversationUrl);
+  const reviewCommand = `${prefix} join ${shellQuote(conversationUrl)} --after ${reviewAfter} --through ${latestMessage} --limit 20`;
   return new Error(`The post was based on sequence ${reviewAfter}, but the room is now at sequence ${latestMessage}. Review the intervening messages and explicitly resubmit with an updated --based-on-sequence. Review command: ${reviewCommand}`);
 }
 

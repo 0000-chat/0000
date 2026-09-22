@@ -34,6 +34,7 @@ test("returns the first read result when messages already exist", async () => {
     conversationUrl: "https://msg.0000.chat/room-1",
     fetch: async (input, init) => {
       expect(input).toBe("https://msg.0000.chat/room-1?after=4&limit=20");
+      expect(init?.redirect).toBe("error");
       expect(init?.headers).toEqual({ accept: "application/json" });
       expect(init?.signal).toBeInstanceOf(AbortSignal);
       return Response.json(boundedRead(5, [{ content: "hello", id: "m5", sequence: 5 }]));
@@ -67,17 +68,20 @@ test("delivers one bounded page without draining or subscribing", async () => {
   expect(reads).toBe(1);
 });
 
-test("reads again after a ready frame closes the read-to-live race", async () => {
+test.each([
+  ["https://msg.0000.chat/room-1", "wss://msg.0000.chat/room-1/live?after=4"],
+  ["http://localhost:8791/room-1", "ws://localhost:8791/room-1/live?after=4"],
+])("reads again after a ready frame closes the read-to-live race at %s", async (conversationUrl, socketUrl) => {
   const socket = new FakeSocket();
   let reads = 0;
   const pending = waitForMessages({
     after: 4,
-    conversationUrl: "https://msg.0000.chat/room-1",
+    conversationUrl,
     fetch: async () => Response.json(reads++ === 0
       ? boundedRead(4, [])
       : boundedRead(5, [{ content: "later", id: "m5", sequence: 5 }])),
     websocket: (url) => {
-      expect(url).toBe("wss://msg.0000.chat/room-1/live?after=4");
+      expect(url).toBe(socketUrl);
       return socket;
     },
   });

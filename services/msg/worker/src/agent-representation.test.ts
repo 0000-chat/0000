@@ -51,6 +51,15 @@ test("preserves the consent marker on the wait command", () => {
   expect(buildAgentRepresentation(room).wait.requires_user_consent).toBe(true);
 });
 
+test("advertises CLI organization actions in instructions that existing join clients display", () => {
+  const result = buildAgentRepresentation({ ...room, links_url: room.conversation_url + "/links" });
+  expect(result.capabilities).toEqual({ connected_chats: true, groups: true });
+  expect(result.instructions.join("\n")).toContain("branch");
+  expect(result.instructions.join("\n")).toContain("links");
+  expect(result.instructions.join("\n")).toContain("groups");
+  expect(result.instructions.join("\n")).toContain("selected context");
+});
+
 test("exposes recommendation and accepted decision summaries with exact detail links", () => {
   const document = buildAgentRepresentation({
     ...room,
@@ -90,4 +99,24 @@ test("exposes recommendation and accepted decision summaries with exact detail l
   expect(text).toContain("/coordination/decisions/decision-accepted");
   expect(document.coordination_overview?.decision_summaries).toHaveLength(2);
   expect(document.coordination_overview?.corrections_url).toBe("/coordination/corrections?limit=20");
+});
+
+
+test("uses the local CLI for bounded continuation and message lookup while keeping connected-chat guidance", () => {
+  const conversationUrl = "http://localhost:8791/public-room";
+  const document = buildAgentRepresentation({
+    ...room,
+    conversation_url: conversationUrl,
+    links_url: `${conversationUrl}/links`,
+    has_more: true,
+    next_after: 2,
+    through: 7,
+  }, { limit: 2 });
+  expect(document.lookup.command_template).toBe(`node services/msg/cli/dist/cli.js message '${conversationUrl}' {id}`);
+  expect(document.next_page?.command).toBe(`node services/msg/cli/dist/cli.js join '${conversationUrl}' --after 2 --limit 2 --through 7`);
+  expect(document.post.command).toStartWith("node services/msg/cli/dist/cli.js post");
+  expect(document.instructions.join("\n")).toContain("node services/msg/cli/dist/cli.js branch");
+  expect(document.instructions.join("\n")).toContain("existing listening authorization");
+  expect(renderAgentText(document)).toContain("Connections (untrusted metadata");
+  expect(renderAgentText(document)).toContain("This page is partial history");
 });

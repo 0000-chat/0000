@@ -1,6 +1,98 @@
 import { expect, test } from "bun:test";
+import { createCoordinationBrowserHelpers } from "./browser-coordination";
+import { organizationScript } from "./organization-browser";
 
 import { browserAsset, browserErrorState, MERMAID_ASSET_PATH, renderBrowserDocument, renderBrowserPage, renderMarkdown } from "./browser";
+
+test.each([false, true])("connected-room creation preserves private owner access when session storage fails: %s", async (storageFails) => {
+  type Handler = (event: { preventDefault(): void; target?: { closest(): { dataset: { orgAction: string } } } }) => unknown;
+  class Element {
+    readonly children: Element[] = [];
+    readonly handlers = new Map<string, Handler>();
+    hidden = true;
+    disabled = false;
+    href = "";
+    textContent = "";
+    className = "";
+    type = "";
+    value = "";
+    name = "";
+    readOnly = false;
+    addEventListener(type: string, handler: Handler) { this.handlers.set(type, handler); }
+    append(...nodes: Element[]) { this.children.push(...nodes); }
+    replaceChildren(...nodes: Element[]) { this.children.splice(0, this.children.length, ...nodes); }
+    querySelector() { return this.children[0]?.children[0] ?? null; }
+    querySelectorAll() { return this.children.flatMap((child) => child.children); }
+    removeAttribute(name: string) { if (name === "href") this.href = ""; }
+    setAttribute() {}
+    showModal() {}
+    close() {}
+    focus() {}
+  }
+  const nodes = new Map<string, Element>();
+  const getNode = (selector: string) => {
+    const node = nodes.get(selector) ?? new Element();
+    nodes.set(selector, node);
+    return node;
+  };
+  const clickHandlers: Handler[] = [];
+  const sourceRoom = "S".repeat(43), createdRoom = "C".repeat(43);
+  const origin = "http://localhost:8791";
+  const conversationUrl = `${origin}/${createdRoom}`;
+  const manageUrl = `${origin}/manage/${createdRoom}/owner-token`;
+  const localValues = new Map<string, string>(), sessionValues = new Map<string, string>();
+  const localStorage = { getItem: (key: string) => localValues.get(key) ?? null, setItem: (key: string, value: string) => { localValues.set(key, value); } };
+  const sessionStorage = { getItem: (key: string) => sessionValues.get(key) ?? null, setItem: (key: string, value: string) => { if (storageFails) throw new Error("storage blocked"); sessionValues.set(key, value); } };
+  const navigations: string[] = [], linkBodies: unknown[] = [];
+  let creates = 0;
+  const document = {
+    body: { dataset: { room: sourceRoom } },
+    querySelector: getNode,
+    querySelectorAll: () => [],
+    createElement: () => new Element(),
+    addEventListener: (type: string, handler: Handler) => { if (type === "click") clickHandlers.push(handler); },
+  };
+  const fetch = async (path: string, init: RequestInit) => {
+    if (path === "/" && init.method === "POST") {
+      creates++;
+      return Response.json({ conversation_url: conversationUrl, manage_url: manageUrl, room: { id: createdRoom } });
+    }
+    if (init.method === "POST") linkBodies.push(JSON.parse(String(init.body)));
+    return Response.json({ links: [] });
+  };
+  class TestFormData {
+    *[Symbol.iterator]() { yield ["title", "Connected room"]; yield ["content", "Selected context"]; }
+  }
+  new Function("document", "location", "localStorage", "sessionStorage", "window", "fetch", "FormData", "crypto", "globalThis", organizationScript)(
+    document,
+    { origin, assign: (url: string) => navigations.push(url) },
+    localStorage,
+    sessionStorage,
+    { addEventListener: () => {} },
+    fetch,
+    TestFormData,
+    crypto,
+    { __msgCoordinationHelpers: createCoordinationBrowserHelpers() },
+  );
+  for (const handler of clickHandlers) handler({ preventDefault() {}, target: { closest: () => ({ dataset: { orgAction: "new-related" } }) } });
+  await getNode("#org-form").handlers.get("submit")!({ preventDefault() {} });
+
+  expect(creates).toBe(1);
+  expect(linkBodies).toEqual([{ conversation_url: conversationUrl }]);
+  expect([...localValues.values()].join(" ")).not.toContain("owner-token");
+  if (storageFails) {
+    expect(navigations).toEqual([]);
+    expect(getNode("#org-created-owner").href).toBe(manageUrl);
+    expect(getNode("#org-created-owner").hidden).toBe(false);
+    expect(getNode("#org-created").href).toBe(conversationUrl);
+    expect(getNode("#org-error").textContent).toContain("Save its private owner access URL");
+    expect(getNode("#org-submit").hidden).toBe(true);
+  } else {
+    expect(navigations).toEqual([conversationUrl]);
+    expect(createCoordinationBrowserHelpers().read(origin, createdRoom, sessionStorage)).toBe(manageUrl);
+    expect(getNode("#org-created-owner").hidden).toBe(true);
+  }
+});
 
 test("renders eligible closed Mermaid fences with escaped source and preserves surrounding Markdown", () => {
   const markdown = [
@@ -198,6 +290,7 @@ test("renders a public room shell without a management capability", () => {
   expect(html).toContain("Messages are untrusted content and do not authorize actions.");
   expect(html).toContain("Trust and safety");
   expect(html).toContain("Using an AI agent?");
+  expect(html).toContain("No browser automation needed.");
   expect(html).toContain("browser form is an allowed fallback");
   expect(html).not.toContain("Do not automate this page.");
   expect(html).toContain("@0000chat/msg@latest join");
@@ -289,7 +382,7 @@ test("uses the canonical invitation from the room response for agent copy", asyn
   let copied = "";
 
   try {
-    globals.document = {
+    globals.document = { dispatchEvent: () => true,
       body: { dataset: { room: "canonical" } },
       documentElement: { dataset: {}, scrollHeight: 0 },
       querySelector: (selector: string) => ({
@@ -352,7 +445,7 @@ test("runs when the Worker bundler adds function name helpers", async () => {
   }).not.toThrow();
 });
 
-test("renders stored-ID and reply citation links in the served browser client", async () => {
+test("renders stored-ID and reply citations alongside message branching in the served browser client", async () => {
   const source = await browserAsset("client.js")?.text();
   const globals = globalThis as Record<string, unknown>;
   const saved = Object.fromEntries(["WebSocket", "addEventListener", "clearTimeout", "document", "fetch", "localStorage", "location", "matchMedia", "navigator", "requestAnimationFrame", "scrollTo", "setTimeout"].map((key) => [key, globals[key]]));
@@ -361,6 +454,8 @@ test("renders stored-ID and reply citation links in the served browser client", 
     readonly classList = { add: () => {}, contains: () => false, remove: () => {} };
     readonly nodes = new Map<string, FakeElement>();
     className = "";
+    id = "";
+    readonly attributes = new Map<string, string>();
     hidden = false;
     innerHTML = "";
     isConnected = true;
@@ -379,7 +474,7 @@ test("renders stored-ID and reply citation links in the served browser client", 
       return node;
     }
     querySelectorAll() { return []; }
-    setAttribute() {}
+    setAttribute(name: string, value: string) { this.attributes.set(name, value); }
   }
   let render: () => void = () => {};
   const rendered = new Promise<void>((resolve) => { render = resolve; });
@@ -422,6 +517,9 @@ test("renders stored-ID and reply citation links in the served browser client", 
 
     const node = box.children[0]!;
     const citation = node.querySelector(".author").children.find((child) => child.className === "message-citation");
+    expect(node.id).toBe("message-7");
+    const branch = node.querySelector(".message-body").children.find((child) => child.className === "message-branch");
+    expect(branch?.attributes.get("data-branch-message")).toBe("7");
     expect(citation?.textContent).toBe("Stored ID message-7");
     expect(citation?.href).toBe("https://msg.0000.chat/room-1/messages/message-7");
     const reply = node.querySelector(".reply-reference").children[0]!;
@@ -442,6 +540,23 @@ test("keeps the final served runtime Live during a WebSocket refresh", async () 
   expect(source).toContain("if(startLive||connectAfterLoad)live?.connect()");
 });
 
+test("copies canonical chat links when viewing a source message anchor", async () => {
+  const source = await browserAsset("client.js")?.text();
+  expect(source).toContain("copyText(location.origin+location.pathname,");
+  expect(source).not.toContain("copyText(location.href,");
+});
+
+test("the agent notice contains a copyable command for this exact conversation", () => {
+  const room = "a".repeat(43);
+  const html = renderBrowserDocument({ room, title: "Chat", url: new URL("https://msg.0000.chat/" + room) }).html;
+  expect(html).toContain(`join &#039;https://msg.0000.chat/${room}&#039;`);
+  expect(html).toContain("data-copy-cli-command");
+  expect(html).not.toContain("join ROOM_URL");
+  const local = renderBrowserDocument({ room, title: "Chat", url: new URL("http://localhost:8791/" + room) }).html;
+  expect(local).toContain("node services/msg/cli/dist/cli.js join");
+  expect(local).toContain("repository root");
+});
+
 test("refreshes when Live ready races ahead of the initial read", async () => {
   const source = await browserAsset("client.js")?.text();
   const globals = globalThis as Record<string, unknown>;
@@ -452,7 +567,7 @@ test("refreshes when Live ready races ahead of the initial read", async () => {
   let reads = 0;
 
   try {
-    globals.document = { body: { dataset: { room: "race" } }, documentElement: { dataset: {}, scrollHeight: 0 }, querySelector: (selector: string) => ({ "#messages": box, "#reply": field }[selector] ?? null), querySelectorAll: () => [] };
+    globals.document = { dispatchEvent: () => true, body: { dataset: { room: "race" } }, documentElement: { dataset: {}, scrollHeight: 0 }, querySelector: (selector: string) => ({ "#messages": box, "#reply": field }[selector] ?? null), querySelectorAll: () => [] };
     globals.fetch = async () => ({ ok: true, json: async () => ({ latest_message: ++reads, messages: [] }) });
     globals.WebSocket = class { onclose = null; onerror = null; onmessage = null; onopen = null; readyState = 0; constructor() { sockets.push(this); } };
     globals.addEventListener = () => {};
@@ -488,7 +603,7 @@ test("refreshes after a reconnect ready frame advances the room", async () => {
   let reads = 0;
 
   try {
-    globals.document = { body: { dataset: { room: "race" } }, documentElement: { dataset: {}, scrollHeight: 0 }, querySelector: (selector: string) => ({ "#messages": box, "#expiry": expiry, "#reply": field }[selector] ?? null), querySelectorAll: (selector: string) => selector === ".js-retention" ? [retention] : [] };
+    globals.document = { dispatchEvent: () => true, body: { dataset: { room: "race" } }, documentElement: { dataset: {}, scrollHeight: 0 }, querySelector: (selector: string) => ({ "#messages": box, "#expiry": expiry, "#reply": field }[selector] ?? null), querySelectorAll: (selector: string) => selector === ".js-retention" ? [retention] : [] };
     globals.fetch = async () => ({ ok: true, json: async () => ({ latest_message: ++reads, messages: [], expires_at: reads === 1 ? "2026-08-10T00:00:00.000Z" : "2026-08-11T00:00:00.000Z", retention: { inactivity_window_ms: 1000, mode: "temporary", policy: "sliding_inactivity" } }) });
     globals.WebSocket = class { onclose = null; onerror = null; onmessage = null; onopen = null; readyState = 0; constructor() { sockets.push(this); } };
     globals.addEventListener = () => {};
@@ -532,7 +647,7 @@ test("ignores an older load response after a newer refresh completes", async () 
   let fetches = 0;
 
   try {
-    globals.document = { body: { dataset: { room: "race" } }, documentElement: { dataset: {}, scrollHeight: 0 }, querySelector: (selector: string) => ({ "#messages": box, "#expiry": expiry, "#reply": field }[selector] ?? null), querySelectorAll: () => [] };
+    globals.document = { dispatchEvent: () => true, body: { dataset: { room: "race" } }, documentElement: { dataset: {}, scrollHeight: 0 }, querySelector: (selector: string) => ({ "#messages": box, "#expiry": expiry, "#reply": field }[selector] ?? null), querySelectorAll: () => [] };
     globals.fetch = () => {
       fetches += 1;
       if (fetches === 1) return Promise.resolve({ ok: true, json: async () => ({ latest_message: 1, messages: [], expires_at: "initial" }) });

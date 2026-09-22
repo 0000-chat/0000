@@ -1,5 +1,6 @@
+import { allowedOrigin } from "./urls.js";
+
 const USAGE = "Usage: msg retention <management-url> inspect | extend";
-const PRODUCTION_ORIGIN = "https://msg.0000.chat";
 const ABSOLUTE_ISO_TIMESTAMP = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,9}))?(Z|[+-]\d{2}:\d{2})$/u;
 
 export type RetentionCommand =
@@ -23,7 +24,7 @@ export function parseRetentionCommand(args: readonly string[]): RetentionCommand
 
 export async function runRetention(options: RetentionOptions): Promise<unknown> {
   if (options.signal?.aborted) throw new RetentionSignalError();
-  const endpoint = new URL(options.managementUrl);
+  const endpoint = new URL(validateManagementUrl(options.managementUrl));
   let body: string | undefined;
   if (options.operation === "extend") {
     if (!options.readStdin) throw new Error("Retention extension requires one JSON object on stdin.");
@@ -65,7 +66,7 @@ export async function runRetention(options: RetentionOptions): Promise<unknown> 
 export function validateManagementUrl(value: string): string {
   let url: URL;
   try { url = new URL(value); } catch { throw new Error("The retention management URL is invalid."); }
-  if (url.origin !== PRODUCTION_ORIGIN || url.username || url.password || url.search || url.hash || !/^\/manage\/[^/]+\/[^/]+$/u.test(url.pathname)) {
+  if (!allowedOrigin(url) || url.username || url.password || url.search || url.hash || !/^\/manage\/[^/]+\/[^/]+$/u.test(url.pathname)) {
     throw new Error("The retention management URL is invalid.");
   }
   return url.toString();

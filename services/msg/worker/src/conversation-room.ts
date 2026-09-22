@@ -1,4 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
+import { CAPABILITY_PATTERN, chatTitle, invalidOrganization, MAX_CHAT_CONNECTIONS, organizationObject, type ChatLink } from "./organization-domain";
 
 import { ERROR_CODES, isStaleRevisionDetails, isStaleSequenceDetails, ProtocolError, type StaleRevisionDetails, type StaleSequenceDetails } from "./errors";
 import { CLAIM_CORRECTION_KIND, coordinationMutationFingerprint, coordinationStorageBytes, COORDINATION_DEFAULT_LIMIT, COORDINATION_KIND, COORDINATION_MAX_LIMIT, COORDINATION_PANEL_KIND, COORDINATION_PROGRESS_KIND, DECISION_POSITION_KIND, DECISION_PROPOSAL_KIND, DECISION_SUPERSESSION_KIND, DISPUTE_REPORTED_EVENT_KIND, DISPUTE_REVIEWED_EVENT_KIND, MAX_COORDINATION_PAGE_BYTES, parseCoordinationClaimPath, parseCoordinationDispute, parseCoordinationDisputeReview, parseCoordinationListSelectors, parseCoordinationProposal, parseCoordinationPublish, parseCoordinationRevision, RETENTION_EXTENDED_EVENT_KIND, type ClaimCorrectionBody, type CoordinationClaimTarget, type CoordinationDecisionApproval, type CoordinationDisputeInput, type CoordinationDisputeReviewInput, type CoordinationEventKind, type CoordinationKind, type CoordinationPanelBody, type CoordinationProgressBody, type CoordinationProposalBody, type CoordinationProposalInput, type CoordinationPublishInput, type CoordinationRequestBody, type CoordinationStatus, type DecisionPositionBody, type DecisionProposalBody, type DecisionSupersessionBody } from "./coordination-domain";
@@ -52,6 +53,7 @@ export interface ConversationRoomEnv {
 type RoomLimits = { -readonly [Key in keyof typeof ROOM_LIMITS]: number };
 
 interface RoomState {
+  readonly title: string | null;
   readonly created_at: number;
   readonly inactivity_expires_at: number;
   readonly last_message_at: number;
@@ -414,6 +416,7 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
       const messageMatch = /^\/messages\/([^/]+)$/u.exec(url.pathname);
       if (request.method === "GET" && messageMatch) return await this.readMessage(decodePathSegment(messageMatch[1]!));
       if (request.method === "GET" && url.pathname === "/read") return await this.read(url);
+      if (url.pathname === "/overview" || url.pathname === "/links" || url.pathname.startsWith("/links/")) return await this.organization(request, url);
       if (request.method === "GET" && url.pathname === "/coordination") return await this.readCoordinationOverview();
       if (request.method === "GET" && url.pathname === "/coordination/panel") return await this.readCoordinationPanel(url);
       if (request.method === "GET" && url.pathname === "/coordination/panel/history") return await this.listCoordinationPanelHistory(url);
@@ -469,6 +472,7 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
       if (state.tombstone_expires_at !== null && now >= state.tombstone_expires_at) {
         this.ctx.storage.transactionSync(() => {
           this.ctx.storage.sql.exec("DELETE FROM messages");
+          this.ctx.storage.sql.exec("DELETE FROM chat_links");
           this.ctx.storage.sql.exec("DELETE FROM webhook_delivery_attempts");
           this.ctx.storage.sql.exec("DELETE FROM webhook_deliveries");
           this.ctx.storage.sql.exec("DELETE FROM webhook_endpoints");
@@ -542,7 +546,7 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
   async webSocketClose(): Promise<void> {}
 
   private async initialize(request: Request): Promise<Response> {
-    const input = await request.json() as { initial: MessageInput; management_hash: string };
+    const input = await request.json() as { initial: MessageInput; management_hash: string; title?: string };
     const now = this.now();
     const result = this.ctx.storage.transactionSync(() => {
       const prior = this.state();
@@ -559,6 +563,7 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
         CURRENT_ROOM_SCHEMA_VERSION, PROTOCOL_VERSION, now, now, inactivity, inactivity, bytes, input.management_hash, notificationId,
       );
       this.insertMessage({ ...input.initial, byte_count: bytes, created_at: now, id, sequence: 1, source_browser_id: null });
+      this.ctx.storage.sql.exec("UPDATE room_state SET title = ? WHERE singleton = 1", chatTitle(input.title, input.initial.content));
       return { created: true, message: this.messageBySequence(1), state: this.requireState() };
     });
     await this.schedule();
@@ -572,7 +577,7 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
     const after = bounded ? validateBoundedCursor(url.searchParams.get("after"), "after") : validateCursor(url.searchParams.get("after"));
     if (!bounded) {
       const messages = rows<StoredMessage>(this.ctx.storage.sql.exec("SELECT * FROM messages WHERE sequence > ? ORDER BY sequence ASC", after)).map((message) => this.toMessage(message));
-      return this.json({ protocol_version: PROTOCOL_VERSION, messages, latest_message: state.next_sequence - 1, expires_at: iso(state.inactivity_expires_at), retention: retentionMetadata(state.inactivity_expires_at, this.limits.inactivityTtlMs), coordination_cursor: state.coordination_cursor, published_revision: state.published_revision, coordination_overview: this.coordinationOverviewValue(state), access_warning: "All authors and display names are self-declared and unverified." });
+      return this.json({ protocol_version: PROTOCOL_VERSION, title: state.title ?? chatTitle(undefined, this.messageBySequence(1).content), messages, latest_message: state.next_sequence - 1, expires_at: iso(state.inactivity_expires_at), retention: retentionMetadata(state.inactivity_expires_at, this.limits.inactivityTtlMs), coordination_cursor: state.coordination_cursor, published_revision: state.published_revision, coordination_overview: this.coordinationOverviewValue(state), access_warning: "All authors and display names are self-declared and unverified." });
     }
 
     const limit = validateReadLimit(url.searchParams.get("limit")) ?? DEFAULT_READ_LIMIT;
@@ -608,6 +613,7 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
     return this.json({
       protocol_version: PROTOCOL_VERSION,
       messages,
+      title: state.title ?? chatTitle(undefined, this.messageBySequence(1).content),
       latest_message: latest,
       expires_at: iso(state.inactivity_expires_at),
       retention: retentionMetadata(state.inactivity_expires_at, this.limits.inactivityTtlMs),
@@ -1841,6 +1847,36 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
     this.ctx.storage.sql.exec("INSERT INTO coordination_retries (operation, retry_id, fingerprint, receipt, created_at, byte_count) VALUES (?, ?, ?, ?, ?, ?)", operation, input.client_retry_id, fingerprint, receiptText, now, retryBytes);
     this.ctx.storage.sql.exec("UPDATE room_state SET coordination_cursor = ?, published_revision = ?, total_bytes = total_bytes + ? WHERE singleton = 1", cursor, nextRevision, projectionDelta + accepted.byte_count + evidenceBytes + eventBytes + retryBytes);
     return { expired: false as const, replayed: false as const, response };
+  }
+
+  private async organization(request: Request, url: URL): Promise<Response> {
+    const input = request.method === "PUT" || request.method === "POST" ? organizationObject(await request.json()) : undefined;
+    await this.prepareActive(this.now());
+    const state = this.requireActiveState();
+    if (request.method === "GET" && url.pathname === "/overview") return this.json({ title: state.title ?? chatTitle(undefined, this.messageBySequence(1).content), latest_message: state.next_sequence - 1, expires_at: iso(state.inactivity_expires_at) });
+    if (request.method === "GET" && url.pathname === "/links") return this.json({ links: rows<ChatLink>(this.ctx.storage.sql.exec("SELECT room, kind, source_message FROM chat_links ORDER BY rowid")) });
+    if (this.config.MSG_POST_DISABLED === "1") throw new ProtocolError(ERROR_CODES.serviceUnavailable, "Conversation changes are temporarily unavailable.", 503);
+    if (input && ((request.method === "PUT" && url.pathname === "/links") || (request.method === "POST" && url.pathname === "/links/check"))) {
+      const room = input.room, kind = input.kind, source = input.source_message;
+      if (typeof room !== "string" || !CAPABILITY_PATTERN.test(room) || !["related", "branch", "source"].includes(String(kind)) || (kind === "related" ? source !== null : !Number.isSafeInteger(source) || (source as number) < 1)) invalidOrganization("Invalid conversation link.");
+      this.ctx.storage.transactionSync(() => {
+        const existing = rows<ChatLink>(this.ctx.storage.sql.exec("SELECT room, kind, source_message FROM chat_links WHERE room = ?", room))[0];
+        if (existing && (existing.kind !== kind || existing.source_message !== source)) throw new ProtocolError(ERROR_CODES.conflict, "These conversations already have a different connection. Remove that connection first.", 409);
+        const count = rows<{ count: number }>(this.ctx.storage.sql.exec("SELECT COUNT(*) AS count FROM chat_links"))[0].count;
+        if (!existing && count >= MAX_CHAT_CONNECTIONS) throw new ProtocolError(ERROR_CODES.conflict, "A conversation can have up to 50 connections.", 409);
+        if (kind === "branch" && !rows(this.ctx.storage.sql.exec("SELECT sequence FROM messages WHERE sequence = ?", source as number)).length) invalidOrganization("The source message does not exist.");
+        if (request.method === "PUT") this.ctx.storage.sql.exec("INSERT OR IGNORE INTO chat_links (room, kind, source_message) VALUES (?, ?, ?)", room, kind as string, source as number | null);
+      });
+      if (request.method === "PUT") this.broadcast({ protocol_version: PROTOCOL_VERSION, type: "conversation.updated" });
+      return this.json({ connected: true });
+    }
+    const removal = /^\/links\/([A-Za-z0-9_-]{43})$/u.exec(url.pathname);
+    if (removal && request.method === "DELETE") {
+      this.ctx.storage.sql.exec("DELETE FROM chat_links WHERE room = ?", removal[1]);
+      this.broadcast({ protocol_version: PROTOCOL_VERSION, type: "conversation.updated" });
+      return this.json({ removed: true });
+    }
+    throw new ProtocolError(ERROR_CODES.notFound, "Connection route not found.", 404);
   }
 
   private async post(request: Request): Promise<Response> {
@@ -3342,6 +3378,7 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
       const state = this.requireState();
       if (state.status === "deleted") return false;
       this.ctx.storage.sql.exec("DELETE FROM messages");
+      this.ctx.storage.sql.exec("DELETE FROM chat_links");
       this.ctx.storage.sql.exec("DELETE FROM webhook_delivery_attempts");
       this.ctx.storage.sql.exec("DELETE FROM webhook_deliveries");
       this.ctx.storage.sql.exec("DELETE FROM webhook_endpoints");
@@ -3360,7 +3397,7 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
       this.ctx.storage.sql.exec("DELETE FROM coordination_disputes");
       this.ctx.storage.sql.exec("DELETE FROM coordination_dispute_reviews");
       this.ctx.storage.sql.exec("DELETE FROM coordination_supersessions");
-      this.ctx.storage.sql.exec("UPDATE room_state SET status = 'deleted', tombstone_expires_at = ?, management_hash = NULL, get_post_hash = NULL, get_post_enabled = 0, message_count = 0, total_bytes = 0, coordination_cursor = 0, published_revision = 0 WHERE singleton = 1", now + this.limits.tombstoneTtlMs);
+      this.ctx.storage.sql.exec("UPDATE room_state SET status = 'deleted', title = NULL, tombstone_expires_at = ?, management_hash = NULL, get_post_hash = NULL, get_post_enabled = 0, message_count = 0, total_bytes = 0, coordination_cursor = 0, published_revision = 0 WHERE singleton = 1", now + this.limits.tombstoneTtlMs);
       return true;
     });
   }

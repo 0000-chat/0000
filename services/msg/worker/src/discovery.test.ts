@@ -117,7 +117,8 @@ test("publishes a complete JSON message contract and create example", () => {
   expect(createJson.schema.properties.content.description).toContain("UTF-8");
   expect(createJson.schema.properties.author).toMatchObject({ type: "string" });
   expect(createJson.example).toMatchObject({ author: "My agent", content: "The message to share" });
-  expect(postJson.schema).toBe(createJson.schema);
+  expect(createJson.schema.properties).toMatchObject(postJson.schema.properties);
+  expect(createJson.schema.properties.title).toMatchObject({ type: "string", maxLength: 120 });
   expect(postJson.example).toBe(createJson.example);
 });
 
@@ -178,6 +179,7 @@ test("documents the post response wait contract", () => {
 test("documents responses for every OpenAPI operation", () => {
   for (const path of Object.values(OPENAPI_DOCUMENT.paths)) {
     for (const operation of Object.values(path)) {
+      if (Array.isArray(operation)) continue; // Shared OpenAPI path parameters.
       expect(operation.responses).toBeDefined();
       expect(Object.keys(operation.responses)).not.toHaveLength(0);
     }
@@ -226,5 +228,5 @@ test("documents responses for every OpenAPI operation", () => {
   expect(OPENAPI_DOCUMENT.paths["/manage/{room}/{token}/coordination/publish"].post.description).toContain("Never expose this URL");
   expect(OPENAPI_DOCUMENT.paths["/{room}/export.json"].get.summary).toContain("complete captured room record");
   expect(OPENAPI_DOCUMENT.paths["/{room}/export.json"].get.description).toContain("one fixed snapshot boundary");
-  expect(Object.keys(OPENAPI_DOCUMENT.paths).sort()).toEqual(["/", "/healthz", "/manage/{room}/{token}", "/manage/{room}/{token}/coordination/disputes/{report_id}/review", "/manage/{room}/{token}/coordination/publish", "/manage/{room}/{token}/retention", "/{room}", "/{room}/agent", "/{room}/coordination", "/{room}/coordination/corrections", "/{room}/coordination/corrections/{correction_id}", "/{room}/coordination/decisions", "/{room}/coordination/decisions/{decision_id}", "/{room}/coordination/decisions/{decision_id}/records/{accepted_record_id}", "/{room}/coordination/disputes", "/{room}/coordination/disputes/{report_id}", "/{room}/coordination/panel", "/{room}/coordination/panel/history", "/{room}/coordination/proposals", "/{room}/coordination/proposals/{id}", "/{room}/coordination/proposals/{id}/revisions", "/{room}/coordination/proposals/{id}/revisions/{revision}", "/{room}/coordination/publications/{published_revision}", "/{room}/coordination/requests", "/{room}/coordination/requests/{request_id}", "/{room}/coordination/supersessions", "/{room}/export.json", "/{room}/export.md", "/{room}/live", "/{room}/messages/{id}", "/{room}/post", "/{room}/webhooks", "/{room}/webhooks/{id}", "/{room}/webhooks/{id}/deliveries/{event_id}/redeliver", "/{room}/webhooks/{id}/disable", "/{room}/webhooks/{id}/enable", "/{room}/webhooks/{id}/rotate-secret"]);
+  expect(Object.keys(OPENAPI_DOCUMENT.paths).sort()).toEqual(["/", "/g/{group}", "/groups", "/groups/{group}", "/groups/{group}/chats", "/groups/{group}/chats/{room}", "/healthz", "/manage/{room}/{token}", "/manage/{room}/{token}/coordination/disputes/{report_id}/review", "/manage/{room}/{token}/coordination/publish", "/manage/{room}/{token}/retention", "/{room}", "/{room}/agent", "/{room}/coordination", "/{room}/coordination/corrections", "/{room}/coordination/corrections/{correction_id}", "/{room}/coordination/decisions", "/{room}/coordination/decisions/{decision_id}", "/{room}/coordination/decisions/{decision_id}/records/{accepted_record_id}", "/{room}/coordination/disputes", "/{room}/coordination/disputes/{report_id}", "/{room}/coordination/panel", "/{room}/coordination/panel/history", "/{room}/coordination/proposals", "/{room}/coordination/proposals/{id}", "/{room}/coordination/proposals/{id}/revisions", "/{room}/coordination/proposals/{id}/revisions/{revision}", "/{room}/coordination/publications/{published_revision}", "/{room}/coordination/requests", "/{room}/coordination/requests/{request_id}", "/{room}/coordination/supersessions", "/{room}/export.json", "/{room}/export.md", "/{room}/links", "/{room}/links/{other_room}", "/{room}/live", "/{room}/messages/{id}", "/{room}/post", "/{room}/webhooks", "/{room}/webhooks/{id}", "/{room}/webhooks/{id}/deliveries/{event_id}/redeliver", "/{room}/webhooks/{id}/disable", "/{room}/webhooks/{id}/enable", "/{room}/webhooks/{id}/rotate-secret"]);
 });
