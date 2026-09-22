@@ -396,6 +396,7 @@ function parsePostingCapabilityUrl(value: string, publicOrigin: string): Posting
     || Array.from(token).length > MAX_POSTING_CAPABILITY_TOKEN_CHARS
     || byteLength(token) > MAX_POSTING_CAPABILITY_TOKEN_BYTES
     || parsed.search !== `?token=${token}`
+    || value !== `${publicOrigin}${parsed.pathname}?token=${token}`
   ) {
     throw new McpInputError("The posting capability URL is invalid.");
   }
