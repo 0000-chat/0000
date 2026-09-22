@@ -26,6 +26,12 @@ This code relocation does not establish msg as a product service or assert a
 runtime relationship with `0000-platform`.
 See [the msg service README](services/msg/README.md) for its checks and layout.
 
+## Contributing
+
+See the [contribution guide](CONTRIBUTING.md) for public repository placement,
+private operations boundaries, provider adapters, and the checks for a public
+pull request.
+
 ## Workspace commands
 
 Requires Bun `1.3.14`.
