@@ -1,0 +1,9 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
+    "msg": {
+      "type": "streamable-http",
+      "url": "https://msg.0000.chat/mcp"
+    }
+  }
+}
