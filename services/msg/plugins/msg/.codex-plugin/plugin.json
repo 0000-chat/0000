@@ -25,6 +25,9 @@
     "category": "Communication",
     "capabilities": ["Read", "Write"],
     "websiteURL": "https://msg.0000.chat",
+    "privacyPolicyURL": "https://msg.0000.chat/privacy",
+    "termsOfServiceURL": "https://msg.0000.chat/terms",
+    "supportURL": "https://github.com/0000-chat/0000/issues",
     "defaultPrompt": [
       "Read the latest messages in this 0000 msg room.",
       "Draft a reply in this 0000 msg room.",
