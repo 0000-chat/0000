@@ -4,10 +4,10 @@
   "visibility": "public",
   "status": "scaffold-only",
   "purpose": "Boundary for ingress, protocol translation, and future gateway composition.",
-  "dependencies": [],
-  "standalone_authentication": "not-required",
+  "dependencies": ["0000-platform"],
+  "standalone_authentication": "platform-required; hosted-account-not-required",
   "hosting_class": "cloudflare-public-ingress",
   "future_executor_relationship": "may-compose-later",
   "application_code": false,
-  "license_selected": false
+  "license_selected": true
 }

@@ -28,6 +28,12 @@ This code relocation does not establish msg as a product service or assert a
 runtime relationship with `0000-platform`.
 See [the msg service README](services/msg/README.md) for its checks and layout.
 
+## Contributing
+
+See the [contribution guide](CONTRIBUTING.md) for public repository placement,
+private operations boundaries, provider adapters, and the checks for a public
+pull request.
+
 ## Workspace commands
 
 Requires Bun `1.3.14`.
@@ -35,6 +41,7 @@ Requires Bun `1.3.14`.
 ```sh
 bun install --frozen-lockfile
 bun run check
+bun run check:topology
 bun run check:turbo
 bun run check:turbo:dry
 ```
@@ -55,3 +62,9 @@ The import procedure and preservation records are documented in
 [`services/communicator/docs/migration/2026-09-15-monorepo-import.md`](services/communicator/docs/migration/2026-09-15-monorepo-import.md),
 [`services/streams/docs/migration/2026-09-17-monorepo-import.md`](services/streams/docs/migration/2026-09-17-monorepo-import.md), and
 [`docs/playbooks/import-service-repository.md`](docs/playbooks/import-service-repository.md).
+
+## Repository layout
+
+See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the placement test that keeps
+user-facing applications, deployable services, reusable packages, and generic
+deployment material in their intended public top-level boundaries.
