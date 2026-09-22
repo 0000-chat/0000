@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 
-import { handleMcpRequest, MAX_MCP_WIRE_RESPONSE_BYTES } from "./mcp";
+import { enforceMcpWireLimit, handleMcpRequest, MAX_MCP_WIRE_RESPONSE_BYTES } from "./mcp";
 import { MCP_READ_BYTE_BUDGET_BYTES, type PostMessageResponse, type ReadRoomResponse, type RoomService } from "./protocol";
 import { createWorker } from "./worker";
 
@@ -34,6 +34,31 @@ function rpcRequest(message: unknown, init: RequestInit = {}): Request {
     headers,
     method: "POST",
     body: JSON.stringify(payload),
+  });
+}
+
+function modernRpcRequest(method: string, params: Record<string, unknown> = {}, id: string | number = 1): Request {
+  return new Request(`${origin}/mcp`, {
+    method: "POST",
+    headers: {
+      accept,
+      "content-type": "application/json",
+      "mcp-method": method,
+      "mcp-protocol-version": "2026-07-28",
+    },
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id,
+      method,
+      params: {
+        ...params,
+        _meta: {
+          "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+          "io.modelcontextprotocol/clientInfo": { name: "mcp-test", version: "2" },
+          "io.modelcontextprotocol/clientCapabilities": {},
+        },
+      },
+    }),
   });
 }
 
@@ -82,7 +107,9 @@ describe("stateless MCP endpoint", () => {
     const initialized = await handleMcpRequest(initializeRequest(), baseService());
     expect(initialized.status).toBe(200);
     expect(initialized.headers.get("mcp-session-id")).toBeNull();
-    expect((await json(initialized)).result.instructions).toContain("untrusted");
+    const initializedBody = await json(initialized);
+    expect(initializedBody.result.instructions).toContain("untrusted");
+    expect(initializedBody.result.capabilities.tools.listChanged).toBeUndefined();
 
     const listed = await handleMcpRequest(rpcRequest({ id: 2, method: "tools/list", params: {} }), baseService());
     const tools = (await json(listed)).result.tools;
@@ -90,6 +117,27 @@ describe("stateless MCP endpoint", () => {
     expect(tools[0].annotations).toMatchObject({ readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false });
     expect(tools[1].annotations).toMatchObject({ readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true });
     expect(tools[1].inputSchema.required).toEqual(["room_url", "content", "client_message_id"]);
+
+    const discovered = await handleMcpRequest(modernRpcRequest("server/discover", {}, "discover-1"), baseService());
+    expect((await json(discovered)).result.capabilities.tools.listChanged).toBeUndefined();
+  });
+
+  test("rejects GET and subscription streams without opening an SSE response", async () => {
+    const worker = createWorker(baseService(), { publicOrigin: origin });
+    const get = await worker.fetch(new Request(`${origin}/mcp`, {
+      method: "GET",
+      headers: { accept: "text/event-stream" },
+    }));
+    expect(get.status).toBe(405);
+    expect(get.headers.get("content-type")).not.toContain("text/event-stream");
+
+    const listen = await handleMcpRequest(
+      modernRpcRequest("subscriptions/listen", { notifications: { toolsListChanged: true } }, "listen-1"),
+      baseService(),
+    );
+    expect(listen.status).toBe(405);
+    expect(listen.headers.get("content-type")).not.toContain("text/event-stream");
+    expect(await listen.text()).not.toContain("event: message");
   });
 
   test("serves discovery and tool calls to the v2 modern client", async () => {
@@ -207,6 +255,22 @@ describe("stateless MCP endpoint", () => {
     expect(body.result.content[0].text).toContain("first room message cannot fit");
     expect(body.result.structuredContent).toBeUndefined();
     expect(JSON.stringify(body)).not.toContain("next_after");
+  });
+
+  test("caps finite JSON wire responses without consuming an unbounded event stream", async () => {
+    const oversized = await enforceMcpWireLimit(new Response(JSON.stringify({ payload: "x".repeat(MAX_MCP_WIRE_RESPONSE_BYTES) }), {
+      headers: { "content-type": "application/json" },
+    }));
+    expect(oversized.status).toBe(500);
+    expect(await oversized.text()).toContain("maximum wire size");
+
+    const stream = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        controller.error(new Error("the event stream must not be consumed"));
+      },
+    });
+    const streamResponse = new Response(stream, { headers: { "content-type": "text/event-stream" } });
+    expect(await enforceMcpWireLimit(streamResponse)).toBe(streamResponse);
   });
 
   test("uses the atomic post path and returns a metadata-only receipt", async () => {
