@@ -23,9 +23,9 @@ does not assert copyright authority that has not been verified. A future
 migration requires an explicit rights and compatibility decision before the
 exception can change.
 
-The temporary `services/cloud` workspace is private operations material and is
-excluded from the public map while the public-boundary migration removes it.
-It must not become a public distributable package by adding a license entry.
+Private Cloud operations are not part of this repository or its license map.
+They must not become a public distributable package through a workspace link
+or package entry.
 
 The AGPL text was copied from the GNU-hosted official text at
 <https://www.gnu.org/licenses/agpl-3.0.txt>. The Apache text was copied from

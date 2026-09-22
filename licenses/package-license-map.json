@@ -127,9 +127,5 @@
       "manifest": "services/streams/package.json"
     }
   },
-  "excluded": {
-    "services/cloud": {
-      "reason": "Private Cloud workspace; it is not a public distributable and is removed by the public-boundary slice."
-    }
-  }
+  "excluded": {}
 }

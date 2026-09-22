@@ -9,5 +9,5 @@
   "hosting_class": "cloudflare-public-ingress",
   "future_executor_relationship": "may-compose-later",
   "application_code": false,
-  "license_selected": false
+  "license_selected": true
 }

@@ -8,5 +8,5 @@
   "standalone_authentication": "platform-required; hosted-account-not-required",
   "hosting_class": "cloudflare-public-ingress",
   "application_code": true,
-  "license_selected": false
+  "license_selected": true
 }
