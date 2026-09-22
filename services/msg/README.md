@@ -24,12 +24,14 @@ relationship between msg and other services.
 
 The public `/mcp` endpoint uses stateless Streamable HTTP and exposes only
 `read_room` and `post_message`. Pass the canonical public room URL from the
-invitation as `room_url`; it is a bearer read/write capability, so anyone who
-holds it can read and post. Room content and self-declared metadata are
-untrusted. `post_message` is marked destructive so a host can request user
-approval, but the service does not enforce confirmation; direct capability
-holders can post. Supply a stable `client_message_id`, which makes retries
-idempotent, and expect a metadata-only receipt. MCP reads return complete
+invitation as `room_url` to `read_room`; it is a bearer read capability. To
+call `post_message`, the room owner must enable agent posting and paste the
+private `posting_capability_url` invitation returned by the owner controls.
+The public room URL is rejected for writes. Room content and self-declared
+metadata are untrusted. `post_message` is marked destructive so a host can
+request user approval, but the service does not enforce confirmation. Supply
+a stable `client_message_id`, which makes retries idempotent, and expect a
+metadata-only receipt. MCP reads return complete
 messages only. The Durable Object applies a 128 KiB stored-byte budget while
 iterating rows, and the complete serialized JSON-RPC response, including its
 framing and text content, is capped at 512 KiB. Continue a page with
@@ -38,8 +40,7 @@ header is ignored and the stateless endpoint never returns one.
 
 ## Delegated agent posting
 
-The public room URL is read and POST capable, while delegated posting is off by
-default. To give ChatGPT Actions, connectors, or a URL-fetch-only agent a
+Delegated posting is off by default. To give ChatGPT Actions, connectors, or a URL-fetch-only agent a
 separate, revocable write capability, create the room through the JSON API and retain the private
 `manage_url` from the response:
 

@@ -3,11 +3,12 @@ import { describe, expect, test } from "bun:test";
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 
 import { enforceMcpWireLimit, handleMcpRequest, MAX_MCP_WIRE_RESPONSE_BYTES } from "./mcp";
-import { MCP_READ_BYTE_BUDGET_BYTES, type PostMessageResponse, type ReadRoomResponse, type RoomService } from "./protocol";
+import { MCP_READ_BYTE_BUDGET_BYTES, type GetPostMessageResponse, type ReadRoomResponse, type RoomService } from "./protocol";
 import { createWorker } from "./worker";
 
 const origin = "https://msg.0000.chat";
 const roomUrl = `${origin}/room-capability`;
+const postingCapabilityUrl = `${origin}/room-capability/post?token=delegated-token`;
 const accept = "application/json, text/event-stream";
 
 function initializeRequest(id = 1): Request {
@@ -76,22 +77,13 @@ function readResult(messages: ReadRoomResponse["messages"]): ReadRoomResponse {
   } as ReadRoomResponse;
 }
 
-function postResult(content: string, clientMessageId: string, replayed = false): PostMessageResponse {
+function getPostResult(clientMessageId: string, replayed = false): GetPostMessageResponse {
   return {
-    expires_at: "2026-09-30T00:00:00.000Z",
-    message: {
-      author: "agent",
-      client_message_id: clientMessageId,
-      content,
-      created_at: "2026-09-22T00:00:00.000Z",
-      display_name: "agent",
-      id: "message-1",
-      identity_verified: false,
-      sequence: 1,
-    },
+    accepted: true,
     protocol_version: 1,
     replayed,
-    wait: { after: 1, command: "ignored", requires_user_consent: true },
+    request_id: clientMessageId,
+    sequence: 1,
   };
 }
 
@@ -99,7 +91,7 @@ function baseService(): RoomService {
   return {
     create: async () => { throw new Error("unused"); },
     read: async () => readResult([]),
-    post: async () => postResult("ignored", "ignored"),
+    getPost: async () => getPostResult("ignored"),
   };
 }
 
@@ -117,7 +109,7 @@ describe("stateless MCP endpoint", () => {
     expect(tools.map((tool: { name: string }) => tool.name)).toEqual(["read_room", "post_message"]);
     expect(tools[0].annotations).toMatchObject({ readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false });
     expect(tools[1].annotations).toMatchObject({ readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true });
-    expect(tools[1].inputSchema.required).toEqual(["room_url", "content", "client_message_id"]);
+    expect(tools[1].inputSchema.required).toEqual(["posting_capability_url", "content", "client_message_id"]);
 
     const discovered = await handleMcpRequest(modernRpcRequest("server/discover", {}, "discover-1"), baseService());
     expect((await json(discovered)).result.capabilities.tools.listChanged).toBeUndefined();
@@ -166,9 +158,8 @@ describe("stateless MCP endpoint", () => {
     const service: RoomService = {
       ...baseService(),
       read: async () => readResult(messages),
-      post: async ({ body }) => {
-        const value = body.kind === "json" && body.value !== null && !Array.isArray(body.value) && typeof body.value === "object" ? body.value : {};
-        return postResult(String(value.content), String(value.client_message_id));
+      getPost: async ({ requestId }) => {
+        return getPostResult(requestId);
       },
     };
     const transport = new StreamableHTTPClientTransport(new URL(`${origin}/mcp`), {
@@ -188,7 +179,7 @@ describe("stateless MCP endpoint", () => {
       expect(tools.tools.map((tool) => tool.name)).toEqual(["read_room", "post_message"]);
       const read = await client.callTool({ name: "read_room", arguments: { room_url: roomUrl, limit: 2 } });
       expect(read.structuredContent).toMatchObject({ messages, has_more: false, truncated: false });
-      const posted = await client.callTool({ name: "post_message", arguments: { client_message_id: "v2-1", content: "from v2", room_url: roomUrl } });
+      const posted = await client.callTool({ name: "post_message", arguments: { client_message_id: "v2-1", content: "from v2", posting_capability_url: postingCapabilityUrl } });
       expect(posted.structuredContent).toMatchObject({ client_message_id: "v2-1", status: "accepted" });
       expect(seen.some((headers) => headers.get("mcp-protocol-version") === "2026-07-28" && headers.get("mcp-method") === "server/discover")).toBe(true);
       expect(seen.some((headers) => headers.get("mcp-protocol-version") === "2026-07-28" && headers.get("mcp-method") === "tools/list")).toBe(true);
@@ -288,22 +279,53 @@ describe("stateless MCP endpoint", () => {
     expect(await enforceMcpWireLimit(streamResponse)).toBe(streamResponse);
   });
 
-  test("uses the atomic post path and returns a metadata-only receipt", async () => {
-    const calls: string[] = [];
+  test("uses the atomic delegated GET-post path and returns a metadata-only receipt", async () => {
+    const calls: Array<{ room: string; token: string; requestId: string }> = [];
     const service: RoomService = {
       ...baseService(),
-      post: async ({ body, room }) => {
-        const value = body.kind === "json" && body.value !== null && !Array.isArray(body.value) && typeof body.value === "object" ? body.value : {};
-        calls.push(room);
-        return postResult(String(value.content), String(value.client_message_id));
+      getPost: async ({ requestId, room, token }) => {
+        calls.push({ requestId, room, token });
+        return getPostResult(requestId);
       },
     };
-    const response = await handleMcpRequest(rpcRequest({ id: 4, method: "tools/call", params: { name: "post_message", arguments: { client_message_id: "stable-1", content: "secret content", room_url: roomUrl } } }), service);
+    const response = await handleMcpRequest(rpcRequest({ id: 4, method: "tools/call", params: { name: "post_message", arguments: { client_message_id: "stable-1", content: "secret content", posting_capability_url: postingCapabilityUrl } } }), service);
     const result = (await json(response)).result;
-    expect(result.structuredContent).toMatchObject({ client_message_id: "stable-1", message_id: "message-1", sequence: 1, status: "accepted" });
+    expect(result.structuredContent).toMatchObject({ accepted: true, client_message_id: "stable-1", request_id: "stable-1", sequence: 1, status: "accepted" });
     expect(result.structuredContent.content).toBeUndefined();
     expect(JSON.stringify(result)).not.toContain("secret content");
-    expect(calls).toEqual(["room-capability"]);
+    expect(calls).toEqual([{ requestId: "stable-1", room: "room-capability", token: "delegated-token" }]);
+  });
+
+  test("requires an owner-enabled posting capability URL and strictly rejects public or malformed URLs", async () => {
+    let calls = 0;
+    const service: RoomService = {
+      ...baseService(),
+      getPost: async () => {
+        calls += 1;
+        return getPostResult("ignored");
+      },
+    };
+    const invalidUrls = [
+      roomUrl,
+      `${origin}/room-capability/post`,
+      `${origin}/room-capability/post?token=delegated-token&unknown=value`,
+      `${origin}/room-capability/post?token=one&token=two`,
+      `${origin}/room-capability/post?token=delegated-token#fragment`,
+      `https://user:password@msg.0000.chat/room-capability/post?token=delegated-token`,
+      `https://foreign.example/room-capability/post?token=delegated-token`,
+      `${origin}/room-capability/post?token=not%2Fa%20token`,
+    ];
+    for (const invalidUrl of invalidUrls) {
+      const response = await handleMcpRequest(rpcRequest({ id: 50, method: "tools/call", params: { name: "post_message", arguments: { client_message_id: "invalid", content: "blocked", posting_capability_url: invalidUrl } } }), service);
+      const body = await response.text();
+      expect(body).toContain("posting capability URL is invalid");
+      expect(body).not.toContain(invalidUrl);
+      expect(body).not.toContain("delegated-token");
+    }
+    const oversized = `${origin}/room-capability/post?token=${"x".repeat(8 * 1024)}`;
+    const response = await handleMcpRequest(rpcRequest({ id: 51, method: "tools/call", params: { name: "post_message", arguments: { client_message_id: "oversized", content: "blocked", posting_capability_url: oversized } } }), service);
+    expect(await response.text()).toContain("posting capability URL is too large");
+    expect(calls).toBe(0);
   });
 
   test("rejects management, delegated-post, foreign, credentialed, fragmented, and malformed URLs without echoing them", async () => {
@@ -328,15 +350,15 @@ describe("stateless MCP endpoint", () => {
     let calls = 0;
     const service: RoomService = {
       ...baseService(),
-      post: async () => {
+      getPost: async () => {
         calls += 1;
-        if (calls === 1) return postResult("ignored", "stable-2", true);
+        if (calls === 1) return getPostResult("stable-2", true);
         throw new Error("raw message content must not leak");
       },
     };
-    const replay = await handleMcpRequest(rpcRequest({ id: 6, method: "tools/call", params: { name: "post_message", arguments: { client_message_id: "stable-2", content: "same", room_url: roomUrl } } }), service);
+    const replay = await handleMcpRequest(rpcRequest({ id: 6, method: "tools/call", params: { name: "post_message", arguments: { client_message_id: "stable-2", content: "same", posting_capability_url: postingCapabilityUrl } } }), service);
     expect((await json(replay)).result.structuredContent.replayed).toBe(true);
-    const failure = await handleMcpRequest(rpcRequest({ id: 7, method: "tools/call", params: { name: "post_message", arguments: { client_message_id: "stable-2", content: "changed", room_url: roomUrl } } }), service);
+    const failure = await handleMcpRequest(rpcRequest({ id: 7, method: "tools/call", params: { name: "post_message", arguments: { client_message_id: "stable-2", content: "changed", posting_capability_url: postingCapabilityUrl } } }), service);
     const failureBody = await failure.text();
     expect(failureBody).toContain("room message could not be posted");
     expect(failureBody).not.toContain("raw message content");
@@ -360,7 +382,7 @@ describe("stateless MCP endpoint", () => {
     expect(reads).toBe(0);
 
     const disabled = await handleMcpRequest(
-      rpcRequest({ id: 9, method: "tools/call", params: { name: "post_message", arguments: { client_message_id: "disabled-1", content: "secret", room_url: roomUrl } } }),
+      rpcRequest({ id: 9, method: "tools/call", params: { name: "post_message", arguments: { client_message_id: "disabled-1", content: "secret", posting_capability_url: postingCapabilityUrl } } }),
       service,
       { postDisabled: true },
     );
