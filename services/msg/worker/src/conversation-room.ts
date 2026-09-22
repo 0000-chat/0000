@@ -205,11 +205,13 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
         return this.json({ triggered: true });
       }
       if (request.method === "GET" && url.pathname === "/read") return await this.read(url);
+      if (request.method === "GET" && url.pathname === "/status") return await this.status();
       if (request.method === "POST" && url.pathname === "/messages") return await this.post(request);
       if (request.method === "GET" && url.pathname === "/manage") return await this.manage(request, false);
       if (request.method === "DELETE" && url.pathname === "/manage") return await this.manage(request, true);
       if (request.method === "POST" && url.pathname === "/manage") return await this.managePost(request);
       if (request.method === "POST" && url.pathname === "/get-post") return await this.getPost(request);
+      if (request.method === "POST" && url.pathname === "/mcp-post") return await this.mcpPost(request);
       if (request.method === "POST" && url.pathname === "/get-post-probe") return await this.getPostProbe(request);
       if (request.method === "GET" && url.pathname === "/live") return await this.live(url);
       if (request.method === "GET" && (url.pathname === "/export.md" || url.pathname === "/export.json")) return await this.export(url.pathname === "/export.json");
@@ -372,6 +374,27 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
     return this.json({ protocol_version: PROTOCOL_VERSION, message: this.toMessage(result.message), expires_at: iso(result.state.inactivity_expires_at), replayed: result.replayed });
   }
 
+  private async mcpPost(request: Request): Promise<Response> {
+    const input = await request.json() as { input?: MessageInput };
+    if (!input.input || typeof input.input.client_message_id !== "string") {
+      throw new ProtocolError(ERROR_CODES.invalidBody, "The client_message_id field is required.", 400);
+    }
+    const requestId = validateRequestId(input.input.client_message_id);
+    const now = this.now();
+    const result = this.commitMessage(input.input, `mcp:${requestId}`, now, (state) => {
+      if (state.get_post_enabled !== 1) {
+        throw new ProtocolError(ERROR_CODES.notFound, "The requested resource was not found.", 404);
+      }
+    });
+    if (result.expired) {
+      await this.expire(now, "Conversation expired");
+      throw new ProtocolError(ERROR_CODES.gone, "The conversation has expired.", 410);
+    }
+    await this.schedule();
+    if (!result.replayed) this.broadcast({ protocol_version: PROTOCOL_VERSION, type: "message.created", sequence: result.message.sequence, latest_message: result.state.next_sequence - 1, expires_at: iso(result.state.inactivity_expires_at) });
+    return this.json({ accepted: true, protocol_version: PROTOCOL_VERSION, replayed: result.replayed, request_id: requestId, sequence: result.message.sequence });
+  }
+
   private async getPost(request: Request): Promise<Response> {
     if (this.config.MSG_POST_DISABLED === "1") {
       throw new ProtocolError(ERROR_CODES.serviceUnavailable, "New messages are temporarily unavailable.", 503);
@@ -408,6 +431,18 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
     if (result === "expired") throw new ProtocolError(ERROR_CODES.gone, "The conversation has expired.", 410);
     if (result === "missing") throw new ProtocolError(ERROR_CODES.notFound, "The requested resource was not found.", 404);
     return this.json({ active: true, get_post_enabled: true, protocol_version: PROTOCOL_VERSION });
+  }
+
+  private async status(): Promise<Response> {
+    const state = this.requireState();
+    const active = state.status === "active" && this.now() < state.inactivity_expires_at;
+    return this.json({
+      active,
+      agent_posting_enabled: active && state.get_post_enabled === 1 && this.config.MSG_POST_DISABLED !== "1",
+      expires_at: iso(state.inactivity_expires_at),
+      latest_message: Math.max(0, state.next_sequence - 1),
+      protocol_version: PROTOCOL_VERSION,
+    });
   }
 
   private commitMessage(

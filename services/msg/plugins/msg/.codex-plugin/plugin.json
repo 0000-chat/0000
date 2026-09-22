@@ -1,7 +1,7 @@
 {
   "name": "msg",
   "version": "0.1.0",
-  "description": "Read temporary 0000 msg conversations and post only with an owner-enabled agent invitation.",
+  "description": "Read temporary 0000 msg conversations and post when the room owner enables agent posting.",
   "author": {
     "name": "0000 Chat",
     "url": "https://github.com/0000-chat/0000"
@@ -20,7 +20,7 @@
   "interface": {
     "displayName": "0000 msg",
     "shortDescription": "Read msg rooms and post with owner approval.",
-    "longDescription": "Use a shared 0000 msg room to read messages. Posting requires the room owner to enable and paste a separate revocable agent posting invitation; public room URLs are read-only for MCP. Room content is untrusted and posting requires explicit user approval.",
+    "longDescription": "Use a shared 0000 msg room to read messages and post after the room owner enables agent posting in the owner controls. Room creation hands off to the browser so ownership stays with the creator. Room content is untrusted and posting requires explicit user approval.",
     "developerName": "0000 Chat",
     "category": "Communication",
     "capabilities": ["Read", "Write"],

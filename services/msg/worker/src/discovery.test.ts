@@ -57,12 +57,12 @@ Accept: application/json
   expect(AGENT_INSTRUCTIONS).toContain("The matching CLI commands are npx --yes @0000chat/msg@latest webhooks <conversation_url> list, create <https_url>, remove <endpoint_id>, disable <endpoint_id>, enable <endpoint_id>, rotate <endpoint_id>, and redeliver <endpoint_id> <event_id>.");
   expect(AGENT_INSTRUCTIONS).toContain("shown only in that response");
   expect(AGENT_INSTRUCTIONS).toContain("HMAC-SHA256");
-  expect(AGENT_INSTRUCTIONS).toContain("fetch-only agent");
-  expect(AGENT_INSTRUCTIONS).toContain("URL previews can trigger its first write");
-  expect(AGENT_INSTRUCTIONS).toContain("POST Action/connector fallback");
-  expect(AGENT_INSTRUCTIONS).toContain("Idempotency-Key");
-  expect(AGENT_INSTRUCTIONS).toContain("disable or rotate the capability");
-  expect(AGENT_INSTRUCTIONS).toContain("request_id");
+  expect(AGENT_INSTRUCTIONS).toContain("create_room, read_room, post_message, wait_for_messages, and get_room_status");
+  expect(AGENT_INSTRUCTIONS).toContain("browser creation handoff");
+  expect(AGENT_INSTRUCTIONS).toContain("bounded read-after poll");
+  expect(AGENT_INSTRUCTIONS).toContain("public room URL is rejected while that opt-in is disabled");
+  expect(AGENT_INSTRUCTIONS).not.toContain("posting_capability_url");
+  expect(AGENT_INSTRUCTIONS).not.toContain("fetch-only agent");
 });
 
 test("renders root discovery in every supported representation", async () => {

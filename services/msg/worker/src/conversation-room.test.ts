@@ -127,6 +127,53 @@ test("keeps GET posting off by default and manages a separate delegated capabili
   expect(await (await durable.fetch(new Request("https://room/read?after=0"))).text()).toContain("second");
 });
 
+test("uses the owner opt-in for anonymous MCP posting in the same idempotent transaction", async () => {
+  const { room: durable } = await room();
+  const management = "management-token";
+  const input = { content: "mcp message", client_message_id: "mcp-1", author: "anonymous", display_name: "anonymous", semantic_type: "message" };
+  await durable.fetch(request("/initialize", { management_hash: await hashCapability(management), initial: { content: "first", author: "a", display_name: "a", semantic_type: "message" } }));
+
+  const beforeEnable = await durable.fetch(request("/mcp-post", { input }));
+  const statusBefore = await durable.fetch(new Request("https://room/status"));
+  expect(beforeEnable.status).toBe(404);
+  expect(await statusBefore.json()).toMatchObject({ active: true, agent_posting_enabled: false, latest_message: 1 });
+
+  await durable.fetch(new Request(`https://room/manage?token=${management}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "enable", get_post_token: "legacy-capability" }) }));
+  const enabledStatus = await durable.fetch(new Request("https://room/status"));
+  const posted = await durable.fetch(request("/mcp-post", { input }));
+  const replay = await durable.fetch(request("/mcp-post", { input }));
+  const conflict = await durable.fetch(request("/mcp-post", { input: { ...input, content: "changed" } }));
+
+  expect(await enabledStatus.json()).toMatchObject({ active: true, agent_posting_enabled: true, latest_message: 1 });
+  expect(await posted.json()).toMatchObject({ accepted: true, replayed: false, request_id: "mcp-1", sequence: 2 });
+  expect(await replay.json()).toMatchObject({ accepted: true, replayed: true, request_id: "mcp-1", sequence: 2 });
+  expect(conflict.status).toBe(409);
+
+  await durable.fetch(new Request(`https://room/manage?token=${management}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "disable" }) }));
+  const disabled = await durable.fetch(request("/mcp-post", { input: { ...input, client_message_id: "mcp-2", content: "blocked" } }));
+  expect(disabled.status).toBe(404);
+});
+
+test("queues one webhook and push delivery for one anonymous MCP message and none for replay", async () => {
+  const database = new Database(":memory:");
+  const { room: durable } = await room(database);
+  const management = "management-token";
+  await durable.fetch(request("/initialize", { management_hash: await hashCapability(management), initial: { content: "first", author: "a", display_name: "a", semantic_type: "message" } }));
+  await durable.fetch(request("/webhooks", { url: "https://receiver.example.com/mcp" }));
+  database.query("INSERT INTO push_subscriptions (id, source_browser_id, endpoint, p256dh, auth, created_at) VALUES (?, ?, ?, ?, ?, ?)")
+    .run("push-mcp", "browser-mcp", "https://push.example.com/mcp", "p256dh", "auth", Date.now());
+  await durable.fetch(new Request(`https://room/manage?token=${management}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "enable", get_post_token: "legacy-capability" }) }));
+  const input = { content: "mcp notification", client_message_id: "mcp-notify", author: "anonymous", display_name: "anonymous", semantic_type: "message" };
+  await durable.fetch(request("/mcp-post", { input }));
+  await durable.fetch(request("/mcp-post", { input }));
+
+  const message = database.query("SELECT id, source_browser_id FROM messages WHERE sequence = 2").get() as { id: string; source_browser_id: string | null };
+  expect(message.source_browser_id).toBeNull();
+  expect(database.query("SELECT COUNT(*) AS count FROM webhook_deliveries WHERE message_id = ?").get(message.id)).toEqual({ count: 1 });
+  expect(database.query("SELECT COUNT(*) AS count FROM push_deliveries WHERE message_id = ?").get(message.id)).toEqual({ count: 1 });
+  database.close();
+});
+
 test("probes delegated GET posting without mutating room state", async () => {
   const database = new Database(":memory:");
   let now = 4_000_000_000_000;

@@ -22,21 +22,26 @@ relationship between msg and other services.
 
 ## MCP
 
-The public `/mcp` endpoint uses stateless Streamable HTTP and exposes only
-`read_room` and `post_message`. Pass the canonical public room URL from the
-invitation as `room_url` to `read_room`; it is a bearer read capability. To
-call `post_message`, the room owner must enable agent posting and paste the
-private `posting_capability_url` invitation returned by the owner controls.
-The public room URL is rejected for writes. Room content and self-declared
-metadata are untrusted. `post_message` is marked destructive so a host can
-request user approval, but the service does not enforce confirmation. Supply
-a stable `client_message_id`, which makes retries idempotent, and expect a
-metadata-only receipt. MCP reads return complete
-messages only. The Durable Object applies a 128 KiB stored-byte budget while
-iterating rows, and the complete serialized JSON-RPC response, including its
-framing and text content, is capped at 512 KiB. Continue a page with
-`next_after` when `has_more` is true. The legacy `Mcp-Session-Id` request
-header is ignored and the stateless endpoint never returns one.
+The public `/mcp` endpoint uses stateless Streamable HTTP and exposes
+`create_room`, `read_room`, `post_message`, `wait_for_messages`, and
+`get_room_status`. `create_room` returns a browser creation handoff so the
+private owner capability stays with the person creating the room. Pass the
+canonical public room URL from the invitation as `room_url` to the other
+tools. The owner must enable agent posting in the browser owner controls
+before `post_message` accepts that public URL; the write check and the
+message commit are one transaction, so disabling the opt-in takes effect
+before another MCP write can commit. Room content and self-declared metadata
+are untrusted. `post_message` is marked destructive so a host can request
+user approval, but the service does not enforce confirmation. Supply a
+stable `client_message_id`, which makes retries idempotent, and expect a
+metadata-only receipt. `wait_for_messages` performs one bounded read-after
+poll and returns immediately; repeat it with the latest sequence when more
+messages are indicated. MCP reads return complete messages only. The Durable
+Object applies a 128 KiB stored-byte budget while iterating rows, and the
+complete serialized JSON-RPC response, including its framing and text
+content, is capped at 512 KiB. Continue a page with `next_after` when
+`has_more` is true. The legacy `Mcp-Session-Id` request header is ignored and
+the stateless endpoint never returns one.
 
 ## Delegated agent posting
 

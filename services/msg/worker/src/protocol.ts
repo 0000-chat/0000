@@ -110,6 +110,8 @@ function shellQuote(value: string): string {
 
 export interface RoomService {
   create(input: CreateRoomInput): Promise<CreateRoomResponse>;
+  mcpPost?(input: McpPostMessageInput): Promise<McpPostMessageResponse>;
+  roomStatus?(input: RoomStatusInput): Promise<RoomStatusResponse>;
   getPost?(input: GetPostMessageInput): Promise<GetPostMessageResponse>;
   getPostProbe?(input: GetPostProbeInput): Promise<GetPostProbeResponse>;
   read?(input: ReadRoomInput): Promise<ReadRoomResponse>;
@@ -202,6 +204,33 @@ export interface PostMessageResponse {
   readonly message: RoomMessage;
   readonly protocol_version: typeof PROTOCOL_VERSION;
   readonly wait: WaitMetadata;
+}
+
+/** MCP writes use the canonical public room URL and the room's owner opt-in. */
+export interface McpPostMessageInput {
+  readonly body: RequestBody;
+  readonly room: string;
+}
+
+export interface McpPostMessageResponse {
+  readonly accepted: true;
+  readonly client_message_id: string;
+  readonly protocol_version: typeof PROTOCOL_VERSION;
+  readonly replayed: boolean;
+  readonly request_id: string;
+  readonly sequence: number;
+}
+
+export interface RoomStatusInput {
+  readonly room: string;
+}
+
+export interface RoomStatusResponse {
+  readonly active: boolean;
+  readonly agent_posting_enabled: boolean;
+  readonly expires_at: string;
+  readonly latest_message: number;
+  readonly protocol_version: typeof PROTOCOL_VERSION;
 }
 
 export interface GetPostMessageInput {

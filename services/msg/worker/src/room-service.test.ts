@@ -58,6 +58,26 @@ test("adds foreground wait metadata after a posted message without exposing mana
   expect(result.wait.command).not.toContain("manage");
 });
 
+test("uses dedicated internal MCP routes without putting a token in the request", async () => {
+  const calls: Request[] = [];
+  const service = new DurableRoomService({
+    getByName: () => ({ fetch: async (request: Request) => {
+      calls.push(request);
+      if (request.url.endsWith("/mcp-post")) return Response.json({ accepted: true, client_message_id: "mcp-1", protocol_version: 1, replayed: false, request_id: "mcp-1", sequence: 2 });
+      return Response.json({ active: true, agent_posting_enabled: true, expires_at: "2026-08-17T00:00:00.000Z", latest_message: 2, protocol_version: 1 });
+    } }),
+  } as never, "https://msg.0000.chat");
+
+  const posted = await service.mcpPost!({ room: "public-room", body: { kind: "json", value: { content: "hello", client_message_id: "mcp-1" } } });
+  const status = await service.roomStatus!({ room: "public-room" });
+
+  expect(posted).toMatchObject({ accepted: true, request_id: "mcp-1", sequence: 2 });
+  expect(status).toMatchObject({ active: true, agent_posting_enabled: true });
+  expect(calls[0]?.url).toBe("https://room/mcp-post");
+  expect(await calls[0]?.clone().json()).toEqual({ input: { author: "anonymous", client_message_id: "mcp-1", content: "hello", display_name: "anonymous", identity_verified: false, semantic_type: "message" } });
+  expect(calls[1]?.url).toBe("https://room/status");
+});
+
 test("creates a delegated GET posting URL only for owner management actions", async () => {
   const calls: Request[] = [];
   const service = new DurableRoomService(
