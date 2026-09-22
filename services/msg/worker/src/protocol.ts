@@ -129,6 +129,8 @@ export interface RoomService {
 
 export interface ReadRoomInput {
   readonly after: number;
+  /** Optional bounded number of messages to fetch from the room store. */
+  readonly limit?: number;
   readonly room: string;
 }
 

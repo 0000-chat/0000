@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
+import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
+
 import { handleMcpRequest } from "./mcp";
 import type { PostMessageResponse, ReadRoomResponse, RoomService } from "./protocol";
 import { createWorker } from "./worker";
@@ -90,6 +92,49 @@ describe("stateless MCP endpoint", () => {
     expect(tools[1].inputSchema.required).toEqual(["room_url", "content", "client_message_id"]);
   });
 
+  test("serves discovery and tool calls to the v2 modern client", async () => {
+    const messages = [1, 2].map((sequence) => ({
+      content: `message-${sequence}`,
+      created_at: `2026-09-22T00:00:0${sequence}.000Z`,
+      id: `message-${sequence}`,
+      sequence,
+    }));
+    const seen: Headers[] = [];
+    const service: RoomService = {
+      ...baseService(),
+      read: async () => readResult(messages),
+      post: async ({ body }) => {
+        const value = body.kind === "json" && body.value !== null && !Array.isArray(body.value) && typeof body.value === "object" ? body.value : {};
+        return postResult(String(value.content), String(value.client_message_id));
+      },
+    };
+    const transport = new StreamableHTTPClientTransport(new URL(`${origin}/mcp`), {
+      fetch: async (url, init) => {
+        seen.push(new Headers(init?.headers));
+        return handleMcpRequest(new Request(url, init), service, { publicOrigin: origin });
+      },
+    });
+    const client = new Client(
+      { name: "mcp-v2-test", version: "2" },
+      { versionNegotiation: { mode: { pin: "2026-07-28" } } },
+    );
+    try {
+      await client.connect(transport);
+      expect(client.getProtocolEra()).toBe("modern");
+      const tools = await client.listTools();
+      expect(tools.tools.map((tool) => tool.name)).toEqual(["read_room", "post_message"]);
+      const read = await client.callTool({ name: "read_room", arguments: { room_url: roomUrl, limit: 2 } });
+      expect(read.structuredContent).toMatchObject({ messages, has_more: false, truncated: false });
+      const posted = await client.callTool({ name: "post_message", arguments: { client_message_id: "v2-1", content: "from v2", room_url: roomUrl } });
+      expect(posted.structuredContent).toMatchObject({ client_message_id: "v2-1", status: "accepted" });
+      expect(seen.some((headers) => headers.get("mcp-protocol-version") === "2026-07-28" && headers.get("mcp-method") === "server/discover")).toBe(true);
+      expect(seen.some((headers) => headers.get("mcp-protocol-version") === "2026-07-28" && headers.get("mcp-method") === "tools/list")).toBe(true);
+      expect(seen.some((headers) => headers.get("mcp-protocol-version") === "2026-07-28" && headers.get("mcp-method") === "tools/call" && headers.get("mcp-name") === "read_room")).toBe(true);
+    } finally {
+      await client.close();
+    }
+  });
+
   test("reads bounded pages and returns only safe structured fields", async () => {
     const messages = [1, 2, 3].map((sequence) => ({
       author: "untrusted-author",
@@ -107,13 +152,34 @@ describe("stateless MCP endpoint", () => {
     };
     const response = await handleMcpRequest(rpcRequest({ id: 3, method: "tools/call", params: { name: "read_room", arguments: { after: 1, limit: 2, room_url: roomUrl } } }), service);
     const result = (await json(response)).result.structuredContent;
-    expect(input).toEqual({ after: 1, room: "room-capability" });
+    expect(input).toEqual({ after: 1, limit: 3, room: "room-capability" });
     expect(result.messages).toHaveLength(2);
     expect(result.messages.map((message: { sequence: number }) => message.sequence)).toEqual([1, 2]);
     expect(result.has_more).toBe(true);
     expect(result.next_after).toBe(2);
     expect(result.share_message).toBeUndefined();
     expect(JSON.stringify(result)).not.toContain("secret invitation");
+  });
+
+  test("bounds structured read output by UTF-8 bytes and reports a cursor", async () => {
+    const messages = [1, 2, 3].map((sequence) => ({
+      content: "💬".repeat(40_000),
+      created_at: "2026-09-22T00:00:00.000Z",
+      id: `message-${sequence}`,
+      sequence,
+    }));
+    const response = await handleMcpRequest(
+      rpcRequest({ id: 30, method: "tools/call", params: { name: "read_room", arguments: { room_url: roomUrl, limit: 3 } } }),
+      { ...baseService(), read: async () => readResult(messages) },
+    );
+    const body = await json(response);
+    const output = body.result.structuredContent as Record<string, unknown>;
+    expect(new TextEncoder().encode(JSON.stringify(output)).byteLength).toBeLessThanOrEqual(48 * 1024);
+    expect(output.truncated).toBe(true);
+    expect(output.has_more).toBe(true);
+    expect(output.next_after).toBe(1);
+    const text = body.result.content[0].text as string;
+    expect(new TextEncoder().encode(text).byteLength).toBeLessThanOrEqual(48 * 1024);
   });
 
   test("uses the atomic post path and returns a metadata-only receipt", async () => {
@@ -215,7 +281,7 @@ describe("stateless MCP endpoint", () => {
     const allowed = await worker.fetch(rpcRequest({ id: 8, method: "initialize", params: { capabilities: {}, clientInfo: { name: "test", version: "1" }, protocolVersion: "2025-03-26" } }, { headers: { origin: "https://chatgpt.com" } }));
     expect(allowed.status).toBe(200);
     expect(allowed.headers.get("access-control-allow-origin")).toBe("https://chatgpt.com");
-    expect(allowed.headers.get("access-control-allow-methods")).toBe("GET, POST, DELETE, OPTIONS");
+    expect(allowed.headers.get("access-control-allow-methods")).toBe("POST, OPTIONS");
     expect(allowed.headers.get("x-content-type-options")).toBe("nosniff");
     expect(allowed.headers.get("content-security-policy")).toContain("default-src 'none'");
 

@@ -311,7 +311,14 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
   private async read(url: URL): Promise<Response> {
     const state = await this.requireActive(this.now());
     const after = Number(url.searchParams.get("after") ?? 0);
-    const messages = rows<StoredMessage>(this.ctx.storage.sql.exec("SELECT * FROM messages WHERE sequence > ? ORDER BY sequence ASC", after)).map((message) => this.toMessage(message));
+    const rawLimit = url.searchParams.get("limit");
+    const limit = rawLimit === null
+      ? undefined
+      : Math.min(101, Math.max(1, Number.isSafeInteger(Number(rawLimit)) ? Number(rawLimit) : 101));
+    const messages = rows<StoredMessage>(limit === undefined
+      ? this.ctx.storage.sql.exec("SELECT * FROM messages WHERE sequence > ? ORDER BY sequence ASC", after)
+      : this.ctx.storage.sql.exec("SELECT * FROM messages WHERE sequence > ? ORDER BY sequence ASC LIMIT ?", after, limit)
+    ).map((message) => this.toMessage(message));
     return this.json({ protocol_version: PROTOCOL_VERSION, messages, latest_message: state.next_sequence - 1, expires_at: iso(state.inactivity_expires_at), access_warning: "All authors and display names are self-declared and unverified." });
   }
 

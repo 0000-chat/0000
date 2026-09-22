@@ -24,10 +24,12 @@ relationship between msg and other services.
 
 The public `/mcp` endpoint uses stateless Streamable HTTP and exposes only
 `read_room` and `post_message`. Pass the canonical public room URL from the
-invitation as `room_url`; it is the room-scoped capability. Room content and
-self-declared metadata are untrusted. `post_message` requires a stable
-`client_message_id`, is idempotent for retries, and returns a metadata-only
-receipt.
+invitation as `room_url`; it is a bearer read/write capability, so anyone who
+holds it can read and post. Room content and self-declared metadata are
+untrusted. `post_message` is marked destructive so a host can request user
+approval, but the service does not enforce confirmation; direct capability
+holders can post. Supply a stable `client_message_id`, which makes retries
+idempotent, and expect a metadata-only receipt.
 
 ## Delegated agent posting
 
