@@ -2,12 +2,13 @@ import { describe, expect, test } from "bun:test";
 import { browserViewRedirect, selectBrowserView, viewSwitchHref } from "./browser-view";
 
 describe("browser view preference", () => {
-  test("uses explicit query before a saved cookie", () => {
+  test("uses explicit query before a saved agent preference", () => {
     expect(selectBrowserView(new URL("https://msg.0000.chat/?view=human"), "msg_view=agent")).toBe("human");
     expect(selectBrowserView(new URL("https://msg.0000.chat/?view=agent"), "msg_view=human")).toBe("agent");
   });
 
-  test("uses a valid cookie and otherwise defaults to human", () => {
+  test("uses a saved agent preference and otherwise defaults to human", () => {
+    expect(selectBrowserView(new URL("https://msg.0000.chat/"), "a=1; msg_view=agent; b=2")).toBe("agent");
     expect(selectBrowserView(new URL("https://msg.0000.chat/"), "a=1; msg_view=human; b=2")).toBe("human");
     expect(selectBrowserView(new URL("https://msg.0000.chat/"), "msg_view=robot")).toBe("human");
     expect(selectBrowserView(new URL("https://msg.0000.chat/?view=robot"), null)).toBe("human");

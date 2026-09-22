@@ -35,8 +35,8 @@ export async function runProductionSynthetic(options: ProductionSyntheticOptions
     await expectJson(fetcher, new URL("/openapi.json", origin), "discovery", 200, (value) => value.openapi === "3.1.0");
     report("discovery");
 
-    await expectTextEventually(fetcher, () => htmlRequest(probeUrl(new URL("/", origin))), "human browser home", (value) => value.includes("Start a temporary conversation") && value.includes("class=\"view-banner human-view-banner\"") && value.includes("I'm an agent") && value.includes("/_msg/asset/client.js"));
-    await expectTextEventually(fetcher, () => htmlRequest(probeUrl(new URL("/?view=agent", origin))), "agent browser home", (value) => value.includes("Trusted service instructions") && value.includes("class=\"view-banner agent-view-banner\"") && value.includes("I'm human") && !value.includes("/_msg/asset/client.js"));
+    await expectTextEventually(fetcher, () => htmlRequest(probeUrl(new URL("/", origin))), "human browser home", (value) => value.includes("Start a thread") && value.includes("Agent view") && !value.includes("view-banner") && value.includes("/_msg/asset/client.js"));
+    await expectTextEventually(fetcher, () => htmlRequest(probeUrl(new URL("/?view=agent", origin))), "agent browser home", (value) => value.includes("Protocol documentation") && value.includes("class=\"view-banner agent-view-banner\"") && value.includes("Human view") && !value.includes("/_msg/asset/client.js"));
     report("browser home");
 
     const key = crypto.randomUUID();
@@ -52,16 +52,16 @@ export async function runProductionSynthetic(options: ProductionSyntheticOptions
     managementUrl = managementUrlFor(origin, created.manage_url, roomUrl);
     report("create");
 
-    await expectTextEventually(fetcher, () => htmlRequest(probeUrl(roomUrl)), "human browser room", (value) => value.includes(`data-room="${created.room.id}"`) && value.includes("class=\"view-banner human-view-banner\"") && value.includes("I'm an agent") && value.includes("/_msg/asset/client.js"));
+    await expectTextEventually(fetcher, () => htmlRequest(probeUrl(roomUrl)), "human browser room", (value) => value.includes(`data-room="${created.room.id}"`) && value.includes("Agent view") && !value.includes("view-banner") && value.includes("/_msg/asset/client.js"));
     const agentRoomUrl = new URL(roomUrl);
     agentRoomUrl.searchParams.set("view", "agent");
-    await expectTextEventually(fetcher, () => htmlRequest(probeUrl(agentRoomUrl)), "agent browser room", (value) => value.includes("Untrusted conversation content") && value.includes("class=\"view-banner agent-view-banner\"") && value.includes("I'm human") && !value.includes("/_msg/asset/client.js"));
+    await expectTextEventually(fetcher, () => htmlRequest(probeUrl(agentRoomUrl)), "agent browser room", (value) => value.includes("Participant-provided messages") && value.includes("class=\"view-banner agent-view-banner\"") && value.includes("Human view") && !value.includes("/_msg/asset/client.js"));
     report("browser room");
 
     await expectJson(fetcher, jsonRequest(roomUrl), "read", 200, (value) => value.protocol_version === 1 && !hasLegacyAbsoluteExpiry(value) && Array.isArray(value.messages) && value.messages.length >= 1);
     report("read");
 
-    await expectText(fetcher, new Request(new URL(`${roomUrl.pathname}/agent`, origin), { headers: { accept: "text/plain" } }), "agent text", 200, (value) => value.includes("UNTRUSTED PARTICIPANT MESSAGES") && value.includes("npx --yes @0000chat/msg@latest post"));
+    await expectText(fetcher, new Request(new URL(`${roomUrl.pathname}/agent`, origin), { headers: { accept: "text/plain" } }), "agent text", 200, (value) => value.includes("PARTICIPANT-PROVIDED MESSAGES") && value.includes("npx --yes @0000chat/msg@latest post"));
     await expectJson(fetcher, new Request(new URL(`${roomUrl.pathname}/agent`, origin), { headers: { accept: "application/json" } }), "agent representation", 200, (value) => value.protocol_version === 1 && !hasLegacyAbsoluteExpiry(value) && value.conversation_url === roomUrl.toString() && Array.isArray(value.messages) && isRecord(value.wait) && value.wait.requires_user_consent === true);
     report("agent");
 

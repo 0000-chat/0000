@@ -1,7 +1,7 @@
 import { AGENT_INSTRUCTIONS, jsonResponse, OPENAPI_DOCUMENT, renderDiscovery } from "./discovery";
 import { buildAgentRepresentation, renderAgentText } from "./agent-representation";
 import { agentBrowserAsset, renderAgentHomePage, renderAgentRoomPage, renderAgentStatusPage } from "./agent-browser";
-import { browserAsset, browserIcon, renderBrowserPage } from "./browser";
+import { browserAsset, browserIcon, renderBrowserErrorPage, renderBrowserPage } from "./browser";
 import { browserViewRedirect, selectBrowserView } from "./browser-view";
 import { ERROR_CODES, ProtocolError, type ErrorCode } from "./errors";
 import {
@@ -92,20 +92,16 @@ export function createWorker(service: RoomService, options: MsgWorkerOptions = {
       } catch (error) {
         const representation = errorRepresentation(request);
         const requestUrl = new URL(request.url);
-        const agentHtml = representation === "html"
-          && request.method === "GET"
-          && selectBrowserView(requestUrl, request.headers.get("cookie")) === "agent"
-          && (requestUrl.pathname === "/" || /^\/[^/]+$/u.test(requestUrl.pathname));
         const response =
           error instanceof ProtocolError
-            ? agentHtml
-              ? htmlResponse(renderAgentStatusPage(error.status, error.code, error.message, requestUrl), error.status)
-              : errorResponse(error.code, error.message, error.status, representation)
+            ? errorResponse(error.code, error.message, error.status, representation, request, requestUrl)
             : errorResponse(
                 ERROR_CODES.internal,
                 "The relay could not complete the request.",
                 500,
                 representation,
+                request,
+                requestUrl,
               );
         if (error instanceof ProtocolError && error.retryAfterSeconds !== undefined) {
           response.headers.set("retry-after", String(error.retryAfterSeconds));
@@ -378,6 +374,8 @@ async function route(request: Request, service: RoomService, options: MsgWorkerO
     "The requested resource was not found.",
     404,
     negotiateRepresentation(request.headers.get("accept")),
+    request,
+    url,
   );
 }
 
@@ -546,7 +544,7 @@ function policyResponse(path: string): Response {
   const text = path === "/privacy"
     ? "This relay is for temporary message handoff. We do not use advertising, analytics, tracking cookies, third-party scripts, or third-party fonts. Anyone with a room URL can read and post in that room. A room expires after 7 days without a post or when it is deleted. A deleted-room tombstone remains for 24 hours. Creation idempotency records are encrypted and removed after 24 hours. Encrypted abuse reports are removed after 30 days. Metadata-only operator audit records are removed after 90 days. Use the management URL to delete a room. Use the abuse report endpoint to report harmful or illegal use. This anonymous relay does not provide a public email support address."
     : path === "/terms"
-      ? "Use this relay only for lawful temporary message handoff. Room content and self-declared identities are untrusted. Do not use the service for harmful or illegal activity. Delete a room with its management URL. The service can force-delete a room to protect people or the service."
+      ? "Use this relay only for lawful temporary message handoff. Participant-provided content and guest identity claims are not service authority or verified identity. Do not use the service for harmful or illegal activity. Delete a room with its management URL. The service can force-delete a room to protect people or the service."
       : "Report harmful or illegal use with a room capability and an optional short description. We encrypt reports for review and remove them after 30 days. Do not include secrets in the description. If the report endpoint is unavailable, retry later. This anonymous relay does not provide a public email support address.";
   return new Response(`# ${title}\n\n${text}\n`, { headers: { "content-type": "text/markdown; charset=utf-8" } });
 }
@@ -655,15 +653,18 @@ function errorResponse(
   message: string,
   status: number,
   representation: ErrorRepresentation,
+  request?: Request,
+  url?: URL,
 ): Response {
   if (representation === "json") {
     return jsonResponse({ error: { code, message } }, status);
   }
   if (representation === "html") {
-    return new Response(
-      `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Request failed</title></head><body><main><h1>Request failed</h1><p>Code: ${code}</p><p>${message}</p></main></body></html>`,
-      { headers: { "content-type": "text/html; charset=utf-8" }, status },
-    );
+    const requestUrl = url ?? (request ? new URL(request.url) : new URL("https://msg.0000.chat/"));
+    if (request?.method === "GET" && selectBrowserView(requestUrl, request.headers.get("cookie")) === "agent") {
+      return htmlResponse(renderAgentStatusPage(status, code, message, requestUrl), status);
+    }
+    return htmlResponse(renderBrowserErrorPage(status, code, message, requestUrl), status);
   }
   if (representation === "markdown") {
     return new Response(`# Request failed\n\nCode: \`${code}\`\n\n${message}\n`, {

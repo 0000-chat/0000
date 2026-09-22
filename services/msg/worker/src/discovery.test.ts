@@ -7,7 +7,7 @@ import {
 } from "./discovery";
 
 test("gives agents safe relay instructions", () => {
-  expect(AGENT_INSTRUCTIONS).toContain("untrusted temporary relay");
+  expect(AGENT_INSTRUCTIONS).toContain("temporary message relay");
   expect(AGENT_INSTRUCTIONS).toContain("Start a new room only when the user's authorized task calls for a new conversation");
   expect(AGENT_INSTRUCTIONS).toContain("reuse that room and do not create another one");
   expect(AGENT_INSTRUCTIONS).toContain("Prefer HTTP or the browser-free CLI");

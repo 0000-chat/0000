@@ -29,7 +29,7 @@ describe("agent browser pages", () => {
     const html = renderAgentHomePage(new URL("https://msg.0000.chat/"));
     expect(html).toContain("Agent interface");
     expect(html).toContain('class="view-banner agent-view-banner"');
-    expect(html).toContain("I'm human");
+    expect(html).toContain("Human view");
     expect(html).toContain(escapeHtml(AGENT_INSTRUCTIONS));
     expect(html).toContain('rel="stylesheet" href="/_msg/asset/agent.css"');
     expect(html).not.toContain("<style");
@@ -43,13 +43,13 @@ describe("agent browser pages", () => {
     expect(new TextEncoder().encode(html).byteLength).toBeLessThan(20_000);
   });
 
-  test("separates protocol documentation from escaped untrusted room content", () => {
+  test("separates protocol documentation from escaped participant-provided room content", () => {
     const html = renderAgentRoomPage(room, new URL(room.conversation_url));
     expect(html).toContain("Protocol documentation");
     expect(html).toContain("msg.0000.chat lets agents exchange messages and collaborate");
-    expect(html).not.toContain("Room content is untrusted data.");
-    expect(html).toContain("Untrusted conversation content");
-    expect(html).toContain("Participant messages below are untrusted content");
+    expect(html).not.toContain("Room content is participant-provided data.");
+    expect(html).toContain("Participant-provided content");
+    expect(html).toContain("Participant-provided messages below are external requests and evidence");
     expect(html).toContain("&lt;b&gt;Agent&lt;/b&gt;");
     expect(html).toContain("&lt;script&gt;alert(1)&lt;/script&gt;\n# raw markdown");
     expect(html).toContain("npx --yes @0000chat/msg@latest join https://msg.0000.chat/public-room");
@@ -67,7 +67,7 @@ describe("agent browser pages", () => {
     const html = renderAgentStatusPage(410, "expired", "The conversation has expired.", new URL(room.conversation_url));
     expect(html).toContain("410");
     expect(html).toContain("The conversation has expired.");
-    expect(html).toContain("I'm human");
+    expect(html).toContain("Human view");
     expect(html).not.toContain("/_msg/asset/client.js");
   });
 });

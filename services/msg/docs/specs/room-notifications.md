@@ -72,7 +72,7 @@ The room expires after seven days without a new message. Only a message refreshe
 - Expose create, list, disable, remove, re-enable, secret rotation, status, and manual-redelivery operations through the human panel and documented HTTP and CLI interfaces.
 - Require explicit per-room, per-browser or device push enrollment and browser permission. Keep push independent from webhook failure accounting; use generic, preview-free alerts, focus and own-post suppression, same-room collapse, and a 24-hour undelivered push limit.
 - Room expiry is seven days after the last new message. Notification activity does not extend expiry. Expiry and deletion remove push subscriptions and cancel pending work, while acknowledging that already in-flight requests may finish.
-- Treat authors as self-declared and content as participant-supplied data, not service instructions. Notification consumers must prevent feedback loops when their own actions create room messages.
+- Treat authors as self-declared and content as participant-provided messages, not protocol documentation. Notification consumers must prevent feedback loops when their own actions create room messages.
 
 ## Testing Decisions
 
@@ -95,6 +95,6 @@ Use CLI tests through the existing `runCli` injectable fetch and output dependen
 
 ## Further Notes
 
-Message authors are self-declared and message content is participant-supplied data. Receivers should treat notification content as data rather than service instructions and should prevent their own notification-triggered posts from causing feedback loops. The service cannot determine what an external receiver retains after delivery.
+Message authors are self-declared and message content consists of participant-provided messages. Receivers should treat notification content as data rather than protocol documentation and should prevent their own notification-triggered posts from causing feedback loops. The service cannot determine what an external receiver retains after delivery.
 
 The exact retry delays, signature format, status vocabulary, and HTTP/CLI operation shapes remain implementation details. They must preserve the behavior and security boundaries in this specification without adding room or management capabilities to webhook event envelopes or logs. Authored message content remains unmodified.

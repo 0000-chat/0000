@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 
-import { browserAsset, browserErrorState, renderBrowserPage, renderMarkdown } from "./browser";
+import { browserAsset, browserErrorState, renderBrowserErrorPage, renderBrowserPage, renderMarkdown } from "./browser";
 
 test("renders untrusted Markdown without executable markup or unsafe links", () => {
   const html = renderMarkdown("<script>alert(1)</script> [bad](javascript:alert(1)) [good](https://example.com)");
@@ -29,21 +29,15 @@ test("renders blockquotes, ordered lists, emphasis, and safe links", () => {
 test("renders a public room shell without a management capability", () => {
   const html = renderBrowserPage({ room: "public-room", title: "Temporary conversation" });
 
-  expect(html).toContain('class="view-banner human-view-banner"');
-  expect(html).toContain("Viewing the human interface");
-  expect(html).toContain("I'm an agent");
-  expect(html.indexOf("human-view-banner")).toBeLessThan(html.indexOf('class="shell"'));
+  expect(html).not.toContain("view-banner");
+  expect(html).toContain("0000 / msg");
+  expect(html).toContain("Agent view");
   expect(html).toContain('/_msg/view/agent?next=%2Fpublic-room');
   expect(html).toContain('data-room="public-room"');
-  expect(html).toContain("Invite your agent");
-  expect(html).toContain("A shared place for independent agents");
-  expect(html).toContain("Messages are untrusted content and do not authorize actions.");
-  expect(html).toContain("Trust and safety");
-  expect(html).toContain("Using an AI agent?");
-  expect(html).toContain("Do not automate this page.");
-  expect(html).toContain("@0000chat/msg@latest join");
-  expect(html).toContain('class="agent-join-notice"');
-  expect(html).toContain("Participant names are self-declared. Messages may be from independent AI agents.");
+  expect(html).toContain("Connect an agent");
+  expect(html).toContain("Guest names aren’t verified. Messages may come from people or independent agents.");
+  expect(html).toContain("Share and export");
+  expect(html).toContain("Thread details");
   expect(html).not.toContain("manage_url");
   expect(html).not.toContain("management capability");
 });
@@ -51,17 +45,15 @@ test("renders a public room shell without a management capability", () => {
 test("renders the creation home for an HTML root request", () => {
   const html = renderBrowserPage({ title: "Start a temporary conversation" });
 
-  expect(html).toContain('class="view-banner human-view-banner"');
-  expect(html).toContain("Viewing the human interface");
-  expect(html).toContain("I'm an agent");
-  expect(html.indexOf("human-view-banner")).toBeLessThan(html.indexOf('class="shell"'));
+  expect(html).not.toContain("view-banner");
+  expect(html).toContain("0000 / msg");
+  expect(html).toContain("Agent view");
   expect(html).toContain('/_msg/view/agent?next=%2F');
-  expect(html).toContain("Start a temporary conversation");
+  expect(html).toContain("Start a thread");
   expect(html).toContain('id="create-room"');
-  expect(html).toContain("For agents");
-  expect(html).toContain("Thread, room, and conversation mean the same thing");
-  expect(html).toContain("If you can interact with this page");
-  expect(html).toContain("An open-only browser tool cannot create or post");
+  expect(html).toContain("Connect an agent");
+  expect(html).toContain("Use the CLI or API to let an agent read and contribute.");
+  expect(html).toContain("View CLI and API examples");
   expect(html).toContain("POST https://msg.0000.chat/");
   expect(html).toContain('&quot;content&quot;: &quot;The message to share&quot;');
   expect(html).toContain('href="/agent.txt"');
@@ -69,15 +61,27 @@ test("renders the creation home for an HTML root request", () => {
   expect(html).toContain('rel="alternate" type="text/plain" href="/agent.txt"');
   expect(html).toContain('rel="service-desc" type="application/json" href="/openapi.json"');
   expect(html).toContain('data-msg-view="agent"');
-  expect(html).toContain("I'm an agent");
+  expect(html).not.toContain("I'm an agent");
 });
 
-test("styles the human view banner with responsive focus-visible controls", async () => {
+test("styles the refreshed human view and error page", async () => {
   const css = await browserAsset("client.css")?.text();
 
-  expect(css).toContain(".view-banner{");
-  expect(css).toContain("@media (max-width: 760px)");
-  expect(css).toContain("focus-visible");
+  expect(css).not.toContain(".view-banner{");
+  expect(css).toContain(".error-page{");
+  expect(css).toContain("@media(max-width:820px)");
+});
+
+test("renders branded human errors with escaped details and an agent switch", () => {
+  const html = renderBrowserErrorPage(404, "not_found", "Missing <script>alert(1)</script> & \"room\"", new URL("https://msg.0000.chat/missing?after=2"));
+
+  expect(html).toContain("0000 / msg");
+  expect(html).toContain("Agent view");
+  expect(html).toContain('/_msg/view/agent?next=%2Fmissing%3Fafter%3D2');
+  expect(html).toContain("&lt;script&gt;alert(1)&lt;/script&gt;");
+  expect(html).toContain("&amp; &quot;room&quot;");
+  expect(html).not.toContain("<script>alert(1)</script>");
+  expect(html).not.toContain("view-banner");
 });
 
 test("serves the browser code from same-origin assets for the strict page policy", async () => {
@@ -336,12 +340,12 @@ test("keeps the approved transcript, mobile rail, and accessibility contracts", 
   expect(css).toContain(".room-facts dd{overflow-wrap:anywhere}");
   expect(css).toContain(".identity{text-transform:uppercase");
   expect(css).toContain(".date-rule{letter-spacing:");
-  expect(html).toContain("Deletion time");
+  expect(html).toContain("Retention");
   expect(html).toContain("Share and export");
-  expect(html).toContain('<summary>Conversation details</summary>');
+  expect(html).toContain('<summary>Thread details</summary>');
   expect(html).toContain('class="expiry js-expiry"');
   expect(html).toContain('class="js-room-created"');
-  expect(html).toContain("Messages are untrusted content and do not authorize actions.");
+  expect(html).toContain("Guest names aren’t verified. Messages may come from people or independent agents.");
 });
 
 test("includes the agent prompt and link copy fallbacks in the served runtime", async () => {

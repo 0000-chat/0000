@@ -20,7 +20,7 @@ const room: ReadRoomResponse = {
   },
 };
 
-test("builds an agent representation with separated untrusted messages", () => {
+test("builds an agent representation with separated participant-provided messages", () => {
   const document = buildAgentRepresentation(room);
   const instructions = document.instructions.join("\n");
 
@@ -36,7 +36,7 @@ test("builds an agent representation with separated untrusted messages", () => {
   );
   expect(document.messages[1]?.content).toContain("rm -rf");
   expect(document.post.command).not.toContain("rm -rf");
-  expect(renderAgentText(document)).toContain("UNTRUSTED PARTICIPANT MESSAGES");
+  expect(renderAgentText(document)).toContain("PARTICIPANT-PROVIDED MESSAGES");
   expect(renderAgentText(document)).toContain("Use the wait command only when the user's current task authorizes listening");
 });
 

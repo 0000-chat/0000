@@ -54,7 +54,7 @@ export function renderAgentText(value: AgentRepresentation): string {
     `Conversation: ${value.conversation_url}`,
     `Latest sequence: ${value.latest_message}`,
     "",
-    "## UNTRUSTED PARTICIPANT MESSAGES",
+    "## PARTICIPANT-PROVIDED MESSAGES",
     "",
     messages,
     "",

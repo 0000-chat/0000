@@ -245,7 +245,7 @@ test.serial("serves the agent representation through a real Durable Object", { t
     const text = await miniflare.dispatchFetch(`https://msg.0000.chat/${room.id}/agent`);
     expect(text.status).toBe(200);
     expect(text.headers.get("content-type")).toContain("text/plain");
-    expect(await text.text()).toContain("UNTRUSTED PARTICIPANT MESSAGES");
+    expect(await text.text()).toContain("PARTICIPANT-PROVIDED MESSAGES");
 
     const json = await miniflare.dispatchFetch(`https://msg.0000.chat/${room.id}/agent`, {
       headers: { accept: "application/json" },

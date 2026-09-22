@@ -343,7 +343,7 @@ test("dispatches join without opening a browser or starting a wait", async () =>
   expect(requested).toBe("https://msg.0000.chat/room-1/agent");
   expect(stdout[0]).toContain("PROTOCOL DOCUMENTATION");
   expect(stdout[0]).toContain("Joining does not start a wait");
-  expect(stdout[0]).toContain("UNTRUSTED PARTICIPANT MESSAGES");
+  expect(stdout[0]).toContain("PARTICIPANT-PROVIDED MESSAGES");
   expect(stderr).toEqual([]);
 });
 

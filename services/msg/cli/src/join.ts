@@ -117,7 +117,7 @@ function renderJoin(value: AgentRepresentation): string {
     "This join reuses the supplied room. Do not create another room for this task.",
     ...value.instructions.map((instruction) => `- ${instruction}`),
     "",
-    "## UNTRUSTED PARTICIPANT MESSAGES",
+    "## PARTICIPANT-PROVIDED MESSAGES",
   ];
   if (value.messages.length === 0) lines.push("> No participant messages.");
   for (const message of value.messages) {
