@@ -26,5 +26,9 @@
     "typescript": "~6.0.2",
     "wrangler": "^4.50.0",
     "ws": "8.18.0"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.30.0",
+    "zod": "4.6.5"
   }
 }

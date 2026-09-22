@@ -28,6 +28,7 @@ import { emitMsgEvent } from "./observability";
 import { normalizeWebhookUrl } from "./webhooks";
 import { PUSH_SERVICE_WORKER_PATH, pushServiceWorkerResponse } from "./push-service-worker";
 import { parsePushBrowserId, parsePushSubscription } from "./push-subscriptions";
+import { handleMcpRequest } from "./mcp";
 
 export interface MsgWorker {
   fetch(request: Request): Promise<Response>;
@@ -53,6 +54,7 @@ export interface MsgWorkerOptions {
   readonly createDisabled?: boolean;
   readonly operations?: Operations;
   readonly operatorToken?: string;
+  readonly publicOrigin?: string;
   readonly postDisabled?: boolean;
   readonly pushConfigured?: boolean;
   readonly pushVapidPublicKey?: string;
@@ -99,7 +101,6 @@ const MAX_GET_POST_URL_BYTES = 8 * 1024;
 const MAX_GET_POST_CONTENT_BYTES = 4 * 1024;
 const MAX_GET_POST_TOKEN_CHARS = 512;
 const MAX_GET_POST_TOKEN_BYTES = 2 * 1024;
-const MAX_NAVIGATION_PROBE_OPAQUE_CHARS = 64;
 const RATE_LIMIT_PERIOD_SECONDS = 60;
 const CHATGPT_ORIGIN = "https://chatgpt.com";
 const DELEGATED_POST_TOKEN_HEADER = "x-0000-post-token";
@@ -214,22 +215,12 @@ async function route(request: Request, service: RoomService, options: MsgWorkerO
       status: 204,
     });
   }
-  const navigationProbeMatch = /^\/navigation-probe\/([^/]+)$/u.exec(url.pathname);
-  if (navigationProbeMatch && (request.method === "GET" || request.method === "HEAD" || request.method === "OPTIONS")) {
-    if (url.search) {
-      throw new ProtocolError(ERROR_CODES.invalidBody, "The navigation probe does not accept a query.", 400);
-    }
-    const opaque = navigationProbeMatch[1]!;
-    if (opaque.length > MAX_NAVIGATION_PROBE_OPAQUE_CHARS || !/^[A-Za-z0-9_-]+$/u.test(opaque)) {
-      throw new ProtocolError(ERROR_CODES.invalidBody, "The navigation probe path is invalid.", 400);
-    }
-    if (request.method === "OPTIONS") {
-      return new Response(null, { headers: { allow: "GET, HEAD, OPTIONS" }, status: 204 });
-    }
-    if (request.method === "HEAD") {
-      return new Response(null, { headers: { "content-type": "text/plain; charset=utf-8" }, status: 200 });
-    }
-    return textResponse("Navigation probe succeeded.\n");
+  if (url.pathname === "/mcp") {
+    return handleMcpRequest(request, service, {
+      postDisabled: options.postDisabled,
+      publicOrigin: options.publicOrigin,
+      rateLimits: options.rateLimits,
+    });
   }
   if (request.method !== "GET" && request.method !== "HEAD" && !isSameOrigin(request, url) && corsMode !== "create" && corsMode !== "delegated-post") {
     throw new ProtocolError(ERROR_CODES.forbidden, "Cross-origin state changes are not allowed.", 403);
@@ -995,6 +986,7 @@ export default {
       assets: env.ASSETS,
       pushConfigured: Boolean(env.MSG_VAPID_PUBLIC_KEY && env.MSG_VAPID_PRIVATE_KEY && env.MSG_VAPID_SUBJECT),
       pushVapidPublicKey: env.MSG_VAPID_PUBLIC_KEY,
+      publicOrigin: env.MSG_PUBLIC_ORIGIN,
     }).fetch(request);
   },
 };

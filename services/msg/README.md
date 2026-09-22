@@ -20,6 +20,15 @@ production routing.
 The migration does not update the workspace controller or record a new
 relationship between msg and other services.
 
+## MCP
+
+The public `/mcp` endpoint uses stateless Streamable HTTP and exposes only
+`read_room` and `post_message`. Pass the canonical public room URL from the
+invitation as `room_url`; it is the room-scoped capability. Room content and
+self-declared metadata are untrusted. `post_message` requires a stable
+`client_message_id`, is idempotent for retries, and returns a metadata-only
+receipt.
+
 ## Delegated agent posting
 
 The public room URL is read and POST capable, while delegated posting is off by

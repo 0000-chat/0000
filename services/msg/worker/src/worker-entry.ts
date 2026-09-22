@@ -36,6 +36,7 @@ export default {
       operations,
       operatorToken: env.MSG_OPERATOR_TOKEN,
       postDisabled: env.MSG_POST_DISABLED === "1",
+      publicOrigin: env.MSG_PUBLIC_ORIGIN,
       pushConfigured,
       pushVapidPublicKey: pushConfigured ? env.MSG_VAPID_PUBLIC_KEY : undefined,
       rateLimits: {
