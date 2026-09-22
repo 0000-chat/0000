@@ -3,7 +3,7 @@ import { DurableObject } from "cloudflare:workers";
 import { ERROR_CODES, ProtocolError } from "./errors";
 import { compareCapabilities, messageStorageBytes, ROOM_LIMITS, validateRequestId } from "./room-domain";
 import type { MessageInput } from "./room-domain";
-import { PROTOCOL_VERSION, type CreateWebhookResponse, type ManageWebhookResponse, type RedeliverWebhookResponse, type RotateWebhookSecretResponse, type WebhookAttemptMetadata, type WebhookDeliveryMetadata, type WebhookSummary } from "./protocol";
+import { MCP_READ_BYTE_BUDGET_BYTES, PROTOCOL_VERSION, type CreateWebhookResponse, type ManageWebhookResponse, type RedeliverWebhookResponse, type RotateWebhookSecretResponse, type WebhookAttemptMetadata, type WebhookDeliveryMetadata, type WebhookSummary } from "./protocol";
 import { CURRENT_ROOM_SCHEMA_VERSION, migrateRoomSchema } from "./room-schema";
 import { discardWebhookResponseBody, generateWebhookSecret, normalizeWebhookUrl, redactWebhookUrl, signWebhookPayload, webhookRequestTarget } from "./webhooks";
 import { createWebPushRequest } from "./web-push-crypto";
@@ -315,11 +315,44 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
     const limit = rawLimit === null
       ? undefined
       : Math.min(101, Math.max(1, Number.isSafeInteger(Number(rawLimit)) ? Number(rawLimit) : 101));
-    const messages = rows<StoredMessage>(limit === undefined
-      ? this.ctx.storage.sql.exec("SELECT * FROM messages WHERE sequence > ? ORDER BY sequence ASC", after)
-      : this.ctx.storage.sql.exec("SELECT * FROM messages WHERE sequence > ? ORDER BY sequence ASC LIMIT ?", after, limit)
-    ).map((message) => this.toMessage(message));
-    return this.json({ protocol_version: PROTOCOL_VERSION, messages, latest_message: state.next_sequence - 1, expires_at: iso(state.inactivity_expires_at), access_warning: "All authors and display names are self-declared and unverified." });
+    const rawByteBudget = url.searchParams.get("max_bytes");
+    const byteBudget = rawByteBudget === null ? undefined : parseReadByteBudget(rawByteBudget);
+    if (byteBudget === undefined) {
+      const messages = rows<StoredMessage>(limit === undefined
+        ? this.ctx.storage.sql.exec("SELECT * FROM messages WHERE sequence > ? ORDER BY sequence ASC", after)
+        : this.ctx.storage.sql.exec("SELECT * FROM messages WHERE sequence > ? ORDER BY sequence ASC LIMIT ?", after, limit)
+      ).map((message) => this.toMessage(message));
+      return this.json({ protocol_version: PROTOCOL_VERSION, messages, latest_message: state.next_sequence - 1, expires_at: iso(state.inactivity_expires_at), access_warning: "All authors and display names are self-declared and unverified." });
+    }
+
+    const messages: ReturnType<typeof this.toMessage>[] = [];
+    let consumedBytes = 0;
+    let cursor = after;
+    let hasMore = false;
+    while (limit === undefined || messages.length < limit) {
+      const next = rows<StoredMessage>(this.ctx.storage.sql.exec(
+        "SELECT * FROM messages WHERE sequence > ? ORDER BY sequence ASC LIMIT 1",
+        cursor,
+      ))[0];
+      if (!next) break;
+      if (messages.length > 0 && consumedBytes + next.byte_count > byteBudget) {
+        hasMore = true;
+        break;
+      }
+      if (messages.length === 0 && next.byte_count > byteBudget) {
+        throw new ProtocolError(ERROR_CODES.bodyTooLarge, "The first room message exceeds the read byte budget.", 413);
+      }
+      messages.push(this.toMessage(next));
+      consumedBytes += next.byte_count;
+      cursor = next.sequence;
+    }
+    if (!hasMore && limit !== undefined && messages.length >= limit) {
+      hasMore = rows<StoredMessage>(this.ctx.storage.sql.exec(
+        "SELECT sequence FROM messages WHERE sequence > ? ORDER BY sequence ASC LIMIT 1",
+        cursor,
+      )).length > 0;
+    }
+    return this.json({ protocol_version: PROTOCOL_VERSION, messages, has_more: hasMore, latest_message: state.next_sequence - 1, expires_at: iso(state.inactivity_expires_at), access_warning: "All authors and display names are self-declared and unverified." });
   }
 
   private async post(request: Request): Promise<Response> {
@@ -1631,6 +1664,13 @@ function createDeferredSignal(): DeferredSignal {
 }
 
 function rows<T>(cursor: Iterable<unknown>): T[] { return [...cursor] as T[]; }
+
+function parseReadByteBudget(value: string): number {
+  if (!/^[1-9][0-9]*$/u.test(value)) throw new ProtocolError(ERROR_CODES.invalidBody, "The read byte budget is invalid.", 400);
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed)) throw new ProtocolError(ERROR_CODES.invalidBody, "The read byte budget is invalid.", 400);
+  return Math.min(parsed, MCP_READ_BYTE_BUDGET_BYTES);
+}
 function isRecord(value: unknown): value is Record<string, unknown> { return typeof value === "object" && value !== null && !Array.isArray(value); }
 function iso(value: number): string { return new Date(value).toISOString(); }
 function decodeBase64Url(value: string): Uint8Array {

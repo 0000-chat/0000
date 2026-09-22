@@ -2,6 +2,7 @@ import { Database } from "bun:sqlite";
 import { expect, mock, test } from "bun:test";
 
 import { hashCapability, ROOM_LIMITS } from "./room-domain";
+import { MCP_READ_BYTE_BUDGET_BYTES } from "./protocol";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 type WebhookPayloadSigner = (secret: string, timestamp: string, body: string) => Promise<string>;
@@ -15,11 +16,13 @@ mock.module("cloudflare:workers", () => ({
 
 class Context {
   readonly storage: { sql: { exec(query: string, ...values: unknown[]): Iterable<unknown> }; transactionSync<T>(callback: () => T): T; setAlarm(value: number): Promise<void>; deleteAlarm(): Promise<void> };
+  readonly queries: string[] = [];
   alarmAt?: number;
   readonly sockets: FakeSocket[] = [];
   constructor(readonly database: Database) {
     this.storage = {
       sql: { exec: (query, ...values) => {
+        this.queries.push(query);
         if (values.length === 0 && query.includes(";")) { database.exec(query); return []; }
         const statement = database.query(query);
         if (/^\s*(?:SELECT|PRAGMA)/i.test(query)) return statement.all(...(values as never[]));
@@ -75,6 +78,25 @@ test("stores ordered messages and idempotent replay in SQLite", async () => {
     expect((await replay.json()).replayed).toBe(true);
     expect((await read.json()).messages.map((message: { sequence: number }) => message.sequence)).toEqual([1, 2]);
   } finally { Date.now = originalNow; }
+});
+
+test("bounds MCP Durable Object reads by exact stored UTF-8 bytes before returning rows", async () => {
+  const { context, room: durable } = await room();
+  const input = { content: "💬".repeat(16_384), author: "a", display_name: "a", semantic_type: "message" };
+  await durable.fetch(request("/initialize", { management_hash: "hash", initial: input }));
+  await durable.fetch(request("/messages", { input }));
+  await durable.fetch(request("/messages", { input }));
+  context.queries.length = 0;
+
+  const response = await durable.fetch(new Request(`https://room/read?after=0&limit=101&max_bytes=${MCP_READ_BYTE_BUDGET_BYTES}`));
+  const value = await response.json() as { messages: Array<{ content: string }>; has_more: boolean };
+  const messageQueries = context.queries.filter((query) => query.includes("FROM messages"));
+  expect(response.status).toBe(200);
+  expect(value.messages).toHaveLength(1);
+  expect(value.messages[0]!.content).toBe(input.content);
+  expect(value.has_more).toBe(true);
+  expect(messageQueries.length).toBe(2);
+  expect(messageQueries.every((query) => query.includes("LIMIT 1"))).toBe(true);
 });
 
 test("rejects room writes while the post kill switch is enabled", async () => {

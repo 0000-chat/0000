@@ -3,19 +3,20 @@ import { z } from "zod/v4";
 
 import { ERROR_CODES, ProtocolError } from "./errors";
 import { byteLength } from "./room-domain";
-import { stripLegacyAbsoluteExpiry, type PostMessageResponse, type ReadRoomResponse, type RequestBody, type RoomMessage, type RoomService } from "./protocol";
+import { MCP_READ_BYTE_BUDGET_BYTES, stripLegacyAbsoluteExpiry, type PostMessageResponse, type ReadRoomResponse, type RequestBody, type RoomMessage, type RoomService } from "./protocol";
 
 const DEFAULT_PUBLIC_ORIGIN = "https://msg.0000.chat";
 const CHATGPT_ORIGINS = ["https://chatgpt.com", "https://chat.openai.com"] as const;
 const MAX_MCP_REQUEST_BYTES = 80 * 1024;
-const MAX_MCP_RESPONSE_BYTES = 48 * 1024;
+/** Hard cap for the complete serialized JSON-RPC response, including framing and text content. */
+export const MAX_MCP_WIRE_RESPONSE_BYTES = 512 * 1024;
 const MAX_ROOM_URL_CHARS = 2_048;
 const MAX_READ_LIMIT = 100;
 const DEFAULT_READ_LIMIT = 50;
 
 const MCP_ALLOW_METHODS = "POST, OPTIONS";
 const MCP_ALLOW_HEADERS = "Accept, Content-Type, Last-Event-ID, Mcp-Protocol-Version, Mcp-Session-Id, Mcp-Method, Mcp-Name";
-const MCP_EXPOSE_HEADERS = "Mcp-Session-Id";
+const MCP_EXPOSE_HEADERS = "";
 
 export interface McpRateLimit {
   limit(input: { readonly key: string }): Promise<{ readonly success: boolean }>;
@@ -101,9 +102,6 @@ export async function handleMcpRequest(
   if (request.method !== "POST") {
     return mcpRequestError(origin, 405, "The MCP endpoint only accepts POST requests.", { allow: "POST, OPTIONS" });
   }
-  if (request.headers.has("mcp-session-id")) {
-    return mcpRequestError(origin, 400, "This MCP endpoint is stateless and does not accept sessions.");
-  }
   if (!await requestWithinLimit(request)) {
     return mcpRequestError(origin, 413, "The MCP request is too large.");
   }
@@ -137,6 +135,7 @@ export async function handleMcpRequest(
       await handler.close().catch(() => undefined);
     }
   }
+  response = await enforceMcpWireLimit(response);
   return applyMcpCors(response, origin);
 }
 
@@ -177,10 +176,10 @@ function buildMcpServer(
         const room = parsePublicRoomUrl(room_url, publicOrigin);
         await enforceMcpRateLimit(request, options.rateLimits?.reads);
         if (!service.read) throw new ProtocolError(ERROR_CODES.serviceUnavailable, "Room reads are unavailable.", 503);
-        const result = stripLegacyAbsoluteExpiry(await service.read({ after, limit: limit + 1, room })) as ReadRoomResponse;
+        const result = stripLegacyAbsoluteExpiry(await service.read({ after, limit: limit + 1, max_bytes: MCP_READ_BYTE_BUDGET_BYTES, room })) as ReadRoomResponse;
         const output = boundedReadOutput(result, after, limit);
         return {
-          content: [{ type: "text" as const, text: boundedText("Room read complete.") }],
+          content: [{ type: "text" as const, text: "Room read complete." }],
           structuredContent: output,
         };
       } catch (error) {
@@ -287,7 +286,7 @@ interface McpReadOutput {
 
 function boundedReadOutput(result: ReadRoomResponse, after: number, limit: number): McpReadOutput {
   const candidates = result.messages.slice(0, limit).map(toMcpMessage);
-  const hasUnseen = (count: number) => result.messages.length > count;
+  const hasUnseen = (count: number) => result.has_more === true || result.messages.length > count;
   const makeOutput = (messages: readonly ReturnType<typeof toMcpMessage>[], truncated: boolean): McpReadOutput => {
     const hasMore = hasUnseen(messages.length);
     const nextAfter = hasMore ? messages.at(-1)?.sequence : undefined;
@@ -304,63 +303,29 @@ function boundedReadOutput(result: ReadRoomResponse, after: number, limit: numbe
   };
 
   const messages: ReturnType<typeof toMcpMessage>[] = [];
-  let truncated = false;
   for (const message of candidates) {
-    const full = makeOutput([...messages, message], truncated);
-    if (byteLength(JSON.stringify(full)) <= MAX_MCP_RESPONSE_BYTES) {
+    const full = makeOutput([...messages, message], false);
+    if (mcpReadWireBytes(full) <= MAX_MCP_WIRE_RESPONSE_BYTES) {
       messages.push(message);
       continue;
     }
-
-    const fitted = fitMessage(message, (candidate) => makeOutput([...messages, candidate], true));
-    if (fitted !== undefined) messages.push(fitted);
-    truncated = true;
-    break;
-  }
-
-  let output = makeOutput(messages, truncated);
-  if (byteLength(JSON.stringify(output)) > MAX_MCP_RESPONSE_BYTES && messages.length > 0) {
-    const last = messages.length - 1;
-    const fitted = fitMessage(messages[last]!, (candidate) => makeOutput([...messages.slice(0, last), candidate], true));
-    if (fitted !== undefined) {
-      messages[last] = fitted;
-      output = makeOutput(messages, true);
+    if (messages.length === 0) {
+      throw new McpResponseLimitError("The first room message cannot fit within the MCP response limit.");
     }
+    return makeOutput(messages, true);
   }
-  return output;
+  return makeOutput(messages, false);
 }
 
-function fitMessage(
-  message: ReturnType<typeof toMcpMessage>,
-  build: (candidate: ReturnType<typeof toMcpMessage>) => McpReadOutput,
-): ReturnType<typeof toMcpMessage> | undefined {
-  let low = 0;
-  let high = Array.from(message.content).length;
-  let best: ReturnType<typeof toMcpMessage> | undefined;
-  while (low <= high) {
-    const middle = Math.floor((low + high) / 2);
-    const candidate = { ...message, content: Array.from(message.content).slice(0, middle).join("") };
-    if (byteLength(JSON.stringify(build(candidate))) <= MAX_MCP_RESPONSE_BYTES) {
-      best = candidate;
-      low = middle + 1;
-    } else {
-      high = middle - 1;
-    }
-  }
-  return best;
-}
-
-function boundedText(value: string): string {
-  if (byteLength(value) <= MAX_MCP_RESPONSE_BYTES) return value;
-  const codePoints = Array.from(value);
-  let low = 0;
-  let high = codePoints.length;
-  while (low < high) {
-    const middle = Math.ceil((low + high) / 2);
-    if (byteLength(codePoints.slice(0, middle).join("")) <= MAX_MCP_RESPONSE_BYTES) low = middle;
-    else high = middle - 1;
-  }
-  return codePoints.slice(0, low).join("");
+function mcpReadWireBytes(output: McpReadOutput): number {
+  return byteLength(JSON.stringify({
+    jsonrpc: "2.0",
+    id: null,
+    result: {
+      content: [{ type: "text", text: "Room read complete." }],
+      structuredContent: output,
+    },
+  }));
 }
 
 function parsePublicRoomUrl(value: string, publicOrigin: string): string {
@@ -400,9 +365,23 @@ function mcpHostIsSafe(request: Request, publicOrigin: string): boolean {
     const requestUrl = new URL(request.url);
     if (requestUrl.origin !== publicOrigin) return false;
     const host = request.headers.get("host");
-    return host === null || host === requestUrl.host;
+    if (host === null) return true;
+    const normalizedHost = normalizeHost(host, requestUrl.protocol);
+    const expectedHost = normalizeHost(requestUrl.host, requestUrl.protocol);
+    return normalizedHost !== undefined && normalizedHost === expectedHost;
   } catch {
     return false;
+  }
+}
+
+function normalizeHost(value: string, protocol: string): string | undefined {
+  if (!value || value.trim() !== value) return undefined;
+  try {
+    const parsed = new URL(`${protocol}//${value}`);
+    if (parsed.username || parsed.password || parsed.pathname !== "/" || parsed.search || parsed.hash) return undefined;
+    return parsed.host;
+  } catch {
+    return undefined;
   }
 }
 
@@ -445,10 +424,13 @@ async function enforceMcpRateLimit(request: Request, binding: McpRateLimit | und
 }
 
 class McpInputError extends Error {}
+class McpResponseLimitError extends Error {}
 
 function mcpToolError(error: unknown, fallback: string) {
   const message = error instanceof McpInputError
     ? error.message
+    : error instanceof McpResponseLimitError
+      ? error.message
     : error instanceof ProtocolError
       ? safeProtocolMessage(error.code)
       : fallback;
@@ -489,7 +471,13 @@ function applyMcpCors(response: Response, origin: string | null): Response {
   response.headers.set("access-control-allow-origin", origin);
   response.headers.set("access-control-allow-methods", MCP_ALLOW_METHODS);
   response.headers.set("access-control-allow-headers", MCP_ALLOW_HEADERS);
-  response.headers.set("access-control-expose-headers", MCP_EXPOSE_HEADERS);
+  if (MCP_EXPOSE_HEADERS) response.headers.set("access-control-expose-headers", MCP_EXPOSE_HEADERS);
   response.headers.set("vary", "Origin");
   return response;
+}
+
+async function enforceMcpWireLimit(response: Response): Promise<Response> {
+  const body = await response.arrayBuffer();
+  if (body.byteLength <= MAX_MCP_WIRE_RESPONSE_BYTES) return new Response(body, response);
+  return mcpHttpError(500, "The MCP response exceeded the maximum wire size.");
 }

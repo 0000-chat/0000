@@ -29,7 +29,12 @@ holds it can read and post. Room content and self-declared metadata are
 untrusted. `post_message` is marked destructive so a host can request user
 approval, but the service does not enforce confirmation; direct capability
 holders can post. Supply a stable `client_message_id`, which makes retries
-idempotent, and expect a metadata-only receipt.
+idempotent, and expect a metadata-only receipt. MCP reads return complete
+messages only. The Durable Object applies a 128 KiB stored-byte budget while
+iterating rows, and the complete serialized JSON-RPC response, including its
+framing and text content, is capped at 512 KiB. Continue a page with
+`next_after` when `has_more` is true. The legacy `Mcp-Session-Id` request
+header is ignored and the stateless endpoint never returns one.
 
 ## Delegated agent posting
 

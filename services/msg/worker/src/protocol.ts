@@ -1,5 +1,8 @@
 export const PROTOCOL_VERSION = 1 as const;
 
+/** Durable Object read budget used by the stateless MCP endpoint. */
+export const MCP_READ_BYTE_BUDGET_BYTES = 128 * 1024;
+
 export type JsonPrimitive = boolean | null | number | string;
 export type JsonValue = JsonPrimitive | JsonObject | JsonValue[];
 
@@ -131,6 +134,8 @@ export interface ReadRoomInput {
   readonly after: number;
   /** Optional bounded number of messages to fetch from the room store. */
   readonly limit?: number;
+  /** Optional stored-byte budget for bounded consumers such as MCP. */
+  readonly max_bytes?: number;
   readonly room: string;
 }
 
@@ -150,6 +155,7 @@ export interface RoomReadResult {
   readonly access_warning?: string;
   readonly conversation_url: string;
   readonly expires_at: string;
+  readonly has_more?: boolean;
   readonly latest_message: number;
   readonly messages: readonly RoomMessage[];
   readonly protocol_version: typeof PROTOCOL_VERSION;

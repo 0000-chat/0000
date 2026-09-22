@@ -2,8 +2,8 @@ import { describe, expect, test } from "bun:test";
 
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 
-import { handleMcpRequest } from "./mcp";
-import type { PostMessageResponse, ReadRoomResponse, RoomService } from "./protocol";
+import { handleMcpRequest, MAX_MCP_WIRE_RESPONSE_BYTES } from "./mcp";
+import { MCP_READ_BYTE_BUDGET_BYTES, type PostMessageResponse, type ReadRoomResponse, type RoomService } from "./protocol";
 import { createWorker } from "./worker";
 
 const origin = "https://msg.0000.chat";
@@ -152,7 +152,7 @@ describe("stateless MCP endpoint", () => {
     };
     const response = await handleMcpRequest(rpcRequest({ id: 3, method: "tools/call", params: { name: "read_room", arguments: { after: 1, limit: 2, room_url: roomUrl } } }), service);
     const result = (await json(response)).result.structuredContent;
-    expect(input).toEqual({ after: 1, limit: 3, room: "room-capability" });
+    expect(input).toEqual({ after: 1, limit: 3, max_bytes: MCP_READ_BYTE_BUDGET_BYTES, room: "room-capability" });
     expect(result.messages).toHaveLength(2);
     expect(result.messages.map((message: { sequence: number }) => message.sequence)).toEqual([1, 2]);
     expect(result.has_more).toBe(true);
@@ -161,25 +161,52 @@ describe("stateless MCP endpoint", () => {
     expect(JSON.stringify(result)).not.toContain("secret invitation");
   });
 
-  test("bounds structured read output by UTF-8 bytes and reports a cursor", async () => {
-    const messages = [1, 2, 3].map((sequence) => ({
-      content: "💬".repeat(40_000),
+  test("returns complete maximum-size messages, paginates, and caps the full JSON-RPC wire response", async () => {
+    const content = "\u0000".repeat(64 * 1024);
+    const messages = [1, 2].map((sequence) => ({
+      content,
       created_at: "2026-09-22T00:00:00.000Z",
       id: `message-${sequence}`,
       sequence,
     }));
+    const service = {
+      ...baseService(),
+      read: async ({ after }: { after: number }) => readResult(after === 0 ? messages : [messages[1]!]),
+    } satisfies RoomService;
     const response = await handleMcpRequest(
       rpcRequest({ id: 30, method: "tools/call", params: { name: "read_room", arguments: { room_url: roomUrl, limit: 3 } } }),
-      { ...baseService(), read: async () => readResult(messages) },
+      service,
     );
-    const body = await json(response);
-    const output = body.result.structuredContent as Record<string, unknown>;
-    expect(new TextEncoder().encode(JSON.stringify(output)).byteLength).toBeLessThanOrEqual(48 * 1024);
+    const raw = await response.text();
+    const body = JSON.parse(raw) as Record<string, any>;
+    const output = body.result.structuredContent as Record<string, any>;
+    expect(new TextEncoder().encode(raw).byteLength).toBeLessThanOrEqual(MAX_MCP_WIRE_RESPONSE_BYTES);
+    expect(output.messages).toHaveLength(1);
+    expect(output.messages[0].content).toBe(content);
     expect(output.truncated).toBe(true);
     expect(output.has_more).toBe(true);
     expect(output.next_after).toBe(1);
-    const text = body.result.content[0].text as string;
-    expect(new TextEncoder().encode(text).byteLength).toBeLessThanOrEqual(48 * 1024);
+
+    const next = await handleMcpRequest(
+      rpcRequest({ id: 31, method: "tools/call", params: { name: "read_room", arguments: { after: 1, room_url: roomUrl, limit: 3 } } }),
+      service,
+    );
+    const nextBody = await json(next);
+    expect(nextBody.result.structuredContent.messages).toHaveLength(1);
+    expect(nextBody.result.structuredContent.messages[0].content).toBe(content);
+    expect(nextBody.result.structuredContent.has_more).toBe(false);
+  });
+
+  test("returns an explicit error without advancing when the first message cannot fit", async () => {
+    const response = await handleMcpRequest(
+      rpcRequest({ id: 32, method: "tools/call", params: { name: "read_room", arguments: { room_url: roomUrl } } }),
+      { ...baseService(), read: async () => readResult([{ content: "\u0000".repeat(100 * 1024), created_at: "2026-09-22T00:00:00.000Z", id: "oversized", sequence: 7 }]) },
+    );
+    const body = await json(response);
+    expect(body.result.isError).toBe(true);
+    expect(body.result.content[0].text).toContain("first room message cannot fit");
+    expect(body.result.structuredContent).toBeUndefined();
+    expect(JSON.stringify(body)).not.toContain("next_after");
   });
 
   test("uses the atomic post path and returns a metadata-only receipt", async () => {
@@ -296,8 +323,11 @@ describe("stateless MCP endpoint", () => {
     expect(method.status).toBe(405);
     expect(method.headers.get("allow")).toBe("POST, OPTIONS");
     expect(method.headers.get("access-control-allow-origin")).toBe("https://chatgpt.com");
-    const session = await worker.fetch(rpcRequest({ id: 11, method: "tools/list", params: {} }, { headers: { "mcp-session-id": "session-secret" } }));
-    expect(session.status).toBe(400);
+    const caseAndPort = await worker.fetch(rpcRequest({ id: 11, method: "tools/list", params: {} }, { headers: { host: "MSG.0000.CHAT:443" } }));
+    expect(caseAndPort.status).toBe(200);
+    const session = await worker.fetch(rpcRequest({ id: 12, method: "tools/list", params: {} }, { headers: { "mcp-session-id": "session-secret" } }));
+    expect(session.status).toBe(200);
+    expect(session.headers.get("mcp-session-id")).toBeNull();
     expect(await session.text()).not.toContain("session-secret");
   });
 });
