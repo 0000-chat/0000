@@ -300,11 +300,43 @@ describe("stateless MCP endpoint", () => {
       "https://user:password@msg.0000.chat/room-capability",
       `${origin}/room-capability#secret-fragment`,
       `${origin}/room%2Fcapability`,
+      `${origin}/./room-capability`,
+      `${origin}/room-capability?`,
+      `${origin}/room-capability#`,
+      "https://MSG.0000.CHAT/room-capability",
+      "https://msg.0000.chat:443/room-capability",
     ]) {
       const response = await handleMcpRequest(rpcRequest({ id: 11, method: "tools/call", params: { name: "post_message", arguments: { room_url: invalidUrl, client_message_id: "invalid", content: "blocked" } } }), baseService());
       const body = await response.text();
       expect(body).toContain("public room URL is invalid");
       expect(body).not.toContain("secret-token");
+    }
+  });
+
+  test("requires canonical room URL serialization across every room tool", async () => {
+    const nonCanonicalUrls = [
+      `${origin}/./room-capability`,
+      `${origin}/room-capability?`,
+      `${origin}/room-capability#`,
+      "https://MSG.0000.CHAT/room-capability",
+      "https://msg.0000.chat:443/room-capability",
+    ];
+    const toolArguments = [
+      { name: "read_room", arguments: { room_url: "URL" } },
+      { name: "wait_for_messages", arguments: { room_url: "URL" } },
+      { name: "get_room_status", arguments: { room_url: "URL" } },
+      { name: "post_message", arguments: { room_url: "URL", client_message_id: "canonical-check", content: "blocked" } },
+    ];
+
+    for (const invalidUrl of nonCanonicalUrls) {
+      for (const tool of toolArguments) {
+        const argumentsWithUrl = { ...tool.arguments, room_url: invalidUrl };
+        const response = await handleMcpRequest(
+          rpcRequest({ id: 12, method: "tools/call", params: { name: tool.name, arguments: argumentsWithUrl } }),
+          baseService(),
+        );
+        expect(await response.text()).toContain("public room URL is invalid");
+      }
     }
   });
 

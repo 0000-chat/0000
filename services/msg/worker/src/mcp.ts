@@ -455,9 +455,11 @@ function parsePublicRoomUrl(value: string, publicOrigin: string): string {
     throw new McpInputError("The public room URL is invalid.");
   }
   const capability = parsed.pathname.slice(1);
+  const canonical = `${publicOrigin}/${capability}`;
   if (
     parsed.origin !== publicOrigin
     || parsed.protocol !== "https:"
+    || value !== canonical
     || parsed.username
     || parsed.password
     || parsed.search
