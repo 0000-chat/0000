@@ -58,6 +58,24 @@ test("adds foreground wait metadata after a posted message without exposing mana
   expect(result.wait.command).not.toContain("manage");
 });
 
+test("creates a delegated GET posting URL only for owner management actions", async () => {
+  const calls: Request[] = [];
+  const service = new DurableRoomService(
+    { getByName: () => ({ fetch: async (request: Request) => { calls.push(request); return Response.json({ protocol_version: 1, expires_at: "2026-08-17T00:00:00.000Z", get_post_enabled: true }); } }) } as never,
+    "https://msg.0000.chat",
+    (values) => values.fill(9),
+  );
+
+  const result = await service.manage({ action: "enable", method: "POST", room: "public-room", token: "owner-token" });
+  const body = await calls[0]!.clone().json() as { action: string; get_post_token: string };
+
+  expect(result.get_post_url).toBe("https://msg.0000.chat/public-room/post?token=CQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQk");
+  expect(result.get_post_url_warning).toContain("write capability");
+  expect(body.action).toBe("enable");
+  expect(body.get_post_token).toBeTruthy();
+  expect(JSON.stringify(result)).not.toContain("owner-token");
+});
+
 test("adds public handoff and wait metadata to a room read", async () => {
   const service = new DurableRoomService({
     getByName: () => ({

@@ -9,12 +9,13 @@ import {
   PROTOCOL_VERSION,
   stripLegacyAbsoluteExpiry,
   type CreateRoomResponse,
+  type GetPostMessageResponse,
   type RequestBody,
   type ManageRoomResponse,
   type ReadRoomResponse,
   type RoomService,
 } from "./protocol";
-import { compareCapabilities, MAX_ROOM_REQUEST_BYTES, roomEtag, validateCursor, validateIdempotencyKey } from "./room-domain";
+import { byteLength, compareCapabilities, MAX_ROOM_REQUEST_BYTES, roomEtag, validateCursor, validateIdempotencyKey, validateRequestId } from "./room-domain";
 import {
   negotiateCreateRepresentation,
   negotiateRepresentation,
@@ -77,6 +78,10 @@ const MAX_CANONICAL_JSON_DEPTH = 32;
 const MAX_REPORT_CAPABILITY_CHARS = 512;
 const MAX_REPORT_DESCRIPTION_BYTES = 4 * 1024;
 const MAX_REPORT_DESCRIPTION_CHARS = 2_000;
+const MAX_GET_POST_URL_BYTES = 8 * 1024;
+const MAX_GET_POST_CONTENT_BYTES = 4 * 1024;
+const MAX_GET_POST_TOKEN_CHARS = 512;
+const MAX_GET_POST_TOKEN_BYTES = 2 * 1024;
 const RATE_LIMIT_PERIOD_SECONDS = 60;
 
 export function createWorker(service: RoomService, options: MsgWorkerOptions = {}): MsgWorker {
@@ -295,6 +300,27 @@ async function route(request: Request, service: RoomService, options: MsgWorkerO
       : textResponse(renderAgentText(document));
   }
 
+  const getPostMatch = /^\/([^/]+)\/post$/.exec(url.pathname);
+  if (getPostMatch && request.method === "GET") {
+    if (!service.getPost) return notFound();
+    if (options.postDisabled) {
+      throw new ProtocolError(ERROR_CODES.serviceUnavailable, "New messages are temporarily unavailable.", 503);
+    }
+    if (!isSameOrigin(request, url)) {
+      throw new ProtocolError(ERROR_CODES.forbidden, "Cross-origin state changes are not allowed.", 403);
+    }
+    rejectGetPostPrefetch(request);
+    const getPost = parseGetPostQuery(request, url);
+    await enforceRateLimit(request, options.rateLimits?.posts);
+    const result = stripLegacyAbsoluteExpiry(await service.getPost({
+      body: { kind: "json", value: getPost.input },
+      requestId: getPost.requestId,
+      room: getPostMatch[1],
+      token: getPost.token,
+    })) as unknown as GetPostMessageResponse;
+    return getPostResponse(result);
+  }
+
   const roomMatch = /^\/([^/]+)$/.exec(url.pathname);
   if (roomMatch) {
     const room = roomMatch[1];
@@ -340,10 +366,11 @@ async function route(request: Request, service: RoomService, options: MsgWorkerO
   }
 
   const manageMatch = /^\/manage\/([^/]+)\/([^/]+)$/.exec(url.pathname);
-  if (manageMatch && (request.method === "GET" || request.method === "DELETE")) {
+  if (manageMatch && (request.method === "GET" || request.method === "DELETE" || request.method === "POST")) {
     if (!service.manage) return notFound();
-    const result = await service.manage({ method: request.method, room: manageMatch[1], token: manageMatch[2] });
-    return manageResponse(result, request.method, negotiateRepresentation(request.headers.get("accept")));
+    const action = request.method === "POST" ? await parseManagementAction(request) : undefined;
+    const result = await service.manage({ action, method: request.method, room: manageMatch[1], token: manageMatch[2] });
+    return manageResponse(result, request.method, negotiateRepresentation(request.headers.get("accept")), url);
   }
 
   return errorResponse(
@@ -352,6 +379,90 @@ async function route(request: Request, service: RoomService, options: MsgWorkerO
     404,
     negotiateRepresentation(request.headers.get("accept")),
   );
+}
+
+const GET_POST_QUERY_FIELDS = new Set(["author", "client", "content", "display_name", "reply_to", "request_id", "semantic_type", "token"]);
+
+interface GetPostQuery {
+  readonly input: Record<string, string>;
+  readonly requestId: string;
+  readonly token: string;
+}
+
+function parseGetPostQuery(request: Request, url: URL): GetPostQuery {
+  if (byteLength(request.url) > MAX_GET_POST_URL_BYTES) {
+    throw new ProtocolError(ERROR_CODES.bodyTooLarge, "The GET posting URL is too large.", 413);
+  }
+  const counts = new Map<string, number>();
+  for (const [name] of url.searchParams) {
+    if (!GET_POST_QUERY_FIELDS.has(name)) throw new ProtocolError(ERROR_CODES.invalidBody, "The GET posting query contains an unsupported field.", 400);
+    counts.set(name, (counts.get(name) ?? 0) + 1);
+  }
+  for (const [name, count] of counts) {
+    if (count !== 1) throw new ProtocolError(ERROR_CODES.invalidBody, `The ${name} query field must appear once.`, 400);
+  }
+
+  const token = boundedQueryValue(url.searchParams.get("token"), "token", MAX_GET_POST_TOKEN_CHARS, MAX_GET_POST_TOKEN_BYTES);
+  const requestId = validateRequestId(requiredQueryValue(url.searchParams.get("request_id"), "request_id"));
+  const content = requiredQueryValue(url.searchParams.get("content"), "content");
+  if (byteLength(content) > MAX_GET_POST_CONTENT_BYTES) {
+    throw new ProtocolError(ERROR_CODES.bodyTooLarge, "The GET posting content is too large.", 413);
+  }
+  const input: Record<string, string> = { content };
+  for (const field of ["author", "display_name", "client", "semantic_type", "reply_to"] as const) {
+    const value = url.searchParams.get(field);
+    if (value !== null) input[field] = value;
+  }
+  return { input, requestId, token };
+}
+
+function requiredQueryValue(value: string | null, field: string): string {
+  if (value === null || value === "") throw new ProtocolError(ERROR_CODES.invalidBody, `The ${field} query field is required.`, 400);
+  return value;
+}
+
+function boundedQueryValue(value: string | null, field: string, maxChars: number, maxBytes: number): string {
+  const result = requiredQueryValue(value, field);
+  if (Array.from(result).length > maxChars || byteLength(result) > maxBytes) {
+    throw new ProtocolError(ERROR_CODES.bodyTooLarge, `The ${field} query field is too large.`, 413);
+  }
+  return result;
+}
+
+function rejectGetPostPrefetch(request: Request): void {
+  if (request.headers.get("sec-fetch-site")?.toLowerCase() === "cross-site") {
+    throw new ProtocolError(ERROR_CODES.forbidden, "GET posting URLs cannot be used by cross-site browser requests.", 403);
+  }
+  const prefetchHeaders = ["purpose", "sec-purpose", "x-moz"].map((name) => request.headers.get(name)?.toLowerCase() ?? "");
+  if (prefetchHeaders.some((value) => value.includes("prefetch") || value.includes("prerender"))) {
+    throw new ProtocolError(ERROR_CODES.forbidden, "GET posting URLs cannot be used by prefetch or prerender requests.", 403);
+  }
+}
+
+async function parseManagementAction(request: Request): Promise<"disable" | "enable" | "rotate"> {
+  const body = await parseRequestBody(request, { maxBytes: 512 });
+  let action: unknown;
+  if (body.kind === "json") {
+    if (body.value === null || Array.isArray(body.value) || typeof body.value !== "object") {
+      throw new ProtocolError(ERROR_CODES.invalidBody, "The management action must be a JSON object.", 400);
+    }
+    const fields = Object.keys(body.value);
+    if (fields.length !== 1 || fields[0] !== "action") {
+      throw new ProtocolError(ERROR_CODES.invalidBody, "The management action must contain only action.", 400);
+    }
+    action = body.value.action;
+  } else {
+    const values = new URLSearchParams(body.value);
+    const fields = [...values.keys()];
+    if (fields.length !== 1 || fields[0] !== "action") {
+      throw new ProtocolError(ERROR_CODES.invalidBody, "The management action must contain only action.", 400);
+    }
+    action = values.get("action");
+  }
+  if (action !== "enable" && action !== "disable" && action !== "rotate") {
+    throw new ProtocolError(ERROR_CODES.invalidBody, "The management action must be enable, disable, or rotate.", 400);
+  }
+  return action;
 }
 
 async function enforceRateLimit(request: Request, binding: MsgRateLimit | undefined): Promise<void> {
@@ -509,10 +620,30 @@ function postResponse(result: import("./protocol").PostMessageResponse, represen
   return new Response(`# Message created\n\n${safeResult.message.content}\n\nExpires: ${safeResult.expires_at}\n`, { headers: { "content-type": "text/markdown; charset=utf-8" }, status: 201 });
 }
 
-function manageResponse(result: ManageRoomResponse, method: "DELETE" | "GET", representation: ReturnType<typeof negotiateRepresentation>): Response {
-  if (representation === "json") return jsonResponse(result, method === "DELETE" ? 200 : 200);
-  const body = method === "DELETE" ? "# Conversation deleted\n" : "# Conversation management\n";
-  return new Response(representation === "html" ? `<!doctype html><html lang="en"><body><main><h1>${method === "DELETE" ? "Conversation deleted" : "Conversation management"}</h1></main></body></html>` : body, { headers: { "content-type": representation === "html" ? "text/html; charset=utf-8" : "text/markdown; charset=utf-8" } });
+function getPostResponse(result: GetPostMessageResponse): Response {
+  return jsonResponse({
+    accepted: true,
+    protocol_version: result.protocol_version,
+    replayed: result.replayed,
+    request_id: result.request_id,
+    sequence: result.sequence,
+  });
+}
+
+function manageResponse(result: ManageRoomResponse, method: "DELETE" | "GET" | "POST", representation: ReturnType<typeof negotiateRepresentation>, url: URL): Response {
+  if (representation === "json") return jsonResponse(result, 200);
+  if (method === "DELETE") {
+    const body = "# Conversation deleted\n";
+    return new Response(representation === "html" ? `<!doctype html><html lang="en"><body><main><h1>Conversation deleted</h1></main></body></html>` : body, { headers: { "content-type": representation === "html" ? "text/html; charset=utf-8" : "text/markdown; charset=utf-8" } });
+  }
+  const enabled = result.get_post_enabled === true;
+  const delegated = result.get_post_url ? `<section><h2>GET posting capability</h2><p>${escapeHtml(result.get_post_url_warning ?? "Treat this URL as a secret write capability.")}</p><pre>${escapeHtml(result.get_post_url)}</pre></section>` : "";
+  const controls = `<section><h2>GET posting capability</h2><p>Status: ${enabled ? "enabled" : "disabled"}.</p><form method="post" action="${escapeHtml(url.toString())}"><button name="action" value="enable" type="submit">Enable</button> <button name="action" value="rotate" type="submit">Rotate</button> <button name="action" value="disable" type="submit">Disable</button></form><p>This capability lets a fetch-only agent write short text. URL previews can trigger a write, so keep the URL secret.</p></section>`;
+  const body = method === "POST" && result.get_post_url
+    ? `${delegated}${controls}`
+    : controls;
+  if (representation === "html") return new Response(`<!doctype html><html lang="en"><body><main><h1>Conversation management</h1>${body}</main></body></html>`, { headers: { "content-type": "text/html; charset=utf-8", "x-msg-management-forms": "1" } });
+  return new Response(`# Conversation management\n\nGET posting: ${enabled ? "enabled" : "disabled"}.\n\n${result.get_post_url ? `${result.get_post_url_warning ?? "Treat this URL as a secret write capability."}\n\n${result.get_post_url}\n` : "Use the management URL to enable or rotate the GET posting capability.\n"}`, { headers: { "content-type": "text/markdown; charset=utf-8" } });
 }
 
 function escapeHtml(value: string): string {
@@ -557,7 +688,9 @@ function errorRepresentation(request: Request): ErrorRepresentation {
 
 function secure(response: Response): Response {
   if (response.status === 101) return response;
-  applySecurityHeaders(response.headers);
+  const allowSameOriginForms = response.headers.get("x-msg-management-forms") === "1";
+  response.headers.delete("x-msg-management-forms");
+  applySecurityHeaders(response.headers, { allowSameOriginForms });
   return response;
 }
 

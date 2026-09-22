@@ -23,7 +23,7 @@ function isPinnedVersion(value) {
 }
 
 const rootManifest = readJson(path.join(root, "package.json"));
-const workspaceDirs = [];
+const workspaceDirs = new Set();
 
 if (rootManifest) {
   expect(rootManifest.private === true, "root package.json must be private");
@@ -49,15 +49,39 @@ if (rootManifest) {
   }
 
   for (const workspacePattern of rootManifest.workspaces ?? []) {
-    expect(typeof workspacePattern === "string" && workspacePattern.endsWith("/*"), `unsupported workspace pattern ${workspacePattern}`);
-    if (typeof workspacePattern !== "string" || !workspacePattern.endsWith("/*")) continue;
+    const isWildcard = typeof workspacePattern === "string" && workspacePattern.endsWith("/*");
+    const isExplicitDirectory =
+      typeof workspacePattern === "string" && workspacePattern.length > 0 && !workspacePattern.includes("*");
+    expect(isWildcard || isExplicitDirectory, `unsupported workspace pattern ${workspacePattern}`);
+    if (!isWildcard && !isExplicitDirectory) continue;
+
+    if (isExplicitDirectory) {
+      const workspaceDir = path.join(root, workspacePattern);
+      try {
+        if (fs.statSync(workspaceDir).isDirectory()) workspaceDirs.add(workspaceDir);
+      } catch (error) {
+        if (error.code !== "ENOENT") throw error;
+      }
+      continue;
+    }
 
     const workspaceRoot = path.join(root, workspacePattern.slice(0, -2));
     expect(fs.existsSync(workspaceRoot), `workspace directory ${workspacePattern.slice(0, -2)} is missing`);
     if (!fs.existsSync(workspaceRoot)) continue;
 
     for (const entry of fs.readdirSync(workspaceRoot, { withFileTypes: true })) {
-      if (entry.isDirectory()) workspaceDirs.push(path.join(workspaceRoot, entry.name));
+      const entryPath = path.join(workspaceRoot, entry.name);
+      if (entry.isDirectory()) {
+        workspaceDirs.add(entryPath);
+        continue;
+      }
+      if (!entry.isSymbolicLink()) continue;
+
+      try {
+        if (fs.statSync(entryPath).isDirectory()) workspaceDirs.add(entryPath);
+      } catch (error) {
+        if (error.code !== "ENOENT") throw error;
+      }
     }
   }
 }

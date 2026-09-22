@@ -1,0 +1,151 @@
+{
+  "schema_version": 1,
+  "source_cwd": "/home/ubuntu/0000-full/repos/0000-streams",
+  "destination_cwd": "/home/ubuntu/0000-full/0000/services/streams",
+  "inventory": {
+    "source_cwd_rows": 5,
+    "user_tasks": 2,
+    "internal_records": 3,
+    "active_list_surface": "Only the current migration user task was surfaced.",
+    "archived_scan": {
+      "pages": 7,
+      "entries": 317,
+      "source_matches": 1
+    }
+  },
+  "tasks": [
+    {
+      "source_id": "01a09093-3e4c-7102-b135-e323efa9acd5",
+      "source_title": "Set up Matt Pocock skills",
+      "kind": "user_task",
+      "source_status": "archived",
+      "copy_id": "01a0addb-d2e7-7210-a917-bac588e73d14",
+      "copy_status": "archived",
+      "copy_method": "Codex CLI: codex fork --cd /home/ubuntu/0000-full/0000/services/streams",
+      "verified": {
+        "turn_count": 5,
+        "history_equivalent": true,
+        "cwd": "/home/ubuntu/0000-full/0000/services/streams"
+      },
+      "desktop_task_list_visibility": "unconfirmed; manual verification required"
+    },
+    {
+      "source_id": "01a0adcc-0e30-7f62-89dd-c0bfe4bc8763",
+      "source_title": "Migrate service and Codex tasks",
+      "kind": "user_task",
+      "source_status": "active",
+      "copy_id": null,
+      "copy_status": "deferred_until_idle"
+    },
+    {
+      "source_id": "01a0adda-5325-7c40-9fa6-f4fb8347dc4b",
+      "kind": "implementation_subagent",
+      "agent_path": "/root/streams_import_implementation",
+      "source_status": "inProgress",
+      "copy_id": null,
+      "copy_status": "excluded_from_user_task_copies",
+      "backup_coverage": "Codex database and rollout backups"
+    },
+    {
+      "source_id": "01a0add2-f7c4-75a2-8df9-c2a94645c748",
+      "kind": "guardian_review",
+      "source_status": "internal_record",
+      "copy_id": null,
+      "copy_status": "excluded_from_user_task_copies",
+      "backup_coverage": "Codex database and rollout backups"
+    },
+    {
+      "source_id": "01a0adda-5487-7652-beb9-49801f3c1139",
+      "kind": "guardian_review",
+      "source_status": "internal_record",
+      "copy_id": null,
+      "copy_status": "excluded_from_user_task_copies",
+      "backup_coverage": "Codex database and rollout backups"
+    }
+  ],
+  "idempotent_rerun_guidance": "Before retrying, query the destination for forked_from_id equal to the source task ID. Reuse an existing matching copy; create a fork only when none exists.",
+  "codex_desktop_projects": {
+    "source": {
+      "id": "2207c8a3-6bda-44a-ad36-fba364d98f9f",
+      "cwd": "/home/ubuntu/0000-full/repos/0000-streams"
+    },
+    "destination": {
+      "id": "72aeeba2-e595-4bea-a10a-bc1554c1021c",
+      "label": "0000-streams-new",
+      "cwd": "/home/ubuntu/0000-full/0000/services/streams"
+    }
+  },
+  "repository_import": {
+    "selected_source_tip": "36356baf768fc11f2223fa8a7052fb7cf91c8353",
+    "staged_import_replayed": true,
+    "destination_postfetch_bundle": {
+      "file": "destination-post-b43-all.bundle",
+      "path": "/home/ubuntu/0000-full/migration-backups/streams-20260917T052328Z/destination-post-b43-all.bundle",
+      "verified_refs": 286,
+      "complete_history": true,
+      "sha256": "84dd653751237949156727d068d0c4c110b9957c1873e51ba6ef3faa896d6cfd"
+    },
+    "backup_sha256sums": {
+      "path": "/home/ubuntu/0000-full/migration-backups/streams-20260917T052328Z/SHA256SUMS",
+      "verified_entries": 84,
+      "total_entries": 84
+    },
+    "original_source_checkout_retained": true,
+    "migration_backups_retained": true,
+    "service_check": {
+      "status": "passed",
+      "oxlint_version": "1.82.0",
+      "biome_version": "2.5.13",
+      "files_checked": 5
+    },
+    "turbo_dry_check": {
+      "status": "passed",
+      "includes_workspace": "@0000/streams",
+      "remote_cache_warning": true
+    },
+    "destination_base": "b43ac3cb71681e4ee6388ecd27fa2481a1f11494",
+    "destination_ref": "origin/main",
+    "skills_symlink_archive": {
+      "file": "streams-agents.tar",
+      "path": "/home/ubuntu/0000-full/migration-backups/streams-20260917T052328Z/destination/streams-agents.tar",
+      "symlink_count": 84,
+      "archive_entries": 86,
+      "sha256": "061dcf73d515d24d05f2dd293666c84e470f290fbdf26f9e718f8f5a5b9c4bc6",
+      "symlink_inventory": "/home/ubuntu/0000-full/migration-backups/streams-20260917T052328Z/destination/streams-agents-symlinks.tsv",
+      "resolved_inventory": "/home/ubuntu/0000-full/migration-backups/streams-20260917T052328Z/destination/streams-agents-resolved.tsv"
+    },
+    "source_repository": "0000-chat/0000-streams",
+    "destination_repository": "0000-chat/0000",
+    "service": "streams",
+    "source_branches": {
+      "main": "67de6b2a3d883c7ccccc6a2e1cbc766041fad549",
+      "codex/oxlint-biome-scaffolds": "36356baf768fc11f2223fa8a7052fb7cf91c8353",
+      "origin/main": "36356baf768fc11f2223fa8a7052fb7cf91c8353"
+    },
+    "source_github_inventory": {
+      "issues": 0,
+      "pull_requests": 0,
+      "releases": 0,
+      "labels_in_backup": 9
+    },
+    "source_refs_retained": {
+      "namespace_prefix": "refs/migration/streams/",
+      "in_verified_bundles": true
+    },
+    "destination_gitkeep_retained": true,
+    "root_check": {
+      "status": "passed",
+      "workspace_manifests": 11
+    },
+    "turbo_full_check": {
+      "status": "failed_at_existing_workspace",
+      "completed_workspaces": 10,
+      "total_workspaces": 11,
+      "failing_workspace": "@0000/msg",
+      "reason": "oxlint was unavailable on PATH",
+      "oxlint_declared_in_root_lock": true,
+      "expected_in_ci_frozen_install": true
+    }
+  },
+  "backup": "/home/ubuntu/0000-full/migration-backups/streams-20260917T052328Z"
+}

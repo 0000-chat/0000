@@ -1,6 +1,6 @@
 import { ROOM_LIMITS } from "./room-domain";
 
-export const CURRENT_ROOM_SCHEMA_VERSION = 3;
+export const CURRENT_ROOM_SCHEMA_VERSION = 4;
 
 interface SqlStorage {
   exec(query: string, ...values: unknown[]): Iterable<unknown>;
@@ -67,6 +67,13 @@ function applyMigration(sql: SqlStorage, version: number, inactivityTtlMs: numbe
       inactivityTtlMs,
     );
     sql.exec("UPDATE room_state SET schema_version = ? WHERE status <> 'active'", CURRENT_ROOM_SCHEMA_VERSION);
+    return;
+  }
+  if (version === 4) {
+    const columns = new Set(rows<{ name: string }>(sql.exec("PRAGMA table_info(room_state)")).map((column) => column.name));
+    if (!columns.has("get_post_hash")) sql.exec("ALTER TABLE room_state ADD COLUMN get_post_hash TEXT");
+    if (!columns.has("get_post_enabled")) sql.exec("ALTER TABLE room_state ADD COLUMN get_post_enabled INTEGER NOT NULL DEFAULT 0");
+    sql.exec("UPDATE room_state SET schema_version = ?", CURRENT_ROOM_SCHEMA_VERSION);
     return;
   }
   throw new Error("The room schema migration is not defined.");

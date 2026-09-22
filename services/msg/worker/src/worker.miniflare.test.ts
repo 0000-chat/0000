@@ -281,6 +281,54 @@ test.serial("replays exact idempotent posts and rejects changed retries", { time
   });
 });
 
+test.serial("runs the delegated GET posting lifecycle through Worker and Durable Object", { timeout: 15_000 }, async () => {
+  await withSharedRuntime(async (miniflare) => {
+    const created = await createRoom(miniflare);
+    const enabled = await miniflare.dispatchFetch(created.manage_url, {
+      body: JSON.stringify({ action: "enable" }),
+      headers: { accept: "application/json", "content-type": "application/json" },
+      method: "POST",
+    });
+    const enabledValue = await enabled.json() as { get_post_enabled: boolean; get_post_url: string; get_post_url_warning?: string };
+    expect(enabled.status).toBe(200);
+    expect(enabledValue.get_post_enabled).toBe(true);
+    expect(enabledValue.get_post_url_warning).toContain("write capability");
+
+    const firstUrl = new URL(enabledValue.get_post_url);
+    firstUrl.searchParams.set("request_id", "fetch-only-1");
+    firstUrl.searchParams.set("content", "fetch-only reply");
+    firstUrl.searchParams.set("author", "URL agent");
+    const first = await miniflare.dispatchFetch(firstUrl, { headers: { accept: "application/json" } });
+    expect(first.status).toBe(200);
+    expect(await first.json()).toMatchObject({ accepted: true, replayed: false, request_id: "fetch-only-1", sequence: 2 });
+
+    const rotated = await miniflare.dispatchFetch(created.manage_url, {
+      body: JSON.stringify({ action: "rotate" }),
+      headers: { accept: "application/json", "content-type": "application/json" },
+      method: "POST",
+    });
+    const rotatedValue = await rotated.json() as { get_post_url: string };
+    const oldRetry = await miniflare.dispatchFetch(firstUrl, { headers: { accept: "application/json" } });
+    expect(rotated.status).toBe(200);
+    expect(oldRetry.status).toBe(404);
+
+    const disabled = await miniflare.dispatchFetch(created.manage_url, {
+      body: JSON.stringify({ action: "disable" }),
+      headers: { accept: "application/json", "content-type": "application/json" },
+      method: "POST",
+    });
+    const newUrl = new URL(rotatedValue.get_post_url);
+    newUrl.searchParams.set("request_id", "fetch-only-2");
+    newUrl.searchParams.set("content", "blocked");
+    const afterDisable = await miniflare.dispatchFetch(newUrl, { headers: { accept: "application/json" } });
+    expect(disabled.status).toBe(200);
+    expect(afterDisable.status).toBe(404);
+
+    const transcript = await miniflare.dispatchFetch(created.conversation_url, { headers: { accept: "application/json" } });
+    expect((await transcript.json() as { messages: Array<{ content: string }> }).messages.map((message) => message.content)).toEqual(["first", "fetch-only reply"]);
+  });
+});
+
 test.serial("renders Durable Object export errors in the negotiated public representation", { timeout: 15_000 }, async () => {
   await withRuntime(async (miniflare) => {
     const deleted = await createRoom(miniflare);

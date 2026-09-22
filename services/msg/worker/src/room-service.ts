@@ -1,6 +1,6 @@
 import { ERROR_CODES, ProtocolError } from "./errors";
-import { hashCapability, parseMessageInput, randomCapability, validateIdempotencyKey } from "./room-domain";
-import { buildShareMessage, foregroundWait, PROTOCOL_VERSION, stripLegacyAbsoluteExpiry, type CreateRoomInput, type CreateRoomResponse, type ExportRoomInput, type LiveRoomInput, type ManageRoomInput, type ManageRoomResponse, type PostMessageInput, type PostMessageResponse, type ReadRoomInput, type ReadRoomResponse, type RoomService } from "./protocol";
+import { hashCapability, parseMessageInput, randomCapability, validateIdempotencyKey, validateRequestId } from "./room-domain";
+import { buildShareMessage, foregroundWait, PROTOCOL_VERSION, stripLegacyAbsoluteExpiry, type CreateRoomInput, type CreateRoomResponse, type ExportRoomInput, type GetPostMessageInput, type GetPostMessageResponse, type LiveRoomInput, type ManageRoomInput, type ManageRoomResponse, type PostMessageInput, type PostMessageResponse, type ReadRoomInput, type ReadRoomResponse, type RoomService } from "./protocol";
 
 export interface RoomStub { fetch(request: Request): Promise<Response>; }
 export interface RoomNamespace { getByName(name: string): RoomStub; }
@@ -60,8 +60,33 @@ export class DurableRoomService implements RoomService {
     return { ...value, wait: foregroundWait(this.origin, input.room, message.sequence) } as unknown as PostMessageResponse;
   }
 
+  async getPost(input: GetPostMessageInput): Promise<GetPostMessageResponse> {
+    const value = await responseJson(await this.room(input.room).fetch(jsonRequest("/get-post", {
+      input: parseMessageInput(input.body),
+      request_id: validateRequestId(input.requestId),
+      token: input.token,
+    })));
+    return value as unknown as GetPostMessageResponse;
+  }
+
   async manage(input: ManageRoomInput): Promise<ManageRoomResponse> {
-    return responseJson(await this.room(input.room).fetch(new Request(`https://room/manage?token=${encodeURIComponent(input.token)}`, { method: input.method }))) as unknown as ManageRoomResponse;
+    if (!input.action) {
+      return responseJson(await this.room(input.room).fetch(new Request(`https://room/manage?token=${encodeURIComponent(input.token)}`, { method: input.method }))) as unknown as ManageRoomResponse;
+    }
+    const delegatedToken = input.action === "disable" ? undefined : randomCapability(this.random);
+    const value = await responseJson(await this.room(input.room).fetch(jsonRequest(`/manage?token=${encodeURIComponent(input.token)}`, {
+      action: input.action,
+      ...(delegatedToken ? { get_post_token: delegatedToken } : {}),
+    })));
+    const result = value as unknown as ManageRoomResponse;
+    if (delegatedToken && result.get_post_enabled) {
+      return {
+        ...result,
+        get_post_url: `${this.origin}/${encodeURIComponent(input.room)}/post?token=${encodeURIComponent(delegatedToken)}`,
+        get_post_url_warning: GET_POST_URL_WARNING,
+      };
+    }
+    return result;
   }
 
   async operatorDelete(room: string): Promise<void> {
@@ -82,6 +107,8 @@ export class DurableRoomService implements RoomService {
 function jsonRequest(path: string, value: unknown): Request {
   return new Request(`https://room${path}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(value) });
 }
+
+const GET_POST_URL_WARNING = "This URL is a write capability. URL previews can submit the first message; treat it as a secret, and reuse request_id only when retrying the same message.";
 
 async function responseJson(response: Response): Promise<Record<string, unknown>> {
   if (!response.ok) throw await responseError(response);

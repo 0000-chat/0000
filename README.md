@@ -1,12 +1,14 @@
 # 0000
 
-This public repository is the 0000 monorepo. It contains the workspace
-boundaries for seven service workspaces and three shared packages, with Bun and
+This public repository is the 0000 monorepo. It contains service workspaces
+and three shared packages, with Bun and
 Turborepo pinned for repeatable outer workspace checks. `services/communicator`
 contains the imported communication adapter application.
 `services/msg` contains the temporary conversation Worker and npm CLI. The
 `services/brain` contains the imported wiki and knowledge-service scaffold.
-Several other service directories remain scaffold placeholders.
+`services/streams` contains the imported stream-processing scaffold, with no
+product implementation. Several other service directories remain scaffold
+placeholders.
 
 ## Service boundaries
 
@@ -41,11 +43,15 @@ bun run check:turbo:dry
 names, private publication safety, and retained directory markers.
 `check:turbo` runs each workspace check through Turbo, including the msg
 Worker, Wrangler tooling, and CLI checks, plus the Communicator relocation and
-tooling check; `check:turbo:dry` only prints the task graph. The Communicator
-application has its own nested pnpm workspace and checks; see
-[`services/communicator/README.md`](services/communicator/README.md).
+tooling check and the Streams workspace check; `check:turbo:dry` only prints
+the task graph. The Communicator application has its own nested pnpm workspace
+and checks; see [`services/communicator/README.md`](services/communicator/README.md).
+From `services/streams`, `bun run check` validates its workspace wrapper and
+`bun run check:application` runs the imported scaffold and tooling checks; see
+[`services/streams/README.md`](services/streams/README.md).
 
 The import procedure and preservation records are documented in
 [`services/brain/docs/migration/2026-09-17-monorepo-import.md`](services/brain/docs/migration/2026-09-17-monorepo-import.md),
-[`services/communicator/docs/migration/2026-09-15-monorepo-import.md`](services/communicator/docs/migration/2026-09-15-monorepo-import.md)
-and [`docs/playbooks/import-service-repository.md`](docs/playbooks/import-service-repository.md).
+[`services/communicator/docs/migration/2026-09-15-monorepo-import.md`](services/communicator/docs/migration/2026-09-15-monorepo-import.md),
+[`services/streams/docs/migration/2026-09-17-monorepo-import.md`](services/streams/docs/migration/2026-09-17-monorepo-import.md), and
+[`docs/playbooks/import-service-repository.md`](docs/playbooks/import-service-repository.md).

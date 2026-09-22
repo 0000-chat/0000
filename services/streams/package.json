@@ -2,8 +2,23 @@
   "name": "@0000/streams",
   "private": true,
   "version": "0.0.0",
-  "description": "Placeholder for the 0000 ordered stream service.",
+  "description": "Ordered stream service for the 0000 platform.",
+  "type": "module",
   "scripts": {
-    "check": "bun ../../scripts/check-workspace.mjs --workspace @0000/streams"
+    "check": "bun ../../scripts/check-workspace.mjs --workspace @0000/streams",
+    "check:application": "./scripts/check",
+    "build": "bunx wrangler@4.133.0 deploy --dry-run --config wrangler.jsonc",
+    "dev": "bunx wrangler@4.133.0 dev --config wrangler.jsonc",
+    "lint": "./scripts/lint src",
+    "test": "bun test src",
+    "typecheck": "bunx --package typescript@6.0.3 tsc --noEmit -p tsconfig.json",
+    "types": "bunx wrangler@4.133.0 types src/worker-configuration.d.ts --config wrangler.jsonc",
+    "deploy": "bunx wrangler@4.133.0 deploy --config wrangler.jsonc"
+  },
+  "devDependencies": {
+    "@types/node": "22.20.3",
+    "oxlint": "1.82.0",
+    "typescript": "6.0.3",
+    "wrangler": "4.133.0"
   }
 }

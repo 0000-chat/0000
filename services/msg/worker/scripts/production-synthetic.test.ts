@@ -3,31 +3,31 @@ import { expect, test } from "bun:test";
 import { runProductionSynthetic } from "./production-synthetic";
 
 test("verifies the public protocol and removes its synthetic room without reporting capabilities", { timeout: 20_000 }, async () => {
-  const requests: Array<{ method: string; path: string }> = [];
+  const requests: Array<{ method: string; path: string; view: string | null }> = [];
   const reports: string[] = [];
   const room = "room-capability-must-not-be-logged";
   const management = "management-capability-must-not-be-logged";
   const origin = "https://msg.example.test";
   let deleted = false;
- let invalidAgent = false;
- let staleAgentHome = true;
+  let invalidAgent = false;
+  let staleHumanHome = true;
   let missingHumanBanner = false;
 
   const fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
     const request = input instanceof Request ? input : new Request(input, init);
     const url = new URL(request.url);
-    requests.push({ method: request.method, path: url.pathname });
+    requests.push({ method: request.method, path: url.pathname, view: url.searchParams.get("view") });
     if (url.pathname === "/healthz") return json({ ok: true, protocol_version: 1 });
     if (["/agent.txt", "/llms.txt"].includes(url.pathname)) return new Response("safe discovery", { status: 200 });
     if (url.pathname === "/openapi.json") return json({ openapi: "3.1.0" });
     if (url.pathname === "/" && request.method === "GET") {
-      if (url.searchParams.get("view") !== "human" && staleAgentHome) {
-        staleAgentHome = false;
+      if (url.searchParams.get("view") !== "agent" && staleHumanHome) {
+        staleHumanHome = false;
         return new Response('<!doctype html><h1>Start a temporary conversation</h1><script src="/_msg/asset/client.js"></script>');
       }
-     return new Response(url.searchParams.get("view") === "human"
-        ? missingHumanBanner ? '<!doctype html><h1>Start a temporary conversation</h1><script src="/_msg/asset/client.js"></script>' : '<!doctype html><aside class="view-banner human-view-banner">I\'m an agent</aside><h1>Start a temporary conversation</h1><script src="/_msg/asset/client.js"></script>'
-        : '<!doctype html><aside class="view-banner agent-view-banner">I\'m human</aside><h1>Trusted service instructions</h1>', { headers: { "content-type": "text/html" } });
+      return new Response(url.searchParams.get("view") === "agent"
+        ? '<!doctype html><aside class="view-banner agent-view-banner">I\'m human</aside><h1>Trusted service instructions</h1>'
+        : missingHumanBanner ? '<!doctype html><h1>Start a temporary conversation</h1><script src="/_msg/asset/client.js"></script>' : '<!doctype html><aside class="view-banner human-view-banner">I\'m an agent</aside><h1>Start a temporary conversation</h1><script src="/_msg/asset/client.js"></script>', { headers: { "content-type": "text/html" } });
     }
     if (url.pathname === "/" && request.method === "POST") {
       return json({
@@ -46,9 +46,9 @@ test("verifies the public protocol and removes its synthetic room without report
     }
     if (url.pathname === `/${room}` && request.method === "GET") {
       if (request.headers.get("accept") !== "application/json") {
-       return new Response(url.searchParams.get("view") === "human"
-          ? missingHumanBanner ? `<!doctype html><main data-room="${room}"></main><script src="/_msg/asset/client.js"></script>` : `<!doctype html><aside class="view-banner human-view-banner">I'm an agent</aside><main data-room="${room}"></main><script src="/_msg/asset/client.js"></script>`
-          : "<!doctype html><aside class=\"view-banner agent-view-banner\">I'm human</aside><h2>Untrusted conversation content</h2>", { headers: { "content-type": "text/html" } });
+       return new Response(url.searchParams.get("view") === "agent"
+          ? "<!doctype html><aside class=\"view-banner agent-view-banner\">I'm human</aside><h2>Untrusted conversation content</h2>"
+          : missingHumanBanner ? `<!doctype html><main data-room="${room}"></main><script src="/_msg/asset/client.js"></script>` : `<!doctype html><aside class="view-banner human-view-banner">I'm an agent</aside><main data-room="${room}"></main><script src="/_msg/asset/client.js"></script>`, { headers: { "content-type": "text/html" } });
       }
       return deleted
         ? json({ error: { code: "gone" } }, 410)
@@ -77,14 +77,18 @@ test("verifies the public protocol and removes its synthetic room without report
   expect(reports.join(" ")).not.toContain(management);
   expect(requests.filter((request) => request.path === "/" && request.method === "POST")).toHaveLength(2);
   expect(requests.filter((request) => request.path === "/" && request.method === "GET").length).toBeGreaterThanOrEqual(3);
+  expect(requests).toContainEqual({ method: "GET", path: "/", view: null });
+  expect(requests).toContainEqual({ method: "GET", path: "/", view: "agent" });
   expect(requests.filter((request) => request.path === `/${room}` && request.method === "POST")).toHaveLength(2);
   expect(requests.filter((request) => request.path === `/${room}/agent` && request.method === "GET")).toHaveLength(2);
+  expect(requests).toContainEqual({ method: "GET", path: `/${room}`, view: null });
+  expect(requests).toContainEqual({ method: "GET", path: `/${room}`, view: "agent" });
   expect(requests.some((request) => request.path === `/manage/${room}/${management}` && request.method === "DELETE")).toBe(true);
 
   missingHumanBanner = true;
- deleted = false;
+  deleted = false;
   await expect(runProductionSynthetic({ fetch, origin, report: () => {}, webSocket: async () => undefined })).rejects.toThrow("human browser home");
-missingHumanBanner = false;
+  missingHumanBanner = false;
 
   invalidAgent = true;
   deleted = false;
@@ -105,10 +109,10 @@ test("still removes a created room when a verification phase fails", async () =>
       if (url.pathname === "/healthz") return json({ ok: true, protocol_version: 1 });
       if (["/agent.txt", "/llms.txt"].includes(url.pathname)) return new Response("safe discovery");
       if (url.pathname === "/openapi.json") return json({ openapi: "3.1.0" });
-      if (url.pathname === "/" && request.method === "GET") return new Response(url.searchParams.get("view") === "human" ? '<aside class="view-banner human-view-banner">I\'m an agent</aside>Start a temporary conversation /_msg/asset/client.js' : '<aside class="view-banner agent-view-banner">I\'m human</aside>Trusted service instructions');
-     if (url.pathname === "/" && request.method === "POST") return json({ conversation_url: `${origin}/${room}`, manage_url: `${origin}/manage/${room}/${management}`, protocol_version: 1, room: { id: room }, share_message: "Join", wait: { after: 1, command: "wait", requires_user_consent: true } }, 201);
+      if (url.pathname === "/" && request.method === "GET") return new Response(url.searchParams.get("view") === "agent" ? '<aside class="view-banner agent-view-banner">I\'m human</aside>Trusted service instructions' : '<aside class="view-banner human-view-banner">I\'m an agent</aside>Start a temporary conversation /_msg/asset/client.js');
+      if (url.pathname === "/" && request.method === "POST") return json({ conversation_url: `${origin}/${room}`, manage_url: `${origin}/manage/${room}/${management}`, protocol_version: 1, room: { id: room }, share_message: "Join", wait: { after: 1, command: "wait", requires_user_consent: true } }, 201);
       if (url.pathname === `/${room}` && request.method === "GET") {
-        if (request.headers.get("accept") === "text/html") return new Response(url.searchParams.get("view") === "human" ? `<aside class="view-banner human-view-banner">I'm an agent</aside>data-room="${room}" /_msg/asset/client.js` : '<aside class="view-banner agent-view-banner">I\'m human</aside>Untrusted conversation content');
+        if (request.headers.get("accept") === "text/html") return new Response(url.searchParams.get("view") === "agent" ? '<aside class="view-banner agent-view-banner">I\'m human</aside>Untrusted conversation content' : `<aside class="view-banner human-view-banner">I'm an agent</aside>data-room="${room}" /_msg/asset/client.js`);
         return new Response(null, { status: 503 });
       }
       if (url.pathname === `/manage/${room}/${management}` && request.method === "DELETE") {

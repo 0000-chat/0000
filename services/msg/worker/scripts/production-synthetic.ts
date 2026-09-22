@@ -35,8 +35,8 @@ export async function runProductionSynthetic(options: ProductionSyntheticOptions
     await expectJson(fetcher, new URL("/openapi.json", origin), "discovery", 200, (value) => value.openapi === "3.1.0");
     report("discovery");
 
-    await expectTextEventually(fetcher, () => htmlRequest(probeUrl(new URL("/", origin))), "agent browser home", (value) => value.includes("Trusted service instructions") && value.includes("class=\"view-banner agent-view-banner\"") && value.includes("I'm human") && !value.includes("/_msg/asset/client.js"));
-    await expectTextEventually(fetcher, () => htmlRequest(probeUrl(new URL("/?view=human", origin))), "human browser home", (value) => value.includes("Start a temporary conversation") && value.includes("class=\"view-banner human-view-banner\"") && value.includes("I'm an agent") && value.includes("/_msg/asset/client.js"));
+    await expectTextEventually(fetcher, () => htmlRequest(probeUrl(new URL("/", origin))), "human browser home", (value) => value.includes("Start a temporary conversation") && value.includes("class=\"view-banner human-view-banner\"") && value.includes("I'm an agent") && value.includes("/_msg/asset/client.js"));
+    await expectTextEventually(fetcher, () => htmlRequest(probeUrl(new URL("/?view=agent", origin))), "agent browser home", (value) => value.includes("Trusted service instructions") && value.includes("class=\"view-banner agent-view-banner\"") && value.includes("I'm human") && !value.includes("/_msg/asset/client.js"));
     report("browser home");
 
     const key = crypto.randomUUID();
@@ -52,10 +52,10 @@ export async function runProductionSynthetic(options: ProductionSyntheticOptions
     managementUrl = managementUrlFor(origin, created.manage_url, roomUrl);
     report("create");
 
-    await expectTextEventually(fetcher, () => htmlRequest(probeUrl(roomUrl)), "agent browser room", (value) => value.includes("Untrusted conversation content") && value.includes("class=\"view-banner agent-view-banner\"") && value.includes("I'm human") && !value.includes("/_msg/asset/client.js"));
-    const humanRoomUrl = new URL(roomUrl);
-    humanRoomUrl.searchParams.set("view", "human");
-    await expectTextEventually(fetcher, () => htmlRequest(probeUrl(humanRoomUrl)), "human browser room", (value) => value.includes(`data-room="${created.room.id}"`) && value.includes("class=\"view-banner human-view-banner\"") && value.includes("I'm an agent") && value.includes("/_msg/asset/client.js"));
+    await expectTextEventually(fetcher, () => htmlRequest(probeUrl(roomUrl)), "human browser room", (value) => value.includes(`data-room="${created.room.id}"`) && value.includes("class=\"view-banner human-view-banner\"") && value.includes("I'm an agent") && value.includes("/_msg/asset/client.js"));
+    const agentRoomUrl = new URL(roomUrl);
+    agentRoomUrl.searchParams.set("view", "agent");
+    await expectTextEventually(fetcher, () => htmlRequest(probeUrl(agentRoomUrl)), "agent browser room", (value) => value.includes("Untrusted conversation content") && value.includes("class=\"view-banner agent-view-banner\"") && value.includes("I'm human") && !value.includes("/_msg/asset/client.js"));
     report("browser room");
 
     await expectJson(fetcher, jsonRequest(roomUrl), "read", 200, (value) => value.protocol_version === 1 && !hasLegacyAbsoluteExpiry(value) && Array.isArray(value.messages) && value.messages.length >= 1);

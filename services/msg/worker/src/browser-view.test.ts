@@ -7,10 +7,11 @@ describe("browser view preference", () => {
     expect(selectBrowserView(new URL("https://msg.0000.chat/?view=agent"), "msg_view=human")).toBe("agent");
   });
 
-  test("uses a valid cookie and otherwise defaults to agent", () => {
+  test("uses a valid cookie and otherwise defaults to human", () => {
     expect(selectBrowserView(new URL("https://msg.0000.chat/"), "a=1; msg_view=human; b=2")).toBe("human");
-    expect(selectBrowserView(new URL("https://msg.0000.chat/"), "msg_view=robot")).toBe("agent");
-    expect(selectBrowserView(new URL("https://msg.0000.chat/?view=robot"), null)).toBe("agent");
+    expect(selectBrowserView(new URL("https://msg.0000.chat/"), "msg_view=robot")).toBe("human");
+    expect(selectBrowserView(new URL("https://msg.0000.chat/?view=robot"), null)).toBe("human");
+    expect(selectBrowserView(new URL("https://msg.0000.chat/"), null)).toBe("human");
   });
 
   test("builds a deterministic fallback link without losing other query fields", () => {

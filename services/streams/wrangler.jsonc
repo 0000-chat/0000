@@ -1,0 +1,24 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "0000-streams",
+  "main": "src/worker.ts",
+  "compatibility_date": "2026-09-05",
+  "compatibility_flags": ["nodejs_compat"],
+  "keep_names": false,
+  "secrets": {
+    "required": [
+      "ACCESS_TEAM_NAME",
+      "ACCESS_AUD",
+      "DON_EMAIL",
+      "MCP_AUTH_TOKEN",
+      "GROK_WEBHOOK_URL",
+      "GROK_WEBHOOK_AUTHORIZATION"
+    ]
+  },
+  "routes": [{ "pattern": "don.0000.gold", "custom_domain": true }],
+  "durable_objects": {
+    "bindings": [{ "name": "STREAMS", "class_name": "StreamsRoom" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["StreamsRoom"] }],
+  "observability": { "enabled": true }
+}
