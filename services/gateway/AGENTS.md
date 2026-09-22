@@ -2,9 +2,10 @@
 
 This directory contains the gateway service inside the public `0000` monorepo.
 The service remains scaffold-only; it has no application implementation,
-runtime dependency, database, API, deployment configuration, secret, or
-selected license. The service may compose the Executor SDK later, but it does
-not fork or vendor Executor.
+database, API, deployment configuration, secret, or selected license. It uses
+the shared `0000-platform` implementation for common identity and
+authentication when runtime code is added. The service may compose the
+Executor SDK later, but it does not fork or vendor Executor.
 
 The root Bun and Turborepo workspace owns monorepo validation. Run
 `bun run check`, `bun run check:turbo`, and `bun run check:turbo:dry` from the

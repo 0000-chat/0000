@@ -51,8 +51,8 @@ wrapper = json.loads((root / "package.json").read_text(encoding="utf-8"))
 if wrapper.get("name") != "@0000/gateway" or wrapper.get("private") is not True:
     raise SystemExit("invalid monorepo workspace wrapper")
 readme = (root / "README.md").read_text(encoding="utf-8")
-if "`0000-gateway` aims" not in readme or "No hard dependency" not in readme:
-    raise SystemExit("README must preserve the gateway purpose and dependency status")
+if "`0000-gateway` aims" not in readme or "requires `0000-platform`" not in readme:
+    raise SystemExit("README must state the gateway purpose and Platform dependency")
 PY
 git -C "$repo_root" diff --check
 pnpm --dir "$root/tooling" run lint

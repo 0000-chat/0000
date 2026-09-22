@@ -1,10 +1,10 @@
 {
   "schema_version": 1,
-  "name": "0000-database",
+  "name": "0000-streams",
   "visibility": "public",
   "status": "scaffold-only",
-  "purpose": "Boundary for persistent data services and future database integration.",
-  "dependencies": ["0000-platform"],
+  "purpose": "Boundary for ordered streams of events or records.",
+  "dependencies": ["0000-platform", "0000-database"],
   "standalone_authentication": "platform-required; hosted-account-not-required",
   "hosting_class": "cloudflare-public-ingress",
   "application_code": false,

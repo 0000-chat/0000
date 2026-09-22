@@ -65,5 +65,6 @@ The Matrix Gateway decrypts E2EE on a VPS and sends normalized, one-tenant
 batches to the private ingestion endpoint. Session, device, access, and other
 Matrix keys stay on that VPS and never enter Cloudflare.
 
-Cloudflare is the public ingress and normal runtime class. Standalone public
-components do not require hosted platform authentication.
+Cloudflare is the public ingress and normal runtime class. Communicator uses
+`0000-platform` for common identity and authentication. Standalone public use
+does not require a hosted 0000 account.

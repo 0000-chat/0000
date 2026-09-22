@@ -24,6 +24,7 @@ function isPinnedVersion(value) {
 
 const rootManifest = readJson(path.join(root, "package.json"));
 const workspaceDirs = [];
+const publicWorkspaceRoots = new Set(["apps", "services", "packages"]);
 
 if (rootManifest) {
   expect(rootManifest.private === true, "root package.json must be private");
@@ -48,16 +49,48 @@ if (rootManifest) {
     );
   }
 
-  for (const workspacePattern of rootManifest.workspaces ?? []) {
-    expect(typeof workspacePattern === "string" && workspacePattern.endsWith("/*"), `unsupported workspace pattern ${workspacePattern}`);
-    if (typeof workspacePattern !== "string" || !workspacePattern.endsWith("/*")) continue;
+  if (Array.isArray(rootManifest.workspaces)) {
+    for (const workspacePattern of rootManifest.workspaces) {
+      expect(typeof workspacePattern === "string", `unsupported workspace pattern ${workspacePattern}`);
+      if (typeof workspacePattern !== "string") continue;
 
-    const workspaceRoot = path.join(root, workspacePattern.slice(0, -2));
-    expect(fs.existsSync(workspaceRoot), `workspace directory ${workspacePattern.slice(0, -2)} is missing`);
-    if (!fs.existsSync(workspaceRoot)) continue;
+      const normalizedPattern = workspacePattern.replaceAll("\\", "/");
+      const segments = normalizedPattern.split("/");
+      const workspaceRootName = segments[0];
+      const workspaceName = segments[1];
+      const isDirectGlob = segments.length === 2 && workspaceName === "*";
+      const isExplicitWorkspace =
+        segments.length === 2 &&
+        workspaceName &&
+        workspaceName !== "*" &&
+        !workspaceName.includes("*") &&
+        !workspaceName.includes("?");
 
-    for (const entry of fs.readdirSync(workspaceRoot, { withFileTypes: true })) {
-      if (entry.isDirectory()) workspaceDirs.push(path.join(workspaceRoot, entry.name));
+      const isSupportedPattern =
+        !normalizedPattern.startsWith("/") &&
+        !normalizedPattern.includes(":") &&
+        !segments.includes("..") &&
+        publicWorkspaceRoots.has(workspaceRootName) &&
+        (isDirectGlob || isExplicitWorkspace);
+      expect(
+        isSupportedPattern,
+        `unsupported workspace pattern ${workspacePattern}; use apps/*, services/*, packages/*, or an explicit path below one of those roots`
+      );
+      if (!isSupportedPattern) continue;
+
+      const workspacePath = path.join(root, isDirectGlob ? workspaceRootName : normalizedPattern);
+      if (isDirectGlob) {
+        expect(fs.existsSync(workspacePath), `workspace directory ${normalizedPattern.slice(0, -2)} is missing`);
+        if (!fs.existsSync(workspacePath)) continue;
+
+        for (const entry of fs.readdirSync(workspacePath, { withFileTypes: true })) {
+          if (entry.isDirectory()) workspaceDirs.push(path.join(workspacePath, entry.name));
+        }
+        continue;
+      }
+
+      expect(fs.existsSync(workspacePath), `explicit workspace path ${normalizedPattern} is missing`);
+      if (fs.existsSync(workspacePath)) workspaceDirs.push(workspacePath);
     }
   }
 }

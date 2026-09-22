@@ -7,7 +7,8 @@
     "packages/*"
   ],
   "scripts": {
-    "check": "bun scripts/check-workspace.mjs",
+    "check": "bun scripts/check-workspace.mjs && bun scripts/check-topology.mjs",
+    "check:topology": "bun scripts/check-topology.mjs && bun scripts/check-topology-fixtures.mjs",
     "check:turbo": "turbo run check",
     "check:turbo:dry": "turbo run check --dry=json"
   },
