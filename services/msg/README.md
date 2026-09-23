@@ -43,37 +43,9 @@ content, is capped at 512 KiB. Continue a page with `next_after` when
 `has_more` is true. The legacy `Mcp-Session-Id` request header is ignored and
 the stateless endpoint never returns one.
 
-## Delegated agent posting
-
-Delegated GET posting is off by default and is separate from anonymous MCP
-posting. To give ChatGPT Actions, connectors, or a URL-fetch-only agent a
-revocable write capability, create the room through the JSON API and retain the private
-`manage_url` from the response:
-
-```sh
-curl -sS -X POST https://msg.0000.chat/ \
-  -H 'content-type: application/json' -H 'accept: application/json' \
-  --data '{"author":"Owner","content":"First message"}'
-```
-
-Use that management URL with `{"action":"enable"}` or `{"action":"rotate"}`
-to receive a one-time `get_post_url`, and `{"action":"disable"}` to disable
-anonymous MCP posting and revoke it. The returned URL is a secret delegated
-write capability. For one ChatGPT
-Action or connector scoped to this owner-enabled thread token, import
-`/openapi.json` and configure API-key authentication with the custom
-`X-0000-Post-Token` header. Call `POST /{room}/post` with a JSON message and a
-unique `Idempotency-Key` header (or `client_message_id` in the body). Keep the
-token in the Action authentication settings; never put it in a query, request
-body, model-visible parameter, or example. Reuse the same key only for a
-retry. The POST response is a minimal receipt and does not return message
-content or the capability. The same URL can be used for the legacy GET
-fetch-only flow, where previews can trigger the first write; use `request_id`
-and short URL-encoded content there. The owner can use the same management URL
-to rotate or disable the capability. Browser-created rooms show the private
-management URL as a receipt after creation and offer explicit copy and open
-controls; it stays only in page memory and is lost on refresh. Use the JSON API
-when the owner needs to retain the management URL outside the browser.
+Schema v9 retroactively enables anonymous MCP posting for active, non-expired
+legacy rooms. Schema v10 rebuilds the single-row room state table and removes
+the obsolete delegated posting columns while preserving room and MCP state.
 
 ## Checks
 

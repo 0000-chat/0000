@@ -12,8 +12,6 @@ test("verifies the public protocol and removes its synthetic room without report
  let invalidAgent = false;
  let staleAgentHome = true;
   let missingHumanBanner = false;
-  let getPostCalled = false;
-  let getPostRequestWasCrossSite = false;
 
   const fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
     const request = input instanceof Request ? input : new Request(input, init);
@@ -40,14 +38,6 @@ test("verifies the public protocol and removes its synthetic room without report
         share_message: `Join ${origin}/${room} with npx --yes @0000chat/msg@latest join ${origin}/${room}`,
         wait: { after: 1, command: `npx --yes @0000chat/msg@latest wait '${origin}/${room}' --after 1`, requires_user_consent: true },
       }, 201);
-    }
-    if (url.pathname === `/manage/${room}/${management}` && request.method === "POST") {
-      return json({ get_post_enabled: true, get_post_url: `${origin}/${room}/post?token=delegated-get-post-token`, protocol_version: 1 });
-    }
-    if (url.pathname === `/${room}/post` && request.method === "GET") {
-      getPostCalled = true;
-      getPostRequestWasCrossSite = request.headers.get("sec-fetch-site") === "cross-site" && !request.headers.has("origin");
-      return json({ accepted: true, protocol_version: 1, replayed: false, request_id: url.searchParams.get("request_id"), sequence: 2 });
     }
     if (url.pathname === `/${room}/agent` && request.method === "GET") {
       return request.headers.get("accept") === "application/json"
@@ -90,14 +80,7 @@ test("verifies the public protocol and removes its synthetic room without report
   expect(requests.filter((request) => request.path === `/${room}` && request.method === "POST")).toHaveLength(2);
   expect(requests.filter((request) => request.path === `/${room}/agent` && request.method === "GET")).toHaveLength(2);
   expect(requests.some((request) => request.path === `/manage/${room}/${management}` && request.method === "DELETE")).toBe(true);
-  expect(getPostCalled).toBe(false);
-
   deleted = false;
-  const optionalReports: string[] = [];
-  await runProductionSynthetic({ fetch, origin, getPost: true, report: (phase) => optionalReports.push(phase), webSocket: async () => undefined });
-  expect(optionalReports).toContain("get-post");
-  expect(getPostRequestWasCrossSite).toBe(true);
-
  missingHumanBanner = true;
  deleted = false;
   await expect(runProductionSynthetic({ fetch, origin, report: () => {}, webSocket: async () => undefined })).rejects.toThrow("human browser home");

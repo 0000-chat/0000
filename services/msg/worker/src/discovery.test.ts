@@ -85,11 +85,8 @@ test("publishes a compact OpenAPI document", () => {
   expect(OPENAPI_DOCUMENT.openapi).toBe("3.1.0");
   expect(OPENAPI_DOCUMENT.paths["/"].post).toBeDefined();
   expect(OPENAPI_DOCUMENT.paths["/healthz"].get).toBeDefined();
-  expect(OPENAPI_DOCUMENT.components.securitySchemes.delegatedPostCapability).toMatchObject({ type: "apiKey", in: "header", name: "X-0000-Post-Token" });
-  expect(OPENAPI_DOCUMENT.paths["/{room}/post"].post.security).toEqual([{ delegatedPostCapability: [] }]);
-  expect(OPENAPI_DOCUMENT.paths["/{room}/post"].post.description).toContain("one delegated thread token");
-  expect(OPENAPI_DOCUMENT.paths["/{room}/post"].post.description).toContain("model-visible parameter");
-  expect(OPENAPI_DOCUMENT.paths["/{room}/post"].post.parameters.some((parameter) => parameter.name === "token" && parameter.in === "query")).toBe(false);
+  expect(OPENAPI_DOCUMENT.components).toEqual({});
+  expect(OPENAPI_DOCUMENT.paths["/{room}/post"]).toBeUndefined();
 });
 
 test("publishes a complete JSON message contract and create example", () => {
@@ -172,16 +169,13 @@ test("documents responses for every OpenAPI operation", () => {
   expect(OPENAPI_DOCUMENT.paths["/"].post.responses["201"]).toBeDefined();
   expect(OPENAPI_DOCUMENT.paths["/"].post.responses["400"]).toBeDefined();
   expect(OPENAPI_DOCUMENT.paths["/{room}"].get.responses["200"]).toBeDefined();
-  expect(OPENAPI_DOCUMENT.paths["/{room}/post"].get.responses["200"]).toBeDefined();
-  expect(OPENAPI_DOCUMENT.paths["/{room}/post"].post.responses["200"]).toBeDefined();
-  expect(OPENAPI_DOCUMENT.paths["/{room}/post"].post.responses["409"]).toBeDefined();
-  expect(OPENAPI_DOCUMENT.paths["/{room}/post"].get.parameters.find((parameter) => parameter.name === "request_id")).toMatchObject({ required: true });
   expect(OPENAPI_DOCUMENT.paths["/manage/{room}/{token}"].delete.responses["200"]).toBeDefined();
   expect(OPENAPI_DOCUMENT.paths["/manage/{room}/{token}"].post.responses["200"]).toBeDefined();
+  expect(OPENAPI_DOCUMENT.paths["/manage/{room}/{token}"].post.requestBody.content["application/json"].schema.properties.action.enum).toEqual(["enable_mcp", "disable_mcp"]);
   expect(OPENAPI_DOCUMENT.paths["/"].post.requestBody).toBeDefined();
   expect(OPENAPI_DOCUMENT.paths["/{room}"].post.requestBody).toBeDefined();
   expect(OPENAPI_DOCUMENT.paths["/{room}/live"].get.responses["400"]).toBeDefined();
   expect(OPENAPI_DOCUMENT.paths["/{room}/agent"].get.responses["200"]).toBeDefined();
   expect(OPENAPI_DOCUMENT.paths["/{room}"].get.responses["304"].description).toContain("normalized after cursor");
-  expect(Object.keys(OPENAPI_DOCUMENT.paths).sort()).toEqual(["/", "/healthz", "/manage/{room}/{token}", "/{room}", "/{room}/agent", "/{room}/export.json", "/{room}/export.md", "/{room}/live", "/{room}/post", "/{room}/webhooks", "/{room}/webhooks/{id}", "/{room}/webhooks/{id}/deliveries/{event_id}/redeliver", "/{room}/webhooks/{id}/disable", "/{room}/webhooks/{id}/enable", "/{room}/webhooks/{id}/rotate-secret"]);
+  expect(Object.keys(OPENAPI_DOCUMENT.paths).sort()).toEqual(["/", "/healthz", "/manage/{room}/{token}", "/{room}", "/{room}/agent", "/{room}/export.json", "/{room}/export.md", "/{room}/live", "/{room}/webhooks", "/{room}/webhooks/{id}", "/{room}/webhooks/{id}/deliveries/{event_id}/redeliver", "/{room}/webhooks/{id}/disable", "/{room}/webhooks/{id}/enable", "/{room}/webhooks/{id}/rotate-secret"]);
 });

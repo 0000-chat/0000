@@ -178,13 +178,12 @@ test("opens and selects the agent prompt when Clipboard API is missing", async (
   expect(events).toEqual(["open", "focus", "select", "Select and copy the prompt"]);
 });
 
-test("keeps owner controls in memory and rotates, disables, and copies the delegated invitation", async () => {
+test("keeps owner controls in memory and independently manages anonymous MCP posting", async () => {
   const requests: Array<{ body: string; headers: Headers }> = [];
   const states: string[] = [];
   const responses = [
-    { get_post_enabled: true, get_post_url: "https://msg.0000.chat/room/post?token=first-token", protocol_version: 1 },
-    { get_post_enabled: true, get_post_url: "https://msg.0000.chat/room/post?token=rotated-token", protocol_version: 1 },
-    { get_post_enabled: false, protocol_version: 1 },
+    { agent_posting_enabled: false, protocol_version: 1 },
+    { agent_posting_enabled: true, protocol_version: 1 },
   ];
   const controller = createOwnerControlsController({
     fetch: async (_input, init) => {
@@ -192,39 +191,25 @@ test("keeps owner controls in memory and rotates, disables, and copies the deleg
       return new Response(JSON.stringify(responses.shift()), { headers: { "content-type": "application/json" }, status: 200 });
     },
     manageUrl: "https://msg.0000.chat/manage/room/owner-token",
-    onState: (state) => states.push(`${state.status}:${state.enabled}`),
-    openApiUrl: "https://msg.0000.chat/openapi.json",
-    publicRoomId: "room",
+    onState: (state) => states.push(`${state.status}:${state.mcpEnabled}`),
     publicRoomUrl: "https://msg.0000.chat/room",
   });
 
-  expect(controller.state()).toMatchObject({ enabled: false, invitationAvailable: false, status: "disabled" });
-  await controller.enable();
-  expect(controller.state()).toMatchObject({ enabled: true, invitationAvailable: true, status: "enabled" });
+  expect(controller.state()).toMatchObject({ mcpEnabled: true, status: "enabled" });
+  await controller.disableMcp();
+  expect(controller.state()).toMatchObject({ mcpEnabled: false, status: "disabled" });
   let copied = "";
-  await controller.copyInvitation(async (value) => { copied = value; });
-  expect(copied).toContain("Public room ID: room");
-  expect(copied).toContain("OpenAPI import URL: https://msg.0000.chat/openapi.json");
-  expect(copied).toContain("X-0000-Post-Token");
-  expect(copied).toContain("Authentication value: first-token");
-  expect(copied).toContain("Idempotency-Key");
-  expect(copied).toContain("<write your message here>");
-  expect(copied).not.toContain("/post?token=");
-
-  await controller.rotate();
-  expect(copied).toContain("first-token");
-  await controller.copyInvitation(async (value) => { copied = value; });
-  expect(copied).toContain("Authentication value: rotated-token");
-  await controller.disable();
-  expect(controller.state()).toMatchObject({ enabled: false, invitationAvailable: false, status: "disabled" });
-  await expect(controller.copyInvitation(async () => {})).rejects.toThrow("Enable delegated posting");
-  expect(requests.map((request) => JSON.parse(request.body).action)).toEqual(["enable", "rotate", "disable"]);
+  await controller.copyManagement(async (value) => { copied = value; });
+  expect(copied).toBe("https://msg.0000.chat/manage/room/owner-token");
+  await controller.enableMcp();
+  expect(controller.state()).toMatchObject({ mcpEnabled: true, status: "enabled" });
+  expect(requests.map((request) => JSON.parse(request.body).action)).toEqual(["disable_mcp", "enable_mcp"]);
   expect(requests.every((request) => request.headers.get("content-type") === "application/json")).toBe(true);
   expect(states).toContain("enabled:true");
   expect(states).toContain("disabled:false");
 });
 
-test("validates management URLs before use and clears a stale invitation when rotation is uncertain", async () => {
+test("validates management URLs and reports an uncertain MCP control", async () => {
   expect(normalizeOwnerManagementUrl("/manage/room/owner-token", "https://msg.0000.chat/room")).toBe("https://msg.0000.chat/manage/room/owner-token");
   expect(() => normalizeOwnerManagementUrl("https://evil.example/manage/room/owner-token", "https://msg.0000.chat/room")).toThrow("invalid private owner link");
   expect(() => normalizeOwnerManagementUrl("https://msg.0000.chat/manage/other/owner-token", "https://msg.0000.chat/room")).toThrow("invalid private owner link");
@@ -233,21 +218,17 @@ test("validates management URLs before use and clears a stale invitation when ro
   const controller = createOwnerControlsController({
     fetch: async () => {
       calls += 1;
-      if (calls === 1) return Response.json({ get_post_enabled: true, get_post_url: "https://msg.0000.chat/room/post?token=first-token", protocol_version: 1 });
+      if (calls === 1) return Response.json({ agent_posting_enabled: true, protocol_version: 1 });
       throw new Error("The owner request timed out.");
     },
     manageUrl: "https://msg.0000.chat/manage/room/owner-token",
     onState: () => {},
-    openApiUrl: "https://msg.0000.chat/openapi.json",
-    publicRoomId: "room",
     publicRoomUrl: "https://msg.0000.chat/room",
   });
 
-  await controller.enable();
-  await controller.copyInvitation(async () => {});
-  await controller.rotate();
-  expect(controller.state()).toMatchObject({ enabled: false, invitationAvailable: false, status: "error" });
-  await expect(controller.copyInvitation(async () => {})).rejects.toThrow("Enable delegated posting");
+  await controller.enableMcp();
+  await controller.disableMcp();
+  expect(controller.state()).toMatchObject({ mcpEnabled: true, status: "error" });
 });
 
 test("waits for an active room-scope service worker before creating and registering a native subscription", async () => {

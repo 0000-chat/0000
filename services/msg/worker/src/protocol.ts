@@ -112,8 +112,6 @@ export interface RoomService {
   create(input: CreateRoomInput): Promise<CreateRoomResponse>;
   mcpPost?(input: McpPostMessageInput): Promise<McpPostMessageResponse>;
   roomStatus?(input: RoomStatusInput): Promise<RoomStatusResponse>;
-  getPost?(input: GetPostMessageInput): Promise<GetPostMessageResponse>;
-  getPostProbe?(input: GetPostProbeInput): Promise<GetPostProbeResponse>;
   read?(input: ReadRoomInput): Promise<ReadRoomResponse>;
   post?(input: PostMessageInput): Promise<PostMessageResponse>;
   manage?(input: ManageRoomInput): Promise<ManageRoomResponse>;
@@ -233,34 +231,8 @@ export interface RoomStatusResponse {
   readonly protocol_version: typeof PROTOCOL_VERSION;
 }
 
-export interface GetPostMessageInput {
-  readonly body: RequestBody;
-  readonly requestId: string;
-  readonly room: string;
-  readonly token: string;
-}
-
-export interface GetPostMessageResponse {
-  readonly accepted: true;
-  readonly protocol_version: typeof PROTOCOL_VERSION;
-  readonly replayed: boolean;
-  readonly request_id: string;
-  readonly sequence: number;
-}
-
-export interface GetPostProbeInput {
-  readonly room: string;
-  readonly token: string;
-}
-
-export interface GetPostProbeResponse {
-  readonly active: true;
-  readonly get_post_enabled: true;
-  readonly protocol_version: typeof PROTOCOL_VERSION;
-}
-
 export interface ManageRoomInput {
-  readonly action?: "disable" | "enable" | "rotate" | "disable_mcp" | "enable_mcp";
+  readonly action?: "disable_mcp" | "enable_mcp";
   readonly method: "DELETE" | "GET" | "POST";
   readonly room: string;
   readonly token: string;
@@ -270,9 +242,6 @@ export interface ManageRoomResponse {
   readonly agent_posting_enabled?: boolean;
   readonly deleted?: boolean;
   readonly expires_at?: string;
-  readonly get_post_enabled?: boolean;
-  readonly get_post_url?: string;
-  readonly get_post_url_warning?: string;
   readonly protocol_version: typeof PROTOCOL_VERSION;
 }
 

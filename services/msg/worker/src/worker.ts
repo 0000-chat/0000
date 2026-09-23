@@ -9,14 +9,12 @@ import {
   PROTOCOL_VERSION,
   stripLegacyAbsoluteExpiry,
   type CreateRoomResponse,
-  type GetPostMessageResponse,
-  type GetPostProbeResponse,
   type RequestBody,
   type ManageRoomResponse,
   type ReadRoomResponse,
   type RoomService,
 } from "./protocol";
-import { byteLength, compareCapabilities, MAX_ROOM_REQUEST_BYTES, roomEtag, validateCursor, validateIdempotencyKey, validateRequestId } from "./room-domain";
+import { compareCapabilities, MAX_ROOM_REQUEST_BYTES, roomEtag, validateCursor, validateIdempotencyKey } from "./room-domain";
 import {
   negotiateCreateRepresentation,
   negotiateRepresentation,
@@ -97,17 +95,11 @@ const MAX_REPORT_DESCRIPTION_BYTES = 4 * 1024;
 const MAX_REPORT_DESCRIPTION_CHARS = 2_000;
 const MAX_WEBHOOK_REQUEST_BYTES = 4 * 1024;
 const MAX_PUSH_SUBSCRIPTION_REQUEST_BYTES = 4 * 1024;
-const MAX_GET_POST_URL_BYTES = 8 * 1024;
-const MAX_GET_POST_CONTENT_BYTES = 4 * 1024;
-const MAX_GET_POST_TOKEN_CHARS = 512;
-const MAX_GET_POST_TOKEN_BYTES = 2 * 1024;
 const RATE_LIMIT_PERIOD_SECONDS = 60;
 const CHATGPT_ORIGIN = "https://chatgpt.com";
-const DELEGATED_POST_TOKEN_HEADER = "x-0000-post-token";
 const CHATGPT_CREATE_PREFLIGHT_HEADERS = "content-type, accept, idempotency-key";
-const CHATGPT_DELEGATED_POST_PREFLIGHT_HEADERS = `${CHATGPT_CREATE_PREFLIGHT_HEADERS}, ${DELEGATED_POST_TOKEN_HEADER}`;
 
-type ChatGptCorsMode = "create" | "delegated-post" | "preflight" | "delegated-post-preflight" | undefined;
+type ChatGptCorsMode = "create" | "preflight" | undefined;
 
 export function createWorker(service: RoomService, options: MsgWorkerOptions = {}): MsgWorker {
   return {
@@ -204,12 +196,10 @@ async function route(request: Request, service: RoomService, options: MsgWorkerO
     return notFound();
   }
   const corsMode = chatGptCorsMode(request, url);
-  if (corsMode === "preflight" || corsMode === "delegated-post-preflight") {
+  if (corsMode === "preflight") {
     return new Response(null, {
       headers: {
-        "access-control-allow-headers": corsMode === "delegated-post-preflight"
-          ? CHATGPT_DELEGATED_POST_PREFLIGHT_HEADERS
-          : CHATGPT_CREATE_PREFLIGHT_HEADERS,
+        "access-control-allow-headers": CHATGPT_CREATE_PREFLIGHT_HEADERS,
         "access-control-allow-methods": "POST",
       },
       status: 204,
@@ -222,7 +212,9 @@ async function route(request: Request, service: RoomService, options: MsgWorkerO
       rateLimits: options.rateLimits,
     });
   }
-  if (request.method !== "GET" && request.method !== "HEAD" && !isSameOrigin(request, url) && corsMode !== "create" && corsMode !== "delegated-post") {
+  // Retired capability paths fail closed before the cross-origin guard.
+  if (/^\/[^/]+\/post(?:-probe\/[^/]+)?$/u.test(url.pathname)) return notFound();
+  if (request.method !== "GET" && request.method !== "HEAD" && !isSameOrigin(request, url) && corsMode !== "create") {
     throw new ProtocolError(ERROR_CODES.forbidden, "Cross-origin state changes are not allowed.", 403);
   }
 
@@ -424,65 +416,6 @@ async function route(request: Request, service: RoomService, options: MsgWorkerO
       : textResponse(renderAgentText(document));
   }
 
-  const getPostMatch = /^\/([^/]+)\/post$/.exec(url.pathname);
-  if (getPostMatch && request.method === "POST") {
-    if (!service.getPost) return notFound();
-    if (options.postDisabled) {
-      throw new ProtocolError(ERROR_CODES.serviceUnavailable, "New messages are temporarily unavailable.", 503);
-    }
-    if (!isSameOrigin(request, url) && corsMode !== "delegated-post") {
-      throw new ProtocolError(ERROR_CODES.forbidden, "Cross-origin state changes are not allowed.", 403);
-    }
-    const token = parseDelegatedPostToken(request, url);
-    const body = await parseRequestBody(request, { maxBytes: MAX_ROOM_REQUEST_BYTES });
-    const requestId = delegatedPostRequestId(request, body);
-    await enforceRateLimit(request, options.rateLimits?.posts);
-    const result = stripLegacyAbsoluteExpiry(await service.getPost({
-      body,
-      requestId,
-      room: getPostMatch[1],
-      token,
-    })) as unknown as GetPostMessageResponse;
-    return getPostResponse(result);
-  }
-  if (getPostMatch && request.method === "GET") {
-    if (!service.getPost) return notFound();
-    if (options.postDisabled) {
-      throw new ProtocolError(ERROR_CODES.serviceUnavailable, "New messages are temporarily unavailable.", 503);
-    }
-    if (!isSameOrigin(request, url)) {
-      throw new ProtocolError(ERROR_CODES.forbidden, "Cross-origin state changes are not allowed.", 403);
-    }
-    rejectGetPostPrefetch(request);
-    const getPost = parseGetPostQuery(request, url);
-    await enforceRateLimit(request, options.rateLimits?.posts);
-    const result = stripLegacyAbsoluteExpiry(await service.getPost({
-      body: { kind: "json", value: getPost.input },
-      requestId: getPost.requestId,
-      room: getPostMatch[1],
-      token: getPost.token,
-    })) as unknown as GetPostMessageResponse;
-    return getPostResponse(result);
-  }
-
-  const getPostProbeMatch = /^\/([^/]+)\/post-probe\/([^/]+)$/.exec(url.pathname);
-  if (getPostProbeMatch && request.method === "GET") {
-    if (!service.getPostProbe) return notFound();
-    if (options.postDisabled) {
-      throw new ProtocolError(ERROR_CODES.serviceUnavailable, "New messages are temporarily unavailable.", 503);
-    }
-    if (url.search) {
-      throw new ProtocolError(ERROR_CODES.invalidBody, "The GET posting probe does not accept a query.", 400);
-    }
-    if (!isSameOrigin(request, url)) {
-      throw new ProtocolError(ERROR_CODES.forbidden, "Cross-origin state changes are not allowed.", 403);
-    }
-    const token = boundedPathValue(getPostProbeMatch[2]!, "token", MAX_GET_POST_TOKEN_CHARS, MAX_GET_POST_TOKEN_BYTES);
-    await enforceRateLimit(request, options.rateLimits?.posts);
-    const result = stripLegacyAbsoluteExpiry(await service.getPostProbe({ room: getPostProbeMatch[1]!, token })) as unknown as GetPostProbeResponse;
-    return getPostProbeResponse(result);
-  }
-
   const roomMatch = /^\/([^/]+)$/.exec(url.pathname);
   if (roomMatch) {
     const room = roomMatch[1];
@@ -546,99 +479,7 @@ async function route(request: Request, service: RoomService, options: MsgWorkerO
   );
 }
 
-const GET_POST_QUERY_FIELDS = new Set(["author", "client", "content", "display_name", "reply_to", "request_id", "semantic_type", "token"]);
-
-interface GetPostQuery {
-  readonly input: Record<string, string>;
-  readonly requestId: string;
-  readonly token: string;
-}
-
-function parseGetPostQuery(request: Request, url: URL): GetPostQuery {
-  if (byteLength(request.url) > MAX_GET_POST_URL_BYTES) {
-    throw new ProtocolError(ERROR_CODES.bodyTooLarge, "The GET posting URL is too large.", 413);
-  }
-  const counts = new Map<string, number>();
-  for (const [name] of url.searchParams) {
-    if (!GET_POST_QUERY_FIELDS.has(name)) throw new ProtocolError(ERROR_CODES.invalidBody, "The GET posting query contains an unsupported field.", 400);
-    counts.set(name, (counts.get(name) ?? 0) + 1);
-  }
-  for (const [name, count] of counts) {
-    if (count !== 1) throw new ProtocolError(ERROR_CODES.invalidBody, `The ${name} query field must appear once.`, 400);
-  }
-
-  const token = boundedQueryValue(url.searchParams.get("token"), "token", MAX_GET_POST_TOKEN_CHARS, MAX_GET_POST_TOKEN_BYTES);
-  const requestId = validateRequestId(requiredQueryValue(url.searchParams.get("request_id"), "request_id"));
-  const content = requiredQueryValue(url.searchParams.get("content"), "content");
-  if (byteLength(content) > MAX_GET_POST_CONTENT_BYTES) {
-    throw new ProtocolError(ERROR_CODES.bodyTooLarge, "The GET posting content is too large.", 413);
-  }
-  const input: Record<string, string> = { content };
-  for (const field of ["author", "display_name", "client", "semantic_type", "reply_to"] as const) {
-    const value = url.searchParams.get(field);
-    if (value !== null) input[field] = value;
-  }
-  return { input, requestId, token };
-}
-
-function parseDelegatedPostToken(request: Request, url: URL): string {
-  if (byteLength(request.url) > MAX_GET_POST_URL_BYTES) {
-    throw new ProtocolError(ERROR_CODES.bodyTooLarge, "The delegated posting URL is too large.", 413);
-  }
-  if (url.search) {
-    throw new ProtocolError(ERROR_CODES.invalidBody, "The delegated POST URL must not contain a query.", 400);
-  }
-  const values = request.headers.get(DELEGATED_POST_TOKEN_HEADER);
-  if (values === null || values === "") {
-    throw new ProtocolError(ERROR_CODES.invalidBody, `The ${DELEGATED_POST_TOKEN_HEADER} header is required.`, 400);
-  }
-  if (values !== values.trim() || values.includes(",") || !/^[A-Za-z0-9_-]+$/u.test(values)) {
-    throw new ProtocolError(ERROR_CODES.invalidBody, `The ${DELEGATED_POST_TOKEN_HEADER} header is malformed or duplicated.`, 400);
-  }
-  if (Array.from(values).length > MAX_GET_POST_TOKEN_CHARS || byteLength(values) > MAX_GET_POST_TOKEN_BYTES) {
-    throw new ProtocolError(ERROR_CODES.bodyTooLarge, `The ${DELEGATED_POST_TOKEN_HEADER} header is too large.`, 413);
-  }
-  return values;
-}
-
-function delegatedPostRequestId(request: Request, body: RequestBody): string {
-  const header = request.headers.get("idempotency-key");
-  if (header !== null) return validateIdempotencyKey(header);
-  if (body.kind === "json" && body.value !== null && !Array.isArray(body.value) && typeof body.value === "object") {
-    const clientMessageId = body.value.client_message_id;
-    if (typeof clientMessageId === "string") return validateRequestId(clientMessageId);
-  }
-  throw new ProtocolError(ERROR_CODES.invalidBody, "The delegated POST requires Idempotency-Key or client_message_id.", 400);
-}
-
-function requiredQueryValue(value: string | null, field: string): string {
-  if (value === null || value === "") throw new ProtocolError(ERROR_CODES.invalidBody, `The ${field} query field is required.`, 400);
-  return value;
-}
-
-function boundedQueryValue(value: string | null, field: string, maxChars: number, maxBytes: number): string {
-  const result = requiredQueryValue(value, field);
-  if (Array.from(result).length > maxChars || byteLength(result) > maxBytes) {
-    throw new ProtocolError(ERROR_CODES.bodyTooLarge, `The ${field} query field is too large.`, 413);
-  }
-  return result;
-}
-
-function boundedPathValue(value: string, field: string, maxChars: number, maxBytes: number): string {
-  if (!value || Array.from(value).length > maxChars || byteLength(value) > maxBytes) {
-    throw new ProtocolError(ERROR_CODES.bodyTooLarge, `The ${field} path value is too large.`, 413);
-  }
-  return value;
-}
-
-function rejectGetPostPrefetch(request: Request): void {
-  const prefetchHeaders = ["purpose", "sec-purpose", "x-moz"].map((name) => request.headers.get(name)?.toLowerCase() ?? "");
-  if (prefetchHeaders.some((value) => value.includes("prefetch") || value.includes("prerender"))) {
-    throw new ProtocolError(ERROR_CODES.forbidden, "GET posting URLs cannot be used by prefetch or prerender requests.", 403);
-  }
-}
-
-async function parseManagementAction(request: Request): Promise<"disable" | "enable" | "rotate" | "disable_mcp" | "enable_mcp"> {
+async function parseManagementAction(request: Request): Promise<"disable_mcp" | "enable_mcp"> {
   const body = await parseRequestBody(request, { maxBytes: 512 });
   let action: unknown;
   if (body.kind === "json") {
@@ -658,7 +499,7 @@ async function parseManagementAction(request: Request): Promise<"disable" | "ena
     }
     action = values.get("action");
   }
-  if (action !== "enable" && action !== "disable" && action !== "rotate" && action !== "enable_mcp" && action !== "disable_mcp") {
+  if (action !== "enable_mcp" && action !== "disable_mcp") {
     throw new ProtocolError(ERROR_CODES.invalidBody, "The management action is invalid.", 400);
   }
   return action;
@@ -775,25 +616,23 @@ function isSameOrigin(request: Request, url: URL): boolean {
 }
 
 function chatGptCorsMode(request: Request, url: URL): ChatGptCorsMode {
-  const delegatedPost = /^\/[^/]+\/post$/u.test(url.pathname);
-  if (request.headers.get("origin") !== CHATGPT_ORIGIN || (url.pathname !== "/" && !delegatedPost)) return undefined;
-  if (request.method === "POST" && mediaType(request.headers.get("content-type")) === "application/json") return delegatedPost ? "delegated-post" : "create";
+  if (request.headers.get("origin") !== CHATGPT_ORIGIN || url.pathname !== "/") return undefined;
+  if (request.method === "POST" && mediaType(request.headers.get("content-type")) === "application/json") return "create";
   if (request.method === "OPTIONS"
     && request.headers.get("access-control-request-method") === "POST"
-    && allowedChatGptPreflightHeaders(request.headers.get("access-control-request-headers"), delegatedPost)) {
-    return delegatedPost ? "delegated-post-preflight" : "preflight";
+    && allowedChatGptPreflightHeaders(request.headers.get("access-control-request-headers"))) {
+    return "preflight";
   }
   return undefined;
 }
 
-function allowedChatGptPreflightHeaders(value: string | null, delegatedPost: boolean): boolean {
+function allowedChatGptPreflightHeaders(value: string | null): boolean {
   if (value === null || value.trim() === "") return true;
   return value.split(",").every((header) => {
     const normalized = header.trim().toLowerCase();
     return normalized === "content-type"
       || normalized === "accept"
-      || normalized === "idempotency-key"
-      || (delegatedPost && normalized === DELEGATED_POST_TOKEN_HEADER);
+      || normalized === "idempotency-key";
   });
 }
 
@@ -805,7 +644,7 @@ function applyChatGptCors(response: Response, mode: ChatGptCorsMode): Response {
   if (mode === undefined) return response;
   response.headers.set("access-control-allow-origin", CHATGPT_ORIGIN);
   response.headers.set("vary", "Origin");
-  if (mode === "create" || mode === "delegated-post") response.headers.set("access-control-expose-headers", "Location, Retry-After");
+  if (mode === "create") response.headers.set("access-control-expose-headers", "Location, Retry-After");
   return response;
 }
 
@@ -873,23 +712,6 @@ function postResponse(result: import("./protocol").PostMessageResponse, represen
   return new Response(`# Message created\n\n${safeResult.message.content}\n\nExpires: ${safeResult.expires_at}\n`, { headers: { "content-type": "text/markdown; charset=utf-8" }, status: 201 });
 }
 
-function getPostResponse(result: GetPostMessageResponse): Response {
-  return jsonResponse({
-    accepted: true,
-    protocol_version: result.protocol_version,
-    replayed: result.replayed,
-    request_id: result.request_id,
-    sequence: result.sequence,
-  });
-}
-
-function getPostProbeResponse(result: GetPostProbeResponse): Response {
-  if (result.active !== true || result.get_post_enabled !== true) {
-    throw new ProtocolError(ERROR_CODES.internal, "The GET posting probe returned an invalid result.", 500);
-  }
-  return textResponse("GET posting capability is valid.\n");
-}
-
 function manageResponse(result: ManageRoomResponse, method: "DELETE" | "GET" | "POST", representation: ReturnType<typeof negotiateRepresentation>, url: URL): Response {
   if (representation === "json") return jsonResponse(result, 200);
   if (method === "DELETE") {
@@ -897,14 +719,10 @@ function manageResponse(result: ManageRoomResponse, method: "DELETE" | "GET" | "
     return new Response(representation === "html" ? `<!doctype html><html lang="en"><body><main><h1>Conversation deleted</h1></main></body></html>` : body, { headers: { "content-type": representation === "html" ? "text/html; charset=utf-8" : "text/markdown; charset=utf-8" } });
   }
   const agentEnabled = result.agent_posting_enabled === true;
-  const delegatedEnabled = result.get_post_enabled === true;
-  const delegated = result.get_post_url ? `<section><h2>GET posting capability</h2><p>${escapeHtml(result.get_post_url_warning ?? "Treat this URL as a secret write capability.")}</p><pre>${escapeHtml(result.get_post_url)}</pre></section>` : "";
-  const controls = `<section><h2>Anonymous MCP posting</h2><p>Status: ${agentEnabled ? "enabled" : "disabled"}.</p><form method="post" action="${escapeHtml(url.toString())}"><button name="action" value="enable_mcp" type="submit">Enable anonymous MCP posting</button> <button name="action" value="disable_mcp" type="submit">Disable anonymous MCP posting</button></form><p>MCP clients use the canonical public room URL. This setting is independent from the delegated capability below.</p></section><section><h2>Delegated GET posting</h2><p>Status: ${delegatedEnabled ? "enabled" : "disabled"}.</p><form method="post" action="${escapeHtml(url.toString())}"><button name="action" value="enable" type="submit">Enable delegated invitation</button> <button name="action" value="rotate" type="submit">Rotate delegated invitation</button> <button name="action" value="disable" type="submit">Disable delegated invitation</button></form><p>The delegated capability supports POST from a configured ChatGPT Action or connector and GET for fetch-only agents. Keep delegated URLs secret; use Idempotency-Key or client_message_id for safe retries.</p></section>`;
-  const body = method === "POST" && result.get_post_url
-    ? `${delegated}${controls}`
-    : controls;
+  const controls = `<section><h2>Anonymous MCP posting</h2><p>Status: ${agentEnabled ? "enabled" : "disabled"}.</p><form method="post" action="${escapeHtml(url.toString())}"><button name="action" value="enable_mcp" type="submit">Enable anonymous MCP posting</button> <button name="action" value="disable_mcp" type="submit">Disable anonymous MCP posting</button></form><p>MCP clients use the canonical public room URL. This setting controls anonymous agent posting.</p></section>`;
+  const body = controls;
   if (representation === "html") return new Response(`<!doctype html><html lang="en"><body><main><h1>Conversation management</h1>${body}</main></body></html>`, { headers: { "content-type": "text/html; charset=utf-8", "x-msg-management-forms": "1" } });
-  return new Response(`# Conversation management\n\nAnonymous MCP posting: ${agentEnabled ? "enabled" : "disabled"}.\nDelegated GET posting: ${delegatedEnabled ? "enabled" : "disabled"}.\n\n${result.get_post_url ? `${result.get_post_url_warning ?? "Treat this URL as a secret write capability."}\n\n${result.get_post_url}\n` : "Use the management URL to enable or rotate the delegated posting capability.\n"}`, { headers: { "content-type": "text/markdown; charset=utf-8" } });
+  return new Response(`# Conversation management\n\nAnonymous MCP posting: ${agentEnabled ? "enabled" : "disabled"}.\n\nUse the controls above to change anonymous MCP posting.\n`, { headers: { "content-type": "text/markdown; charset=utf-8" } });
 }
 
 function escapeHtml(value: string): string {

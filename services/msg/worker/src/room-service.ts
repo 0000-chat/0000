@@ -1,6 +1,6 @@
 import { ERROR_CODES, ProtocolError } from "./errors";
-import { hashCapability, parseMessageInput, randomCapability, validateIdempotencyKey, validateRequestId } from "./room-domain";
-import { buildShareMessage, foregroundWait, PROTOCOL_VERSION, stripLegacyAbsoluteExpiry, type CreateRoomInput, type CreateRoomResponse, type CreateWebhookInput, type CreateWebhookResponse, type EnrollPushInput, type ExportRoomInput, type GetPostMessageInput, type GetPostMessageResponse, type GetPostProbeInput, type GetPostProbeResponse, type ListWebhooksInput, type ListWebhooksResponse, type LiveRoomInput, type ManageRoomInput, type ManageRoomResponse, type ManageWebhookInput, type ManageWebhookResponse, type McpPostMessageInput, type McpPostMessageResponse, type PostMessageInput, type PostMessageResponse, type PushEnrollmentInput, type PushEnrollmentResponse, type ReadRoomInput, type ReadRoomResponse, type RedeliverWebhookInput, type RedeliverWebhookResponse, type RemovePushEnrollmentResponse, type RemoveWebhookInput, type RemoveWebhookResponse, type RotateWebhookSecretResponse, type RoomService, type RoomStatusInput, type RoomStatusResponse } from "./protocol";
+import { hashCapability, parseMessageInput, randomCapability, validateIdempotencyKey } from "./room-domain";
+import { buildShareMessage, foregroundWait, PROTOCOL_VERSION, stripLegacyAbsoluteExpiry, type CreateRoomInput, type CreateRoomResponse, type CreateWebhookInput, type CreateWebhookResponse, type EnrollPushInput, type ExportRoomInput, type ListWebhooksInput, type ListWebhooksResponse, type LiveRoomInput, type ManageRoomInput, type ManageRoomResponse, type ManageWebhookInput, type ManageWebhookResponse, type McpPostMessageInput, type McpPostMessageResponse, type PostMessageInput, type PostMessageResponse, type PushEnrollmentInput, type PushEnrollmentResponse, type ReadRoomInput, type ReadRoomResponse, type RedeliverWebhookInput, type RedeliverWebhookResponse, type RemovePushEnrollmentResponse, type RemoveWebhookInput, type RemoveWebhookResponse, type RotateWebhookSecretResponse, type RoomService, type RoomStatusInput, type RoomStatusResponse } from "./protocol";
 
 export interface RoomStub { fetch(request: Request): Promise<Response>; }
 export interface RoomNamespace { getByName(name: string): RoomStub; }
@@ -75,22 +75,6 @@ export class DurableRoomService implements RoomService {
     return value as unknown as RoomStatusResponse;
   }
 
-  async getPost(input: GetPostMessageInput): Promise<GetPostMessageResponse> {
-    const value = await responseJson(await this.room(input.room).fetch(jsonRequest("/get-post", {
-      input: parseMessageInput(input.body),
-      request_id: validateRequestId(input.requestId),
-      token: input.token,
-    })));
-    return value as unknown as GetPostMessageResponse;
-  }
-
-  async getPostProbe(input: GetPostProbeInput): Promise<GetPostProbeResponse> {
-    const value = await responseJson(await this.room(input.room).fetch(jsonRequest("/get-post-probe", {
-      token: input.token,
-    })));
-    return value as unknown as GetPostProbeResponse;
-  }
-
   async readPushEnrollment(input: PushEnrollmentInput): Promise<PushEnrollmentResponse> {
     const response = await this.room(input.room).fetch(new Request("https://room/push-subscriptions", {
       headers: { "x-msg-browser-id": input.browserId },
@@ -118,20 +102,10 @@ export class DurableRoomService implements RoomService {
     if (!input.action) {
       return responseJson(await this.room(input.room).fetch(new Request(`https://room/manage?token=${encodeURIComponent(input.token)}`, { method: input.method }))) as unknown as ManageRoomResponse;
     }
-    const delegatedToken = input.action === "enable" || input.action === "rotate" ? randomCapability(this.random) : undefined;
     const value = await responseJson(await this.room(input.room).fetch(jsonRequest(`/manage?token=${encodeURIComponent(input.token)}`, {
       action: input.action,
-      ...(delegatedToken ? { get_post_token: delegatedToken } : {}),
     })));
-    const result = value as unknown as ManageRoomResponse;
-    if (delegatedToken && result.get_post_enabled) {
-      return {
-        ...result,
-        get_post_url: `${this.origin}/${encodeURIComponent(input.room)}/post?token=${encodeURIComponent(delegatedToken)}`,
-        get_post_url_warning: GET_POST_URL_WARNING,
-      };
-    }
-    return result;
+    return value as unknown as ManageRoomResponse;
   }
 
   async createWebhook(input: CreateWebhookInput): Promise<CreateWebhookResponse> {
@@ -180,8 +154,6 @@ export class DurableRoomService implements RoomService {
 function jsonRequest(path: string, value: unknown): Request {
   return new Request(`https://room${path}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(value) });
 }
-
-const GET_POST_URL_WARNING = "This URL is a separate delegated GET write capability for one owner-enabled thread token; URL previews can submit the first message. For a ChatGPT Action or connector, configure X-0000-Post-Token API-key authentication and send POST without a token query. Keep the token out of POST request bodies, model-visible parameters, examples, and room content. Reuse Idempotency-Key or request_id only when retrying the same message.";
 
 async function responseJson(response: Response): Promise<Record<string, unknown>> {
   if (!response.ok) throw await responseError(response);

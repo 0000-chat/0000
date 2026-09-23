@@ -1,7 +1,7 @@
 import { ROOM_LIMITS } from "./room-domain";
 import { WEBHOOK_RETRY_INITIAL_DELAY_MS, WEBHOOK_RETRY_WINDOW_MS } from "./webhook-policy";
 
-export const CURRENT_ROOM_SCHEMA_VERSION = 9;
+export const CURRENT_ROOM_SCHEMA_VERSION = 10;
 
 interface SqlStorage {
   exec(query: string, ...values: unknown[]): Iterable<unknown>;
@@ -246,6 +246,36 @@ function applyMigration(sql: SqlStorage, version: number, inactivityTtlMs: numbe
     if (!columns.has("mcp_post_enabled")) sql.exec("ALTER TABLE room_state ADD COLUMN mcp_post_enabled INTEGER NOT NULL DEFAULT 0");
     sql.exec("UPDATE room_state SET mcp_post_enabled = CASE WHEN status = 'active' AND inactivity_expires_at > ? THEN 1 ELSE 0 END", now);
     sql.exec("UPDATE room_state SET schema_version = ?", CURRENT_ROOM_SCHEMA_VERSION);
+    return;
+  }
+  if (version === 10) {
+    // v9 remains the retroactive migration that enables anonymous MCP posting
+    // for active, non-expired legacy rooms. The delegated GET columns are no
+    // longer part of the model, so rebuild this single-row table to remove
+    // them while preserving every live room field and its MCP setting.
+    sql.exec(`
+      CREATE TABLE room_state_without_delegated_post (
+        singleton INTEGER PRIMARY KEY CHECK(singleton = 1), schema_version INTEGER NOT NULL,
+        protocol_version INTEGER NOT NULL, created_at INTEGER NOT NULL, last_message_at INTEGER NOT NULL,
+        inactivity_expires_at INTEGER NOT NULL, absolute_expires_at INTEGER NOT NULL,
+        next_sequence INTEGER NOT NULL, message_count INTEGER NOT NULL, total_bytes INTEGER NOT NULL,
+        status TEXT NOT NULL, tombstone_expires_at INTEGER, management_hash TEXT,
+        notification_id TEXT, mcp_post_enabled INTEGER NOT NULL DEFAULT 0
+      );
+      INSERT INTO room_state_without_delegated_post (
+        singleton, schema_version, protocol_version, created_at, last_message_at,
+        inactivity_expires_at, absolute_expires_at, next_sequence, message_count,
+        total_bytes, status, tombstone_expires_at, management_hash, notification_id,
+        mcp_post_enabled
+      )
+      SELECT singleton, ${CURRENT_ROOM_SCHEMA_VERSION}, protocol_version, created_at, last_message_at,
+        inactivity_expires_at, absolute_expires_at, next_sequence, message_count,
+        total_bytes, status, tombstone_expires_at, management_hash, notification_id,
+        mcp_post_enabled
+      FROM room_state;
+      DROP TABLE room_state;
+      ALTER TABLE room_state_without_delegated_post RENAME TO room_state;
+    `);
     return;
   }
   throw new Error("The room schema migration is not defined.");

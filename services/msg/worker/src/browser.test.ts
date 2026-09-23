@@ -228,20 +228,19 @@ test("renders a private creation receipt shell without capability values", async
   expect(html).toContain("Public thread");
   expect(html).toContain("Private owner link");
   expect(html).toContain("Save the private owner link now");
-  expect(html).toContain("Enable delegated invitation");
+  expect(html).toContain("Enable anonymous MCP posting");
   expect(html).toContain("Copy private owner link");
   expect(html).toContain("Open private owner controls");
-  expect(html).toContain("Copy delegated invitation");
   expect(html).toContain("Anonymous MCP agents can post by default");
   expect(html).not.toContain("/manage/");
   expect(html).not.toContain("post?token=");
   expect(source).toContain("createOwnerControlsController");
   expect(source).toContain("normalizeOwnerManagementUrl");
-  expect(source).toContain("data.manage_url");
+  expect(source).toContain("manage_url");
   expect(source).not.toContain("ownerLink.href");
-  expect(source).toContain("owner-post-rotate");
-  expect(source).toContain("owner-post-disable");
-  expect(source).toContain("X-0000-Post-Token");
+  expect(source).toContain("owner-mcp-enable");
+  expect(source).toContain("owner-mcp-disable");
+  expect(source).not.toContain("X-0000-Post-Token");
   expect(source).not.toContain("localStorage.setItem('manage");
   expect(source).not.toContain("sessionStorage.setItem('manage");
 });
@@ -251,7 +250,7 @@ test("does not render private creation controls on a public room page", () => {
 
   expect(html).not.toContain('id="creation-receipt"');
   expect(html).not.toContain("Private owner link");
-  expect(html).not.toContain("Enable delegated invitation");
+  expect(html).not.toContain("Enable anonymous MCP posting");
   expect(html).not.toContain("post?token=");
 });
 
@@ -275,12 +274,10 @@ test("keeps the creation receipt private in page memory and enables clipboard se
   const ownerLink = { href: "", textContent: "" };
   const continueLink = { href: "", textContent: "" };
   const ownerStatus = { textContent: "" };
-  const enable = { disabled: false, onclick: undefined as (() => void) | undefined, addEventListener: (_event: string, callback: () => void) => { enable.onclick = callback; } };
-  const rotate = { disabled: true, onclick: undefined as (() => void) | undefined, addEventListener: (_event: string, callback: () => void) => { rotate.onclick = callback; } };
-  const disable = { disabled: true, onclick: undefined as (() => void) | undefined, addEventListener: (_event: string, callback: () => void) => { disable.onclick = callback; } };
+  const mcpEnable = { disabled: true, onclick: undefined as (() => void) | undefined, addEventListener: (_event: string, callback: () => void) => { mcpEnable.onclick = callback; } };
+  const mcpDisable = { disabled: false, onclick: undefined as (() => void) | undefined, addEventListener: (_event: string, callback: () => void) => { mcpDisable.onclick = callback; } };
   const copyOwner = { disabled: true, onclick: undefined as (() => void) | undefined, addEventListener: (_event: string, callback: () => void) => { copyOwner.onclick = callback; } };
   const openOwner = { disabled: true, onclick: undefined as (() => void) | undefined, addEventListener: (_event: string, callback: () => void) => { openOwner.onclick = callback; } };
-  const copy = { disabled: true, onclick: undefined as (() => void) | undefined, addEventListener: (_event: string, callback: () => void) => { copy.onclick = callback; } };
   const notice = { textContent: "", className: "", hidden: true };
   const map: Record<string, unknown> = {
     "#create-room": createForm,
@@ -288,11 +285,9 @@ test("keeps the creation receipt private in page memory and enables clipboard se
     "#creation-receipt-title": receiptHeading,
     "#initial-message": field,
     "#owner-post-copy-owner": copyOwner,
-    "#owner-post-copy": copy,
-    "#owner-post-disable": disable,
-    "#owner-post-enable": enable,
+    "#owner-mcp-disable": mcpDisable,
+    "#owner-mcp-enable": mcpEnable,
     "#owner-post-open": openOwner,
-    "#owner-post-rotate": rotate,
     "#owner-post-status": ownerStatus,
     "#receipt-continue": continueLink,
     "#receipt-owner-link": ownerLink,
@@ -314,8 +309,8 @@ test("keeps the creation receipt private in page memory and enables clipboard se
       }
       managerCalls += 1;
       expect(init?.method).toBe("POST");
-      expect(JSON.parse(String(init?.body))).toEqual({ action: "enable" });
-      return Response.json({ get_post_enabled: true, get_post_url: "https://msg.0000.chat/room/post?token=delegated", protocol_version: 1 });
+      const action = JSON.parse(String(init?.body)).action;
+      return Response.json({ agent_posting_enabled: action === "enable_mcp", protocol_version: 1 });
     };
     globals.WebSocket = class { onclose = null; onerror = null; onmessage = null; onopen = null; readyState = 0; close() {} };
     globals.addEventListener = () => {};
@@ -344,18 +339,15 @@ test("keeps the creation receipt private in page memory and enables clipboard se
     expect(createCalls).toBe(1);
     expect(createHeaders?.get("idempotency-key")).toMatch(/^[A-Za-z0-9-]{20,}$/u);
 
-    enable.onclick?.();
+    mcpDisable.onclick?.();
     await Promise.resolve();
     await Promise.resolve();
     expect(managerCalls).toBe(1);
-    expect(copy.disabled).toBe(false);
-    copy.onclick?.();
+    expect(mcpEnable.disabled).toBe(false);
+    mcpEnable.onclick?.();
     await Promise.resolve();
     await Promise.resolve();
-    expect(copied).toContain("Public room URL: https://msg.0000.chat/room");
-    expect(copied).toContain("X-0000-Post-Token");
-    expect(copied).toContain("Authentication value: delegated");
-    expect(ownerLink.textContent).not.toContain("delegated");
+    expect(managerCalls).toBe(2);
 
     copyOwner.onclick?.();
     await Promise.resolve();

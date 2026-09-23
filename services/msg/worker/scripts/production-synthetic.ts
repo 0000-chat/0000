@@ -2,7 +2,6 @@ type FetchLike = (input: RequestInfo | URL, init?: RequestInit) => Promise<Respo
 
 export interface ProductionSyntheticOptions {
   readonly fetch?: FetchLike;
-  readonly getPost?: boolean;
   readonly origin?: string;
   readonly report?: (phase: string) => void;
   readonly webSocket?: (url: URL) => Promise<void>;
@@ -19,12 +18,11 @@ type CreatedRoom = {
 
 const defaultOrigin = "https://msg.0000.chat";
 
-/** Exercises public behavior only. Reports phases, never capability URLs or management URLs. */
+/** Exercises public behavior only. Reports phases, never management URLs. */
 export async function runProductionSynthetic(options: ProductionSyntheticOptions = {}): Promise<void> {
   const origin = productionOrigin(options.origin ?? process.env.MSG_SYNTHETIC_ORIGIN ?? defaultOrigin);
   const fetcher = options.fetch ?? fetch;
   const report = options.report ?? ((phase: string) => process.stdout.write(`msg synthetic: ${phase}\n`));
-  const getPostEnabled = options.getPost ?? process.env.MSG_SYNTHETIC_GET_POST === "1";
   let managementUrl: URL | undefined;
   let deleted = false;
 
@@ -53,22 +51,6 @@ export async function runProductionSynthetic(options: ProductionSyntheticOptions
     const roomUrl = roomUrlFor(origin, created.conversation_url);
     managementUrl = managementUrlFor(origin, created.manage_url, roomUrl);
     report("create");
-
-    if (getPostEnabled) {
-      const enabled = await expectJson(fetcher, new Request(managementUrl, {
-        body: JSON.stringify({ action: "enable" }),
-        headers: { accept: "application/json", "content-type": "application/json" },
-        method: "POST",
-      }), "get-post enable", 200, (value) => value.get_post_enabled === true && typeof value.get_post_url === "string");
-      const getPostUrl = getPostUrlFor(origin, enabled.get_post_url as string, roomUrl);
-      const requestId = crypto.randomUUID();
-      getPostUrl.searchParams.set("request_id", requestId);
-      getPostUrl.searchParams.set("content", "synthetic GET post probe");
-      await expectJson(fetcher, new Request(getPostUrl, {
-        headers: { accept: "application/json", "sec-fetch-site": "cross-site" },
-      }), "get-post", 200, (value) => value.accepted === true && value.protocol_version === 1 && value.replayed === false && value.request_id === requestId && typeof value.sequence === "number");
-      report("get-post");
-    }
 
     await expectTextEventually(fetcher, () => htmlRequest(probeUrl(roomUrl)), "agent browser room", (value) => value.includes("Untrusted conversation content") && value.includes("class=\"view-banner agent-view-banner\"") && value.includes("I'm human") && !value.includes("/_msg/asset/client.js"));
     const humanRoomUrl = new URL(roomUrl);
@@ -203,13 +185,6 @@ function roomUrlFor(origin: URL, value: string): URL {
 function managementUrlFor(origin: URL, value: string, room: URL): URL {
   const url = new URL(value);
   if (url.origin !== origin.origin || !new RegExp(`^/manage/${escapeRegex(room.pathname.slice(1))}/[A-Za-z0-9_-]{32,}$`).test(url.pathname) || url.search || url.hash) throw failure("create response");
-  return url;
-}
-
-function getPostUrlFor(origin: URL, value: string, room: URL): URL {
-  const url = new URL(value);
-  const keys = [...url.searchParams.keys()];
-  if (url.origin !== origin.origin || url.pathname !== `${room.pathname}/post` || url.hash || keys.length !== 1 || keys[0] !== "token" || !url.searchParams.get("token")) throw failure("get-post enable");
   return url;
 }
 

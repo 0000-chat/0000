@@ -277,7 +277,7 @@ function buildMcpServer(
     "get_room_status",
     {
       title: "Get room status",
-      description: "Read bounded room metadata and whether anonymous MCP agent posting is currently enabled. This status never returns an owner or delegated GET posting capability.",
+      description: "Read bounded room metadata and whether anonymous MCP agent posting is currently enabled. This status never returns an owner capability.",
       inputSchema: {
         room_url: RoomUrlSchema.describe("The canonical public room URL from the room invitation."),
       },

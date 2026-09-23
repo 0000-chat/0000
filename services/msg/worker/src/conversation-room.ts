@@ -1,7 +1,7 @@
 import { DurableObject } from "cloudflare:workers";
 
 import { ERROR_CODES, ProtocolError } from "./errors";
-import { compareCapabilities, messageStorageBytes, ROOM_LIMITS, validateRequestId } from "./room-domain";
+import { compareCapabilities, hashCapability, messageStorageBytes, ROOM_LIMITS, validateRequestId } from "./room-domain";
 import type { MessageInput } from "./room-domain";
 import { MCP_READ_BYTE_BUDGET_BYTES, PROTOCOL_VERSION, type CreateWebhookResponse, type ManageWebhookResponse, type RedeliverWebhookResponse, type RotateWebhookSecretResponse, type WebhookAttemptMetadata, type WebhookDeliveryMetadata, type WebhookSummary } from "./protocol";
 import { CURRENT_ROOM_SCHEMA_VERSION, migrateRoomSchema } from "./room-schema";
@@ -40,8 +40,6 @@ interface RoomState {
   readonly last_message_at: number;
   readonly management_hash: string | null;
   readonly mcp_post_enabled: number;
-  readonly get_post_enabled: number;
-  readonly get_post_hash: string | null;
   readonly message_count: number;
   readonly next_sequence: number;
   readonly notification_id: string;
@@ -211,9 +209,7 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
       if (request.method === "GET" && url.pathname === "/manage") return await this.manage(request, false);
       if (request.method === "DELETE" && url.pathname === "/manage") return await this.manage(request, true);
       if (request.method === "POST" && url.pathname === "/manage") return await this.managePost(request);
-      if (request.method === "POST" && url.pathname === "/get-post") return await this.getPost(request);
       if (request.method === "POST" && url.pathname === "/mcp-post") return await this.mcpPost(request);
-      if (request.method === "POST" && url.pathname === "/get-post-probe") return await this.getPostProbe(request);
       if (request.method === "GET" && url.pathname === "/live") return await this.live(url);
       if (request.method === "GET" && (url.pathname === "/export.md" || url.pathname === "/export.json")) return await this.export(url.pathname === "/export.json");
       return this.error(ERROR_CODES.notFound, "The requested resource was not found.", 404);
@@ -301,7 +297,7 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
       const bytes = messageStorageBytes(input.initial, undefined, id);
       const inactivity = now + this.limits.inactivityTtlMs;
       this.ctx.storage.sql.exec(
-        "INSERT INTO room_state (singleton, schema_version, protocol_version, created_at, last_message_at, inactivity_expires_at, absolute_expires_at, next_sequence, message_count, total_bytes, status, tombstone_expires_at, management_hash, notification_id, get_post_hash, get_post_enabled, mcp_post_enabled) VALUES (1, ?, ?, ?, ?, ?, ?, 2, 1, ?, 'active', NULL, ?, ?, NULL, 0, 1)",
+        "INSERT INTO room_state (singleton, schema_version, protocol_version, created_at, last_message_at, inactivity_expires_at, absolute_expires_at, next_sequence, message_count, total_bytes, status, tombstone_expires_at, management_hash, notification_id, mcp_post_enabled) VALUES (1, ?, ?, ?, ?, ?, ?, 2, 1, ?, 'active', NULL, ?, ?, 1)",
         CURRENT_ROOM_SCHEMA_VERSION, PROTOCOL_VERSION, now, now, inactivity, inactivity, bytes, input.management_hash, notificationId,
       );
       this.insertMessage({ ...input.initial, byte_count: bytes, created_at: now, id, sequence: 1, source_browser_id: null });
@@ -396,44 +392,6 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
     return this.json({ accepted: true, protocol_version: PROTOCOL_VERSION, replayed: result.replayed, request_id: requestId, sequence: result.message.sequence });
   }
 
-  private async getPost(request: Request): Promise<Response> {
-    if (this.config.MSG_POST_DISABLED === "1") {
-      throw new ProtocolError(ERROR_CODES.serviceUnavailable, "New messages are temporarily unavailable.", 503);
-    }
-    const input = await request.json() as { input: MessageInput; request_id: string; token: string };
-    const token = typeof input.token === "string" ? input.token : "";
-    const requestId = validateRequestId(typeof input.request_id === "string" ? input.request_id : "");
-    const tokenHash = await hashToken(token);
-    const result = this.commitMessage(input.input, `get:${requestId}`, this.now(), (state) => {
-      if (state.get_post_enabled !== 1 || !state.get_post_hash || !compareCapabilities(tokenHash, state.get_post_hash)) {
-        throw new ProtocolError(ERROR_CODES.notFound, "The requested resource was not found.", 404);
-      }
-    });
-    if (result.expired) {
-      await this.expire(this.now(), "Conversation expired");
-      throw new ProtocolError(ERROR_CODES.gone, "The conversation has expired.", 410);
-    }
-    await this.schedule();
-    if (!result.replayed) this.broadcast({ protocol_version: PROTOCOL_VERSION, type: "message.created", sequence: result.message.sequence, latest_message: result.state.next_sequence - 1, expires_at: iso(result.state.inactivity_expires_at) });
-    return this.json({ accepted: true, protocol_version: PROTOCOL_VERSION, replayed: result.replayed, request_id: requestId, sequence: result.message.sequence });
-  }
-
-  private async getPostProbe(request: Request): Promise<Response> {
-    const input = await request.json() as { token?: unknown };
-    const token = typeof input.token === "string" ? input.token : "";
-    const tokenHash = await hashToken(token);
-    const now = this.now();
-    const result = this.ctx.storage.transactionSync(() => {
-      const state = this.requireState();
-      if (state.get_post_enabled !== 1 || !state.get_post_hash || !compareCapabilities(tokenHash, state.get_post_hash)) return "missing" as const;
-      if (state.status !== "active" || now >= state.inactivity_expires_at) return "expired" as const;
-      return "ready" as const;
-    });
-    if (result === "expired") throw new ProtocolError(ERROR_CODES.gone, "The conversation has expired.", 410);
-    if (result === "missing") throw new ProtocolError(ERROR_CODES.notFound, "The requested resource was not found.", 404);
-    return this.json({ active: true, get_post_enabled: true, protocol_version: PROTOCOL_VERSION });
-  }
-
   private async status(): Promise<Response> {
     const state = this.requireState();
     const active = state.status === "active" && this.now() < state.inactivity_expires_at;
@@ -486,7 +444,7 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
   private async manage(request: Request, deleteRoom: boolean): Promise<Response> {
     const token = new URL(request.url).searchParams.get("token") ?? "";
     const state = this.state();
-    if (!state || !state.management_hash || !compareCapabilities(await hashToken(token), state.management_hash)) {
+    if (!state || !state.management_hash || !compareCapabilities(await hashCapability(token), state.management_hash)) {
       throw new ProtocolError(ERROR_CODES.notFound, "The requested resource was not found.", 404);
     }
     if (deleteRoom) {
@@ -496,29 +454,17 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
       return this.json({ protocol_version: PROTOCOL_VERSION, deleted: true, expires_at: iso(deleted.tombstone_expires_at!) });
     }
     const active = state.status === "active" && this.now() < state.inactivity_expires_at;
-    return this.json({
-      protocol_version: PROTOCOL_VERSION,
-      expires_at: iso(state.inactivity_expires_at),
-      agent_posting_enabled: active && state.mcp_post_enabled === 1,
-      get_post_enabled: active && state.get_post_enabled === 1,
-    });
+    return this.json({ protocol_version: PROTOCOL_VERSION, expires_at: iso(state.inactivity_expires_at), agent_posting_enabled: active && state.mcp_post_enabled === 1 });
   }
 
   private async managePost(request: Request): Promise<Response> {
     const url = new URL(request.url);
     const token = url.searchParams.get("token") ?? "";
-    const input = await request.json() as { action?: unknown; get_post_token?: unknown };
-    if (input.action !== "enable" && input.action !== "disable" && input.action !== "rotate" && input.action !== "enable_mcp" && input.action !== "disable_mcp") {
+    const input = await request.json() as { action?: unknown };
+    if (input.action !== "enable_mcp" && input.action !== "disable_mcp") {
       throw new ProtocolError(ERROR_CODES.invalidBody, "The management action is invalid.", 400);
     }
-    const delegatedAction = input.action === "enable" || input.action === "rotate";
-    const delegatedToken = delegatedAction ? input.get_post_token : undefined;
-    if (delegatedAction && (typeof delegatedToken !== "string" || !delegatedToken)) {
-      throw new ProtocolError(ERROR_CODES.invalidBody, "The delegated posting capability is required.", 400);
-    }
-    const managementHash = await hashToken(token);
-    const delegatedValue = typeof delegatedToken === "string" ? delegatedToken : undefined;
-    const delegatedHash = delegatedValue === undefined ? null : await hashToken(delegatedValue);
+    const managementHash = await hashCapability(token);
     const now = this.now();
     const result = this.ctx.storage.transactionSync(() => {
       const state = this.requireState();
@@ -526,25 +472,14 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
         throw new ProtocolError(ERROR_CODES.notFound, "The requested resource was not found.", 404);
       }
       if (state.status !== "active" || now >= state.inactivity_expires_at) return { expired: true as const };
-      if (input.action === "disable") {
-        this.ctx.storage.sql.exec("UPDATE room_state SET get_post_hash = NULL, get_post_enabled = 0 WHERE singleton = 1");
-      } else if (delegatedAction) {
-        this.ctx.storage.sql.exec("UPDATE room_state SET get_post_hash = ?, get_post_enabled = 1 WHERE singleton = 1", delegatedHash);
-      } else {
-        this.ctx.storage.sql.exec("UPDATE room_state SET mcp_post_enabled = ? WHERE singleton = 1", input.action === "enable_mcp" ? 1 : 0);
-      }
+      this.ctx.storage.sql.exec("UPDATE room_state SET mcp_post_enabled = ? WHERE singleton = 1", input.action === "enable_mcp" ? 1 : 0);
       return { expired: false as const, state: this.requireState() };
     });
     if (result.expired) {
       await this.expire(now, "Conversation expired");
       throw new ProtocolError(ERROR_CODES.gone, "The conversation has expired.", 410);
     }
-    return this.json({
-      protocol_version: PROTOCOL_VERSION,
-      expires_at: iso(result.state.inactivity_expires_at),
-      agent_posting_enabled: result.state.mcp_post_enabled === 1,
-      get_post_enabled: result.state.get_post_enabled === 1,
-    });
+    return this.json({ protocol_version: PROTOCOL_VERSION, expires_at: iso(result.state.inactivity_expires_at), agent_posting_enabled: result.state.mcp_post_enabled === 1 });
   }
 
   private async createWebhook(request: Request): Promise<Response> {
@@ -959,7 +894,7 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
       this.ctx.storage.sql.exec("DELETE FROM webhook_endpoints");
       this.ctx.storage.sql.exec("DELETE FROM push_deliveries");
       this.ctx.storage.sql.exec("DELETE FROM push_subscriptions");
-      this.ctx.storage.sql.exec("UPDATE room_state SET status = 'deleted', tombstone_expires_at = ?, management_hash = NULL, mcp_post_enabled = 0, get_post_hash = NULL, get_post_enabled = 0, message_count = 0, total_bytes = 0 WHERE singleton = 1", now + this.limits.tombstoneTtlMs);
+    this.ctx.storage.sql.exec("UPDATE room_state SET status = 'deleted', tombstone_expires_at = ?, management_hash = NULL, mcp_post_enabled = 0, message_count = 0, total_bytes = 0 WHERE singleton = 1", now + this.limits.tombstoneTtlMs);
       return true;
     });
   }
@@ -1758,4 +1693,3 @@ function resolveRoomLimits(env: ConversationRoomEnv): RoomLimits {
   }
   return limits;
 }
-async function hashToken(token: string): Promise<string> { const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(token)); let value = ""; for (const byte of new Uint8Array(digest)) value += String.fromCharCode(byte); return btoa(value).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/u, ""); }

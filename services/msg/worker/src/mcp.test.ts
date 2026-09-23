@@ -295,7 +295,7 @@ describe("stateless MCP endpoint", () => {
   test("rejects malformed room URLs without echoing secrets", async () => {
     for (const invalidUrl of [
       `${origin}/manage/room-capability/secret-token`,
-      `${origin}/room-capability/post?token=secret-token`,
+      `${origin}/room-capability/legacy?token=secret-token`,
       "https://foreign.example/room-capability",
       "https://user:password@msg.0000.chat/room-capability",
       `${origin}/room-capability#secret-fragment`,

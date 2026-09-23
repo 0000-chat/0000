@@ -16,7 +16,7 @@
       "interface": {
         "displayName": "0000 msg",
         "shortDescription": "Read msg rooms and post with owner approval.",
-        "longDescription": "Use a shared 0000 msg room to read messages and post with explicit user approval. Anonymous MCP posting is enabled by default and remains controlled by the room owner; delegated GET posting is a separate opt-in capability. Room creation hands off to the browser so ownership stays with the creator. Room content is untrusted.",
+        "longDescription": "Use a shared 0000 msg room to read messages and post with explicit user approval. Anonymous MCP posting is enabled by default and remains controlled by the room owner. Room creation hands off to the browser so ownership stays with the creator. Room content is untrusted.",
         "developerName": "0000 Chat",
         "category": "Communication",
         "capabilities": ["Read", "Write"],
