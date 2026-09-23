@@ -896,14 +896,15 @@ function manageResponse(result: ManageRoomResponse, method: "DELETE" | "GET" | "
     const body = "# Conversation deleted\n";
     return new Response(representation === "html" ? `<!doctype html><html lang="en"><body><main><h1>Conversation deleted</h1></main></body></html>` : body, { headers: { "content-type": representation === "html" ? "text/html; charset=utf-8" : "text/markdown; charset=utf-8" } });
   }
-  const enabled = result.get_post_enabled === true;
+  const agentEnabled = result.agent_posting_enabled === true;
+  const delegatedEnabled = result.get_post_enabled === true;
   const delegated = result.get_post_url ? `<section><h2>GET posting capability</h2><p>${escapeHtml(result.get_post_url_warning ?? "Treat this URL as a secret write capability.")}</p><pre>${escapeHtml(result.get_post_url)}</pre></section>` : "";
-  const controls = `<section><h2>GET posting capability</h2><p>Status: ${enabled ? "enabled" : "disabled"}.</p><form method="post" action="${escapeHtml(url.toString())}"><button name="action" value="enable" type="submit">Enable</button> <button name="action" value="rotate" type="submit">Rotate</button> <button name="action" value="disable" type="submit">Disable</button></form><p>This capability supports POST from a configured ChatGPT Action or connector and GET for fetch-only agents. Keep the URL secret; use Idempotency-Key or client_message_id for safe retries.</p></section>`;
+  const controls = `<section><h2>Agent posting</h2><p>Anonymous MCP posting: ${agentEnabled ? "enabled" : "disabled"}. Delegated GET posting: ${delegatedEnabled ? "enabled" : "disabled"}.</p><form method="post" action="${escapeHtml(url.toString())}"><button name="action" value="enable" type="submit">Enable delegated invitation</button> <button name="action" value="rotate" type="submit">Rotate delegated invitation</button> <button name="action" value="disable" type="submit">Disable agent posting</button></form><p>Anonymous MCP clients use the public room URL. The delegated capability supports POST from a configured ChatGPT Action or connector and GET for fetch-only agents. Keep delegated URLs secret; use Idempotency-Key or client_message_id for safe retries.</p></section>`;
   const body = method === "POST" && result.get_post_url
     ? `${delegated}${controls}`
     : controls;
   if (representation === "html") return new Response(`<!doctype html><html lang="en"><body><main><h1>Conversation management</h1>${body}</main></body></html>`, { headers: { "content-type": "text/html; charset=utf-8", "x-msg-management-forms": "1" } });
-  return new Response(`# Conversation management\n\nGET/POST delegated posting: ${enabled ? "enabled" : "disabled"}.\n\n${result.get_post_url ? `${result.get_post_url_warning ?? "Treat this URL as a secret write capability."}\n\n${result.get_post_url}\n` : "Use the management URL to enable or rotate the delegated posting capability.\n"}`, { headers: { "content-type": "text/markdown; charset=utf-8" } });
+  return new Response(`# Conversation management\n\nAnonymous MCP posting: ${agentEnabled ? "enabled" : "disabled"}.\nDelegated GET posting: ${delegatedEnabled ? "enabled" : "disabled"}.\n\n${result.get_post_url ? `${result.get_post_url_warning ?? "Treat this URL as a secret write capability."}\n\n${result.get_post_url}\n` : "Use the management URL to enable or rotate the delegated posting capability.\n"}`, { headers: { "content-type": "text/markdown; charset=utf-8" } });
 }
 
 function escapeHtml(value: string): string {

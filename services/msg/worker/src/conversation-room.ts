@@ -39,6 +39,7 @@ interface RoomState {
   readonly inactivity_expires_at: number;
   readonly last_message_at: number;
   readonly management_hash: string | null;
+  readonly mcp_post_enabled: number;
   readonly get_post_enabled: number;
   readonly get_post_hash: string | null;
   readonly message_count: number;
@@ -300,7 +301,7 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
       const bytes = messageStorageBytes(input.initial, undefined, id);
       const inactivity = now + this.limits.inactivityTtlMs;
       this.ctx.storage.sql.exec(
-        "INSERT INTO room_state (singleton, schema_version, protocol_version, created_at, last_message_at, inactivity_expires_at, absolute_expires_at, next_sequence, message_count, total_bytes, status, tombstone_expires_at, management_hash, notification_id, get_post_hash, get_post_enabled) VALUES (1, ?, ?, ?, ?, ?, ?, 2, 1, ?, 'active', NULL, ?, ?, NULL, 0)",
+        "INSERT INTO room_state (singleton, schema_version, protocol_version, created_at, last_message_at, inactivity_expires_at, absolute_expires_at, next_sequence, message_count, total_bytes, status, tombstone_expires_at, management_hash, notification_id, get_post_hash, get_post_enabled, mcp_post_enabled) VALUES (1, ?, ?, ?, ?, ?, ?, 2, 1, ?, 'active', NULL, ?, ?, NULL, 0, 1)",
         CURRENT_ROOM_SCHEMA_VERSION, PROTOCOL_VERSION, now, now, inactivity, inactivity, bytes, input.management_hash, notificationId,
       );
       this.insertMessage({ ...input.initial, byte_count: bytes, created_at: now, id, sequence: 1, source_browser_id: null });
@@ -382,7 +383,7 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
     const requestId = validateRequestId(input.input.client_message_id);
     const now = this.now();
     const result = this.commitMessage(input.input, `mcp:${requestId}`, now, (state) => {
-      if (state.get_post_enabled !== 1) {
+      if (state.mcp_post_enabled !== 1) {
         throw new ProtocolError(ERROR_CODES.notFound, "The requested resource was not found.", 404);
       }
     });
@@ -438,7 +439,7 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
     const active = state.status === "active" && this.now() < state.inactivity_expires_at;
     return this.json({
       active,
-      agent_posting_enabled: active && state.get_post_enabled === 1 && this.config.MSG_POST_DISABLED !== "1",
+      agent_posting_enabled: active && state.mcp_post_enabled === 1 && this.config.MSG_POST_DISABLED !== "1",
       expires_at: iso(state.inactivity_expires_at),
       latest_message: Math.max(0, state.next_sequence - 1),
       protocol_version: PROTOCOL_VERSION,
@@ -494,7 +495,12 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
       await this.schedule();
       return this.json({ protocol_version: PROTOCOL_VERSION, deleted: true, expires_at: iso(deleted.tombstone_expires_at!) });
     }
-    return this.json({ protocol_version: PROTOCOL_VERSION, expires_at: iso(state.inactivity_expires_at), get_post_enabled: state.get_post_enabled === 1 });
+    return this.json({
+      protocol_version: PROTOCOL_VERSION,
+      expires_at: iso(state.inactivity_expires_at),
+      agent_posting_enabled: state.mcp_post_enabled === 1,
+      get_post_enabled: state.get_post_enabled === 1,
+    });
   }
 
   private async managePost(request: Request): Promise<Response> {
@@ -519,9 +525,9 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
       }
       if (state.status !== "active" || now >= state.inactivity_expires_at) return { expired: true as const };
       if (input.action === "disable") {
-        this.ctx.storage.sql.exec("UPDATE room_state SET get_post_hash = NULL, get_post_enabled = 0 WHERE singleton = 1");
+        this.ctx.storage.sql.exec("UPDATE room_state SET mcp_post_enabled = 0, get_post_hash = NULL, get_post_enabled = 0 WHERE singleton = 1");
       } else {
-        this.ctx.storage.sql.exec("UPDATE room_state SET get_post_hash = ?, get_post_enabled = 1 WHERE singleton = 1", delegatedHash);
+        this.ctx.storage.sql.exec("UPDATE room_state SET mcp_post_enabled = 1, get_post_hash = ?, get_post_enabled = 1 WHERE singleton = 1", delegatedHash);
       }
       return { expired: false as const, state: this.requireState() };
     });
@@ -529,7 +535,12 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
       await this.expire(now, "Conversation expired");
       throw new ProtocolError(ERROR_CODES.gone, "The conversation has expired.", 410);
     }
-    return this.json({ protocol_version: PROTOCOL_VERSION, expires_at: iso(result.state.inactivity_expires_at), get_post_enabled: result.state.get_post_enabled === 1 });
+    return this.json({
+      protocol_version: PROTOCOL_VERSION,
+      expires_at: iso(result.state.inactivity_expires_at),
+      agent_posting_enabled: result.state.mcp_post_enabled === 1,
+      get_post_enabled: result.state.get_post_enabled === 1,
+    });
   }
 
   private async createWebhook(request: Request): Promise<Response> {
@@ -944,7 +955,7 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
       this.ctx.storage.sql.exec("DELETE FROM webhook_endpoints");
       this.ctx.storage.sql.exec("DELETE FROM push_deliveries");
       this.ctx.storage.sql.exec("DELETE FROM push_subscriptions");
-      this.ctx.storage.sql.exec("UPDATE room_state SET status = 'deleted', tombstone_expires_at = ?, management_hash = NULL, get_post_hash = NULL, get_post_enabled = 0, message_count = 0, total_bytes = 0 WHERE singleton = 1", now + this.limits.tombstoneTtlMs);
+      this.ctx.storage.sql.exec("UPDATE room_state SET status = 'deleted', tombstone_expires_at = ?, management_hash = NULL, mcp_post_enabled = 0, get_post_hash = NULL, get_post_enabled = 0, message_count = 0, total_bytes = 0 WHERE singleton = 1", now + this.limits.tombstoneTtlMs);
       return true;
     });
   }

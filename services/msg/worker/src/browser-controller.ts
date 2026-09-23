@@ -624,7 +624,7 @@ export function createOwnerControlsController(options: OwnerControlsControllerOp
     busy: false,
     enabled: false,
     invitationAvailable: false,
-    message: "Agent posting is disabled.",
+    message: "Anonymous MCP posting is enabled by default. Delegated posting invitation is disabled.",
     status: "disabled",
   };
   const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
@@ -651,7 +651,7 @@ export function createOwnerControlsController(options: OwnerControlsControllerOp
   }
 
   function invitation(): string {
-    if (!delegatedToken) throw new Error("Enable agent posting before copying its invitation.");
+    if (!delegatedToken) throw new Error("Enable delegated posting before copying its invitation.");
     return [
       "Configure one GPT Action or connector for this 0000 conversation.",
       "",
@@ -680,7 +680,7 @@ export function createOwnerControlsController(options: OwnerControlsControllerOp
       ...currentState,
       busy: true,
       invitationAvailable: action === "rotate" ? false : currentState.invitationAvailable,
-      message: action === "disable" ? "Disabling agent posting…" : action === "rotate" ? "Rotating agent posting…" : "Enabling agent posting…",
+      message: action === "disable" ? "Disabling agent posting…" : action === "rotate" ? "Rotating delegated posting invitation…" : "Enabling delegated posting invitation…",
     });
     try {
       const response = await options.fetch(managementUrl, {
@@ -702,11 +702,11 @@ export function createOwnerControlsController(options: OwnerControlsControllerOp
         return setState({ busy: false, enabled: false, invitationAvailable: false, message: "Agent posting is disabled.", status: "disabled" });
       }
       delegatedToken = delegatedTokenFromUrl(value.get_post_url);
-      return setState({ busy: false, enabled: true, invitationAvailable: true, message: action === "rotate" ? "Agent posting was rotated. Copy the new invitation for the agent." : "Agent posting is enabled. Copy the invitation for the agent.", status: "enabled" });
+      return setState({ busy: false, enabled: true, invitationAvailable: true, message: action === "rotate" ? "Delegated posting invitation was rotated. Copy the new invitation for the agent." : "Delegated posting invitation is enabled. Anonymous MCP posting remains enabled.", status: "enabled" });
     } catch (error) {
       if (action === "rotate") {
         delegatedToken = undefined;
-        return setState({ busy: false, enabled: false, invitationAvailable: false, message: error instanceof Error ? error.message : "The owner control request failed while rotating agent posting.", status: "error" });
+        return setState({ busy: false, enabled: false, invitationAvailable: false, message: error instanceof Error ? error.message : "The owner control request failed while rotating the delegated posting invitation.", status: "error" });
       }
       return setState({ ...currentState, busy: false, message: error instanceof Error ? error.message : "The owner control request failed.", status: "error" });
     } finally {

@@ -1,7 +1,7 @@
 import { ROOM_LIMITS } from "./room-domain";
 import { WEBHOOK_RETRY_INITIAL_DELAY_MS, WEBHOOK_RETRY_WINDOW_MS } from "./webhook-policy";
 
-export const CURRENT_ROOM_SCHEMA_VERSION = 8;
+export const CURRENT_ROOM_SCHEMA_VERSION = 9;
 
 interface SqlStorage {
   exec(query: string, ...values: unknown[]): Iterable<unknown>;
@@ -233,6 +233,18 @@ function applyMigration(sql: SqlStorage, version: number, inactivityTtlMs: numbe
     const columns = new Set(rows<{ name: string }>(sql.exec("PRAGMA table_info(room_state)")).map((column) => column.name));
     if (!columns.has("get_post_hash")) sql.exec("ALTER TABLE room_state ADD COLUMN get_post_hash TEXT");
     if (!columns.has("get_post_enabled")) sql.exec("ALTER TABLE room_state ADD COLUMN get_post_enabled INTEGER NOT NULL DEFAULT 0");
+    sql.exec("UPDATE room_state SET schema_version = ?", CURRENT_ROOM_SCHEMA_VERSION);
+    return;
+  }
+  if (version === 9) {
+    // Anonymous MCP posting is an independent room setting. Existing active
+    // rooms were historically represented by get_post_enabled, which also
+    // guarded the secret delegated GET capability. Default the new setting on
+    // for every room and make the active-room intent explicit for the lazy
+    // migration path; the delegated hash and flag remain untouched.
+    const columns = new Set(rows<{ name: string }>(sql.exec("PRAGMA table_info(room_state)")).map((column) => column.name));
+    if (!columns.has("mcp_post_enabled")) sql.exec("ALTER TABLE room_state ADD COLUMN mcp_post_enabled INTEGER NOT NULL DEFAULT 1");
+    sql.exec("UPDATE room_state SET mcp_post_enabled = 1 WHERE status = 'active'");
     sql.exec("UPDATE room_state SET schema_version = ?", CURRENT_ROOM_SCHEMA_VERSION);
     return;
   }

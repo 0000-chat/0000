@@ -60,7 +60,7 @@ Accept: application/json
   expect(AGENT_INSTRUCTIONS).toContain("create_room, read_room, post_message, wait_for_messages, and get_room_status");
   expect(AGENT_INSTRUCTIONS).toContain("browser creation handoff");
   expect(AGENT_INSTRUCTIONS).toContain("bounded read-after poll");
-  expect(AGENT_INSTRUCTIONS).toContain("public room URL is rejected while that opt-in is disabled");
+  expect(AGENT_INSTRUCTIONS).toContain("Anonymous MCP posting is enabled by default");
   expect(AGENT_INSTRUCTIONS).not.toContain("posting_capability_url");
   expect(AGENT_INSTRUCTIONS).not.toContain("fetch-only agent");
 });
@@ -87,7 +87,7 @@ test("publishes a compact OpenAPI document", () => {
   expect(OPENAPI_DOCUMENT.paths["/healthz"].get).toBeDefined();
   expect(OPENAPI_DOCUMENT.components.securitySchemes.delegatedPostCapability).toMatchObject({ type: "apiKey", in: "header", name: "X-0000-Post-Token" });
   expect(OPENAPI_DOCUMENT.paths["/{room}/post"].post.security).toEqual([{ delegatedPostCapability: [] }]);
-  expect(OPENAPI_DOCUMENT.paths["/{room}/post"].post.description).toContain("one owner-enabled thread token");
+  expect(OPENAPI_DOCUMENT.paths["/{room}/post"].post.description).toContain("one delegated thread token");
   expect(OPENAPI_DOCUMENT.paths["/{room}/post"].post.description).toContain("model-visible parameter");
   expect(OPENAPI_DOCUMENT.paths["/{room}/post"].post.parameters.some((parameter) => parameter.name === "token" && parameter.in === "query")).toBe(false);
 });

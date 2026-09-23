@@ -206,7 +206,7 @@ export interface PostMessageResponse {
   readonly wait: WaitMetadata;
 }
 
-/** MCP writes use the canonical public room URL and the room's owner opt-in. */
+/** MCP writes use the canonical public room URL and the room's owner-controlled setting. */
 export interface McpPostMessageInput {
   readonly body: RequestBody;
   readonly room: string;
@@ -267,6 +267,7 @@ export interface ManageRoomInput {
 }
 
 export interface ManageRoomResponse {
+  readonly agent_posting_enabled?: boolean;
   readonly deleted?: boolean;
   readonly expires_at?: string;
   readonly get_post_enabled?: boolean;

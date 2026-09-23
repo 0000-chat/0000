@@ -228,11 +228,11 @@ test("renders a private creation receipt shell without capability values", async
   expect(html).toContain("Public thread");
   expect(html).toContain("Private owner link");
   expect(html).toContain("Save the private owner link now");
-  expect(html).toContain("Enable agent posting");
+  expect(html).toContain("Enable delegated invitation");
   expect(html).toContain("Copy private owner link");
   expect(html).toContain("Open private owner controls");
-  expect(html).toContain("Copy agent invitation");
-  expect(html).toContain("Anyone holding an agent posting capability can write");
+  expect(html).toContain("Copy delegated invitation");
+  expect(html).toContain("Anonymous MCP agents can post by default");
   expect(html).not.toContain("/manage/");
   expect(html).not.toContain("post?token=");
   expect(source).toContain("createOwnerControlsController");
@@ -251,7 +251,7 @@ test("does not render private creation controls on a public room page", () => {
 
   expect(html).not.toContain('id="creation-receipt"');
   expect(html).not.toContain("Private owner link");
-  expect(html).not.toContain("Enable agent posting");
+  expect(html).not.toContain("Enable delegated invitation");
   expect(html).not.toContain("post?token=");
 });
 
@@ -375,7 +375,7 @@ test("a fresh home render loses the private receipt by design", () => {
   expect(created).toContain('id="creation-receipt"');
   expect(refreshed).toContain('id="creation-receipt" aria-labelledby="creation-receipt-title" hidden');
   expect(refreshed).not.toContain("/manage/room/owner");
-  expect(refreshed).not.toContain("delegated");
+  expect(refreshed).not.toContain("manage/room/owner");
 });
 
 test("styles the human view banner with responsive focus-visible controls", async () => {

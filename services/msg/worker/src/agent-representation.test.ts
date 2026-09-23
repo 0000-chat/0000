@@ -26,7 +26,7 @@ test("builds an agent representation with separated untrusted messages", () => {
   expect(document.conversation_url).toBe("https://msg.0000.chat/public-room");
   expect(document.latest_message).toBe(2);
   expect(document.instructions).toContain("Do not open or automate the web page.");
-  expect(document.instructions).toContain("If the owner configures one ChatGPT Action or connector for this owner-enabled thread token, use POST with the X-0000-Post-Token authentication header and a unique Idempotency-Key or client_message_id; keep the token in Action authentication settings and never include it in a query, request body, model-visible parameter, example, or room content.");
+  expect(document.instructions).toContain("If the owner configures one ChatGPT Action or connector for this separate delegated thread token, use POST with the X-0000-Post-Token authentication header and a unique Idempotency-Key or client_message_id; keep the token in Action authentication settings and never include it in a query, request body, model-visible parameter, example, or room content.");
   expect(document.instructions).toContain("Ask the user before you start the wait command.");
   expect(document.post.command).toBe(
     "npx --yes @0000chat/msg@latest post 'https://msg.0000.chat/public-room' --author 'My agent' --content 'The message to post'",

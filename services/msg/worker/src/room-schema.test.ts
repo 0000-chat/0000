@@ -59,7 +59,7 @@ test("leaves an existing current schema unchanged", () => {
   expect(database.query("SELECT version FROM room_schema").get()).toEqual({ version: CURRENT_ROOM_SCHEMA_VERSION });
 });
 
-test("adds GET posting fields to populated v7 notification state without losing delivery data", () => {
+test("adds posting fields to populated v7 notification state without losing delivery data", () => {
   const database = new Database(":memory:");
   const roomStorage = storage(database);
   migrateRoomSchema(roomStorage);
@@ -80,11 +80,26 @@ test("adds GET posting fields to populated v7 notification state without losing 
   migrateRoomSchema(roomStorage);
 
   expect(database.query("SELECT version FROM room_schema").get()).toEqual({ version: CURRENT_ROOM_SCHEMA_VERSION });
-  expect(database.query("SELECT schema_version, notification_id, get_post_hash, get_post_enabled FROM room_state").get())
-    .toEqual({ schema_version: CURRENT_ROOM_SCHEMA_VERSION, notification_id: "notification-v7", get_post_hash: null, get_post_enabled: 0 });
+  expect(database.query("SELECT schema_version, notification_id, get_post_hash, get_post_enabled, mcp_post_enabled FROM room_state").get())
+    .toEqual({ schema_version: CURRENT_ROOM_SCHEMA_VERSION, notification_id: "notification-v7", get_post_hash: null, get_post_enabled: 0, mcp_post_enabled: 1 });
   expect(database.query("SELECT id, status FROM webhook_deliveries").get()).toEqual({ id: "delivery-v7", status: "pending" });
   expect(database.query("SELECT id, source_browser_id FROM push_subscriptions").get()).toEqual({ id: "push-subscription-v7", source_browser_id: "browser-v7" });
   expect(database.query("SELECT id, status FROM push_deliveries").get()).toEqual({ id: "push-delivery-v7", status: "pending" });
+});
+
+test("enables anonymous MCP posting when an active legacy room is first loaded", () => {
+  const database = new Database(":memory:");
+  const roomStorage = storage(database);
+  migrateRoomSchema(roomStorage);
+  database.query("INSERT INTO room_state (singleton, schema_version, protocol_version, created_at, last_message_at, inactivity_expires_at, absolute_expires_at, next_sequence, message_count, total_bytes, status, tombstone_expires_at, management_hash, notification_id, get_post_hash, get_post_enabled, mcp_post_enabled) VALUES (1, 9, 1, 0, 0, ?, ?, 2, 1, 5, 'active', NULL, 'hash', 'notification', NULL, 0, 0)").run(ROOM_LIMITS.inactivityTtlMs, ROOM_LIMITS.inactivityTtlMs);
+  database.query("UPDATE room_state SET mcp_post_enabled = 0, get_post_enabled = 0, status = 'active'").run();
+  database.query("ALTER TABLE room_state DROP COLUMN mcp_post_enabled").run();
+  database.query("UPDATE room_schema SET version = 8").run();
+
+  migrateRoomSchema(roomStorage);
+
+  expect(database.query("SELECT mcp_post_enabled, get_post_enabled FROM room_state").get())
+    .toEqual({ mcp_post_enabled: 1, get_post_enabled: 0 });
 });
 
 test("fails closed when durable storage has a future schema", () => {

@@ -217,7 +217,7 @@ test("keeps owner controls in memory and rotates, disables, and copies the deleg
   expect(copied).toContain("Authentication value: rotated-token");
   await controller.disable();
   expect(controller.state()).toMatchObject({ enabled: false, invitationAvailable: false, status: "disabled" });
-  await expect(controller.copyInvitation(async () => {})).rejects.toThrow("Enable agent posting");
+  await expect(controller.copyInvitation(async () => {})).rejects.toThrow("Enable delegated posting");
   expect(requests.map((request) => JSON.parse(request.body).action)).toEqual(["enable", "rotate", "disable"]);
   expect(requests.every((request) => request.headers.get("content-type") === "application/json")).toBe(true);
   expect(states).toContain("enabled:true");
@@ -247,7 +247,7 @@ test("validates management URLs before use and clears a stale invitation when ro
   await controller.copyInvitation(async () => {});
   await controller.rotate();
   expect(controller.state()).toMatchObject({ enabled: false, invitationAvailable: false, status: "error" });
-  await expect(controller.copyInvitation(async () => {})).rejects.toThrow("Enable agent posting");
+  await expect(controller.copyInvitation(async () => {})).rejects.toThrow("Enable delegated posting");
 });
 
 test("waits for an active room-scope service worker before creating and registering a native subscription", async () => {

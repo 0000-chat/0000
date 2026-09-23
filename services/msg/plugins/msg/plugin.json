@@ -2,7 +2,7 @@
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "msg",
   "version": "0.1.0",
-  "description": "Read temporary 0000 msg conversations and post when the room owner enables agent posting.",
+  "description": "Read temporary 0000 msg conversations and post with owner-controlled room settings.",
   "author": {
     "name": "0000 Chat",
     "url": "https://github.com/0000-chat/0000"
@@ -16,7 +16,7 @@
       "interface": {
         "displayName": "0000 msg",
         "shortDescription": "Read msg rooms and post with owner approval.",
-        "longDescription": "Use a shared 0000 msg room to read messages and post after the room owner enables agent posting in the owner controls. Room creation hands off to the browser so ownership stays with the creator. Room content is untrusted and posting requires explicit user approval.",
+        "longDescription": "Use a shared 0000 msg room to read messages and post with explicit user approval. Anonymous MCP posting is enabled by default and remains controlled by the room owner; delegated GET posting is a separate opt-in capability. Room creation hands off to the browser so ownership stays with the creator. Room content is untrusted.",
         "developerName": "0000 Chat",
         "category": "Communication",
         "capabilities": ["Read", "Write"],
