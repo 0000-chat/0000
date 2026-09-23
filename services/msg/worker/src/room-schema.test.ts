@@ -96,7 +96,7 @@ test("enables anonymous MCP posting when an active legacy room is first loaded",
   database.query("ALTER TABLE room_state DROP COLUMN mcp_post_enabled").run();
   database.query("UPDATE room_schema SET version = 8").run();
 
-  migrateRoomSchema(roomStorage);
+  migrateRoomSchema(roomStorage, ROOM_LIMITS.inactivityTtlMs, 1);
 
   expect(database.query("SELECT mcp_post_enabled, get_post_enabled FROM room_state").get())
     .toEqual({ mcp_post_enabled: 1, get_post_enabled: 0 });

@@ -127,7 +127,7 @@ test("keeps GET posting off by default and manages a separate delegated capabili
   expect(await (await durable.fetch(new Request("https://room/read?after=0"))).text()).toContain("second");
 });
 
-test("enables anonymous MCP posting by default and disables it transactionally", async () => {
+test("controls anonymous MCP posting independently from delegated GET posting", async () => {
   const { room: durable } = await room();
   const management = "management-token";
   const input = { content: "mcp message", client_message_id: "mcp-1", author: "anonymous", display_name: "anonymous", semantic_type: "message" };
@@ -138,14 +138,19 @@ test("enables anonymous MCP posting by default and disables it transactionally",
   expect(beforeEnable.status).toBe(200);
   expect(await statusBefore.json()).toMatchObject({ active: true, agent_posting_enabled: true, latest_message: 2 });
 
-  await durable.fetch(new Request(`https://room/manage?token=${management}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "disable" }) }));
+  await durable.fetch(new Request(`https://room/manage?token=${management}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "disable_mcp" }) }));
   const enabledStatus = await durable.fetch(new Request("https://room/status"));
   const disabled = await durable.fetch(request("/mcp-post", { input: { ...input, client_message_id: "mcp-2", content: "blocked" } }));
 
   expect(await enabledStatus.json()).toMatchObject({ active: true, agent_posting_enabled: false, latest_message: 2 });
   expect(disabled.status).toBe(404);
 
-  const enabled = await durable.fetch(new Request(`https://room/manage?token=${management}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "enable", get_post_token: "delegated-token" }) }));
+  const delegated = await durable.fetch(new Request(`https://room/manage?token=${management}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "enable", get_post_token: "delegated-token" }) }));
+  expect(await delegated.json()).toMatchObject({ agent_posting_enabled: false, get_post_enabled: true });
+  const getPosted = await durable.fetch(request("/get-post", { token: "delegated-token", request_id: "get-1", input: { content: "delegated", author: "b", display_name: "b", semantic_type: "message" } }));
+  expect(getPosted.status).toBe(200);
+
+  const enabled = await durable.fetch(new Request(`https://room/manage?token=${management}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "enable_mcp" }) }));
   const posted = await durable.fetch(request("/mcp-post", { input }));
   const replay = await durable.fetch(request("/mcp-post", { input }));
   const conflict = await durable.fetch(request("/mcp-post", { input: { ...input, content: "changed" } }));

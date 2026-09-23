@@ -118,7 +118,7 @@ export class DurableRoomService implements RoomService {
     if (!input.action) {
       return responseJson(await this.room(input.room).fetch(new Request(`https://room/manage?token=${encodeURIComponent(input.token)}`, { method: input.method }))) as unknown as ManageRoomResponse;
     }
-    const delegatedToken = input.action === "disable" ? undefined : randomCapability(this.random);
+    const delegatedToken = input.action === "enable" || input.action === "rotate" ? randomCapability(this.random) : undefined;
     const value = await responseJson(await this.room(input.room).fetch(jsonRequest(`/manage?token=${encodeURIComponent(input.token)}`, {
       action: input.action,
       ...(delegatedToken ? { get_post_token: delegatedToken } : {}),

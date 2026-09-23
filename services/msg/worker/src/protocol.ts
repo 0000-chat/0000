@@ -260,7 +260,7 @@ export interface GetPostProbeResponse {
 }
 
 export interface ManageRoomInput {
-  readonly action?: "disable" | "enable" | "rotate";
+  readonly action?: "disable" | "enable" | "rotate" | "disable_mcp" | "enable_mcp";
   readonly method: "DELETE" | "GET" | "POST";
   readonly room: string;
   readonly token: string;

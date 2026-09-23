@@ -176,7 +176,7 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
     this.limits = resolveRoomLimits(env);
     this.now = now ?? (() => this.testNowOverride ?? resolveNow(env));
     this.signWebhook = signWebhook;
-    migrateRoomSchema(this.ctx.storage, this.limits.inactivityTtlMs);
+    migrateRoomSchema(this.ctx.storage, this.limits.inactivityTtlMs, this.now());
   }
 
   async fetch(request: Request): Promise<Response> {
@@ -495,11 +495,12 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
       await this.schedule();
       return this.json({ protocol_version: PROTOCOL_VERSION, deleted: true, expires_at: iso(deleted.tombstone_expires_at!) });
     }
+    const active = state.status === "active" && this.now() < state.inactivity_expires_at;
     return this.json({
       protocol_version: PROTOCOL_VERSION,
       expires_at: iso(state.inactivity_expires_at),
-      agent_posting_enabled: state.mcp_post_enabled === 1,
-      get_post_enabled: state.get_post_enabled === 1,
+      agent_posting_enabled: active && state.mcp_post_enabled === 1,
+      get_post_enabled: active && state.get_post_enabled === 1,
     });
   }
 
@@ -507,11 +508,12 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
     const url = new URL(request.url);
     const token = url.searchParams.get("token") ?? "";
     const input = await request.json() as { action?: unknown; get_post_token?: unknown };
-    if (input.action !== "enable" && input.action !== "disable" && input.action !== "rotate") {
-      throw new ProtocolError(ERROR_CODES.invalidBody, "The management action must be enable, disable, or rotate.", 400);
+    if (input.action !== "enable" && input.action !== "disable" && input.action !== "rotate" && input.action !== "enable_mcp" && input.action !== "disable_mcp") {
+      throw new ProtocolError(ERROR_CODES.invalidBody, "The management action is invalid.", 400);
     }
-    const delegatedToken = input.action === "disable" ? undefined : input.get_post_token;
-    if (input.action !== "disable" && (typeof delegatedToken !== "string" || !delegatedToken)) {
+    const delegatedAction = input.action === "enable" || input.action === "rotate";
+    const delegatedToken = delegatedAction ? input.get_post_token : undefined;
+    if (delegatedAction && (typeof delegatedToken !== "string" || !delegatedToken)) {
       throw new ProtocolError(ERROR_CODES.invalidBody, "The delegated posting capability is required.", 400);
     }
     const managementHash = await hashToken(token);
@@ -525,9 +527,11 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
       }
       if (state.status !== "active" || now >= state.inactivity_expires_at) return { expired: true as const };
       if (input.action === "disable") {
-        this.ctx.storage.sql.exec("UPDATE room_state SET mcp_post_enabled = 0, get_post_hash = NULL, get_post_enabled = 0 WHERE singleton = 1");
+        this.ctx.storage.sql.exec("UPDATE room_state SET get_post_hash = NULL, get_post_enabled = 0 WHERE singleton = 1");
+      } else if (delegatedAction) {
+        this.ctx.storage.sql.exec("UPDATE room_state SET get_post_hash = ?, get_post_enabled = 1 WHERE singleton = 1", delegatedHash);
       } else {
-        this.ctx.storage.sql.exec("UPDATE room_state SET mcp_post_enabled = 1, get_post_hash = ?, get_post_enabled = 1 WHERE singleton = 1", delegatedHash);
+        this.ctx.storage.sql.exec("UPDATE room_state SET mcp_post_enabled = ? WHERE singleton = 1", input.action === "enable_mcp" ? 1 : 0);
       }
       return { expired: false as const, state: this.requireState() };
     });

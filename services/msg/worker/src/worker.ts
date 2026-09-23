@@ -638,7 +638,7 @@ function rejectGetPostPrefetch(request: Request): void {
   }
 }
 
-async function parseManagementAction(request: Request): Promise<"disable" | "enable" | "rotate"> {
+async function parseManagementAction(request: Request): Promise<"disable" | "enable" | "rotate" | "disable_mcp" | "enable_mcp"> {
   const body = await parseRequestBody(request, { maxBytes: 512 });
   let action: unknown;
   if (body.kind === "json") {
@@ -658,8 +658,8 @@ async function parseManagementAction(request: Request): Promise<"disable" | "ena
     }
     action = values.get("action");
   }
-  if (action !== "enable" && action !== "disable" && action !== "rotate") {
-    throw new ProtocolError(ERROR_CODES.invalidBody, "The management action must be enable, disable, or rotate.", 400);
+  if (action !== "enable" && action !== "disable" && action !== "rotate" && action !== "enable_mcp" && action !== "disable_mcp") {
+    throw new ProtocolError(ERROR_CODES.invalidBody, "The management action is invalid.", 400);
   }
   return action;
 }
@@ -899,7 +899,7 @@ function manageResponse(result: ManageRoomResponse, method: "DELETE" | "GET" | "
   const agentEnabled = result.agent_posting_enabled === true;
   const delegatedEnabled = result.get_post_enabled === true;
   const delegated = result.get_post_url ? `<section><h2>GET posting capability</h2><p>${escapeHtml(result.get_post_url_warning ?? "Treat this URL as a secret write capability.")}</p><pre>${escapeHtml(result.get_post_url)}</pre></section>` : "";
-  const controls = `<section><h2>Agent posting</h2><p>Anonymous MCP posting: ${agentEnabled ? "enabled" : "disabled"}. Delegated GET posting: ${delegatedEnabled ? "enabled" : "disabled"}.</p><form method="post" action="${escapeHtml(url.toString())}"><button name="action" value="enable" type="submit">Enable delegated invitation</button> <button name="action" value="rotate" type="submit">Rotate delegated invitation</button> <button name="action" value="disable" type="submit">Disable agent posting</button></form><p>Anonymous MCP clients use the public room URL. The delegated capability supports POST from a configured ChatGPT Action or connector and GET for fetch-only agents. Keep delegated URLs secret; use Idempotency-Key or client_message_id for safe retries.</p></section>`;
+  const controls = `<section><h2>Anonymous MCP posting</h2><p>Status: ${agentEnabled ? "enabled" : "disabled"}.</p><form method="post" action="${escapeHtml(url.toString())}"><button name="action" value="enable_mcp" type="submit">Enable anonymous MCP posting</button> <button name="action" value="disable_mcp" type="submit">Disable anonymous MCP posting</button></form><p>MCP clients use the canonical public room URL. This setting is independent from the delegated capability below.</p></section><section><h2>Delegated GET posting</h2><p>Status: ${delegatedEnabled ? "enabled" : "disabled"}.</p><form method="post" action="${escapeHtml(url.toString())}"><button name="action" value="enable" type="submit">Enable delegated invitation</button> <button name="action" value="rotate" type="submit">Rotate delegated invitation</button> <button name="action" value="disable" type="submit">Disable delegated invitation</button></form><p>The delegated capability supports POST from a configured ChatGPT Action or connector and GET for fetch-only agents. Keep delegated URLs secret; use Idempotency-Key or client_message_id for safe retries.</p></section>`;
   const body = method === "POST" && result.get_post_url
     ? `${delegated}${controls}`
     : controls;
