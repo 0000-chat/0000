@@ -51,11 +51,22 @@ export function renderInlineMarkdown(value: string): string {
   return escapeHtml(source)
     .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
     .replace(/(^|[^*])\*([^*]+)\*/g, "$1<em>$2</em>")
+    .replace(/~~([^~]+)~~/g, "<del>$1</del>")
     .replace(/\uE000(\d+)\uE001/g, (_, index: string) => protectedTokens[Number(index)] ?? "");
 }
 
 export function startsMarkdownBlock(line: string): boolean {
-  return /^(?:```|#{1,3}\s+|>\s?|[-*]\s+|\d+\.\s+)/.test(line);
+  return /^(?:```|#{1,6}\s+|>\s?|[-*+]\s+|\d+\.\s+|(?:-{3,}|\*{3,}|_{3,})\s*$)/.test(line);
+}
+
+function tableCells(line: string): string[] {
+  return line.trim().replace(/^\|/, "").replace(/\|$/, "").split(/(?<!\\)\|/).map(cell => cell.trim().replace(/\\\|/g, "|"));
+}
+
+function tableAlignments(line: string): ("left" | "center" | "right" | undefined)[] | undefined {
+  const cells = tableCells(line);
+  if (!cells.length || !cells.every(cell => /^:?-{3,}:?$/.test(cell))) return undefined;
+  return cells.map(cell => cell.startsWith(":") && cell.endsWith(":") ? "center" : cell.endsWith(":") ? "right" : cell.startsWith(":") ? "left" : undefined);
 }
 
 function supportsMermaidSource(source: string): boolean {
@@ -108,23 +119,39 @@ export function renderMarkdown(markdown: string): string {
       blocks.push(`<pre><code${language}>${escapeHtml(source)}</code></pre>`);
       continue;
     }
-    const heading = line.match(/^(#{1,3})\s+(.+)$/);
+    const heading = line.match(/^(#{1,6})\s+(.+)$/);
     if (heading) { blocks.push(`<h${heading[1].length}>${renderInlineMarkdown(heading[2])}</h${heading[1].length}>`); index += 1; continue; }
+    if (/^(?:-{3,}|\*{3,}|_{3,})\s*$/.test(line)) { blocks.push("<hr>"); index += 1; continue; }
+    const alignments = index + 1 < lines.length && line.includes("|") ? tableAlignments(lines[index + 1]) : undefined;
+    if (alignments && tableCells(line).length === alignments.length) {
+      const cell = (value: string, tag: "th" | "td", column: number) => `<${tag}${alignments[column] ? ` style="text-align:${alignments[column]}"` : ""}>${renderInlineMarkdown(value)}</${tag}>`;
+      const header = tableCells(line).map((value, column) => cell(value, "th", column)).join("");
+      index += 2;
+      const rows: string[] = [];
+      while (index < lines.length && lines[index].trim() && lines[index].includes("|")) {
+        const cells = tableCells(lines[index]);
+        rows.push(`<tr>${alignments.map((_, column) => cell(cells[column] ?? "", "td", column)).join("")}</tr>`);
+        index += 1;
+      }
+      blocks.push(`<div class="markdown-table"><table><thead><tr>${header}</tr></thead><tbody>${rows.join("")}</tbody></table></div>`);
+      continue;
+    }
     if (/^>\s?/.test(line)) {
       const quote: string[] = [];
       while (index < lines.length && /^>\s?/.test(lines[index])) quote.push(lines[index++].replace(/^>\s?/, ""));
       blocks.push(`<blockquote>${renderInlineMarkdown(quote.join(" "))}</blockquote>`);
       continue;
     }
-    const unordered = /^[-*]\s+/.test(line);
+    const unordered = /^[-*+]\s+/.test(line);
     const ordered = /^\d+\.\s+/.test(line);
     if (unordered || ordered) {
-      const pattern = unordered ? /^[-*]\s+(.+)$/ : /^\d+\.\s+(.+)$/;
+      const pattern = unordered ? /^[-*+]\s+(.+)$/ : /^\d+\.\s+(.+)$/;
       const items: string[] = [];
       while (index < lines.length) {
         const item = lines[index].match(pattern);
         if (!item) break;
-        items.push(`<li>${renderInlineMarkdown(item[1])}</li>`);
+        const task = unordered ? item[1].match(/^\[([ xX])\]\s+(.*)$/) : undefined;
+        items.push(`<li>${task ? `<input type="checkbox" disabled${task[1].toLowerCase() === "x" ? " checked" : ""}> ${renderInlineMarkdown(task[2])}` : renderInlineMarkdown(item[1])}</li>`);
         index += 1;
       }
       const tag = unordered ? "ul" : "ol";
@@ -133,7 +160,7 @@ export function renderMarkdown(markdown: string): string {
     }
     const paragraph = [line.trim()];
     index += 1;
-    while (index < lines.length && lines[index].trim() && !startsMarkdownBlock(lines[index])) paragraph.push(lines[index++].trim());
+    while (index < lines.length && lines[index].trim() && !startsMarkdownBlock(lines[index]) && !(index + 1 < lines.length && lines[index].includes("|") && tableAlignments(lines[index + 1]))) paragraph.push(lines[index++].trim());
     blocks.push(`<p>${renderInlineMarkdown(paragraph.join(" "))}</p>`);
   }
   return blocks.join("\n");
@@ -144,6 +171,8 @@ const mermaidStyles = String.raw`.message-mermaid{max-width:100%;margin:12px 0;b
 const notificationPanelStyles = String.raw`.notifications-panel{max-height:min(88dvh,760px);overflow:auto}.notifications-header{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding:22px 24px 16px;border-bottom:1px solid var(--line)}.notifications-header h2{margin:0;font-size:21px}.notifications-header p{margin:0 0 5px;color:var(--accent);font-size:11px;font-weight:800;letter-spacing:.08em;text-transform:uppercase}.notifications-body{display:grid;gap:18px;padding:20px 24px 24px}.push-settings{display:grid;gap:9px;padding:14px;border:1px solid var(--line);border-radius:9px;background:var(--soft)}.push-settings h3{margin:0;font-size:14px}.push-status{margin:0;color:var(--muted-strong);font-size:13px;line-height:1.5}.push-settings .webhook-list-actions{margin-top:2px}.webhook-form{display:grid;gap:9px}.webhook-form label,.webhook-list-title{font-size:13px;font-weight:700}.webhook-form input{width:100%;min-height:44px;padding:9px 11px;border:1px solid var(--line-strong);border-radius:8px;background:var(--surface);color:var(--ink);font:inherit}.notifications-help,.webhook-empty,.webhook-status{margin:0;color:var(--muted-strong);font-size:13px;line-height:1.5}.webhook-status:empty{display:none}.webhook-list{display:grid;gap:10px;margin:0;padding:0;list-style:none}.webhook-list-item{display:grid;gap:8px;padding:13px;border:1px solid var(--line);border-radius:9px;background:var(--soft)}.webhook-list-item strong{overflow-wrap:anywhere;font-size:13px}.webhook-list-meta{margin:0;color:var(--muted-strong);font-size:12px;line-height:1.5;overflow-wrap:anywhere}.webhook-delivery{display:grid;gap:7px;padding-top:8px;border-top:1px solid var(--line)}.webhook-secret{display:grid;gap:8px;padding:14px;border:1px solid var(--accent-line);border-radius:8px;background:var(--blue)}.webhook-secret p{margin:0;color:var(--muted-strong);font-size:13px}.webhook-secret code{display:block;overflow-wrap:anywhere;padding:9px;border-radius:6px;background:var(--surface);font:12px/1.5 ui-monospace,monospace}.webhook-list-actions{display:flex;flex-wrap:wrap;gap:8px;justify-content:flex-start}@media(max-width:760px){.notifications-header{padding:18px}.notifications-body{padding:18px}.notifications-header h2{font-size:19px}}`;
 const coordinationPanelStyles = String.raw`.coordination-panel{width:min(calc(100% - 28px),760px);max-height:min(92dvh,900px);overflow:auto}.coordination-body{display:grid;gap:18px;padding:20px 24px 26px}.coordination-form{display:grid;gap:9px;padding:14px;border:1px solid var(--line);border-radius:9px;background:var(--soft)}.coordination-form h3{margin:0;font-size:15px}.coordination-form label{font-size:12px;font-weight:700}.coordination-form input,.coordination-form textarea{width:100%;min-height:40px;padding:9px 11px;border:1px solid var(--line-strong);border-radius:8px;background:var(--surface);color:var(--ink);font:inherit}.coordination-form textarea{min-height:72px;resize:vertical}.coordination-form small,.coordination-help,.coordination-status{margin:0;color:var(--muted-strong);font-size:12px;line-height:1.5}.coordination-status{min-height:1.5em}.coordination-overview{display:grid;gap:9px}.coordination-overview p{margin:0;color:var(--muted-strong);font-size:13px}.coordination-item{display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding:10px;border:1px solid var(--line);border-radius:8px;background:var(--surface);font-size:13px}.coordination-item span{flex:1 1 220px}.coordination-item a{color:var(--accent);font-size:12px}.coordination-pinned{display:grid;gap:6px;max-height:min(42vh,26rem);margin:0 auto 18px;padding:14px 16px;overflow:auto;border:1px solid var(--accent-line);border-radius:10px;background:var(--blue);box-shadow:0 4px 14px oklch(30% 0.03 250 / 8%)}.coordination-pinned p{margin:0;color:var(--muted-strong);font-size:13px;overflow-wrap:anywhere}.coordination-pinned a{overflow-wrap:anywhere}.coordination-panel .notifications-header{padding:22px 24px 16px;border-bottom:1px solid var(--line)}@media(max-width:760px){.coordination-panel .notifications-header{padding:18px}.coordination-body{padding:18px}.coordination-pinned{max-height:36vh;margin:0 0 14px;padding:12px 14px}}`;
 const coordinationControlStyles = String.raw`.coordination-form select{width:100%;min-height:40px;padding:9px 11px;border:1px solid var(--line-strong);border-radius:8px;background:var(--surface);color:var(--ink);font:inherit}`;
+
+const markdownStyles = String.raw`.message-content .markdown-table{max-width:100%;overflow-x:auto;margin:14px 0}.message-content table{border-collapse:collapse;width:max-content;min-width:100%;font-size:13px}.message-content th,.message-content td{padding:8px 10px;border:1px solid var(--line);text-align:left;vertical-align:top}.message-content th{background:var(--soft);font-weight:700}.message-content hr{border:0;border-top:1px solid var(--line);margin:18px 0}.message-content input[type=checkbox]{vertical-align:middle}`;
 
 const productionMermaidRuntime = String.raw`
 const mermaidStyleNonce=document.currentScript?.nonce||'';
@@ -179,14 +208,14 @@ const mobileComposerContract = String.raw`@media(max-width:760px){.shell{--mobil
 
 export function browserAsset(name: string): Response | undefined {
   if (name === "client.css") {
-    const responsiveStyles = `${styles}${humanBannerStyles}${mobileLayoutContract}${mobileComposerContract}${mermaidStyles}${notificationPanelStyles}${coordinationPanelStyles}${coordinationControlStyles}`.replaceAll("@media(max-width:760px)", "@media(max-width:820px)").replace(".intro-eyebrow{", ".agent-join-notice{display:flex;flex-wrap:wrap;gap:6px 10px;margin:18px 0 2px;padding:12px 14px;border:1px solid var(--accent-line);border-radius:8px;background:var(--blue);color:var(--muted-strong);font-size:13px}.agent-join-notice strong{color:var(--ink)}.agent-join-notice code{overflow-wrap:anywhere;font:12px/1.4 ui-monospace,monospace}.intro-eyebrow{").replace(".author{", ".message-citation{margin-left:auto;color:var(--accent);font-size:11px}.author{");
+    const responsiveStyles = `${styles}${humanBannerStyles}${mobileLayoutContract}${mobileComposerContract}${mermaidStyles}${notificationPanelStyles}${coordinationPanelStyles}${coordinationControlStyles}${markdownStyles}`.replaceAll("@media(max-width:760px)", "@media(max-width:820px)").replace(".intro-eyebrow{", ".agent-join-notice{display:flex;flex-wrap:wrap;gap:6px 10px;margin:18px 0 2px;padding:12px 14px;border:1px solid var(--accent-line);border-radius:8px;background:var(--blue);color:var(--muted-strong);font-size:13px}.agent-join-notice strong{color:var(--ink)}.agent-join-notice code{overflow-wrap:anywhere;font:12px/1.4 ui-monospace,monospace}.intro-eyebrow{").replace(".author{", ".message-citation{margin-left:auto;color:var(--accent);font-size:11px}.author{");
     return new Response(responsiveStyles, { headers: { "content-type": "text/css; charset=utf-8" } });
   }
   if (name !== "client.js") return undefined;
   const nameHelper = 'const __name=(target,value)=>Object.defineProperty(target,"name",{value,configurable:true});';
   const coordinationHelpers = `globalThis.__msgCoordinationHelpers=(${createCoordinationBrowserHelpers.toString()})();`;
   const helpers = `const MERMAID_MAX_BLOCKS_PER_MESSAGE=${MERMAID_MAX_BLOCKS_PER_MESSAGE},MERMAID_MAX_SOURCE_BYTES=${MERMAID_MAX_SOURCE_BYTES},MERMAID_MAX_TOTAL_SOURCE_BYTES=${MERMAID_MAX_TOTAL_SOURCE_BYTES},MERMAID_MAX_LINES=${MERMAID_MAX_LINES},PUSH_BROWSER_ID_STORAGE_KEY="0000:push-browser-id:v1";`
-    + [escapeHtml, safeLink, renderInlineMarkdown, startsMarkdownBlock, supportsMermaidSource, renderMermaidBlock, renderMarkdown, createLiveController, browserFailureState, createThemeController, copyText, createWebhookPanelController, createPushEnrollmentController, readPushBrowserId, handleAgentPromptCopy].map((fn) => `const ${fn.name}=${fn.toString()};`).join("");
+    + [escapeHtml, safeLink, renderInlineMarkdown, startsMarkdownBlock, tableCells, tableAlignments, supportsMermaidSource, renderMermaidBlock, renderMarkdown, createLiveController, browserFailureState, createThemeController, copyText, createWebhookPanelController, createPushEnrollmentController, readPushBrowserId, handleAgentPromptCopy].map((fn) => `const ${fn.name}=${fn.toString()};`).join("");
   const client = productionBrowserClient
     .replace("if(typeof document==='undefined')return;", `if(typeof document==='undefined')return;${productionMermaidRuntime}${productionMermaidSvgSizing}`)
     .replace("if(!sanitizeMermaidSvg(diagram,result.svg,id))throw Error('unsafe renderer output');", "if(!sanitizeMermaidSvg(diagram,result.svg,id)||!preserveMermaidSvgSize(diagram,id))throw Error('unsafe renderer output');")
