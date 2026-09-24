@@ -33,6 +33,21 @@ test("renders eligible closed Mermaid fences with escaped source and preserves s
   expect(html.match(/class="message-mermaid-error" role="status" hidden/g)).toHaveLength(2);
 });
 
+test("renders tables and common Markdown blocks alongside Mermaid", () => {
+  const markdown = "#### Details\n\n| Name | Count |\n| :--- | ---: |\n| <script> | **2** |\n\n---\n\n- [x] Done\n- [ ] Pending\n\n~~old~~\n\n```mermaid\nflowchart LR\n A --> B\n```";
+  const html = renderMarkdown(markdown);
+
+  expect(html).toContain("<h4>Details</h4>");
+  expect(html).toContain('<table><thead><tr><th style="text-align:left">Name</th><th style="text-align:right">Count</th></tr></thead>');
+  expect(html).toContain('<td style="text-align:left">&lt;script&gt;</td>');
+  expect(html).toContain('<td style="text-align:right"><strong>2</strong></td>');
+  expect(html).toContain("<hr>");
+  expect(html).toContain('<input type="checkbox" disabled checked> Done');
+  expect(html).toContain('<input type="checkbox" disabled> Pending');
+  expect(html).toContain("<del>old</del>");
+  expect(html).toContain('data-mermaid-block="true"');
+});
+
 test("allows attribute-free br label breaks while rejecting other HTML", () => {
   const htmlFor = (source: string) => renderMarkdown(["```mermaid", source, "```"].join("\n"));
   const supportedSources = [
@@ -335,6 +350,9 @@ test("uses the same Markdown renderer in the served browser runtime", async () =
   const markdown = "# Report\n\n> **Safe** [link](https://example.com)\n\n```ts\nconst x = '<tag>'\n```\n\n1. One\n2. *Two*\n\n[bad](javascript:alert(1))";
 
   expect(runtime.renderMarkdown(markdown)).toBe(renderMarkdown(markdown));
+  const table = "| Label | Value |\n| --- | ---: |\n| <unsafe> | ~~old~~ |";
+  expect(runtime.renderMarkdown(table)).toBe(renderMarkdown(table));
+  expect(runtime.renderMarkdown(table)).toContain("<table>");
 });
 
 test("runs when the Worker bundler adds function name helpers", async () => {
