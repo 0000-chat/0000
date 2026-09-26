@@ -1,7 +1,7 @@
 import { ROOM_LIMITS } from "./room-domain";
 import { WEBHOOK_RETRY_INITIAL_DELAY_MS, WEBHOOK_RETRY_WINDOW_MS } from "./webhook-policy";
 
-export const CURRENT_ROOM_SCHEMA_VERSION = 15;
+export const CURRENT_ROOM_SCHEMA_VERSION = 16;
 
 interface SqlStorage {
   exec(query: string, ...values: unknown[]): Iterable<unknown>;
@@ -456,6 +456,15 @@ function applyMigration(sql: SqlStorage, version: number, inactivityTtlMs: numbe
     if (!columns.has("get_post_hash")) sql.exec("ALTER TABLE room_state ADD COLUMN get_post_hash TEXT");
     if (!columns.has("get_post_enabled")) sql.exec("ALTER TABLE room_state ADD COLUMN get_post_enabled INTEGER NOT NULL DEFAULT 0");
     sql.exec("UPDATE room_state SET schema_version = ? WHERE singleton = 1", CURRENT_ROOM_SCHEMA_VERSION);
+    return;
+  }
+  if (version === 16) {
+    // Version numbers from older deployments do not guarantee that every
+    // coordination table exists. Reapply the idempotent table migrations so
+    // rooms with a higher recorded version recover missing additive schema.
+    for (const compatibilityVersion of [9, 10, 11, 12]) {
+      applyMigration(sql, compatibilityVersion, inactivityTtlMs);
+    }
     return;
   }
   throw new Error("The room schema migration is not defined.");

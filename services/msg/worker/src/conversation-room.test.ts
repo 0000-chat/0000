@@ -440,6 +440,54 @@ test("opens and reads a schema 14 room after restoring removed delegated-posting
   expect(database.query("SELECT get_post_hash, get_post_enabled FROM room_state WHERE singleton = 1").get()).toEqual({ get_post_hash: null, get_post_enabled: 0 });
 });
 
+test("repairs missing coordination tables when a high-version room is read", async () => {
+  const database = new Database(":memory:");
+  const initial = await room(database, () => 1_000);
+  const created = await initial.room.fetch(request("/initialize", {
+    now: 1_000,
+    management_hash: "management-hash",
+    initial: { content: "fixture", author: "agent", display_name: "Agent", semantic_type: "message" },
+  }));
+  expect(created.status).toBe(200);
+
+  const coordinationTables = [
+    "coordination_proposals",
+    "coordination_requests",
+    "coordination_events",
+    "coordination_retries",
+    "coordination_panel",
+    "coordination_decisions",
+    "coordination_decision_positions",
+    "coordination_decision_accepted_records",
+    "coordination_decision_approval_evidence",
+    "coordination_supersessions",
+    "coordination_corrections",
+    "coordination_disputes",
+    "coordination_dispute_reviews",
+  ];
+  for (const table of coordinationTables) database.exec(`DROP TABLE IF EXISTS ${table}`);
+  database.exec("UPDATE room_schema SET version = 15 WHERE singleton = 1; UPDATE room_state SET schema_version = 15 WHERE singleton = 1");
+
+  const restarted = await room(database, () => 2_000);
+  const [{ DurableRoomService }, { createWorker }] = await Promise.all([
+    import("./room-service"),
+    import("./worker"),
+  ]);
+  const service = new DurableRoomService({
+    getByName: () => ({ fetch: (input) => restarted.room.fetch(input) }),
+  }, "https://msg.0000.chat");
+  const response = await createWorker(service).fetch(new Request("https://msg.0000.chat/fixture-room/agent?after=0", {
+    headers: { accept: "application/json" },
+  }));
+
+  expect(response.status).toBe(200);
+  expect(await response.json()).toMatchObject({ latest_message: 1, messages: [{ sequence: 1 }] });
+  expect(database.query("SELECT version FROM room_schema WHERE singleton = 1").get()).toEqual({ version: 16 });
+  const repairedTables = (database.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name GLOB 'coordination_*' ORDER BY name").all() as { name: string }[]).map(({ name }) => name);
+  expect(repairedTables).toEqual(coordinationTables.sort());
+  database.close();
+});
+
 test("does not expose the legacy absolute expiry field in room responses", async () => {
   let now = 1_000;
   const { context, room: durable } = await room(undefined, () => now);
