@@ -103,6 +103,7 @@ test("upgrades an old-source v4 room before applying current v5 migrations", () 
     INSERT INTO room_schema VALUES (1, 4);
     INSERT INTO room_state VALUES (1, 4, 1, 1, 1, 9999999999999, 9999999999999, 2, 1, 1, 'active', NULL, 'hash');
     INSERT INTO messages VALUES (1, 'id', 'x', 'author', 'display', NULL, 'message', NULL, 1, NULL, 1, NULL);
+    INSERT INTO name_claims VALUES ('author', 'old-source-claim-hash', 1);
   `);
 
   migrateRoomSchema(storage(database));
@@ -114,6 +115,8 @@ test("upgrades an old-source v4 room before applying current v5 migrations", () 
     { name: "webhook_endpoints" },
   ]);
   expect(database.query("SELECT id, display_name FROM messages").get()).toEqual({ id: "id", display_name: "display" });
+  expect(database.query("SELECT normalized_name FROM legacy_names ORDER BY normalized_name").all()).toEqual([{ normalized_name: "display" }]);
+  expect(database.query("SELECT normalized_name, password_hash FROM name_claims").all()).toEqual([{ normalized_name: "author", password_hash: "old-source-claim-hash" }]);
 });
 
 test("fails closed when durable storage has a future schema", () => {

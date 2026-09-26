@@ -351,12 +351,15 @@ test("reads a room created by the standalone v4 Worker", async () => {
     INSERT INTO room_state VALUES (1, 4, 1, 1, 1, 9999999999999, 9999999999999, 2, 1, 1, 'active', NULL, 'hash');
     INSERT INTO messages VALUES (1, 'id', 'x', 'author', 'display', NULL, 'message', NULL, 1, NULL, 1, NULL);
   `);
+  database.query("INSERT INTO name_claims (normalized_name, password_hash, created_at) VALUES (?, ?, ?)").run("author", await hashCapability("old-password"), 1);
 
   const { room: durable } = await room(database, () => 1_000);
   const response = await durable.fetch(new Request("https://room/read?after=0"));
 
   expect(response.status).toBe(200);
   expect(await response.json()).toMatchObject({ latest_message: 1, messages: [{ sequence: 1, display_name: "display" }] });
+  const wrongPassword = await durable.fetch(request("/messages", { input: { content: "second", author: "author", display_name: "display", semantic_type: "message", name_password: "wrong-password" } }));
+  expect(wrongPassword.status).toBe(409);
 });
 
 test("does not expose the legacy absolute expiry field in room responses", async () => {
