@@ -384,6 +384,40 @@ test("migrates a capped legacy room before its old alarm can expire it", async (
   expect(restarted.context.alarmAt).toBe(lastMessageAt + ROOM_LIMITS.inactivityTtlMs);
 });
 
+test("reads a room created by the standalone v4 Worker", async () => {
+  const database = new Database(":memory:");
+  database.exec(`
+    CREATE TABLE room_schema (singleton INTEGER PRIMARY KEY CHECK(singleton = 1), version INTEGER NOT NULL);
+    CREATE TABLE room_state (
+      singleton INTEGER PRIMARY KEY CHECK(singleton = 1), schema_version INTEGER NOT NULL,
+      protocol_version INTEGER NOT NULL, created_at INTEGER NOT NULL, last_message_at INTEGER NOT NULL,
+      inactivity_expires_at INTEGER NOT NULL, absolute_expires_at INTEGER NOT NULL,
+      next_sequence INTEGER NOT NULL, message_count INTEGER NOT NULL, total_bytes INTEGER NOT NULL,
+      status TEXT NOT NULL, tombstone_expires_at INTEGER, management_hash TEXT
+    );
+    CREATE TABLE messages (
+      sequence INTEGER PRIMARY KEY, id TEXT NOT NULL UNIQUE, content TEXT NOT NULL, author TEXT NOT NULL,
+      display_name TEXT NOT NULL, client TEXT, semantic_type TEXT NOT NULL, reply_to TEXT,
+      created_at INTEGER NOT NULL, client_message_id TEXT UNIQUE, byte_count INTEGER NOT NULL,
+      idempotency_key TEXT
+    );
+    CREATE TABLE name_claims (normalized_name TEXT PRIMARY KEY, password_hash TEXT NOT NULL, created_at INTEGER NOT NULL);
+    CREATE TABLE legacy_names (normalized_name TEXT PRIMARY KEY);
+    INSERT INTO room_schema VALUES (1, 4);
+    INSERT INTO room_state VALUES (1, 4, 1, 1, 1, 9999999999999, 9999999999999, 2, 1, 1, 'active', NULL, 'hash');
+    INSERT INTO messages VALUES (1, 'id', 'x', 'author', 'display', NULL, 'message', NULL, 1, NULL, 1, NULL);
+  `);
+  database.query("INSERT INTO name_claims (normalized_name, password_hash, created_at) VALUES (?, ?, ?)").run("author", await hashCapability("old-password"), 1);
+
+  const { room: durable } = await room(database, () => 1_000);
+  const response = await durable.fetch(new Request("https://room/read?after=0"));
+
+  expect(response.status).toBe(200);
+  expect(await response.json()).toMatchObject({ latest_message: 1, messages: [{ sequence: 1, display_name: "display" }] });
+  const wrongPassword = await durable.fetch(request("/messages", { input: { content: "second", author: "author", display_name: "display", semantic_type: "message", name_password: "wrong-password" } }));
+  expect(wrongPassword.status).toBe(409);
+});
+
 test("does not expose the legacy absolute expiry field in room responses", async () => {
   let now = 1_000;
   const { context, room: durable } = await room(undefined, () => now);

@@ -71,31 +71,15 @@ function applyMigration(sql: SqlStorage, version: number, inactivityTtlMs: numbe
     return;
   }
   if (version === 4) {
-    const columns = rows<{ name: string }>(sql.exec("PRAGMA table_info(room_state)"));
-    if (!columns.some((column) => column.name === "notification_id")) sql.exec("ALTER TABLE room_state ADD COLUMN notification_id TEXT");
-    const roomsWithoutNotificationId = rows<{ singleton: number }>(sql.exec("SELECT singleton FROM room_state WHERE notification_id IS NULL"));
-    for (const room of roomsWithoutNotificationId) sql.exec("UPDATE room_state SET notification_id = ?, schema_version = ? WHERE singleton = ?", crypto.randomUUID(), CURRENT_ROOM_SCHEMA_VERSION, room.singleton);
-    sql.exec(`
-      CREATE TABLE IF NOT EXISTS webhook_endpoints (
-        id TEXT PRIMARY KEY, url TEXT NOT NULL, secret TEXT NOT NULL,
-        created_at INTEGER NOT NULL, status TEXT NOT NULL CHECK(status = 'active')
-      );
-      CREATE TABLE IF NOT EXISTS webhook_deliveries (
-        id TEXT PRIMARY KEY, endpoint_id TEXT NOT NULL, event_id TEXT NOT NULL,
-        message_id TEXT NOT NULL, message_sequence INTEGER NOT NULL,
-        created_at INTEGER NOT NULL, due_at INTEGER NOT NULL,
-        attempted_at INTEGER, completed_at INTEGER, lease_expires_at INTEGER,
-        status TEXT NOT NULL CHECK(status IN ('pending', 'sending', 'delivered', 'failed')),
-        attempt_count INTEGER NOT NULL, failure_category TEXT
-      );
-      CREATE INDEX IF NOT EXISTS webhook_deliveries_due ON webhook_deliveries(status, due_at, created_at);
-      CREATE INDEX IF NOT EXISTS webhook_deliveries_endpoint ON webhook_deliveries(endpoint_id, created_at DESC);
-      CREATE INDEX IF NOT EXISTS webhook_deliveries_retention ON webhook_deliveries(created_at);
-    `);
-    sql.exec("UPDATE room_state SET schema_version = ? WHERE singleton = 1", CURRENT_ROOM_SCHEMA_VERSION);
+    ensureVersionFourSchema(sql);
     return;
   }
   if (version === 5) {
+    // The old standalone Worker also used room_schema version 4, but its v4
+    // migration created name tables instead of these webhook tables. When a
+    // room crosses into this Worker, bootstrap this Worker's v4 shape before
+    // applying the ordered v5 migration.
+    if (!tableExists(sql, "webhook_endpoints") || !tableExists(sql, "webhook_deliveries")) ensureVersionFourSchema(sql);
     sql.exec("ALTER TABLE webhook_endpoints RENAME TO webhook_endpoints_v4");
     sql.exec(`
       CREATE TABLE webhook_endpoints (
@@ -433,8 +417,9 @@ function applyMigration(sql: SqlStorage, version: number, inactivityTtlMs: numbe
     return;
   }
   if (version === 13) {
-    // Name claims are intentionally not backfilled from messages. Names that
-    // existed before this migration remain unclaimed and unprotected forever.
+    // Name claims are not inferred from messages. Historical names without an
+    // existing claim become legacy, while claims stored by an older Worker
+    // retain their password protection.
     sql.exec(`
       CREATE TABLE IF NOT EXISTS name_claims (
         normalized_name TEXT PRIMARY KEY,
@@ -446,11 +431,12 @@ function applyMigration(sql: SqlStorage, version: number, inactivityTtlMs: numbe
         normalized_name TEXT PRIMARY KEY
       );
     `);
+    const claimedNames = new Set(rows<{ normalized_name: string }>(sql.exec("SELECT normalized_name FROM name_claims")).map(({ normalized_name }) => normalized_name));
     const legacyNames = new Set<string>();
     for (const message of rows<{ author: string; display_name: string }>(sql.exec("SELECT author, display_name FROM messages"))) {
       for (const value of [message.author, message.display_name]) {
         const normalized = normalizeLegacyName(value);
-        if (normalized) legacyNames.add(normalized);
+        if (normalized && !claimedNames.has(normalized)) legacyNames.add(normalized);
       }
     }
     for (const name of legacyNames) sql.exec("INSERT OR IGNORE INTO legacy_names (normalized_name) VALUES (?)", name);
@@ -461,4 +447,31 @@ function applyMigration(sql: SqlStorage, version: number, inactivityTtlMs: numbe
 }
 
 function rows<T>(cursor: Iterable<unknown>): T[] { return [...cursor] as T[]; }
+function tableExists(sql: SqlStorage, name: string): boolean {
+  return rows<{ name: string }>(sql.exec("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?", name)).length > 0;
+}
+function ensureVersionFourSchema(sql: SqlStorage): void {
+  const columns = rows<{ name: string }>(sql.exec("PRAGMA table_info(room_state)"));
+  if (!columns.some((column) => column.name === "notification_id")) sql.exec("ALTER TABLE room_state ADD COLUMN notification_id TEXT");
+  const roomsWithoutNotificationId = rows<{ singleton: number }>(sql.exec("SELECT singleton FROM room_state WHERE notification_id IS NULL"));
+  for (const room of roomsWithoutNotificationId) sql.exec("UPDATE room_state SET notification_id = ?, schema_version = ? WHERE singleton = ?", crypto.randomUUID(), CURRENT_ROOM_SCHEMA_VERSION, room.singleton);
+  sql.exec(`
+    CREATE TABLE IF NOT EXISTS webhook_endpoints (
+      id TEXT PRIMARY KEY, url TEXT NOT NULL, secret TEXT NOT NULL,
+      created_at INTEGER NOT NULL, status TEXT NOT NULL CHECK(status = 'active')
+    );
+    CREATE TABLE IF NOT EXISTS webhook_deliveries (
+      id TEXT PRIMARY KEY, endpoint_id TEXT NOT NULL, event_id TEXT NOT NULL,
+      message_id TEXT NOT NULL, message_sequence INTEGER NOT NULL,
+      created_at INTEGER NOT NULL, due_at INTEGER NOT NULL,
+      attempted_at INTEGER, completed_at INTEGER, lease_expires_at INTEGER,
+      status TEXT NOT NULL CHECK(status IN ('pending', 'sending', 'delivered', 'failed')),
+      attempt_count INTEGER NOT NULL, failure_category TEXT
+    );
+    CREATE INDEX IF NOT EXISTS webhook_deliveries_due ON webhook_deliveries(status, due_at, created_at);
+    CREATE INDEX IF NOT EXISTS webhook_deliveries_endpoint ON webhook_deliveries(endpoint_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS webhook_deliveries_retention ON webhook_deliveries(created_at);
+  `);
+  sql.exec("UPDATE room_state SET schema_version = ? WHERE singleton = 1", CURRENT_ROOM_SCHEMA_VERSION);
+}
 function normalizeLegacyName(value: string): string { return value.trim().toLowerCase(); }

@@ -4,9 +4,11 @@ import { runProductionSynthetic } from "./production-synthetic";
 
 test("verifies the public protocol and removes its synthetic room without reporting capabilities", { timeout: 20_000 }, async () => {
   const requests: Array<{ method: string; path: string }> = [];
+  const postBodies: Array<Record<string, unknown>> = [];
   const reports: string[] = [];
   const room = "room-capability-must-not-be-logged";
   const management = "management-capability-must-not-be-logged";
+  const generatedNamePassword = "A1b2C3d4";
   const origin = "https://msg.example.test";
   let deleted = false;
  let invalidAgent = false;
@@ -35,6 +37,7 @@ test("verifies the public protocol and removes its synthetic room without report
         manage_url: `${origin}/manage/${room}/${management}`,
         protocol_version: 1,
         room: { id: room },
+        name_password: generatedNamePassword,
         share_message: `Join ${origin}/${room} with npx --yes @0000chat/msg@latest join ${origin}/${room}`,
         wait: { after: 1, command: `npx --yes @0000chat/msg@latest wait '${origin}/${room}' --after 1`, requires_user_consent: true },
       }, 201);
@@ -54,7 +57,10 @@ test("verifies the public protocol and removes its synthetic room without report
         ? json({ error: { code: "gone" } }, 410)
         : json({ latest_message: 1, messages: [{ sequence: 1 }], protocol_version: 1 });
     }
-    if (url.pathname === `/${room}` && request.method === "POST") return json({ message: { sequence: 2 }, protocol_version: 1, replayed: false }, 201);
+    if (url.pathname === `/${room}` && request.method === "POST") {
+      postBodies.push(await request.json() as Record<string, unknown>);
+      return json({ message: { sequence: 2 }, protocol_version: 1, replayed: false }, 201);
+    }
     if (url.pathname === `/${room}/export.json`) return request.headers.get("accept") === "application/json"
       ? json({ messages: [{ sequence: 1 }, { sequence: 2 }], protocol_version: 1 })
       : new Response("# Export", { headers: { "content-type": "text/markdown" } });
@@ -78,6 +84,8 @@ test("verifies the public protocol and removes its synthetic room without report
   expect(requests.filter((request) => request.path === "/" && request.method === "POST")).toHaveLength(2);
   expect(requests.filter((request) => request.path === "/" && request.method === "GET").length).toBeGreaterThanOrEqual(3);
   expect(requests.filter((request) => request.path === `/${room}` && request.method === "POST")).toHaveLength(2);
+  expect(postBodies).toHaveLength(2);
+  expect(postBodies.every((body) => body.name_password === generatedNamePassword)).toBe(true);
   expect(requests.filter((request) => request.path === `/${room}/agent` && request.method === "GET")).toHaveLength(2);
   expect(requests.some((request) => request.path === `/manage/${room}/${management}` && request.method === "DELETE")).toBe(true);
 
