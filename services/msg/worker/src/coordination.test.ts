@@ -65,14 +65,34 @@ async function room(environment: Record<string, string> = {}, existingDatabase?:
 
 function json(path: string, value: unknown, method = "POST"): Request {
   const init: RequestInit = { method, headers: { "content-type": "application/json" } };
-  if (method !== "GET" && method !== "HEAD") init.body = JSON.stringify(value);
+  if (method !== "GET" && method !== "HEAD") init.body = JSON.stringify(withTestNamePassword(path, value));
   return new Request(`https://room${path}`, init);
 }
 
 function workerJson(path: string, value: unknown, method = "POST"): Request {
   const init: RequestInit = { method, headers: { accept: "application/json", "content-type": "application/json" } };
-  if (method !== "GET" && method !== "HEAD") init.body = JSON.stringify(value);
+  if (method !== "GET" && method !== "HEAD") init.body = JSON.stringify(withTestNamePassword(path, value));
   return new Request(`https://msg.0000.chat${path}`, init);
+}
+
+function withTestNamePassword(path: string, value: unknown): unknown {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return value;
+  const record = value as Record<string, unknown>;
+  const route = path.split("?", 1)[0];
+  const field = route === "/initialize" ? "initial" : route === "/messages" ? "input" : undefined;
+  if (field !== undefined && record[field] !== undefined) {
+    const message = record[field];
+    if (message !== null && typeof message === "object" && !Array.isArray(message)) {
+      const messageRecord = message as Record<string, unknown>;
+      if (typeof messageRecord.author === "string" && messageRecord.name_password === undefined) {
+        return { ...record, [field]: { ...messageRecord, name_password: "test-password" } };
+      }
+    }
+  }
+  if (/^\/[^/]+$/u.test(route) && typeof record.author === "string" && typeof record.content === "string" && record.name_password === undefined) {
+    return { ...record, name_password: "test-password" };
+  }
+  return value;
 }
 
 function proposal(retry: string, source: string, baseRevision = 0, title = "Collect evidence") {

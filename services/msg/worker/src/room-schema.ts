@@ -1,7 +1,7 @@
 import { ROOM_LIMITS } from "./room-domain";
 import { WEBHOOK_RETRY_INITIAL_DELAY_MS, WEBHOOK_RETRY_WINDOW_MS } from "./webhook-policy";
 
-export const CURRENT_ROOM_SCHEMA_VERSION = 12;
+export const CURRENT_ROOM_SCHEMA_VERSION = 13;
 
 interface SqlStorage {
   exec(query: string, ...values: unknown[]): Iterable<unknown>;
@@ -432,7 +432,33 @@ function applyMigration(sql: SqlStorage, version: number, inactivityTtlMs: numbe
     sql.exec("UPDATE room_state SET schema_version = ? WHERE singleton = 1", CURRENT_ROOM_SCHEMA_VERSION);
     return;
   }
+  if (version === 13) {
+    // Name claims are intentionally not backfilled from messages. Names that
+    // existed before this migration remain unclaimed and unprotected forever.
+    sql.exec(`
+      CREATE TABLE IF NOT EXISTS name_claims (
+        normalized_name TEXT PRIMARY KEY,
+        password_hash TEXT NOT NULL,
+        created_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS name_claims_password ON name_claims(password_hash);
+      CREATE TABLE IF NOT EXISTS legacy_names (
+        normalized_name TEXT PRIMARY KEY
+      );
+    `);
+    const legacyNames = new Set<string>();
+    for (const message of rows<{ author: string; display_name: string }>(sql.exec("SELECT author, display_name FROM messages"))) {
+      for (const value of [message.author, message.display_name]) {
+        const normalized = normalizeLegacyName(value);
+        if (normalized) legacyNames.add(normalized);
+      }
+    }
+    for (const name of legacyNames) sql.exec("INSERT OR IGNORE INTO legacy_names (normalized_name) VALUES (?)", name);
+    sql.exec("UPDATE room_state SET schema_version = ? WHERE singleton = 1", CURRENT_ROOM_SCHEMA_VERSION);
+    return;
+  }
   throw new Error("The room schema migration is not defined.");
 }
 
 function rows<T>(cursor: Iterable<unknown>): T[] { return [...cursor] as T[]; }
+function normalizeLegacyName(value: string): string { return value.trim().toLowerCase(); }

@@ -644,3 +644,161 @@ test.each([
 ])("gives truthful browser state for status %s", (status, online, message) => {
   expect(browserErrorState(status, online)).toBe(message);
 });
+
+test("requires a human display name and masks the per-room name password", async () => {
+  const home = renderBrowserPage({ title: "Start a temporary conversation" });
+  const room = renderBrowserPage({ room: "name-room", title: "Temporary conversation" });
+  const css = await browserAsset("client.css")?.text();
+  const source = await browserAsset("client.js")?.text();
+
+  for (const html of [home, room]) {
+    expect(html).toContain('id="display-name" name="display_name"');
+    expect(html).toContain('id="display-name-password" name="name_password" type="password"');
+    expect(html).toContain('id="name-claim-undo"');
+    expect(html).toContain("optional for a new name; required for a claimed name");
+  }
+  expect(home).toContain('id="create-room"');
+  expect(room).toContain('id="composer"');
+  expect(css).toContain(".name-claim-notice");
+  expect(css).toContain(".name-claim-warning");
+  expect(source).toContain("request.name_password");
+  expect(source).toContain("0000:name-claim:v1:");
+  expect(source).toContain("0000:name-claim:last-display-name:v1");
+  expect(source).toContain("name_password_notice");
+  expect(source).toContain("Changing your display name cleared the saved password");
+  expect(source).toContain("Save it now for");
+});
+
+test("keeps generated name passwords out of the message request body and transcript", async () => {
+  const html = renderBrowserPage({ room: "private-name-room", title: "Temporary conversation" });
+  const source = await browserAsset("client.js")?.text();
+
+  expect(html).not.toContain("name_password:");
+  expect(source).toContain("delete request.name_password");
+  expect(source).toContain("saveRecord(responseRoom, displayName, password)");
+  expect(source).toContain("sessionStorage?.setItem(generatedKey(responseRoom)");
+  expect(source).toContain("request.content");
+  expect(source).not.toContain("content:password");
+});
+
+test("stores a generated create password privately and restores it through Undo", async () => {
+  const source = await browserAsset("client.js")?.text();
+  const globals = globalThis as Record<string, unknown>;
+  const keys = ["WebSocket", "addEventListener", "clearTimeout", "document", "fetch", "innerHeight", "localStorage", "location", "matchMedia", "navigator", "requestAnimationFrame", "scrollTo", "scrollY", "sessionStorage", "setTimeout"];
+  const saved = Object.fromEntries(keys.map((key) => [key, globals[key]]));
+  class Element {
+    value = "";
+    hidden = false;
+    required = false;
+    textContent = "";
+    innerHTML = "";
+    className = "";
+    open = false;
+    readonly listeners = new Map<string, (event: { preventDefault(): void; stopImmediatePropagation?(): void }) => void>();
+    readonly classList = { add: () => {}, remove: () => {} };
+    addEventListener(type: string, listener: (event: { preventDefault(): void; stopImmediatePropagation?(): void }) => void): void { this.listeners.set(type, listener); }
+    append(..._nodes: Element[]): void {}
+    close(): void { this.open = false; }
+    showModal(): void { this.open = true; }
+    querySelector(): Element | null { return null; }
+    querySelectorAll(): Element[] { return []; }
+    replaceChildren(..._nodes: Element[]): void {}
+    setAttribute(): void {}
+    removeAttribute(): void {}
+  }
+  const name = new Element();
+  const password = new Element();
+  const warning = new Element();
+  const undo = new Element();
+  const notice = new Element();
+  const form = new Element();
+  const reply = new Element();
+  const messages = new Element();
+  messages.innerHTML = "";
+  const storage = new Map<string, string>();
+  storage.set("0000:name-claim:last-display-name:v1", "Previous Name");
+  const session = new Map<string, string>();
+  const posted: Array<Record<string, unknown>> = [];
+
+  try {
+    const pageDocument = {
+      body: { dataset: {} as Record<string, string> },
+      documentElement: { dataset: {}, scrollHeight: 0 },
+      querySelector: (selector: string) => ({
+        "#messages": messages,
+        "#state-notice": new Element(),
+        "#connection-status": new Element(),
+        "#reply": reply,
+        "#create-room": form,
+        "#composer": form,
+        "#scroll-to-latest": new Element(),
+        "#conversation-intro": new Element(),
+        "#agent-prompt": new Element(),
+        "#toast": new Element(),
+        "#display-name": name,
+        "#display-name-password": password,
+        "#name-claim-warning": warning,
+        "#name-claim-undo": undo,
+        "#name-claim-notice": notice,
+      }[selector] ?? null),
+      querySelectorAll: () => [],
+    };
+    globals.document = pageDocument;
+    const serverFetch = async (input: string, init?: RequestInit) => {
+      if (!init?.method) return Response.json({ latest_message: 0, messages: [] });
+      posted.push(JSON.parse(String(init.body)) as Record<string, unknown>);
+      return Response.json({ conversation_url: "https://msg.0000.chat/create-room", room: { id: "create-room" }, message: { id: "one", sequence: 1 }, name_password: "AbC23456", name_password_notice: "Save this password; it will not be shown again." }, { status: 201 });
+    };
+    globals.fetch = serverFetch;
+    globals.WebSocket = class { onclose = null; onerror = null; onmessage = null; onopen = null; readyState = 0; close() {} };
+    globals.addEventListener = () => {};
+    globals.clearTimeout = () => {};
+    globals.localStorage = { getItem: (key: string) => storage.get(key) ?? null, setItem: (key: string, value: string) => { storage.set(key, value); } };
+    globals.sessionStorage = { getItem: (key: string) => session.get(key) ?? null, removeItem: (key: string) => { session.delete(key); }, setItem: (key: string, value: string) => { session.set(key, value); } };
+    globals.location = { href: "https://msg.0000.chat/", origin: "https://msg.0000.chat", pathname: "/" };
+    globals.matchMedia = () => ({ matches: false, addEventListener: () => {} });
+    globals.navigator = { onLine: true };
+    globals.innerHeight = 800;
+    globals.requestAnimationFrame = (callback: () => void) => { callback(); return 0; };
+    globals.scrollTo = () => {};
+    globals.scrollY = 0;
+    globals.setTimeout = (callback: () => void) => { callback(); return 0; };
+
+    new Function(source ?? "")();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(name.value).toBe("Previous Name");
+    expect(password.value).toBe("");
+    name.value = "Alice";
+    await (globals.fetch as (input: string, init: RequestInit) => Promise<Response>)("/", { method: "POST", body: JSON.stringify({ content: "hello", author: "Anonymous", display_name: "Anonymous", semantic_type: "message" }) });
+
+    expect(posted[0]).toMatchObject({ author: "Alice", display_name: "Alice", semantic_type: "message" });
+    expect(posted[0]).not.toHaveProperty("name_password");
+    expect(password.value).toBe("AbC23456");
+    expect(notice.textContent).toContain("Save this password");
+    expect(notice.textContent).toContain("AbC23456");
+    expect([...storage.keys()]).toContain("0000:name-claim:v1:create-room");
+
+    name.value = "Bob";
+    name.listeners.get("input")?.({ preventDefault: () => {} });
+    expect(password.value).toBe("");
+    expect(warning.hidden).toBe(false);
+    undo.listeners.get("click")?.({ preventDefault: () => {} });
+    expect(name.value).toBe("Alice");
+    expect(password.value).toBe("AbC23456");
+
+    pageDocument.body.dataset.room = "different-room";
+    globals.location = { href: "https://msg.0000.chat/different-room", origin: "https://msg.0000.chat", pathname: "/different-room" };
+    globals.fetch = serverFetch;
+    name.value = "";
+    password.value = "";
+    warning.hidden = true;
+    new Function(source ?? "")();
+    await Promise.resolve();
+    expect(name.value).toBe("Alice");
+    expect(password.value).toBe("");
+    expect(warning.hidden).toBe(true);
+  } finally {
+    Object.assign(globals, saved);
+  }
+});

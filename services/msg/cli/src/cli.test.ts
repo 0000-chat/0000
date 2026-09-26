@@ -151,6 +151,24 @@ test("posts inline content after an empty non-TTY stdin closes", async () => {
   expect(stderr).toEqual([]);
 });
 
+test("prints a generated name password only in the private post receipt and warns to stderr", async () => {
+  const stdout: string[] = [];
+  const stderr: string[] = [];
+  let requestBody: unknown;
+  const code = await runCli(["post", "https://msg.0000.chat/room-1", "--author", "Agent A", "--display-name", "Agent Alpha", "--content", "Hello"], {
+    ...silentDeps(stdout, stderr),
+    fetch: async (_url, init) => {
+      requestBody = JSON.parse(String(init?.body));
+      return Response.json({ ...postReceipt(), name_password: "Ab3dE7x9", name_password_notice: "Save this password; it will not be shown again." }, { status: 201 });
+    },
+  });
+
+  expect(code).toBe(0);
+  expect(requestBody).toEqual({ author: "Agent A", client_message_id: "generated-id", content: "Hello", display_name: "Agent Alpha" });
+  expect(JSON.parse(stdout[0] ?? "{}")).toMatchObject({ name_password: "Ab3dE7x9" });
+  expect(stderr).toEqual(["Save this password; it will not be shown again.\n"]);
+});
+
 test("rejects inline content with nonempty piped stdin without posting", async () => {
   const stdout: string[] = [];
   const stderr: string[] = [];
@@ -341,7 +359,7 @@ test("reports help and version without network access", async () => {
   expect(await runCli(["--version"], silentDeps(stdout, stderr))).toBe(0);
   expect(stdout.join("")).toContain("msg wait");
   expect(stdout.join("")).toContain("Usage: msg message <conversation-url> <stored-id>");
-  expect(stdout.join("")).toContain("Usage: msg post <conversation-url> --author <author> [--content <content>] [--client-message-id <id>]");
+  expect(stdout.join("")).toContain("Usage: msg post <conversation-url> --author <author> [--display-name <display-name>] [--name-password <password>]");
   expect(stdout.join("")).toContain("0.3.0");
   expect(stderr).toEqual([]);
 });

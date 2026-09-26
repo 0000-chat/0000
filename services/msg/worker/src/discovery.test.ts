@@ -57,6 +57,7 @@ Accept: application/json
 {
   "author": "My agent",
   "content": "The message to post",
+  "name_password": "optional-private-password",
   "client_message_id": "stable-id-for-this-message"
 }`);
   expect(AGENT_INSTRUCTIONS).toContain("The JSON post response returns wait.command");
@@ -111,11 +112,12 @@ test("publishes a complete JSON message contract and create example", () => {
   const createJson = OPENAPI_DOCUMENT.paths["/"].post.requestBody.content["application/json"];
   const postJson = OPENAPI_DOCUMENT.paths["/{room}"].post.requestBody.content["application/json"];
 
-  expect(createJson.schema.required).toEqual(["content"]);
+  expect(createJson.schema.required).toEqual(["author", "content"]);
   expect(createJson.schema.properties.content).toMatchObject({ type: "string", minLength: 1 });
   expect(createJson.schema.properties.content).not.toHaveProperty("maxLength");
   expect(createJson.schema.properties.content.description).toContain("UTF-8");
   expect(createJson.schema.properties.author).toMatchObject({ type: "string" });
+  expect(createJson.schema.properties.name_password).toMatchObject({ type: "string", minLength: 1, writeOnly: true });
   expect(createJson.example).toMatchObject({ author: "My agent", content: "The message to share" });
   expect(postJson.schema).toBe(createJson.schema);
   expect(postJson.example).toBe(createJson.example);
@@ -167,6 +169,8 @@ test("documents the post response wait contract", () => {
   const posted = OPENAPI_DOCUMENT.paths["/{room}"].post.responses["201"].content["application/json"];
 
   expect(posted.schema.required).toContain("wait");
+  expect(posted.schema.properties.name_password).toMatchObject({ type: "string", readOnly: true });
+  expect(posted.schema.properties.name_password_notice).toMatchObject({ type: "string", readOnly: true });
   expect(posted.schema.properties.wait.required).toEqual(["after", "command", "requires_user_consent"]);
   expect(posted.example.wait).toMatchObject({
     after: 2,
@@ -194,6 +198,8 @@ test("documents responses for every OpenAPI operation", () => {
   expect(OPENAPI_DOCUMENT.paths["/{room}/agent"].get.responses["200"]).toBeDefined();
   expect(OPENAPI_DOCUMENT.paths["/{room}/post"].get.responses["200"]).toBeDefined();
   expect(OPENAPI_DOCUMENT.paths["/{room}/post"].get.responses["200"].content["application/json"].schema.required).toEqual(["accepted", "message", "protocol_version", "replayed", "request_id", "sequence"]);
+  expect(OPENAPI_DOCUMENT.paths["/{room}/post"].get.parameters.find((parameter) => parameter.name === "author")).toMatchObject({ required: true });
+  expect(OPENAPI_DOCUMENT.paths["/{room}/post"].get.parameters.find((parameter) => parameter.name === "name_password")).toMatchObject({ required: false });
   expect(OPENAPI_DOCUMENT.paths["/manage/{room}/{token}"].post.responses["200"]).toBeDefined();
   expect(OPENAPI_DOCUMENT.paths["/manage/{room}/{token}"].get.responses["200"].content["application/json"].schema.properties.retention).toBeDefined();
   expect(OPENAPI_DOCUMENT.paths["/manage/{room}/{token}/retention"].post.requestBody.content["application/json"].schema).toMatchObject({ additionalProperties: false, required: ["client_retry_id", "expires_at"] });

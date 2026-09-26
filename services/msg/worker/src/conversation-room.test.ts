@@ -59,7 +59,14 @@ async function room(database = new Database(":memory:"), clock: () => number = D
 }
 
 function request(path: string, value: unknown) {
-  return new Request(`https://room${path}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(value) });
+  const body = value !== null && typeof value === "object" && !Array.isArray(value)
+    ? Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([key, entry]) => {
+      if ((key !== "initial" && key !== "input") || entry === null || typeof entry !== "object" || Array.isArray(entry)) return [key, entry];
+      const message = entry as Record<string, unknown>;
+      return [key, message.author === undefined || message.name_password !== undefined ? entry : { ...message, name_password: "test-password" }];
+    }))
+    : value;
+  return new Request(`https://room${path}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
 }
 
 test("stores ordered messages and idempotent replay in SQLite", async () => {

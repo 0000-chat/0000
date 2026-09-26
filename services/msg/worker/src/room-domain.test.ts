@@ -12,11 +12,12 @@ import {
   validateThrough,
 } from "./room-domain";
 
-test("parses raw messages as self-declared unverified messages", () => {
-  expect(parseMessageInput({ kind: "raw", value: "hello" })).toMatchObject({
-    author: "anonymous",
+test("requires an author and defaults display_name to it", () => {
+  expect(() => parseMessageInput({ kind: "raw", value: "hello" })).toThrow("author");
+  expect(parseMessageInput({ kind: "json", value: { author: "agent", content: "hello" } })).toMatchObject({
+    author: "agent",
     content: "hello",
-    display_name: "anonymous",
+    display_name: "agent",
     identity_verified: false,
     semantic_type: "message",
   });
@@ -43,15 +44,17 @@ test("compares capability hashes without accepting a prefix", () => {
 });
 
 test("allows exactly 64 KiB message content and rejects one extra byte", () => {
-  expect(parseMessageInput({ kind: "raw", value: "a".repeat(64 * 1024) }).content).toHaveLength(64 * 1024);
-  expect(() => parseMessageInput({ kind: "raw", value: "a".repeat(64 * 1024 + 1) })).toThrow("too large");
+  expect(parseMessageInput({ kind: "json", value: { author: "a", content: "a".repeat(64 * 1024) } }).content).toHaveLength(64 * 1024);
+  expect(() => parseMessageInput({ kind: "json", value: { author: "a", content: "a".repeat(64 * 1024 + 1) } })).toThrow("too large");
 });
 
 test("bounds self-declared metadata and semantic fields", () => {
   expect(() => parseMessageInput({ kind: "json", value: { content: "x", author: "a".repeat(81) } })).toThrow("author");
-  expect(() => parseMessageInput({ kind: "json", value: { content: "x", semantic_type: "other" } })).toThrow("semantic");
-  expect(() => parseMessageInput({ kind: "json", value: { content: "x", reply_to: 0 } })).toThrow("reply_to");
+  expect(() => parseMessageInput({ kind: "json", value: { author: "a", content: "x", semantic_type: "other" } })).toThrow("semantic");
+  expect(() => parseMessageInput({ kind: "json", value: { author: "a", content: "x", reply_to: 0 } })).toThrow("reply_to");
   expect(() => validateIdempotencyKey("x".repeat(129))).toThrow("Idempotency-Key");
+  expect(parseMessageInput({ kind: "json", value: { author: "a", content: "x", name_password: "secret" } })).toMatchObject({ name_password: "secret" });
+  expect(() => parseMessageInput({ kind: "json", value: { author: "a", content: "x", name_password: "" } })).toThrow("name_password");
 });
 
 test("accounts for every stored string and record overhead", () => {

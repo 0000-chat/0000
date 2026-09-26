@@ -38,6 +38,7 @@ export class DurableRoomService implements RoomService {
       latest_message: 1,
       expires_at: value.expires_at as string,
       ...(value.retention === undefined || value.retention === null ? {} : { retention: value.retention as CreateRoomResponse["retention"] }),
+      ...(typeof value.name_password === "string" ? { name_password: value.name_password, name_password_notice: typeof value.name_password_notice === "string" ? value.name_password_notice : undefined } : {}),
       wait: foregroundWait(this.origin, room, 1),
     };
   }

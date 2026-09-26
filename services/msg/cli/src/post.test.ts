@@ -13,6 +13,19 @@ test("parses a post command with inline content", () => {
   });
 });
 
+test("parses optional display name and name password while keeping author required", () => {
+  expect(parsePostCommand(["post", conversationUrl, "--author", "Agent A", "--display-name", "Agent Alpha", "--name-password", "chosen secret", "--content", "Hello"])).toEqual({
+    author: "Agent A",
+    content: "Hello",
+    conversationUrl,
+    displayName: "Agent Alpha",
+    namePassword: "chosen secret",
+  });
+  expect(() => parsePostCommand(["post", conversationUrl, "--display-name", "Agent Alpha", "--content", "Hello"])).toThrow("--author is required");
+  expect(() => parsePostCommand(["post", conversationUrl, "--author", "Agent A", "--display-name", ""])).toThrow("--display-name must not be empty");
+  expect(() => parsePostCommand(["post", conversationUrl, "--author", "Agent A", "--name-password", ""])).toThrow("--name-password must not be empty");
+});
+
 test("parses a post command for stdin content and preserves an explicit client message ID", () => {
   expect(parsePostCommand(["post", conversationUrl, "--author", "Agent A", "--client-message-id", "stable-id"])).toEqual({
     author: "Agent A",
@@ -127,6 +140,53 @@ test("preserves an explicit client message ID", async () => {
 
   expect(body).toEqual({ author: "Agent A", client_message_id: "caller-owned-id", content: "Hello" });
   expect(receipt).toEqual(publicReceipt("caller-owned-id", false));
+});
+
+test("sends display_name and name_password without exposing them in the message projection", async () => {
+  let body: unknown;
+  const receipt = await postMessage({
+    author: "Agent A",
+    content: "Hello",
+    conversationUrl,
+    displayName: "Agent Alpha",
+    namePassword: "caller-chosen password of any nonempty length",
+    fetch: async (_input, init) => {
+      body = JSON.parse(String(init?.body));
+      return Response.json(successReceipt({ replayed: false }), { status: 201 });
+    },
+    generatedClientMessageId: () => "generated-id",
+    sleep: async () => {},
+  });
+
+  expect(body).toEqual({ author: "Agent A", client_message_id: "generated-id", content: "Hello", display_name: "Agent Alpha", name_password: "caller-chosen password of any nonempty length" });
+  expect(receipt).toEqual(publicReceipt("generated-id", false));
+});
+
+test("returns a generated first-claim password and emits a save warning", async () => {
+  const statuses: string[] = [];
+  const receipt = await postMessage({
+    author: "Agent A",
+    content: "Hello",
+    conversationUrl,
+    fetch: async () => Response.json({ ...successReceipt({ replayed: false }), name_password: "Ab3dE7x9", name_password_notice: "Save this password; it will not be shown again." }, { status: 201 }),
+    generatedClientMessageId: () => "generated-id",
+    sleep: async () => {},
+    status: (text) => statuses.push(text),
+  });
+
+  expect(receipt).toEqual({ ...publicReceipt("generated-id", false), name_password: "Ab3dE7x9", name_password_notice: "Save this password; it will not be shown again." });
+  expect(statuses).toEqual(["Save this password; it will not be shown again."]);
+});
+
+test("rejects a generated name password unless it is exactly eight characters", async () => {
+  await expect(postMessage({
+    author: "Agent A",
+    content: "Hello",
+    conversationUrl,
+    fetch: async () => Response.json({ ...successReceipt({ replayed: false }), name_password: "short", name_password_notice: "Save this password; it will not be shown again." }, { status: 201 }),
+    generatedClientMessageId: () => "generated-id",
+    sleep: async () => {},
+  })).rejects.toThrow("invalid post receipt");
 });
 
 test("sends based_on_sequence and reports stale conflicts without retrying", async () => {

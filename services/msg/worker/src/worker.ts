@@ -7,6 +7,7 @@ import { ERROR_CODES, isStaleRevisionDetails, isStaleSequenceDetails, ProtocolEr
 import {
   foregroundWaitForConversation,
   messageCitationUrl,
+  NAME_PASSWORD_NOTICE,
   PROTOCOL_VERSION,
   sequenceCitationUrl,
   stripLegacyAbsoluteExpiry,
@@ -290,7 +291,7 @@ async function route(request: Request, service: RoomService, options: MsgWorkerO
       }
       if (claim) emitMsgEvent("msg.creation.claimed", claim.kind);
       if (claim?.kind === "complete") {
-        return createResponse(claim.response, negotiateCreateRepresentation(request.headers.get("accept")));
+        return createResponse(stripGeneratedNamePassword(claim.response), negotiateCreateRepresentation(request.headers.get("accept")));
       }
       if (claim?.kind === "conflict") {
         throw new ProtocolError(ERROR_CODES.conflict, "The Idempotency-Key is already used for another request.", 409);
@@ -731,7 +732,7 @@ async function route(request: Request, service: RoomService, options: MsgWorkerO
   );
 }
 
-const GET_POST_QUERY_FIELDS = new Set(["author", "based_on_sequence", "client", "content", "display_name", "reply_to", "request_id", "semantic_type", "token"]);
+const GET_POST_QUERY_FIELDS = new Set(["author", "based_on_sequence", "client", "content", "display_name", "name_password", "reply_to", "request_id", "semantic_type", "token"]);
 
 interface GetPostQuery {
   readonly basedOnSequence?: number;
@@ -761,7 +762,7 @@ function parseGetPostQuery(request: Request, url: URL): GetPostQuery {
     throw new ProtocolError(ERROR_CODES.bodyTooLarge, "The GET posting content is too large.", 413);
   }
   const input: Record<string, string> = { content };
-  for (const field of ["author", "display_name", "client", "semantic_type", "reply_to"] as const) {
+  for (const field of ["author", "display_name", "name_password", "client", "semantic_type", "reply_to"] as const) {
     const value = url.searchParams.get(field);
     if (value !== null) input[field] = value;
   }
@@ -1038,10 +1039,11 @@ function createResponse(
     representation === "json"
       ? jsonResponse(hydrated, 201)
       : textResponse(
-          `${hydrated.share_message}\n`,
+          `${hydrated.share_message}\n${hydrated.name_password === undefined ? "" : privateNamePasswordText(hydrated)}`,
           201,
         );
   response.headers.set("location", hydrated.conversation_url);
+  response.headers.set("cache-control", "no-store");
   return response;
 }
 
@@ -1089,20 +1091,43 @@ function messageResponse(result: ReadMessageResponse, representation: ReturnType
 
 function postResponse(result: import("./protocol").PostMessageResponse, representation: ReturnType<typeof negotiateRepresentation>): Response {
   const safeResult = stripLegacyAbsoluteExpiry(result);
-  if (representation === "json") return jsonResponse(safeResult, 201);
-  if (representation === "html") return new Response(`<!doctype html><html lang="en"><body><main><h1>Message created</h1><article data-sequence="${safeResult.message.sequence}"><pre>${escapeHtml(safeResult.message.content)}</pre></article><p>Expires: ${safeResult.expires_at}</p></main></body></html>`, { headers: { "content-type": "text/html; charset=utf-8" }, status: 201 });
-  return new Response(`# Message created\n\n${safeResult.message.content}\n\nExpires: ${safeResult.expires_at}\n`, { headers: { "content-type": "text/markdown; charset=utf-8" }, status: 201 });
+  if (representation === "json") return postingReceipt(jsonResponse(safeResult, 201));
+  if (representation === "html") return postingReceipt(new Response(`<!doctype html><html lang="en"><body><main><h1>Message created</h1><article data-sequence="${safeResult.message.sequence}"><pre>${escapeHtml(safeResult.message.content)}</pre></article><p>Expires: ${safeResult.expires_at}</p>${privateNamePasswordHtml(safeResult)}</main></body></html>`, { headers: { "content-type": "text/html; charset=utf-8" }, status: 201 }));
+  return postingReceipt(new Response(`# Message created\n\n${safeResult.message.content}\n\nExpires: ${safeResult.expires_at}\n${privateNamePasswordText(safeResult)}`, { headers: { "content-type": "text/markdown; charset=utf-8" }, status: 201 }));
 }
 
 function getPostResponse(result: GetPostMessageResponse): Response {
-  return jsonResponse({
+  return postingReceipt(jsonResponse({
     accepted: true,
     message: { created_at: result.message.created_at, id: result.message.id, sequence: result.message.sequence },
+    ...(result.name_password === undefined ? {} : { name_password: result.name_password, name_password_notice: result.name_password_notice ?? NAME_PASSWORD_NOTICE }),
     protocol_version: result.protocol_version,
     replayed: result.replayed,
     request_id: result.request_id,
     sequence: result.sequence,
-  });
+  }));
+}
+
+function postingReceipt(response: Response): Response {
+  response.headers.set("cache-control", "no-store");
+  return response;
+}
+
+function stripGeneratedNamePassword<T extends object>(value: T): Omit<T, "name_password" | "name_password_notice"> {
+  const copy = { ...value } as Record<string, unknown>;
+  delete copy.name_password;
+  delete copy.name_password_notice;
+  return copy as Omit<T, "name_password" | "name_password_notice">;
+}
+
+function privateNamePasswordText(value: { readonly name_password?: string; readonly name_password_notice?: string }): string {
+  if (value.name_password === undefined) return "";
+  return `\n${value.name_password_notice ?? NAME_PASSWORD_NOTICE}\nName password: ${value.name_password}\n`;
+}
+
+function privateNamePasswordHtml(value: { readonly name_password?: string; readonly name_password_notice?: string }): string {
+  if (value.name_password === undefined) return "";
+  return `<p>${escapeHtml(value.name_password_notice ?? NAME_PASSWORD_NOTICE)}</p><p>Name password: <code>${escapeHtml(value.name_password)}</code></p>`;
 }
 
 function manageResponse(result: ManageRoomResponse, method: "DELETE" | "GET" | "POST", representation: ReturnType<typeof negotiateRepresentation>, url: URL): Response {
