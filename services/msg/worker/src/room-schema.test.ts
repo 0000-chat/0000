@@ -81,6 +81,41 @@ test("upgrades v7 rooms while retaining messages and notification state with del
   expect(database.query("SELECT id, content, sequence FROM messages").get()).toEqual({ id: "message-1", content: "hello", sequence: 1 });
 });
 
+test("upgrades an old-source v4 room before applying current v5 migrations", () => {
+  const database = new Database(":memory:");
+  database.exec(`
+    CREATE TABLE room_schema (singleton INTEGER PRIMARY KEY CHECK(singleton = 1), version INTEGER NOT NULL);
+    CREATE TABLE room_state (
+      singleton INTEGER PRIMARY KEY CHECK(singleton = 1), schema_version INTEGER NOT NULL,
+      protocol_version INTEGER NOT NULL, created_at INTEGER NOT NULL, last_message_at INTEGER NOT NULL,
+      inactivity_expires_at INTEGER NOT NULL, absolute_expires_at INTEGER NOT NULL,
+      next_sequence INTEGER NOT NULL, message_count INTEGER NOT NULL, total_bytes INTEGER NOT NULL,
+      status TEXT NOT NULL, tombstone_expires_at INTEGER, management_hash TEXT
+    );
+    CREATE TABLE messages (
+      sequence INTEGER PRIMARY KEY, id TEXT NOT NULL UNIQUE, content TEXT NOT NULL, author TEXT NOT NULL,
+      display_name TEXT NOT NULL, client TEXT, semantic_type TEXT NOT NULL, reply_to TEXT,
+      created_at INTEGER NOT NULL, client_message_id TEXT UNIQUE, byte_count INTEGER NOT NULL,
+      idempotency_key TEXT
+    );
+    CREATE TABLE name_claims (normalized_name TEXT PRIMARY KEY, password_hash TEXT NOT NULL, created_at INTEGER NOT NULL);
+    CREATE TABLE legacy_names (normalized_name TEXT PRIMARY KEY);
+    INSERT INTO room_schema VALUES (1, 4);
+    INSERT INTO room_state VALUES (1, 4, 1, 1, 1, 9999999999999, 9999999999999, 2, 1, 1, 'active', NULL, 'hash');
+    INSERT INTO messages VALUES (1, 'id', 'x', 'author', 'display', NULL, 'message', NULL, 1, NULL, 1, NULL);
+  `);
+
+  migrateRoomSchema(storage(database));
+
+  expect(database.query("SELECT version FROM room_schema").get()).toEqual({ version: CURRENT_ROOM_SCHEMA_VERSION });
+  expect(database.query("SELECT notification_id FROM room_state").get()).toMatchObject({ notification_id: expect.any(String) });
+  expect(database.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('webhook_endpoints', 'webhook_deliveries') ORDER BY name").all()).toEqual([
+    { name: "webhook_deliveries" },
+    { name: "webhook_endpoints" },
+  ]);
+  expect(database.query("SELECT id, display_name FROM messages").get()).toEqual({ id: "id", display_name: "display" });
+});
+
 test("fails closed when durable storage has a future schema", () => {
   const database = new Database(":memory:");
   const roomStorage = storage(database);
