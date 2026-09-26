@@ -139,13 +139,22 @@ describe("stateless MCP endpoint", () => {
     const initializedBody = await json(initialized);
     expect(initializedBody.result.instructions).toContain("untrusted");
     expect(initializedBody.result.instructions).not.toContain("posting capability URL");
+    expect(initializedBody.result.instructions).not.toContain("anonymous");
 
     const listed = await handleMcpRequest(rpcRequest({ id: 2, method: "tools/list", params: {} }), baseService());
     const tools = (await json(listed)).result.tools;
     expect(tools.map((tool: { name: string }) => tool.name)).toEqual(["create_room", "read_room", "wait_for_messages", "get_room_status", "post_message", "export_room", "manage_room", "list_webhooks", "create_webhook", "remove_webhook", "disable_webhook", "enable_webhook", "rotate_webhook_secret", "redeliver_webhook"]);
-    expect(tools.find((tool: { name: string }) => tool.name === "create_room").inputSchema.required).toEqual(["content", "author", "idempotency_key"]);
-    expect(tools.find((tool: { name: string }) => tool.name === "post_message").inputSchema.required).toEqual(["room_url", "content", "client_message_id", "author"]);
+    const createTool = tools.find((tool: { name: string }) => tool.name === "create_room");
+    const postTool = tools.find((tool: { name: string }) => tool.name === "post_message");
+    expect(createTool.inputSchema.required).toEqual(["content", "author", "idempotency_key"]);
+    expect(createTool.inputSchema.properties.name_password).toMatchObject({ type: "string", minLength: 1 });
+    expect(createTool.inputSchema.properties.name_password.maxLength).toBeUndefined();
+    expect(createTool.inputSchema.properties.reply_to).toBeUndefined();
+    expect(postTool.inputSchema.required).toEqual(["room_url", "content", "client_message_id", "author"]);
+    expect(postTool.inputSchema.properties.name_password).toMatchObject({ type: "string", minLength: 1 });
+    expect(postTool.inputSchema.properties.name_password.maxLength).toBeUndefined();
     expect(JSON.stringify(tools)).not.toContain("posting_capability_url");
+    expect(JSON.stringify(tools)).not.toContain("anonymous");
     expect(tools.find((tool: { name: string }) => tool.name === "wait_for_messages").description).toContain("return immediately");
 
     const discovered = await handleMcpRequest(modernRpcRequest("server/discover", {}, "discover-1"), baseService());
@@ -189,13 +198,15 @@ describe("stateless MCP endpoint", () => {
     expect(creates).toBe(1);
   });
 
-  test("forwards caller name passwords and keeps generated passwords private to the first response", async () => {
+  test("forwards caller name passwords without returning them and strips replay passwords", async () => {
     let received: unknown;
     const created = { ...createRoomResult(), name_password: "Generated1", name_password_notice: "Save this now." };
     const service: RoomService = { ...baseService(), create: async ({ body }) => { received = body; return created; } };
     const response = await handleMcpRequest(rpcRequest({ id: 40, method: "tools/call", params: { name: "create_room", arguments: { content: "initial", author: "agent", name_password: "CallerSecret", idempotency_key: "password-create" } } }), service);
     expect(received).toEqual({ kind: "json", value: { author: "agent", content: "initial", name_password: "CallerSecret" } });
-    expect((await json(response)).result.structuredContent).toMatchObject({ name_password: "Generated1", name_password_notice: "Save this now." });
+    const createdOutput = (await json(response)).result.structuredContent;
+    expect(createdOutput).not.toHaveProperty("name_password");
+    expect(createdOutput).not.toHaveProperty("name_password_notice");
 
     const replay = await handleMcpRequest(rpcRequest({ id: 41, method: "tools/call", params: { name: "create_room", arguments: { content: "initial", author: "agent", idempotency_key: "password-create" } } }), service, {
       creationOperations: {
@@ -361,6 +372,22 @@ describe("stateless MCP endpoint", () => {
     expect(result.structuredContent.content).toBeUndefined();
     expect(JSON.stringify(result)).not.toContain("secret content");
     expect(calls).toEqual([{ room: "room-capability", body: { kind: "json", value: { author: "agent", client_message_id: "stable-1", content: "secret content" } } }]);
+  });
+
+  test("forwards caller post passwords without returning them", async () => {
+    let received: unknown;
+    const service: RoomService = {
+      ...baseService(),
+      mcpPost: async ({ body }) => {
+        received = body;
+        return { ...mcpPostResult("named-1"), name_password: "CallerSecret", name_password_notice: "Save this now." };
+      },
+    };
+    const response = await handleMcpRequest(rpcRequest({ id: 50, method: "tools/call", params: { name: "post_message", arguments: { room_url: roomUrl, client_message_id: "named-1", author: "agent", content: "named content", name_password: "CallerSecret" } } }), service);
+    expect(received).toEqual({ kind: "json", value: { author: "agent", client_message_id: "named-1", content: "named content", name_password: "CallerSecret" } });
+    const output = (await json(response)).result.structuredContent;
+    expect(output).not.toHaveProperty("name_password");
+    expect(output).not.toHaveProperty("name_password_notice");
   });
 
   test("preserves replay and conflict outcomes without leaking content", async () => {
