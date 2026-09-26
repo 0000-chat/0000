@@ -482,7 +482,7 @@ test("repairs missing coordination tables when a high-version room is read", asy
 
   expect(response.status).toBe(200);
   expect(await response.json()).toMatchObject({ latest_message: 1, messages: [{ sequence: 1 }] });
-  expect(database.query("SELECT version FROM room_schema WHERE singleton = 1").get()).toEqual({ version: 16 });
+  expect(database.query("SELECT version FROM room_schema WHERE singleton = 1").get()).toEqual({ version: 17 });
   const repairedTables = (database.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name GLOB 'coordination_*' ORDER BY name").all() as { name: string }[]).map(({ name }) => name);
   expect(repairedTables).toEqual(coordinationTables.sort());
   database.close();
@@ -850,4 +850,57 @@ test("accepts a reconnect cursor and reports the current latest sequence", async
   await durable.fetch(request("/messages", { now: now + 1, input: { content: "second", author: "a", display_name: "a", semantic_type: "message" } }));
   expect((await durable.fetch(new Request("https://room/live?after=1"))).status).toBe(101);
   expect(JSON.parse(context.sockets[0].sent[0])).toMatchObject({ type: "ready", latest_message: 2 });
+});
+
+test("supports direct MCP posting, status, owner control, and name password replay", async () => {
+  const database = new Database(":memory:");
+  let now = 1_000;
+  const { room: durable } = await room(database, () => now);
+  const management = "owner-token";
+  try {
+    const initialized = await durable.fetch(request("/initialize", {
+      management_hash: await hashCapability(management),
+      initial: { content: "first", author: "owner", display_name: "owner", name_password: "owner-secret", semantic_type: "message" },
+    }));
+    expect(initialized.status).toBe(200);
+
+    const status = await durable.fetch(new Request("https://room/status"));
+    expect(await status.json()).toMatchObject({ active: true, agent_posting_enabled: true, latest_message: 1 });
+
+    now += 1;
+    const posted = await durable.fetch(new Request("https://room/mcp-post", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ input: { content: "from mcp", author: "agent", display_name: "agent", client_message_id: "mcp-1", semantic_type: "message" } }),
+    }));
+    expect(posted.status).toBe(200);
+    const postedValue = await posted.json() as Record<string, unknown>;
+    expect(postedValue).toMatchObject({ accepted: true, replayed: false, request_id: "mcp-1", sequence: 2 });
+    expect(postedValue.name_password).toEqual(expect.any(String));
+    expect(postedValue.name_password_notice).toEqual(expect.any(String));
+
+    const replay = await durable.fetch(new Request("https://room/mcp-post", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ input: { content: "from mcp", author: "agent", display_name: "agent", client_message_id: "mcp-1", name_password: postedValue.name_password, semantic_type: "message" } }),
+    }));
+    const replayValue = await replay.json() as Record<string, unknown>;
+    expect(replayValue).toMatchObject({ accepted: true, replayed: true, sequence: 2 });
+    expect(replayValue).not.toHaveProperty("name_password");
+
+    const disabled = await durable.fetch(request(`/manage?token=${management}`, { action: "disable_mcp" }));
+    expect(await disabled.json()).toMatchObject({ agent_posting_enabled: false });
+    expect((await durable.fetch(new Request("https://room/status"))).status).toBe(200);
+    expect(await (await durable.fetch(new Request("https://room/status"))).json()).toMatchObject({ agent_posting_enabled: false });
+    expect((await durable.fetch(new Request("https://room/mcp-post", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ input: { content: "blocked", author: "agent", display_name: "agent", client_message_id: "mcp-2", name_password: postedValue.name_password, semantic_type: "message" } }),
+    }))).status).toBe(404);
+
+    const enabled = await durable.fetch(request(`/manage?token=${management}`, { action: "enable_mcp" }));
+    expect(await enabled.json()).toMatchObject({ agent_posting_enabled: true });
+  } finally {
+    database.close();
+  }
 });

@@ -59,6 +59,19 @@ test("leaves an existing current schema unchanged", () => {
   expect(database.query("SELECT version FROM room_schema").get()).toEqual({ version: CURRENT_ROOM_SCHEMA_VERSION });
 });
 
+test("adds MCP posting control when upgrading a production schema 16 room", () => {
+  const database = new Database(":memory:");
+  const roomStorage = storage(database);
+  migrateRoomSchema(roomStorage);
+  database.query("INSERT INTO room_state (singleton, schema_version, protocol_version, created_at, last_message_at, inactivity_expires_at, absolute_expires_at, next_sequence, message_count, total_bytes, status, tombstone_expires_at, management_hash, notification_id, get_post_hash, get_post_enabled, mcp_post_enabled, coordination_cursor, published_revision) VALUES (1, 16, 1, 1000, 1000, 7000, 7000, 2, 1, 5, 'active', NULL, 'management-hash', 'notification-1', NULL, 0, 1, 0, 0)").run();
+  database.exec("ALTER TABLE room_state DROP COLUMN mcp_post_enabled");
+  database.query("UPDATE room_schema SET version = 16 WHERE singleton = 1").run();
+  migrateRoomSchema(roomStorage, ROOM_LIMITS.inactivityTtlMs, 2_000);
+
+  expect(database.query("SELECT version FROM room_schema").get()).toEqual({ version: CURRENT_ROOM_SCHEMA_VERSION });
+  expect(database.query("SELECT schema_version, mcp_post_enabled FROM room_state").get()).toEqual({ schema_version: CURRENT_ROOM_SCHEMA_VERSION, mcp_post_enabled: 1 });
+});
+
 test("upgrades schema 14 rooms after restoring removed delegated-posting columns", () => {
   const database = new Database(":memory:");
   const roomStorage = storage(database);

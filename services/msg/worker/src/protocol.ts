@@ -3,6 +3,8 @@ import type { RetentionMetadata } from "./room-domain";
 
 export const PROTOCOL_VERSION = 1 as const;
 export const NAME_PASSWORD_NOTICE = "Save this password now; it will not be shown again. Include it on future posts using this name in this room. Losing it means the name cannot be reused." as const;
+/** Maximum serialized message bytes returned by a stateless MCP read. */
+export const MCP_READ_BYTE_BUDGET_BYTES = 128 * 1024;
 
 export type JsonPrimitive = boolean | null | number | string;
 export type JsonValue = JsonPrimitive | JsonObject | JsonValue[];
@@ -141,6 +143,8 @@ function shellQuote(value: string): string {
 
 export interface RoomService {
   create(input: CreateRoomInput): Promise<CreateRoomResponse>;
+  mcpPost?(input: McpPostMessageInput): Promise<McpPostMessageResponse>;
+  roomStatus?(input: RoomStatusInput): Promise<RoomStatusResponse>;
   getPost?(input: GetPostMessageInput): Promise<GetPostMessageResponse>;
   read?(input: ReadRoomInput): Promise<ReadRoomResponse>;
   readMessage?(input: ReadMessageInput): Promise<ReadMessageResponse>;
@@ -188,6 +192,8 @@ export interface ReadRoomInput {
   readonly after: number;
   /** A positive page size opts the read into bounded mode. */
   readonly limit?: number;
+  /** Maximum serialized message bytes for bounded agent reads. */
+  readonly max_bytes?: number;
   readonly room: string;
   /** An inclusive snapshot boundary opts the read into bounded mode. */
   readonly through?: number;
@@ -944,6 +950,37 @@ export interface PostMessageResponse {
   readonly retention?: RetentionMetadata;
 }
 
+export interface McpPostMessageInput {
+  readonly body: RequestBody;
+  readonly room: string;
+}
+
+export interface McpPostMessageResponse {
+  readonly accepted: true;
+  readonly client_message_id?: string;
+  readonly expires_at: string;
+  readonly message?: Pick<RoomMessage, "created_at" | "id" | "sequence">;
+  readonly name_password?: string;
+  readonly name_password_notice?: string;
+  readonly protocol_version: typeof PROTOCOL_VERSION;
+  readonly replayed: boolean;
+  readonly request_id: string;
+  readonly sequence: number;
+  readonly wait?: WaitMetadata;
+}
+
+export interface RoomStatusInput {
+  readonly room: string;
+}
+
+export interface RoomStatusResponse {
+  readonly active: boolean;
+  readonly agent_posting_enabled: boolean;
+  readonly expires_at: string;
+  readonly latest_message: number;
+  readonly protocol_version: typeof PROTOCOL_VERSION;
+}
+
 export interface GetPostMessageInput {
   /** Transport-only stale-context precondition; never part of MessageInput. */
   readonly basedOnSequence?: number;
@@ -967,7 +1004,7 @@ export interface GetPostMessageResponse {
 }
 
 export interface ManageRoomInput {
-  readonly action?: "disable" | "enable" | "rotate";
+  readonly action?: "disable" | "enable" | "rotate" | "enable_mcp" | "disable_mcp";
   readonly method: "DELETE" | "GET" | "POST";
   readonly room: string;
   readonly token: string;
@@ -1003,6 +1040,7 @@ export interface RetentionExtensionResponse {
 }
 
 export interface ManageRoomResponse {
+  readonly agent_posting_enabled?: boolean;
   readonly deleted?: boolean;
   readonly expires_at?: string;
   readonly get_post_enabled?: boolean;

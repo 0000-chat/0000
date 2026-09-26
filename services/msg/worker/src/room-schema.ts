@@ -1,7 +1,7 @@
 import { ROOM_LIMITS } from "./room-domain";
 import { WEBHOOK_RETRY_INITIAL_DELAY_MS, WEBHOOK_RETRY_WINDOW_MS } from "./webhook-policy";
 
-export const CURRENT_ROOM_SCHEMA_VERSION = 16;
+export const CURRENT_ROOM_SCHEMA_VERSION = 17;
 
 interface SqlStorage {
   exec(query: string, ...values: unknown[]): Iterable<unknown>;
@@ -13,7 +13,7 @@ interface TransactionalStorage {
 }
 
 /** Applies only forward, ordered SQLite migrations. Future data fails closed. */
-export function migrateRoomSchema(storage: TransactionalStorage, inactivityTtlMs = ROOM_LIMITS.inactivityTtlMs): void {
+export function migrateRoomSchema(storage: TransactionalStorage, inactivityTtlMs = ROOM_LIMITS.inactivityTtlMs, now = Date.now()): void {
   storage.sql.exec("CREATE TABLE IF NOT EXISTS room_schema (singleton INTEGER PRIMARY KEY CHECK(singleton = 1), version INTEGER NOT NULL)");
   storage.transactionSync(() => {
     const versionRow = rows<{ version: number }>(storage.sql.exec("SELECT version FROM room_schema WHERE singleton = 1"))[0];
@@ -26,14 +26,14 @@ export function migrateRoomSchema(storage: TransactionalStorage, inactivityTtlMs
     if (version > CURRENT_ROOM_SCHEMA_VERSION) throw new Error("The room schema is newer than this Worker supports.");
     while (version < CURRENT_ROOM_SCHEMA_VERSION) {
       const next = version + 1;
-      applyMigration(storage.sql, next, inactivityTtlMs);
+      applyMigration(storage.sql, next, inactivityTtlMs, now);
       storage.sql.exec("UPDATE room_schema SET version = ? WHERE singleton = 1", next);
       version = next;
     }
   });
 }
 
-function applyMigration(sql: SqlStorage, version: number, inactivityTtlMs: number): void {
+function applyMigration(sql: SqlStorage, version: number, inactivityTtlMs: number, now: number): void {
   if (version === 1) {
     sql.exec(`
       CREATE TABLE IF NOT EXISTS room_state (
@@ -463,8 +463,15 @@ function applyMigration(sql: SqlStorage, version: number, inactivityTtlMs: numbe
     // coordination table exists. Reapply the idempotent table migrations so
     // rooms with a higher recorded version recover missing additive schema.
     for (const compatibilityVersion of [9, 10, 11, 12]) {
-      applyMigration(sql, compatibilityVersion, inactivityTtlMs);
+      applyMigration(sql, compatibilityVersion, inactivityTtlMs, now);
     }
+    return;
+  }
+  if (version === 17) {
+    const columns = new Set(rows<{ name: string }>(sql.exec("PRAGMA table_info(room_state)")).map((column) => column.name));
+    if (!columns.has("mcp_post_enabled")) sql.exec("ALTER TABLE room_state ADD COLUMN mcp_post_enabled INTEGER NOT NULL DEFAULT 1");
+    sql.exec("UPDATE room_state SET mcp_post_enabled = CASE WHEN status = 'active' AND inactivity_expires_at > ? THEN 1 ELSE 0 END WHERE singleton = 1", now);
+    sql.exec("UPDATE room_state SET schema_version = ? WHERE singleton = 1", CURRENT_ROOM_SCHEMA_VERSION);
     return;
   }
   throw new Error("The room schema migration is not defined.");
