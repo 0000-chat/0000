@@ -2,7 +2,9 @@
 set -eu
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+cache_dir="${XDG_CACHE_HOME:-${HOME}/.cache}/0000-scaffold/npm"
+mkdir -p "$cache_dir"
 cd "$root"
 
-bunx --yes --package "oxlint@1.82.0" oxlint --version
-bunx --yes --package "@biomejs/biome@2.5.13" biome --version
+npx --yes --prefer-offline --workspaces=false --cache "$cache_dir" --package "oxlint@1.82.0" -- oxlint --version
+npx --yes --prefer-offline --workspaces=false --cache "$cache_dir" --package "@biomejs/biome@2.5.13" -- biome --version

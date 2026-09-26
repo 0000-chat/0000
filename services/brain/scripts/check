@@ -52,8 +52,8 @@ if metadata.get("schema_version") != 1 or metadata.get("name") != "0000-brain":
     raise SystemExit("invalid product metadata")
 if metadata.get("status") != "scaffold-only" or metadata.get("application_code") is not False:
     raise SystemExit("product is not marked scaffold-only")
-if metadata.get("license_selected") is not False:
-    raise SystemExit("scaffold must not select a license")
+if metadata.get("license_selected") is not True:
+    raise SystemExit("Brain must record its selected public license")
 if metadata.get("dependencies") != ["0000-platform"]:
     raise SystemExit("Brain must use Platform for common identity")
 readme = (root / "README.md").read_text(encoding="utf-8")

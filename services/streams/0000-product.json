@@ -4,9 +4,9 @@
   "visibility": "public",
   "status": "active-development",
   "purpose": "Boundary for stream processing and event transport.",
-  "dependencies": ["0000-database"],
+  "dependencies": ["0000-platform", "0000-database"],
   "standalone_authentication": "platform-required; hosted-account-not-required",
   "hosting_class": "cloudflare-public-ingress",
   "application_code": true,
-  "license_selected": false
+  "license_selected": true
 }

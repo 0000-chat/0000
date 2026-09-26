@@ -15,8 +15,9 @@ This service is responsible for:
 - keeping service-specific details out of clients.
 
 It does not own product data, make product decisions, provide communication
-channels, or define the hosted user experience. No hard dependency on another
-0000 service is confirmed.
+channels, or define the hosted user experience. It requires `0000-platform` for
+common identity and authentication; standalone use does not require a hosted
+0000 account.
 
 This directory is the Gateway subtree in the `0000` monorepo. Its root
 `package.json` is the private `@0000/gateway` workspace. The Worker serves a

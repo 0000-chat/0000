@@ -1,7 +1,7 @@
 # 0000
 
-This public repository is the 0000 monorepo. It contains the workspace
-boundaries for seven service workspaces and three shared packages, with Bun and
+This public repository is the 0000 monorepo. It contains service workspaces
+and three shared packages, with Bun and
 Turborepo pinned for repeatable outer workspace checks. `services/communicator`
 contains the imported communication adapter application.
 `services/msg` contains the temporary conversation Worker and npm CLI. The
@@ -30,6 +30,12 @@ This code relocation does not establish msg as a product service or assert a
 runtime relationship with `0000-platform`.
 See [the msg service README](services/msg/README.md) for its checks and layout.
 
+## Contributing
+
+See the [contribution guide](CONTRIBUTING.md) for public repository placement,
+private operations boundaries, provider adapters, and the checks for a public
+pull request.
+
 ## Workspace commands
 
 Requires Bun `1.3.14`.
@@ -37,6 +43,7 @@ Requires Bun `1.3.14`.
 ```sh
 bun install --frozen-lockfile
 bun run check
+bun run check:topology
 bun run check:turbo
 bun run check:turbo:dry
 ```
@@ -45,13 +52,21 @@ bun run check:turbo:dry
 names, private publication safety, and retained directory markers.
 `check:turbo` runs each workspace check through Turbo, including the msg
 Worker, Wrangler tooling, and CLI checks, plus the Communicator relocation and
-tooling check; `check:turbo:dry` only prints the task graph. Run
-`bun run check:application` from `services/streams` for its app checks. The
-Communicator application has its own nested pnpm workspace and checks; see
-[`services/communicator/README.md`](services/communicator/README.md).
+tooling check and the Streams workspace check; `check:turbo:dry` only prints
+the task graph. The Communicator application has its own nested pnpm workspace
+and checks; see [`services/communicator/README.md`](services/communicator/README.md).
+From `services/streams`, `bun run check` validates its workspace wrapper and
+`bun run check:application` runs the imported scaffold and tooling checks; see
+[`services/streams/README.md`](services/streams/README.md).
 
 The import procedure and preservation records are documented in
 [`services/brain/docs/migration/2026-09-17-monorepo-import.md`](services/brain/docs/migration/2026-09-17-monorepo-import.md),
 [`services/communicator/docs/migration/2026-09-15-monorepo-import.md`](services/communicator/docs/migration/2026-09-15-monorepo-import.md),
-[`services/streams/docs/migration/2026-09-17-monorepo-import.md`](services/streams/docs/migration/2026-09-17-monorepo-import.md),
-and [`docs/playbooks/import-service-repository.md`](docs/playbooks/import-service-repository.md).
+[`services/streams/docs/migration/2026-09-17-monorepo-import.md`](services/streams/docs/migration/2026-09-17-monorepo-import.md), and
+[`docs/playbooks/import-service-repository.md`](docs/playbooks/import-service-repository.md).
+
+## Repository layout
+
+See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the placement test that keeps
+user-facing applications, deployable services, reusable packages, and generic
+deployment material in their intended public top-level boundaries.

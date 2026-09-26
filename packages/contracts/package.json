@@ -1,6 +1,7 @@
 {
   "name": "@0000/contracts",
   "private": true,
+  "license": "Apache-2.0",
   "version": "0.0.0",
   "description": "Placeholder for shared 0000 service contracts.",
   "scripts": {

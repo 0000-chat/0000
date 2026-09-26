@@ -23,4 +23,3 @@ Manual redelivery targets one failed event while its original message and delive
 ## Parent
 
 [Room Notifications spec](https://github.com/0000-chat/0000-full/issues/24)
-
