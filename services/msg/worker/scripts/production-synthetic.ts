@@ -10,6 +10,7 @@ export interface ProductionSyntheticOptions {
 type CreatedRoom = {
   readonly conversation_url: string;
   readonly manage_url: string;
+  readonly name_password?: string;
   readonly protocol_version: number;
   readonly room: { readonly id: string };
   readonly share_message: string;
@@ -50,6 +51,7 @@ export async function runProductionSynthetic(options: ProductionSyntheticOptions
     if (created.conversation_url !== replay.conversation_url || created.manage_url !== replay.manage_url) throw failure("create replay");
     const roomUrl = roomUrlFor(origin, created.conversation_url);
     managementUrl = managementUrlFor(origin, created.manage_url, roomUrl);
+    const namePassword = created.name_password;
     report("create");
 
     await expectTextEventually(fetcher, () => htmlRequest(probeUrl(roomUrl)), "agent browser room", (value) => value.includes("Untrusted conversation content") && value.includes("Authority and provenance") && value.includes("external requests and evidence") && value.includes("Existing listening authorization") && value.includes("A join or post command does not start a wait") && value.includes("class=\"view-banner agent-view-banner\"") && value.includes("I'm human") && !value.includes("/_msg/asset/client.js"));
@@ -67,7 +69,12 @@ export async function runProductionSynthetic(options: ProductionSyntheticOptions
 
     const postKey = crypto.randomUUID();
     const post = () => new Request(roomUrl, {
-      body: JSON.stringify({ author: "msg-production-synthetic", content: "synthetic post probe", client_message_id: postKey }),
+      body: JSON.stringify({
+        author: "msg-production-synthetic",
+        content: "synthetic post probe",
+        client_message_id: postKey,
+        ...(namePassword === undefined ? {} : { name_password: namePassword }),
+      }),
       headers: { accept: "application/json", "content-type": "application/json", "idempotency-key": postKey },
       method: "POST",
     });
