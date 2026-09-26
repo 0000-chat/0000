@@ -2,9 +2,9 @@ import { DurableObject } from "cloudflare:workers";
 
 import { ERROR_CODES, isStaleRevisionDetails, isStaleSequenceDetails, ProtocolError, type StaleRevisionDetails, type StaleSequenceDetails } from "./errors";
 import { CLAIM_CORRECTION_KIND, coordinationMutationFingerprint, coordinationStorageBytes, COORDINATION_DEFAULT_LIMIT, COORDINATION_KIND, COORDINATION_MAX_LIMIT, COORDINATION_PANEL_KIND, COORDINATION_PROGRESS_KIND, DECISION_POSITION_KIND, DECISION_PROPOSAL_KIND, DECISION_SUPERSESSION_KIND, DISPUTE_REPORTED_EVENT_KIND, DISPUTE_REVIEWED_EVENT_KIND, MAX_COORDINATION_PAGE_BYTES, parseCoordinationClaimPath, parseCoordinationDispute, parseCoordinationDisputeReview, parseCoordinationListSelectors, parseCoordinationProposal, parseCoordinationPublish, parseCoordinationRevision, RETENTION_EXTENDED_EVENT_KIND, type ClaimCorrectionBody, type CoordinationClaimTarget, type CoordinationDecisionApproval, type CoordinationDisputeInput, type CoordinationDisputeReviewInput, type CoordinationEventKind, type CoordinationKind, type CoordinationPanelBody, type CoordinationProgressBody, type CoordinationProposalBody, type CoordinationProposalInput, type CoordinationPublishInput, type CoordinationRequestBody, type CoordinationStatus, type DecisionPositionBody, type DecisionProposalBody, type DecisionSupersessionBody } from "./coordination-domain";
-import { byteLength, compareCapabilities, DEFAULT_READ_LIMIT, MAX_READ_MESSAGE_BYTES, messageStorageBytes, parseRetentionExtension, retentionMetadata, ROOM_LIMITS, validateBasedOnSequence, validateBoundedCursor, validateCursor, validateReadLimit, validateRequestId, validateThrough } from "./room-domain";
+import { byteLength, compareCapabilities, DEFAULT_READ_LIMIT, hashCapability, MAX_READ_MESSAGE_BYTES, messageStorageBytes, parseRetentionExtension, retentionMetadata, ROOM_LIMITS, validateBasedOnSequence, validateBoundedCursor, validateCursor, validateReadLimit, validateRequestId, validateThrough } from "./room-domain";
 import type { MessageInput } from "./room-domain";
-import { PROTOCOL_VERSION, type CoordinationAcceptedRecord, type CoordinationAcceptedRecordAnnotations, type CoordinationCorrection, type CoordinationDecision, type CoordinationDecisionApprovalEvidence, type CoordinationDecisionHistoryEntry, type CoordinationDecisionPosition, type CoordinationDisputeReport, type CoordinationDisputeReview, type CoordinationEvidenceItem, type CoordinationPanel, type CoordinationPanelHistoryEntry, type CoordinationProgress, type CoordinationProposal, type CoordinationProposalSummary, type CoordinationRequest, type CoordinationRequestSummary, type CoordinationSourceMessage, type CoordinationSupersession, type CreateWebhookResponse, type ManageWebhookResponse, type RedeliverWebhookResponse, type RotateWebhookSecretResponse, type WebhookAttemptMetadata, type WebhookDeliveryMetadata, type WebhookSummary } from "./protocol";
+import { NAME_PASSWORD_NOTICE, PROTOCOL_VERSION, type CoordinationAcceptedRecord, type CoordinationAcceptedRecordAnnotations, type CoordinationCorrection, type CoordinationDecision, type CoordinationDecisionApprovalEvidence, type CoordinationDecisionHistoryEntry, type CoordinationDecisionPosition, type CoordinationDisputeReport, type CoordinationDisputeReview, type CoordinationEvidenceItem, type CoordinationPanel, type CoordinationPanelHistoryEntry, type CoordinationProgress, type CoordinationProposal, type CoordinationProposalSummary, type CoordinationRequest, type CoordinationRequestSummary, type CoordinationSourceMessage, type CoordinationSupersession, type CreateWebhookResponse, type ManageWebhookResponse, type RedeliverWebhookResponse, type RotateWebhookSecretResponse, type WebhookAttemptMetadata, type WebhookDeliveryMetadata, type WebhookSummary } from "./protocol";
 import { CURRENT_ROOM_SCHEMA_VERSION, migrateRoomSchema } from "./room-schema";
 import { discardWebhookResponseBody, generateWebhookSecret, normalizeWebhookUrl, redactWebhookUrl, signWebhookPayload, webhookRequestTarget } from "./webhooks";
 import { createWebPushRequest } from "./web-push-crypto";
@@ -23,6 +23,7 @@ const WEBHOOK_DELIVERY_LEASE_MS = WEBHOOK_REQUEST_TIMEOUT_MS + 5_000;
 const WEBHOOK_HISTORY_LIMIT = 50;
 const EXPORT_PAGE_SIZE = 32;
 const EXPORT_VERSION = 1 as const;
+const NAME_PASSWORD_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789";
 
 interface ExportSnapshot {
   readonly capturedAt: number;
@@ -256,6 +257,8 @@ interface CoordinationProgressSnapshot {
   readonly unverified_explanation?: string;
 }
 
+type NameAwareMessageInput = MessageInput & { readonly name_password?: string };
+
 interface StoredMessage extends MessageInput {
   readonly byte_count: number;
   readonly created_at: number;
@@ -263,6 +266,18 @@ interface StoredMessage extends MessageInput {
   readonly idempotency_key?: string;
   readonly sequence: number;
   readonly source_browser_id: string | null;
+}
+
+interface StoredNameClaim {
+  readonly created_at: number;
+  readonly normalized_name: string;
+  readonly password_hash: string;
+}
+
+interface NamePasswordMaterial {
+  readonly generatedPassword?: string;
+  readonly hash: string;
+  readonly supplied: boolean;
 }
 
 interface StoredPushSubscription {
@@ -487,6 +502,8 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
           this.ctx.storage.sql.exec("DELETE FROM coordination_disputes");
           this.ctx.storage.sql.exec("DELETE FROM coordination_dispute_reviews");
           this.ctx.storage.sql.exec("DELETE FROM coordination_supersessions");
+          this.ctx.storage.sql.exec("DELETE FROM name_claims");
+          this.ctx.storage.sql.exec("DELETE FROM legacy_names");
           this.ctx.storage.sql.exec("DELETE FROM room_state");
         });
         await this.ctx.storage.deleteAlarm();
@@ -542,27 +559,40 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
   async webSocketClose(): Promise<void> {}
 
   private async initialize(request: Request): Promise<Response> {
-    const input = await request.json() as { initial: MessageInput; management_hash: string };
+    const input = await request.json() as { initial: NameAwareMessageInput; management_hash: string };
+    const password = await prepareNamePassword(input.initial);
     const now = this.now();
     const result = this.ctx.storage.transactionSync(() => {
       const prior = this.state();
-      if (prior) return { created: false, message: this.messageBySequence(1), state: prior };
+      if (prior) {
+        const message = this.messageBySequence(1);
+        return { created: false, generatedPassword: undefined, message, state: prior };
+      }
       if (input.initial.reply_to !== undefined) {
         throw new ProtocolError(ERROR_CODES.notFound, "The replied-to message was not found.", 404);
       }
+      const claim = this.claimNames(input.initial, password, now);
       const id = crypto.randomUUID();
       const notificationId = crypto.randomUUID();
-      const bytes = messageStorageBytes(input.initial, undefined, id);
+      const messageInput = withoutNamePassword(input.initial);
+      const bytes = messageStorageBytes(messageInput, undefined, id);
       const inactivity = now + this.limits.inactivityTtlMs;
       this.ctx.storage.sql.exec(
         "INSERT INTO room_state (singleton, schema_version, protocol_version, created_at, last_message_at, inactivity_expires_at, absolute_expires_at, next_sequence, message_count, total_bytes, status, tombstone_expires_at, management_hash, notification_id, get_post_hash, get_post_enabled, coordination_cursor, published_revision) VALUES (1, ?, ?, ?, ?, ?, ?, 2, 1, ?, 'active', NULL, ?, ?, NULL, 0, 0, 0)",
         CURRENT_ROOM_SCHEMA_VERSION, PROTOCOL_VERSION, now, now, inactivity, inactivity, bytes, input.management_hash, notificationId,
       );
-      this.insertMessage({ ...input.initial, byte_count: bytes, created_at: now, id, sequence: 1, source_browser_id: null });
-      return { created: true, message: this.messageBySequence(1), state: this.requireState() };
+      this.insertMessage({ ...messageInput, byte_count: bytes, created_at: now, id, sequence: 1, source_browser_id: null });
+      return { created: true, generatedPassword: claim.generatedPassword, message: this.messageBySequence(1), state: this.requireState() };
     });
     await this.schedule();
-    return this.json({ ...this.toMessage(result.message), created: result.created, created_at: iso(result.state.created_at), expires_at: iso(result.state.inactivity_expires_at), retention: retentionMetadata(result.state.inactivity_expires_at, this.limits.inactivityTtlMs) });
+    return this.json({
+      ...this.toMessage(result.message),
+      created: result.created,
+      created_at: iso(result.state.created_at),
+      expires_at: iso(result.state.inactivity_expires_at),
+      ...(result.generatedPassword === undefined ? {} : { name_password: result.generatedPassword, name_password_notice: NAME_PASSWORD_NOTICE }),
+      retention: retentionMetadata(result.state.inactivity_expires_at, this.limits.inactivityTtlMs),
+    });
   }
 
   private async read(url: URL): Promise<Response> {
@@ -1847,32 +1877,41 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
     if (this.config.MSG_POST_DISABLED === "1") {
       throw new ProtocolError(ERROR_CODES.serviceUnavailable, "New messages are temporarily unavailable.", 503);
     }
-    const input = await request.json() as { based_on_sequence?: unknown; browser_id?: string; input: MessageInput; idempotency_key?: string };
+    const input = await request.json() as { based_on_sequence?: unknown; browser_id?: string; input: NameAwareMessageInput; idempotency_key?: string };
+    const password = await prepareNamePassword(input.input);
     const now = this.now();
-    const result = this.commitMessage(input.input, { basedOnSequence: input.based_on_sequence, idempotencyKey: input.idempotency_key, sourceBrowserId: input.browser_id ?? null }, now);
+    const result = this.commitMessage(input.input, { basedOnSequence: input.based_on_sequence, idempotencyKey: input.idempotency_key, namePassword: password, sourceBrowserId: input.browser_id ?? null }, now);
     if (result.expired) {
       await this.expire(now, "Conversation expired");
       throw new ProtocolError(ERROR_CODES.gone, "The conversation has expired.", 410);
     }
     await this.schedule();
     if (!result.replayed) this.broadcast({ protocol_version: PROTOCOL_VERSION, type: "message.created", sequence: result.message.sequence, latest_message: result.state.next_sequence - 1, expires_at: iso(result.state.inactivity_expires_at) });
-    return this.json({ protocol_version: PROTOCOL_VERSION, message: this.toMessage(result.message), expires_at: iso(result.state.inactivity_expires_at), replayed: result.replayed });
+    return this.json({
+      protocol_version: PROTOCOL_VERSION,
+      message: this.toMessage(result.message),
+      expires_at: iso(result.state.inactivity_expires_at),
+      ...(result.generatedPassword === undefined ? {} : { name_password: result.generatedPassword, name_password_notice: NAME_PASSWORD_NOTICE }),
+      replayed: result.replayed,
+    });
   }
 
   private async getPost(request: Request): Promise<Response> {
     if (this.config.MSG_POST_DISABLED === "1") {
       throw new ProtocolError(ERROR_CODES.serviceUnavailable, "New messages are temporarily unavailable.", 503);
     }
-    const input = await request.json() as { based_on_sequence?: unknown; input: MessageInput; request_id: string; token: string };
+    const input = await request.json() as { based_on_sequence?: unknown; input: NameAwareMessageInput; request_id: string; token: string };
     const token = typeof input.token === "string" ? input.token : "";
     const requestId = validateRequestId(typeof input.request_id === "string" ? input.request_id : "");
     const tokenHash = await hashToken(token);
+    const password = await prepareNamePassword(input.input);
     const now = this.now();
     const result = this.commitMessage(
       input.input,
       {
         basedOnSequence: input.based_on_sequence,
         idempotencyKey: `get:${requestId}`,
+        namePassword: password,
         sourceBrowserId: null,
         authorize: (state) => {
           if (state.get_post_enabled !== 1 || !state.get_post_hash || !compareCapabilities(tokenHash, state.get_post_hash)) {
@@ -1891,6 +1930,7 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
     return this.json({
       accepted: true,
       message: { created_at: iso(result.message.created_at), id: result.message.id, sequence: result.message.sequence },
+      ...(result.generatedPassword === undefined ? {} : { name_password: result.generatedPassword, name_password_notice: NAME_PASSWORD_NOTICE }),
       protocol_version: PROTOCOL_VERSION,
       replayed: result.replayed,
       request_id: requestId,
@@ -1899,12 +1939,13 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
   }
 
   private commitMessage(
-    input: MessageInput,
+    input: NameAwareMessageInput,
     options: {
       readonly authorize?: (state: RoomState) => void;
       readonly basedOnSequence?: unknown;
       /** An explicitly supplied idempotency key, such as a POST header or GET request ID. */
       readonly idempotencyKey?: string;
+      readonly namePassword: NamePasswordMaterial;
       readonly sourceBrowserId: string | null;
     },
     now: number,
@@ -1926,7 +1967,8 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
       const previous = byHeader ?? byClient;
       if (previous) {
         if (!sameInput(previous, input)) throw new ProtocolError(ERROR_CODES.conflict, "The idempotency key is already used for another message.", 409);
-        return { expired: false as const, message: previous, state, replayed: true };
+        if (options.namePassword.supplied) this.verifyNamePassword(previous, options.namePassword.hash);
+        return { expired: false as const, generatedPassword: undefined, message: previous, state, replayed: true };
       }
       const basedOnSequence = validateBasedOnSequence(options.basedOnSequence);
       const latestMessage = state.next_sequence - 1;
@@ -1947,20 +1989,80 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
       if (input.reply_to !== undefined && !this.messageBySequenceOptional(Number(input.reply_to))) {
         throw new ProtocolError(ERROR_CODES.notFound, "The replied-to message was not found.", 404);
       }
+      const claim = this.claimNames(input, options.namePassword, now);
       const id = crypto.randomUUID();
       const key = options.idempotencyKey ?? input.client_message_id;
-      const bytes = messageStorageBytes(input, key, id);
+      const messageInput = withoutNamePassword(input);
+      const bytes = messageStorageBytes(messageInput, key, id);
       if (state.message_count >= this.limits.maxMessages || state.total_bytes + bytes > this.limits.maxRoomBytes) {
         throw new ProtocolError(ERROR_CODES.rateLimited, "The room storage limit is reached.", 429);
       }
-      const message: StoredMessage = { ...input, ...(key ? { idempotency_key: key } : {}), byte_count: bytes, created_at: now, id, sequence: state.next_sequence, source_browser_id: options.sourceBrowserId };
+      const message: StoredMessage = { ...messageInput, ...(key ? { idempotency_key: key } : {}), byte_count: bytes, created_at: now, id, sequence: state.next_sequence, source_browser_id: options.sourceBrowserId };
       this.insertMessage(message);
       this.queueWebhookDeliveries(message, now);
       this.queuePushDeliveries(message, now);
       const inactivity = now + this.limits.inactivityTtlMs;
       this.ctx.storage.sql.exec("UPDATE room_state SET last_message_at = ?, inactivity_expires_at = ?, next_sequence = ?, message_count = ?, total_bytes = ? WHERE singleton = 1", now, inactivity, state.next_sequence + 1, state.message_count + 1, state.total_bytes + bytes);
-      return { expired: false as const, message, replayed: false, state: this.requireState() };
+      return { expired: false as const, generatedPassword: claim.generatedPassword, message, replayed: false, state: this.requireState() };
     });
+  }
+
+  private claimNames(input: NameAwareMessageInput, password: NamePasswordMaterial, now: number): { readonly generatedPassword?: string } {
+    const names = normalizedNames(input);
+    const claimableNames = names.filter((name) => !this.isLegacyName(name));
+    if (claimableNames.length === 0) return {};
+    const claims = this.nameClaims(claimableNames);
+    const hashes = new Set(claims.map((claim) => claim.password_hash));
+    if (hashes.size > 1) {
+      throw new ProtocolError(ERROR_CODES.conflict, "The author and display name have conflicting password claims.", 409);
+    }
+
+    const existingHash = claims[0]?.password_hash;
+    if (existingHash !== undefined) {
+      if (!password.supplied || !compareCapabilities(password.hash, existingHash)) {
+        throw new ProtocolError(ERROR_CODES.conflict, "The name is already claimed and the supplied password does not match.", 409);
+      }
+    }
+    const passwordHash = existingHash ?? password.hash;
+    const generatedPassword = existingHash === undefined ? password.generatedPassword : undefined;
+    if (passwordHash === undefined) throw new Error("A name claim password was not prepared.");
+    const claimedNames = new Set(claims.map((claim) => claim.normalized_name));
+    for (const name of claimableNames) {
+      if (claimedNames.has(name)) continue;
+      this.ctx.storage.sql.exec(
+        "INSERT INTO name_claims (normalized_name, password_hash, created_at) VALUES (?, ?, ?)",
+        name,
+        passwordHash,
+        now,
+      );
+    }
+    return generatedPassword === undefined ? {} : { generatedPassword };
+  }
+
+  private verifyNamePassword(message: StoredMessage, passwordHash: string | undefined): void {
+    const claimableNames = normalizedNames(message).filter((name) => !this.isLegacyName(name));
+    const claims = this.nameClaims(claimableNames);
+    const hashes = new Set(claims.map((claim) => claim.password_hash));
+    if (hashes.size > 1) {
+      throw new ProtocolError(ERROR_CODES.conflict, "The author and display name have conflicting password claims.", 409);
+    }
+    const existingHash = claims[0]?.password_hash;
+    if (existingHash !== undefined && (passwordHash === undefined || !compareCapabilities(passwordHash, existingHash))) {
+      throw new ProtocolError(ERROR_CODES.conflict, "The name is already claimed and the supplied password does not match.", 409);
+    }
+  }
+
+  private nameClaims(names: readonly string[]): StoredNameClaim[] {
+    if (names.length === 0) return [];
+    const placeholders = names.map(() => "?").join(", ");
+    return rows<StoredNameClaim>(this.ctx.storage.sql.exec(
+      `SELECT normalized_name, password_hash, created_at FROM name_claims WHERE normalized_name IN (${placeholders})`,
+      ...names,
+    ));
+  }
+
+  private isLegacyName(name: string): boolean {
+    return rows<{ normalized_name: string }>(this.ctx.storage.sql.exec("SELECT normalized_name FROM legacy_names WHERE normalized_name = ?", name)).length > 0;
   }
 
   private async manage(request: Request, deleteRoom: boolean): Promise<Response> {
@@ -3360,6 +3462,8 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
       this.ctx.storage.sql.exec("DELETE FROM coordination_disputes");
       this.ctx.storage.sql.exec("DELETE FROM coordination_dispute_reviews");
       this.ctx.storage.sql.exec("DELETE FROM coordination_supersessions");
+      this.ctx.storage.sql.exec("DELETE FROM name_claims");
+      this.ctx.storage.sql.exec("DELETE FROM legacy_names");
       this.ctx.storage.sql.exec("UPDATE room_state SET status = 'deleted', tombstone_expires_at = ?, management_hash = NULL, get_post_hash = NULL, get_post_enabled = 0, message_count = 0, total_bytes = 0, coordination_cursor = 0, published_revision = 0 WHERE singleton = 1", now + this.limits.tombstoneTtlMs);
       return true;
     });
@@ -5273,6 +5377,36 @@ function resolveNow(env: ConversationRoomEnv): number {
   return now;
 }
 function sameInput(message: StoredMessage, input: MessageInput): boolean { return message.content === input.content && message.author === input.author && message.display_name === input.display_name && message.client === (input.client ?? null) && message.semantic_type === input.semantic_type && message.reply_to === (input.reply_to ?? null) && message.client_message_id === (input.client_message_id ?? null); }
+function normalizedNames(input: Pick<MessageInput, "author" | "display_name">): readonly string[] {
+  return [...new Set([normalizeName(input.author), normalizeName(input.display_name)])];
+}
+function normalizeName(value: string): string { return value.trim().toLowerCase(); }
+function withoutNamePassword(input: NameAwareMessageInput): MessageInput {
+  const { name_password: _namePassword, ...message } = input;
+  return message;
+}
+async function prepareNamePassword(input: NameAwareMessageInput): Promise<NamePasswordMaterial> {
+  if (typeof input.author !== "string" || !input.author.trim()) {
+    throw new ProtocolError(ERROR_CODES.invalidBody, "The self-declared author is required.", 400);
+  }
+  if (typeof input.display_name !== "string" || !input.display_name.trim()) {
+    throw new ProtocolError(ERROR_CODES.invalidBody, "The display_name field is required.", 400);
+  }
+  if (input.name_password !== undefined) {
+    if (typeof input.name_password !== "string" || input.name_password.length === 0) {
+      throw new ProtocolError(ERROR_CODES.invalidBody, "The name_password field must be a nonempty string.", 400);
+    }
+    return { hash: await hashCapability(input.name_password), supplied: true };
+  }
+  const generatedPassword = generateNamePassword();
+  return { generatedPassword, hash: await hashCapability(generatedPassword), supplied: false };
+}
+function generateNamePassword(): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(8));
+  let password = "";
+  for (const byte of bytes) password += NAME_PASSWORD_ALPHABET[byte % NAME_PASSWORD_ALPHABET.length];
+  return password;
+}
 function resolveRoomLimits(env: ConversationRoomEnv): RoomLimits {
   if (env.MSG_TEST_MODE === undefined && env.MSG_TEST_ROOM_LIMITS === undefined) return ROOM_LIMITS;
   if (env.MSG_TEST_MODE !== "1" || !env.MSG_TEST_ROOM_LIMITS) throw new Error("Test room limits require explicit test mode.");

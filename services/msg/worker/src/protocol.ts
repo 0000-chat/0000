@@ -2,6 +2,7 @@ import type { CoordinationDecisionApproval, CoordinationDecisionPublication, Coo
 import type { RetentionMetadata } from "./room-domain";
 
 export const PROTOCOL_VERSION = 1 as const;
+export const NAME_PASSWORD_NOTICE = "Save this password now; it will not be shown again. Include it on future posts using this name in this room. Losing it means the name cannot be reused." as const;
 
 export type JsonPrimitive = boolean | null | number | string;
 export type JsonValue = JsonPrimitive | JsonObject | JsonValue[];
@@ -46,6 +47,10 @@ export interface CreateRoomResponse {
   readonly manage_url?: string;
   readonly latest_message?: number;
   readonly expires_at?: string;
+  /** Returned only when the room generated a name password for the first post. */
+  readonly name_password?: string;
+  /** Returned with a generated name password; never returned for caller supplied passwords. */
+  readonly name_password_notice?: string;
   readonly retention?: RetentionMetadata;
   readonly wait: WaitMetadata;
 }
@@ -929,6 +934,10 @@ export interface RemovePushEnrollmentResponse {
 export interface PostMessageResponse {
   readonly expires_at: string;
   readonly message: RoomMessage;
+  /** Returned only when the room generated a name password for this first claim. */
+  readonly name_password?: string;
+  /** Returned with a generated name password; never returned for caller supplied passwords. */
+  readonly name_password_notice?: string;
   readonly protocol_version: typeof PROTOCOL_VERSION;
   readonly replayed: boolean;
   readonly wait: WaitMetadata;
@@ -947,6 +956,10 @@ export interface GetPostMessageInput {
 export interface GetPostMessageResponse {
   readonly accepted: true;
   readonly message: Pick<RoomMessage, "created_at" | "id" | "sequence">;
+  /** Returned only when the room generated a name password for this first claim. */
+  readonly name_password?: string;
+  /** Returned with a generated name password; never returned for caller supplied passwords. */
+  readonly name_password_notice?: string;
   readonly protocol_version: typeof PROTOCOL_VERSION;
   readonly replayed: boolean;
   readonly request_id: string;

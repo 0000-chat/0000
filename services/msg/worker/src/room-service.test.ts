@@ -11,7 +11,7 @@ test("creates independent room and management capabilities and does not leak man
     (values) => values.fill(7),
   );
 
-  const result = await service.create({ body: { kind: "raw", value: "hello" } });
+  const result = await service.create({ body: { kind: "json", value: { author: "agent", content: "hello" } } });
 
   expect(result.conversation_url).toMatch(/^https:\/\/msg\.0000\.chat\/[^/]+$/);
   expect(result.manage_url).toContain("/manage/");
@@ -43,6 +43,39 @@ test("creates independent room and management capabilities and does not leak man
   expect(calls).toHaveLength(1);
 });
 
+test("forwards name passwords to the room and returns generated creation credentials", async () => {
+  const calls: Request[] = [];
+  const service = new DurableRoomService({
+    getByName: () => ({
+      fetch: async (request: Request) => {
+        calls.push(request);
+        if (request.url.endsWith("/initialize")) {
+          return Response.json({
+            created: true,
+            created_at: "2026-08-10T00:00:00.000Z",
+            expires_at: "2026-08-17T00:00:00.000Z",
+            name_password: "Ab234567",
+            name_password_notice: "Save this password; it will not be shown again.",
+          });
+        }
+        return Response.json({
+          expires_at: "2026-08-17T00:00:00.000Z",
+          message: { created_at: "2026-08-10T00:00:00.000Z", id: "message", sequence: 2 },
+          protocol_version: 1,
+          replayed: false,
+        });
+      },
+    }),
+  } as never, "https://msg.0000.chat");
+
+  const created = await service.create({ body: { kind: "json", value: { author: "agent", content: "hello", name_password: "caller-secret" } } });
+  const posted = await service.post({ body: { kind: "json", value: { author: "agent", content: "reply", name_password: "caller-secret" } }, room: "room" });
+  expect(created).toMatchObject({ name_password: "Ab234567", name_password_notice: expect.any(String) });
+  expect(posted.message.sequence).toBe(2);
+  expect(await calls[0]!.clone().json()).toMatchObject({ initial: { author: "agent", content: "hello", name_password: "caller-secret" } });
+  expect(await calls[1]!.clone().json()).toMatchObject({ input: { author: "agent", content: "reply", name_password: "caller-secret" } });
+});
+
 test("adds foreground wait metadata after a posted message without exposing management capabilities", async () => {
   const service = new DurableRoomService({
     getByName: () => ({
@@ -53,7 +86,7 @@ test("adds foreground wait metadata after a posted message without exposing mana
     }),
   } as never, "https://msg.0000.chat");
 
-  const result = await service.post({ body: { kind: "raw", value: "reply" }, room: "public-room" });
+  const result = await service.post({ body: { kind: "json", value: { author: "agent", content: "reply" } }, room: "public-room" });
 
   expect(result.wait).toEqual({
     after: 7,
@@ -157,7 +190,7 @@ test("uses a normalized configured service origin for public URLs and quoted wai
     getByName: () => ({ fetch: async () => Response.json({ created_at: "2026-08-10T00:00:00.000Z", expires_at: "2026-08-17T00:00:00.000Z" }) }),
   } as never, "HTTPS://MSG.0000.CHAT:443/$(touch injected)/%27%22", (values) => values.fill(7));
 
-  const result = await service.create({ body: { kind: "raw", value: "hello" } });
+  const result = await service.create({ body: { kind: "json", value: { author: "agent", content: "hello" } } });
 
   expect(result.conversation_url).toMatch(/^https:\/\/msg\.0000\.chat\/[^/]+$/);
   expect(result.wait.command).toBe(`npx --yes @0000chat/msg@latest wait '${result.conversation_url}' --after 1`);

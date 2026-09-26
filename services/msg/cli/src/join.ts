@@ -6,6 +6,7 @@ const MAX_JOIN_LIMIT = 100;
 interface AgentMessage {
   readonly author?: string;
   readonly content: string;
+  readonly display_name?: string;
   readonly id: string;
   readonly reply_to?: string;
   readonly sequence: number;
@@ -137,6 +138,7 @@ function isAgentMessage(value: unknown): value is AgentMessage {
     && isSafePositiveInteger(value.sequence)
     && typeof value.content === "string"
     && (value.author === undefined || typeof value.author === "string")
+    && (value.display_name === undefined || typeof value.display_name === "string")
     && (value.reply_to === undefined || typeof value.reply_to === "string");
 }
 
@@ -186,7 +188,11 @@ function renderJoin(value: AgentRepresentation, command: JoinCommand): string {
   if (value.messages.length === 0) lines.push("> No participant messages.");
   for (const message of value.messages) {
     const citation = messageCitationUrl(value.conversation_url, message.id);
-    lines.push(`> Message ${message.sequence}${message.author === undefined ? "" : ` from ${message.author} (self-declared and unverified)`} [stored ID ${message.id}](${citation}):`);
+    const displayName = message.display_name ?? message.author;
+    const authorNote = displayName === undefined
+      ? ""
+      : ` from ${displayName} (self-declared and unverified)${message.author === undefined || message.author === displayName ? "" : `; author ${message.author}`}`;
+    lines.push(`> Message ${message.sequence}${authorNote} [stored ID ${message.id}](${citation}):`);
     lines.push(`> Citation: ${citation}`);
     if (message.reply_to !== undefined) {
       if (isSequence(message.reply_to)) {

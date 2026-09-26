@@ -163,7 +163,7 @@ async function createRoom(miniflare: Awaited<ReturnType<typeof startMsgMiniflare
 
 async function post(miniflare: Awaited<ReturnType<typeof startMsgMiniflare>>["miniflare"], room: string, content: string, idempotencyKey?: string, browserId?: string, replyTo?: string, basedOnSequence?: number) {
   return miniflare.dispatchFetch(`https://msg.0000.chat/${room}`, {
-    body: JSON.stringify({ content, author: "beta", display_name: "Beta", semantic_type: "message", ...(replyTo === undefined ? {} : { reply_to: replyTo }), ...(basedOnSequence === undefined ? {} : { based_on_sequence: basedOnSequence }) }),
+    body: JSON.stringify({ content, author: "beta", display_name: "Beta", name_password: "test-password", semantic_type: "message", ...(replyTo === undefined ? {} : { reply_to: replyTo }), ...(basedOnSequence === undefined ? {} : { based_on_sequence: basedOnSequence }) }),
     headers: { ...jsonHeaders, ...(idempotencyKey !== undefined ? { "idempotency-key": idempotencyKey } : {}), ...(browserId !== undefined ? { "x-msg-browser-id": browserId } : {}) },
     method: "POST",
   });
@@ -1292,8 +1292,8 @@ test.serial("reads bounded pages through a stable snapshot without changing lega
     const normalContent = "n".repeat(50_000);
     for (let sequence = 2; sequence <= 5; sequence += 1) {
       const posted = await miniflare.dispatchFetch(`https://msg.0000.chat/${budgetRoom.room.id}`, {
-        body: normalContent,
-        headers: { accept: "application/json", "content-type": "text/plain" },
+        body: JSON.stringify({ author: "budget-agent", content: normalContent, name_password: "test-password" }),
+        headers: jsonHeaders,
         method: "POST",
       });
       expect(posted.status).toBe(201);
@@ -1311,7 +1311,7 @@ test.serial("reads bounded pages through a stable snapshot without changing lega
   }, { ...TEST_ROOM_LIMITS, maxMessages: 100 });
 });
 
-test.serial("returns a control-heavy oversized message alone within bounded pagination", { timeout: MINIFLARE_TEST_TIMEOUT_MS }, async () => {
+test.serial("rejects raw control-heavy messages without a required author", { timeout: MINIFLARE_TEST_TIMEOUT_MS }, async () => {
   await withRuntime(async (miniflare) => {
     const { room } = await createRoom(miniflare, "small");
     const content = "\u0001".repeat(64 * 1024);
@@ -1320,14 +1320,8 @@ test.serial("returns a control-heavy oversized message alone within bounded pagi
       headers: { accept: "application/json", "content-type": "text/plain" },
       method: "POST",
     });
-    expect(posted.status).toBe(201);
-
-    const response = await miniflare.dispatchFetch(`https://msg.0000.chat/${room.id}?after=1&limit=20&through=2`, { headers: { accept: "application/json" } });
-    const value = await response.json() as { messages: Array<{ content: string; sequence: number }>; next_after: number; oversized_message?: boolean };
-    expect(value.messages).toHaveLength(1);
-    expect(value.messages[0]).toMatchObject({ content, sequence: 2 });
-    expect(value).toMatchObject({ next_after: 2, oversized_message: true });
-    expect(new TextEncoder().encode(JSON.stringify(value.messages)).byteLength).toBeGreaterThan(128 * 1024);
+    expect(posted.status).toBe(400);
+    expect(await posted.json()).toMatchObject({ error: { code: "invalid_body" } });
   });
 });
 
@@ -1450,7 +1444,7 @@ test.serial("creates, replays, rotates, and disables delegated GET posts through
       for (const [name, value] of Object.entries(values)) url.searchParams.set(name, value);
       return url.toString();
     };
-    const request = (base: string, requestId: string, content: string, extra: Record<string, string> = {}) => miniflare.dispatchFetch(getUrl(base, { content, request_id: requestId, ...extra }), { headers: { accept: "application/json" } });
+    const request = (base: string, requestId: string, content: string, extra: Record<string, string> = {}) => miniflare.dispatchFetch(getUrl(base, { author: "fetch-only", content, name_password: "test-password", request_id: requestId, ...extra }), { headers: { accept: "application/json" } });
 
     const invalidReply = await request(getPostUrl, "invalid-reply", "must not store", { reply_to: "999" });
     expect(invalidReply.status).toBe(404);
@@ -1571,8 +1565,10 @@ test.serial("applies stale review and authorization semantics to delegated GET p
     const getPostUrl = (await enabled.json() as { get_post_url: string }).get_post_url;
     const getUrl = (requestId: string, content: string, basedOnSequence?: string) => {
       const url = new URL(getPostUrl);
+      url.searchParams.set("author", "fetch-only");
       url.searchParams.set("request_id", requestId);
       url.searchParams.set("content", content);
+      url.searchParams.set("name_password", "test-password");
       if (basedOnSequence !== undefined) url.searchParams.set("based_on_sequence", basedOnSequence);
       return url.toString();
     };
@@ -1755,34 +1751,17 @@ test.serial("creates five concurrent webhooks atomically and hides URL credentia
   });
 });
 
-test.serial("sends an unchanged 64 KiB control-heavy message beyond the former envelope limit", { timeout: MINIFLARE_TEST_TIMEOUT_MS }, async () => {
+test.serial("rejects a raw 64 KiB control-heavy message without a required author", { timeout: MINIFLARE_TEST_TIMEOUT_MS }, async () => {
   await withRuntime(async (miniflare) => {
     const { room } = await createRoom(miniflare);
-    const registration = await registerWebhook(miniflare, room.id, "https://receiver.example.com/full-message");
     const content = "\u0000".repeat(64 * 1024);
     const response = await miniflare.dispatchFetch(`https://msg.0000.chat/${room.id}`, {
       body: content,
       headers: { accept: "application/json", "content-type": "text/plain" },
       method: "POST",
     });
-    expect(response.status).toBe(201);
-    const posted = await response.json() as { message: { content: string; id: string; sequence: number } };
-    expect(posted.message.content).toHaveLength(64 * 1024);
-    expect(posted.message.content).toBe(content);
-
-    const requests = await waitForOutboundRequests(miniflare, 1, 5_000);
-    expect(requests).toHaveLength(1);
-    const outbound = requests[0]!;
-    expect(outbound.body.length).toBeGreaterThan(72 * 1024);
-    const timestamp = outbound.headers["x-msg-timestamp"];
-    const signature = outbound.headers["x-msg-signature"];
-    expect(await verifyWebhookSignature(registration.secret, timestamp!, outbound.body, signature!)).toBe(true);
-    const event = JSON.parse(outbound.body) as { event_id: string; message: { content: string; id: string; sequence: number }; room_id: string };
-    expect(event.event_id).toBe(posted.message.id);
-    expect(event.message).toMatchObject({ content, id: posted.message.id, sequence: posted.message.sequence });
-    expect(event.room_id).not.toBe(room.id);
-    expect(outbound.body).not.toContain(room.id);
-    expect(outbound.body).not.toContain(registration.secret);
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ error: { code: "invalid_body" } });
   });
 });
 

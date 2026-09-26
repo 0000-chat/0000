@@ -47,6 +47,8 @@ export interface MessageInput {
   readonly content: string;
   readonly display_name: string;
   readonly identity_verified: false;
+  /** Transport-only credential; the room strips it before storing or publishing a message. */
+  readonly name_password?: string;
   readonly reply_to?: string;
   readonly semantic_type: string;
 }
@@ -248,14 +250,18 @@ export function byteLength(value: string): number {
 
 function messageInput(value: JsonObject): MessageInput {
   const content = stringField(value, "content");
-  const author = optionalString(value, "author") ?? "anonymous";
+  const author = optionalString(value, "author");
+  if (author === undefined) throw invalidMessage("The self-declared author is required.");
   const displayName = optionalString(value, "display_name") ?? author;
+  const namePassword = optionalString(value, "name_password");
   const semanticType = optionalString(value, "semantic_type") ?? "message";
   const client = optionalString(value, "client");
   const replyTo = optionalPositiveSafeInteger(value, "reply_to");
   const clientMessageId = optionalString(value, "client_message_id");
   if (!content) throw invalidMessage("The message content is required.");
   if (!author) throw invalidMessage("The self-declared author is required.");
+  if (!displayName) throw invalidMessage("The display_name field is required.");
+  if (namePassword !== undefined && namePassword.length === 0) throw invalidMessage("The name_password field must be a nonempty string.");
   validateBoundedString(author, "author", maxIdentityChars, maxIdentityBytes);
   validateBoundedString(displayName, "display_name", maxIdentityChars, maxIdentityBytes);
   if (client) validateBoundedString(client, "client", maxIdentityChars, maxIdentityBytes);
@@ -271,6 +277,7 @@ function messageInput(value: JsonObject): MessageInput {
     content,
     display_name: displayName,
     identity_verified: false,
+    ...(namePassword === undefined ? {} : { name_password: namePassword }),
     ...(replyTo ? { reply_to: replyTo } : {}),
     semantic_type: semanticType,
   };

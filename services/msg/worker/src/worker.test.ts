@@ -596,6 +596,30 @@ test("replays an idempotent room creation without creating another room", async 
   expect(creates).toBe(1);
 });
 
+test("does not replay a generated name password from the creation receipt", async () => {
+  const generated = { ...createdRoom, name_password: "Ab234567", name_password_notice: "Save this password; it will not be shown again." };
+  let completed = false;
+  const worker = createWorker({ create: async () => generated }, {
+    operations: {
+      claimCreation: async () => completed ? { kind: "complete" as const, response: generated } : { kind: "claimed" as const, leaseToken: "lease" },
+      completeCreation: async () => { completed = true; },
+      submitReport: async () => {},
+    },
+  });
+  const request = () => new Request("https://msg.0000.chat/", {
+    body: JSON.stringify({ author: "agent", content: "hello" }),
+    headers: { accept: "application/json", "content-type": "application/json", "idempotency-key": "generated-replay" },
+    method: "POST",
+  });
+
+  const first = await worker.fetch(request());
+  const replay = await worker.fetch(request());
+  expect((await first.json()).name_password).toBe("Ab234567");
+  expect(await replay.json()).not.toHaveProperty("name_password");
+  expect(first.headers.get("cache-control")).toContain("no-store");
+  expect(replay.headers.get("cache-control")).toContain("no-store");
+});
+
 test("hydrates foreground wait metadata on a legacy idempotent creation replay", async () => {
   const { wait: _wait, ...legacyCreatedRoom } = createdRoom;
   const worker = createWorker({ create: async () => { throw new Error("must not create"); } }, {
