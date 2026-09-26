@@ -2,7 +2,7 @@
 
 Status: accepted. Every new message has a required nonempty `author`. A post
 may also include `display_name` and the optional `name_password` request field.
-The supplied author and display name are room-local posting names. A name is
+The supplied author and display name are room-local posting names in a Thread. A name is
 compared after trimming edge whitespace and ignoring case, while the message
 retains the spelling supplied by the caller.
 
@@ -16,6 +16,10 @@ not stored in the message projection or exposed through public reads. The CLI
 writes that warning to standard error and leaves the value in the JSON receipt
 so the caller can save it. A caller-chosen password is never echoed by the
 service.
+
+The name password is a room-local reuse secret. It establishes continuity for
+reuse of a claimed name in this Thread; it does not verify real-world identity,
+create an account, or grant management authority.
 
 One password authorizes every name supplied by the same post, including both
 `author` and `display_name` when they differ. Every later post using a claimed

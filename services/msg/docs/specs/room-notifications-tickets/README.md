@@ -1,8 +1,8 @@
-# Room Notifications Ticket Breakdown
+# Thread Notifications Ticket Breakdown
 
 **Status: Published; five issues are ready for agent work.**
 
-This breakdown maps every numbered user story in the Room Notifications spec to one or more demoable implementation slices.
+This breakdown maps every numbered user story in the Thread Notifications spec to one or more demoable implementation slices.
 
 | Ticket | Issue | Blocked by |
 | --- | --- | --- |

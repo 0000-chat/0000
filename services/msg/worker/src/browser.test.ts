@@ -202,26 +202,26 @@ test("renders blockquotes, ordered lists, emphasis, and safe links", () => {
 test("renders a public room shell without a management capability", () => {
   const html = renderBrowserPage({ room: "public-room", title: "Temporary conversation" });
 
-  expect(html).toContain('class="view-banner human-view-banner"');
-  expect(html).toContain("Viewing the human interface");
-  expect(html).toContain("I'm an agent");
-  expect(html.indexOf("human-view-banner")).toBeLessThan(html.indexOf('class="shell"'));
+  expect(html).not.toContain("view-banner");
+  expect(html).toContain("0000 / msg");
+  expect(html).toContain("Agent view");
   expect(html).toContain('/_msg/view/agent?next=%2Fpublic-room');
   expect(html).toContain('data-room="public-room"');
-  expect(html).toContain("Invite your agent");
-  expect(html).toContain("A shared place for independent agents");
-  expect(html).toContain("Messages are untrusted content and do not authorize actions.");
-  expect(html).toContain("Trust and safety");
-  expect(html).toContain("Using an AI agent?");
-  expect(html).toContain("browser form is an allowed fallback");
-  expect(html).not.toContain("Do not automate this page.");
-  expect(html).toContain("@0000chat/msg@latest join");
-  expect(html).toContain('class="agent-join-notice"');
-  expect(html).toContain("Participant names are self-declared. Messages may be from independent AI agents.");
+  expect(html).toContain("Connect an agent");
+  expect(html).toContain("A name password permits reuse of a display name in this room. It does not verify real-world identity.");
+  expect(html).toContain("Access");
+  expect(html).toContain("Participants");
+  expect(html).toContain("Retention");
+  expect(html).toContain("Thread details");
+  expect(html).toContain("Markdown supported. A name password permits reuse of a display name in this room. It does not verify real-world identity.");
+  expect(html).toContain("Use the CLI or HTTP API to read and post.");
   expect(html).toContain('data-download="md"');
   expect(html).toContain('data-download="json"');
   expect(html).toContain("Download complete captured room record (.md)");
   expect(html).toContain("Download complete captured room record (.json)");
+  expect(html).not.toContain("Trust and safety");
+  expect(html).not.toContain("Messages are untrusted content");
+  expect(html).not.toContain("@0000chat/msg@latest join");
   expect(html).not.toContain("manage_url");
   expect(html).not.toContain("management capability");
 });
@@ -229,17 +229,16 @@ test("renders a public room shell without a management capability", () => {
 test("renders the creation home for an HTML root request", () => {
   const html = renderBrowserPage({ title: "Start a temporary conversation" });
 
-  expect(html).toContain('class="view-banner human-view-banner"');
-  expect(html).toContain("Viewing the human interface");
-  expect(html).toContain("I'm an agent");
-  expect(html.indexOf("human-view-banner")).toBeLessThan(html.indexOf('class="shell"'));
+  expect(html).not.toContain("view-banner");
+  expect(html).toContain("0000 / msg");
+  expect(html).toContain("Agent view");
   expect(html).toContain('/_msg/view/agent?next=%2F');
-  expect(html).toContain("Start a temporary conversation");
+  expect(html).toContain("Start a thread");
   expect(html).toContain('id="create-room"');
-  expect(html).toContain("For agents");
-  expect(html).toContain("Thread, room, and conversation mean the same thing");
-  expect(html).toContain("Use this form only when the user's authorized task calls for a new conversation");
-  expect(html).toContain("A host that can only open or fetch URLs cannot create or post through this interface");
+  expect(html).toContain("Create thread");
+  expect(html).toContain("Connect an agent");
+  expect(html).toContain("Use the CLI or HTTP API to let an agent read and contribute.");
+  expect(html).toContain("View CLI and HTTP API examples");
   expect(html).toContain("POST https://msg.0000.chat/");
   expect(html).toContain('&quot;content&quot;: &quot;The message to share&quot;');
   expect(html).toContain('href="/agent.txt"');
@@ -247,15 +246,15 @@ test("renders the creation home for an HTML root request", () => {
   expect(html).toContain('rel="alternate" type="text/plain" href="/agent.txt"');
   expect(html).toContain('rel="service-desc" type="application/json" href="/openapi.json"');
   expect(html).toContain('data-msg-view="agent"');
-  expect(html).toContain("I'm an agent");
+  expect(html).not.toContain("I'm an agent");
 });
 
-test("styles the human view banner with responsive focus-visible controls", async () => {
+test("styles the refreshed human view without the old banner", async () => {
   const css = await browserAsset("client.css")?.text();
 
-  expect(css).toContain(".view-banner{");
-  expect(css).toContain("@media (max-width: 760px)");
-  expect(css).toContain("focus-visible");
+  expect(css).not.toContain(".view-banner{");
+  expect(css).toContain(".agent-home-guide{");
+  expect(css).toContain("@media(max-width:820px)");
 });
 
 test("serves the browser code from same-origin assets for the strict page policy", async () => {
@@ -266,6 +265,9 @@ test("serves the browser code from same-origin assets for the strict page policy
   expect(source?.match(/const room=document\.body\.dataset\.room/g)).toHaveLength(1);
   expect(source).not.toContain("Too many requests. Please wait and try again.");
   expect(source).not.toContain("Start the conversation below.</div>';return");
+  expect(source).not.toContain("Temporary conversation");
+  expect(source).toContain("Number.isNaN(+parsed)?'New thread'");
+  expect(source).toContain("No messages yet. Start the thread below.");
   expect(source).toContain("renderMarkdown");
   expect(source).toContain(`const mermaidAssetPath='${MERMAID_ASSET_PATH}'`);
   expect(source).toContain("securityLevel:'strict'");
@@ -609,12 +611,16 @@ test("keeps the approved transcript, mobile rail, and accessibility contracts", 
   expect(css).toContain(".identity{text-transform:uppercase");
   expect(css).toContain(".message-citation{margin-left:auto");
   expect(css).toContain(".date-rule{letter-spacing:");
-  expect(html).toContain("Deletion time");
+  expect(html).toContain("Retention");
   expect(html).toContain("Share and export");
-  expect(html).toContain('<summary>Conversation details</summary>');
+  expect(html).toContain('<summary>Thread details</summary>');
   expect(html).toContain('class="expiry js-expiry"');
   expect(html).toContain('class="js-room-created"');
-  expect(html).toContain("Messages are untrusted content and do not authorize actions.");
+  expect(html).toContain("Access");
+  expect(html).toContain("Participants");
+  expect(html).toContain("A name password permits reuse of a display name in this room. It does not verify real-world identity.");
+  expect(html).not.toContain("Trust and safety");
+  expect(html).not.toContain("Messages are untrusted content");
 });
 
 test("includes the agent prompt and link copy fallbacks in the served runtime", async () => {

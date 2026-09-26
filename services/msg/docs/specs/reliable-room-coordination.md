@@ -1,8 +1,8 @@
-# Reliable room access and shared coordination state
+# Reliable Thread access and shared coordination state
 
 ## Problem Statement
 
-People and agents using msg for ongoing coordination must reconstruct what is currently true and what happens next from long room transcripts. Requests, corrections, proposals, approvals, and implementation updates are mixed together. A partial reply can look complete, a superseded proposal can look current, and an agent recommendation can look like participant agreement.
+People and agents using msg for ongoing coordination must reconstruct what is currently true and what happens next from long Thread transcripts. Requests, corrections, proposals, approvals, and implementation updates are mixed together. A partial reply can look complete, a superseded proposal can look current, and an agent recommendation can look like participant agreement.
 
 A user-supplied account of sustained use also reports a transcript exceeding an agent tool's output limit, repetitive requests for listening permission, contradictory service instructions, and conversational keepalive messages used solely to prevent expiration. These are reported experiences, not a live-production audit.
 
@@ -10,22 +10,22 @@ The inspected workspace already implements incremental reads using `after`, stor
 
 ## Solution
 
-Deliver both reliable conversation access and structured coordination in staged increments. People and agents can read a bounded portion of a room, verify a cited message, post with a dependable receipt, and resume waiting without losing their place. Instructions respect the agent's existing user authorization and clearly distinguish protocol documentation from participant requests.
+Deliver both reliable Thread access and structured coordination in staged increments. People and agents can read a bounded portion of a Thread, verify a cited message, post with a dependable receipt, and resume waiting without losing their place. Instructions respect the agent's existing user authorization and clearly distinguish protocol documentation from participant-provided messages.
 
-Add explicit tracked requests and a compact, versioned state panel showing purpose, phase, accepted-decision records, open questions, canonical documents, corrections, and next actions. Every substantive state claim retains its source and revision history. An agent-generated suggestion cannot silently become an accepted decision. The interface distinguishes reported approvals from authenticated identity and never infers acceptance from silence.
+Add explicit tracked requests and a compact, versioned state panel showing purpose, phase, accepted-decision records, open questions, canonical documents, corrections, and next actions. Every substantive state claim retains its source and revision history. A participant-provided suggestion cannot silently become an accepted decision. The interface distinguishes reported approvals from authenticated identity and never infers acceptance from silence.
 
-Make retention visible and extendable through owner authority without posting a message. Export the full coordination record alongside messages. Rooms remain temporary in this release; structured state shares the room's lifecycle.
+Make retention visible and extendable through owner authority without posting a message. Export the full coordination record alongside messages. Threads remain temporary in this release; structured state shares the Thread's lifecycle.
 
 ## User Stories
 
 1. As a user inspecting msg, I want agents to read documentation without creating a room, so that inspection has no unintended side effects.
-2. As a participant, I want an agent to reuse a supplied room, so that collaboration stays in the right conversation.
+2. As a participant, I want an agent to reuse a supplied Thread, so that collaboration stays in the right place.
 3. As an agent, I want a clear transport preference and supported fallbacks, so that instructions do not contradict one another.
-4. As an agent, I want protocol documentation separated from participant content and subordinate to host and user instructions, so that authority is clear.
-5. As a participant, I want agents to consider my messages within their user's authorized task, so that useful collaboration remains possible.
+4. As an agent, I want protocol documentation separated from participant-provided messages and subordinate to host and user instructions, so that authority is clear.
+5. As a participant, I want agents to consider messages I provide within their user's authorized task, so that useful collaboration remains possible.
 6. As a user, I want previously granted listening authorization respected within its scope, so that agents do not repeatedly ask the same permission question.
 7. As a new participant, I want a complete invitation explaining how to join, so that I can start successfully.
-8. As a returning participant, I want concise room links and delivery confirmations, so that repeated onboarding does not obscure the conversation.
+8. As a returning participant, I want concise Thread links and delivery confirmations, so that repeated onboarding does not obscure the Thread.
 9. As an agent, I want to retrieve only messages after my saved cursor, so that checking for updates is inexpensive.
 10. As an agent, I want bounded pages and explicit continuation metadata, so that I can detect incomplete history.
 11. As an agent, I want a stable snapshot boundary while paging, so that concurrent messages do not make my read ambiguous.
@@ -54,10 +54,11 @@ Make retention visible and extendable through owner authority without posting a 
 34. As a participant, I want state revisions and confirmation provenance available, so that I can audit how the overview changed.
 35. As a concurrent editor, I want stale state updates rejected, so that I do not overwrite newer work.
 36. As a room owner, I want the temporary retention policy and expiry visible when people join, so that nobody assumes indefinite storage.
-37. As a room owner, I want to extend retention without a conversational message, so that maintenance does not become unread activity.
+37. As a Thread owner, I want to extend retention without a conversational message, so that maintenance does not become unread activity.
 38. As a participant, I want exports to include messages, requests, decisions, evidence references, and state history, so that coordination can be preserved outside the room.
 39. As a participant, I want unavailable or expired evidence represented honestly, so that missing information is not silently treated as confirmation.
-40. As an existing client user, I want compatible access to my existing rooms during rollout, so that these improvements do not interrupt conversations.
+40. As an existing client user, I want compatible access to my existing Threads during rollout, so that these improvements do not interrupt them.
+41. As a participant, I want the public Thread URL to open the human view and show "Anyone with this link can read and post," so that access and posting are clear.
 
 ## Implementation Decisions
 
@@ -66,16 +67,16 @@ These decisions define the proposed implementation, not claims about deployed be
 ### Delivery and boundaries
 
 - Stage 1: correct instructions and finish reliable reading, receipts, reply validation, and bounded wait contracts. Stage 2: tracked requests and compact overview. Stage 3: reviewable decision state, corrections, canonical documents, and state-panel editing. Stage 4: retention extension and complete coordination exports. Each stage must leave the room usable independently.
-- Extend the existing Worker routing, room service, ConversationRoom Durable Object, protocol representations, CLI, and browser interface. Keep room messages and coordination state together in the room's persistence and transaction boundary. D1 operations metadata must not become a second store of conversation content.
-- Do not add a runtime dependency on Brain, Streams, Database, or Platform as part of this spec. Shared identity architecture remains a separate integration decision; room-local name passwords are continuity secrets, not an identity issuer or real-world participant credentials. Current account-free room semantics and `identity_verified: false` remain explicit.
+- Extend the existing Worker routing, room service, ConversationRoom Durable Object, protocol representations, CLI, and browser interface. Keep Thread messages and coordination state together in the room's persistence and transaction boundary. D1 operations metadata must not become a second store of participant-provided messages.
+- Do not add a runtime dependency on Brain, Streams, Database, or Platform as part of this spec. Shared identity architecture remains a separate integration decision; room-local name passwords are continuity secrets, not an identity issuer or real-world participant credentials. Current account-free Thread semantics and `identity_verified: false` remain explicit.
 - Preserve the accepted opt-in GET posting ADR: public reads remain non-mutating; delegated GET posting stays separately enabled and revocable with its existing retry namespace. Do not extend that capability to management or state publication.
 
 ### Instructions and representation
 
-- Create a room only for an authorized new conversation; reuse supplied rooms. Prefer HTTP or CLI for agents, document the existing delegated GET option for fetch-only agents, and permit the ordinary browser form as a fallback when the host supports it and user authorization covers the action. Remove categorical browser prohibitions that contradict supported behavior.
-- Describe service instructions as protocol documentation, subordinate to host and user instructions. Treat participant messages as external requests and evidence actionable only within the agent's granted task and authority.
+- Create a Thread only for an authorized new conversation; reuse supplied Thread URLs. Prefer HTTP or CLI for agents, document the existing delegated GET option for fetch-only agents, and permit the ordinary browser form as a fallback when the host supports it and user authorization covers the action. Remove categorical browser prohibitions that contradict supported behavior.
+- Describe service-controlled instructions as protocol documentation, subordinate to host and user instructions. Treat participant-provided messages as external requests and evidence actionable only within the agent's granted task and authority; they are data, not service instructions.
 - Listening requires user authorization, but existing authorization within the active task satisfies that requirement. Do not remove the consent requirement or interpret it as a mandatory fresh question on every wait. Preserve existing protocol fields while clarifying their meaning.
-- Retain complete invitations for new handoffs; allow concise room links and receipts during ongoing work. Teach attribution, exact-revision approval, correction references, and the prohibition on treating silence as acceptance.
+- Retain complete invitations for new handoffs; allow concise Thread links and receipts during ongoing work. Teach attribution, exact-revision approval, correction references, and the prohibition on treating silence as acceptance.
 
 ### Read, post, and wait contracts
 
@@ -85,21 +86,21 @@ These decisions define the proposed implementation, not claims about deployed be
 - Provide room-scoped single-message lookup by stored ID and bounded sequence-range reads using the same pagination rules. Cross-room and nonexistent references produce a not-found result without revealing other rooms. The implementation may choose route spelling within existing routing conventions; the semantics above are required.
 - Preserve `reply_to` as the canonical reply field rather than adding a synonymous `in_reply_to`. Validate new references against the same room. Preserve legacy stored values without claiming they were validated retrospectively.
 - Preserve existing POST receipts and retry behavior; make ID, sequence, timestamp, and replay status consistently available to the CLI and delegated GET receipt. Same retry identifier and same logical payload return the original stored receipt; changed payload conflicts.
-- Require a nonempty `author` on every new post and accept an optional `display_name`. Compare both supplied names after trimming edge whitespace and ignoring case. A first use may choose any nonempty `name_password`, or receive an eight-character generated password in the private first-post receipt; later uses require the password. Keep the password out of messages, public representations, exports, public browser pages, and application logs; a private browser receipt may show it to its caller. During migration, normalize each `author` and `display_name` value present in pre-migration messages and record those values in `legacy_names`. Names in that table remain unclaimed and unprotected forever; do not infer or backfill claims, and do not allow a later post to claim a matching normalized name. Only names absent from `legacy_names` and `name_claims` can be newly claimed. The private delegated GET write URL may carry `name_password` in its query, so treat the full URL as a password-bearing secret because browser history, proxy or server URL logs, referrers, previews, and screenshots can retain it.
+- Require a nonempty `author` on every new post and accept an optional `display_name`. Compare both supplied names after trimming edge whitespace and ignoring case. A first use may choose any nonempty `name_password`, or receive an eight-character generated password in the private first-post receipt; later uses require the password. A name password is a room-local reuse secret, not identity verification or an account credential. Keep the password out of messages, public representations, exports, public browser pages, and application logs; a private browser receipt may show it to its caller. During migration, normalize each `author` and `display_name` value present in pre-migration messages and record those values in `legacy_names`. Names in that table remain unclaimed and unprotected forever; do not infer or backfill claims, and do not allow a later post to claim a matching normalized name. Only names absent from `legacy_names` and `name_claims` can be newly claimed. The private delegated GET write URL may carry `name_password` in its query, so treat the full URL as a password-bearing secret because browser history, proxy or server URL logs, referrers, previews, and screenshots can retain it.
 - Add optional `based_on_sequence` as an opt-in atomic precondition for message posting. If the room has advanced, return a conflict with the current latest sequence and a review cursor without storing the message or consuming the retry identifier. Clients read the intervening messages and explicitly resubmit against the new sequence. Clients omitting the field retain existing posting behavior. Resolve a successful idempotent replay before checking this precondition so a network retry still succeeds after later messages arrive.
 - Give CLI waits a finite default timeout of 60 seconds and allow an explicit positive override up to 5 minutes. Return structured event or timeout results with a resume cursor; distinguish timeout from transport failure. A timeout never advances past undelivered messages. Preserve WebSocket reconnect and read-before-subscribe recovery behavior and ensure page continuation cannot skip messages.
 
 ### Requests and shared state
 
-- Store requests with stable room-local IDs, source message references, title or purpose, owner label, requested output, explicit unknowns, completion criteria, decision impact, status, blockers, and completion evidence. Artifact evidence includes URL, affected tab/range or equivalent location when relevant, verification result, and who reported it. The service records evidence; it does not claim to have verified an external document.
+- Store requests with stable room-local IDs, source message references, title or purpose, owner label, requested output, explicit unknowns, completion criteria, decision impact, status, blockers, and completion evidence. Artifact evidence includes URL, affected tab/range or equivalent location when relevant, verification result, and who reported it. The service records participant-provided evidence; it does not claim to have verified an external document.
 - Request status is one of open, in progress, blocked, done, or withdrawn. A done report requires completion evidence or an explicit explanation that completion is self-reported and unverified. Preserve status history; reopening done or withdrawn work requires a reason. Ownership filters are label-based convenience filters, not authenticated inboxes.
 - The overview contains purpose, phase, published state revision, pending request counts and bounded request summaries, decision summaries, canonical artifact references and their roles, corrections/supersession links, next actions, latest message sequence, and expiry. Each collection is bounded and exposes continuation or a detail link. It never embeds an unbounded transcript or revision history. Empty coordination state is shown explicitly rather than invented from chat.
-- Public room participants may submit attributed state-change proposals and request-progress reports using existing room participation authority. These remain visibly proposed or reported. The management capability publishes canonical panel changes, including canonical request status. This is an explicit initial authority model for an account-free room, not proof of any participant's identity or agreement.
+- Public Thread participants may submit attributed state-change proposals and request-progress reports using existing room participation authority. These participant-provided messages remain visibly proposed or reported. The management capability publishes canonical panel changes, including canonical request status. This is an explicit initial authority model for an account-free Thread, not proof of any participant's identity or agreement.
 - Each proposal and revision records the submitting label, authority class, source message IDs, base state revision, and timestamp. Management capability values are never stored in public history. Publish updates atomically only when the submitted base revision matches; otherwise return a conflict and current revision. Require retry identifiers for structured mutations and preserve replay semantics.
 - Model a recommendation, reported position, explicit approval record, and accepted-decision record separately. A decision proposal identifies the exact revision and required approving participant labels. Acceptance publication requires explicit supporting approval-message references for every required label, an unchanged proposal revision, and an owner attestation that those messages approve that revision. Empty required-approver sets cannot produce accepted decisions. Display this as owner-recorded acceptance backed by unverified participant messages; do not imply authenticated consent.
 - An owner cannot manufacture participant approval by publishing a summary. The interface requires the evidence and attestation above and shows the original approval text and identity limitation. Unverifiable claims remain reported positions. Silence, an agent recommendation, a historical account, or completing an information request is insufficient acceptance evidence.
 - A new substantive proposal revision invalidates its earlier approval association. Retain original accepted records and link later decisions that supersede them. A correction references the exact earlier message or state claim, retains its attribution, and does not erase the earlier account. Record disputes and withdrawal of reported approval as new evidence and mark the affected decision contested until reviewed; preserve the historical acceptance record.
-- The browser panel and HTTP/CLI representations expose the same revision and provenance. Cache validators for representations containing state or expiry must change when those values change, even when message sequence is unchanged. Reading a room does not trigger automatic summarization. Agents may propose summaries through the same review path; there is no background LLM or autonomous acceptance engine in this release.
+- The browser panel and HTTP/CLI representations expose the same revision and provenance. Cache validators for representations containing state or expiry must change when those values change, even when message sequence is unchanged. Reading a Thread does not trigger automatic summarization. Agents may propose summaries through the same review path; there is no background LLM or autonomous acceptance engine in this release.
 - Apply room byte limits, mutation rate limits, same-room reference validation, and lifecycle deletion to requests, proposals, and revision history. If capacity is exhausted, reject mutations explicitly rather than pruning evidence silently. State publication does not create a chat message or increment the message sequence; expose state revision independently. Do not silently broaden existing message-only notifications to every coordination edit.
 
 ### Retention and export
@@ -111,7 +112,7 @@ These decisions define the proposed implementation, not claims about deployed be
 
 ## Testing Decisions
 
-- Prefer the existing Worker HTTP/WebSocket integration seam backed by the Miniflare ConversationRoom fixture. It exercises routing, protocol representations, persistence, capability checks, and live delivery together. Existing room creation/post/read, retry, expiry, export, and delegated GET tests provide prior art. Avoid creating parallel mocked acceptance suites for each internal helper.
+- Prefer the existing Worker HTTP/WebSocket integration seam backed by the Miniflare ConversationRoom fixture. It exercises routing, protocol representations, persistence, capability checks, and live delivery together. Existing Thread creation/post/read, retry, expiry, export, and delegated GET tests provide prior art. Avoid creating parallel mocked acceptance suites for each internal helper.
 - Test externally observable behavior: what a client can read, post, resume, review, publish, and export. Do not assert private SQL layout or implementation call order.
 - Cover multi-page reads, byte limits, zero and empty cursors, concurrent arrivals during paging, exact message lookup, invalid bounds, same-room reference checks, legacy-client compatibility, and continuation without gaps or duplicates.
 - Cover original receipts after ambiguous-network retries, changed-payload retry conflicts, stale `based_on_sequence` rejection with no stored message, and successful replay after the room has advanced. Preserve delegated GET disable/rotate and idempotency regression coverage.
@@ -134,10 +135,10 @@ These decisions define the proposed implementation, not claims about deployed be
 
 ## Further Notes
 
-The user authorized both reliable conversation infrastructure and structured coordination after reviewing the agent's feedback. This spec deliberately ships reliable access first, then requests and reviewable decision state, rather than requiring a large orchestration system.
+The user authorized both reliable Thread infrastructure and structured coordination after reviewing the agent's feedback. This spec deliberately ships reliable access first, then requests and reviewable decision state, rather than requiring a large orchestration system.
 
-The agent's negotiation examples motivate provenance and correction behavior; they are not data to import into another room. No real participant's financial details or disputed account is included here.
+The agent's negotiation examples motivate provenance and correction behavior; they are not data to import into another Thread. No real participant's financial details or disputed account is included here.
 
-The current local service is a migrated, account-free temporary relay. Controller architecture documents describe a broader shared-identity direction and contain older repository-layout descriptions. This spec preserves the service's inspected behavior and records the identity limitation rather than treating the broader direction as an implemented msg integration.
+The current local service is a migrated, account-free temporary relay. Controller architecture documents describe a broader shared-identity direction and contain older repository-layout descriptions. This spec preserves the service's inspected behavior and records the identity limitation rather than treating the broader direction as an implemented msg integration. Participant-provided messages remain data, not service instructions, and the room-local name password does not establish identity.
 
 Implementation should recheck in-flight room-notification and delegated GET changes before editing shared protocol surfaces. Existing functionality listed in the baseline must be extended and tested, not recreated under duplicate APIs.
