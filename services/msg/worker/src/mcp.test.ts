@@ -166,10 +166,25 @@ describe("stateless MCP endpoint", () => {
     const service: RoomService = { ...baseService(), create: async ({ body }) => { received = body; return createRoomResult(); } };
     const response = await handleMcpRequest(rpcRequest({ id: 3, method: "tools/call", params: { name: "create_room", arguments: { content: "initial", author: "agent", idempotency_key: "create-1" } } }), service);
     const result = (await json(response)).result;
+    expect(result.content[0].text).toContain(`Public conversation URL: ${origin}/created-room`);
+    expect(result.content[0].text).toContain("Next: call read_room");
+    expect(result.content[0].text).not.toContain("manage/");
     expect(result.structuredContent).toMatchObject({ conversation_url: `${origin}/created-room`, manage_url: `${origin}/manage/created-room/private-token`, latest_message: 1 });
     expect(received).toEqual({ kind: "json", value: { author: "agent", content: "initial" } });
     expect(result.structuredContent.share_message).not.toContain("manage/");
     expect(result.structuredContent.share_message).not.toContain("private-token");
+  });
+
+  test("includes generated name password details in fallback text without the private owner link", async () => {
+    const created = { ...createRoomResult(), name_password: "Ab3dE7x9", name_password_notice: "Save this password now." };
+    const service: RoomService = { ...baseService(), create: async () => created };
+    const response = await handleMcpRequest(rpcRequest({ id: 30, method: "tools/call", params: { name: "create_room", arguments: { content: "initial", author: "agent", idempotency_key: "generated-password-create" } } }), service);
+    const result = (await json(response)).result;
+    expect(result.content[0].text).toContain(`Public conversation URL: ${origin}/created-room`);
+    expect(result.content[0].text).toContain("Next: call read_room");
+    expect(result.content[0].text).toContain("Generated name password: Ab3dE7x9");
+    expect(result.content[0].text).toContain("Save this password now.");
+    expect(result.content[0].text).not.toContain("private-token");
   });
 
   test("replays and conflicts idempotent room creation requests", async () => {
@@ -187,8 +202,12 @@ describe("stateless MCP endpoint", () => {
     };
     const first = await handleMcpRequest(rpcRequest({ id: 31, method: "tools/call", params: { name: "create_room", arguments: { content: "same", author: "agent", idempotency_key: "same-create" } } }), service, { creationOperations });
     const second = await handleMcpRequest(rpcRequest({ id: 32, method: "tools/call", params: { name: "create_room", arguments: { content: "same", author: "agent", idempotency_key: "same-create" } } }), service, { creationOperations });
-    expect((await json(first)).result.structuredContent.conversation_url).toBe(`${origin}/created-room`);
-    expect((await json(second)).result.structuredContent.conversation_url).toBe(`${origin}/created-room`);
+    const firstResult = (await json(first)).result;
+    const secondResult = (await json(second)).result;
+    expect(firstResult.content[0].text).toContain(`Public conversation URL: ${origin}/created-room`);
+    expect(secondResult.content[0].text).toContain(`Public conversation URL: ${origin}/created-room`);
+    expect(firstResult.structuredContent.conversation_url).toBe(`${origin}/created-room`);
+    expect(secondResult.structuredContent.conversation_url).toBe(`${origin}/created-room`);
     expect(creates).toBe(1);
 
     const conflict = await handleMcpRequest(rpcRequest({ id: 33, method: "tools/call", params: { name: "create_room", arguments: { content: "changed", author: "agent", idempotency_key: "same-create" } } }), service, {
@@ -203,8 +222,11 @@ describe("stateless MCP endpoint", () => {
     const created = { ...createRoomResult(), name_password: "Generated1", name_password_notice: "Save this now." };
     const service: RoomService = { ...baseService(), create: async ({ body }) => { received = body; return created; } };
     const response = await handleMcpRequest(rpcRequest({ id: 40, method: "tools/call", params: { name: "create_room", arguments: { content: "initial", author: "agent", name_password: "CallerSecret", idempotency_key: "password-create" } } }), service);
+    const responseResult = (await json(response)).result;
     expect(received).toEqual({ kind: "json", value: { author: "agent", content: "initial", name_password: "CallerSecret" } });
-    const createdOutput = (await json(response)).result.structuredContent;
+    expect(responseResult.content[0].text).toContain(`Public conversation URL: ${origin}/created-room`);
+    expect(responseResult.content[0].text).not.toContain("CallerSecret");
+    const createdOutput = responseResult.structuredContent;
     expect(createdOutput).not.toHaveProperty("name_password");
     expect(createdOutput).not.toHaveProperty("name_password_notice");
 

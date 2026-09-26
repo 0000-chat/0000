@@ -291,7 +291,10 @@ function buildMcpServer(
           }
         }
         if (claim) {
-          if (claim.kind === "complete") return { content: [{ type: "text" as const, text: "Room already created." }], structuredContent: safeCreateOutput(claim.response, false) };
+          if (claim.kind === "complete") {
+            const structuredContent = safeCreateOutput(claim.response, false);
+            return { content: [{ type: "text" as const, text: createRoomToolText(structuredContent, true) }], structuredContent };
+          }
           if (claim.kind === "conflict") throw new ProtocolError(ERROR_CODES.conflict, "The Idempotency-Key is already used for another request.", 409);
           if (claim.kind === "pending") throw new ProtocolError(ERROR_CODES.serviceUnavailable, "Room creation is still in progress. Retry with the same idempotency_key.", 503);
         }
@@ -304,9 +307,10 @@ function buildMcpServer(
             // The room remains valid when optional replay storage cannot persist.
           }
         }
+        const structuredContent = safeCreateOutput(created, name_password === undefined);
         return {
-          content: [{ type: "text" as const, text: "Room created." }],
-          structuredContent: safeCreateOutput(created, name_password === undefined),
+          content: [{ type: "text" as const, text: createRoomToolText(structuredContent, false) }],
+          structuredContent,
         };
       } catch (error) {
         return mcpToolError(error, "The room could not be created.");
@@ -725,7 +729,12 @@ function registerWebhookTools(
   );
 }
 
-function safeCreateOutput(result: CreateRoomResponse, includeGeneratedPassword = true) {
+type SafeCreateRoomOutput = CreateRoomResponse & {
+  readonly expires_at: string;
+  readonly latest_message: number;
+};
+
+function safeCreateOutput(result: CreateRoomResponse, includeGeneratedPassword = true): SafeCreateRoomOutput {
   const safe = stripLegacyAbsoluteExpiry(result);
   const sanitized = includeGeneratedPassword
     ? safe
@@ -741,6 +750,19 @@ function safeCreateOutput(result: CreateRoomResponse, includeGeneratedPassword =
     protocol_version: sanitized.protocol_version ?? PROTOCOL_VERSION,
     wait: foregroundWaitForConversation(sanitized.conversation_url, latestMessage),
   };
+}
+
+function createRoomToolText(result: ReturnType<typeof safeCreateOutput>, replayed: boolean): string {
+  const lines = [
+    replayed ? "Room already created." : "Room created.",
+    `Public conversation URL: ${result.conversation_url}`,
+    "Next: call read_room with room_url set to this URL before calling post_message.",
+  ];
+  if (typeof result.name_password === "string") {
+    lines.push(`Generated name password: ${result.name_password}`);
+    if (typeof result.name_password_notice === "string") lines.push(result.name_password_notice);
+  }
+  return lines.join("\n");
 }
 
 function parseExportJson(value: string): string | Record<string, unknown> {
