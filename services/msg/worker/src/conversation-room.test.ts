@@ -418,6 +418,28 @@ test("reads a room created by the standalone v4 Worker", async () => {
   expect(wrongPassword.status).toBe(409);
 });
 
+test("opens and reads a schema 14 room after restoring removed delegated-posting columns", async () => {
+  const database = new Database(":memory:");
+  const initial = await room(database, () => 1_000);
+  const created = await initial.room.fetch(request("/initialize", {
+    now: 1_000,
+    management_hash: "management-hash",
+    initial: { content: "first", author: "agent", display_name: "Agent", semantic_type: "message" },
+  }));
+  expect(created.status).toBe(200);
+
+  database.exec("ALTER TABLE room_state DROP COLUMN get_post_hash; ALTER TABLE room_state DROP COLUMN get_post_enabled;");
+  database.query("UPDATE room_schema SET version = 14 WHERE singleton = 1").run();
+  database.query("UPDATE room_state SET schema_version = 14 WHERE singleton = 1").run();
+
+  const restarted = await room(database, () => 2_000);
+  const response = await restarted.room.fetch(new Request("https://room/read?after=0"));
+
+  expect(response.status).toBe(200);
+  expect(await response.json()).toMatchObject({ latest_message: 1, messages: [{ content: "first", sequence: 1 }] });
+  expect(database.query("SELECT get_post_hash, get_post_enabled FROM room_state WHERE singleton = 1").get()).toEqual({ get_post_hash: null, get_post_enabled: 0 });
+});
+
 test("does not expose the legacy absolute expiry field in room responses", async () => {
   let now = 1_000;
   const { context, room: durable } = await room(undefined, () => now);

@@ -1,7 +1,7 @@
 import { ROOM_LIMITS } from "./room-domain";
 import { WEBHOOK_RETRY_INITIAL_DELAY_MS, WEBHOOK_RETRY_WINDOW_MS } from "./webhook-policy";
 
-export const CURRENT_ROOM_SCHEMA_VERSION = 13;
+export const CURRENT_ROOM_SCHEMA_VERSION = 15;
 
 interface SqlStorage {
   exec(query: string, ...values: unknown[]): Iterable<unknown>;
@@ -440,6 +440,21 @@ function applyMigration(sql: SqlStorage, version: number, inactivityTtlMs: numbe
       }
     }
     for (const name of legacyNames) sql.exec("INSERT OR IGNORE INTO legacy_names (normalized_name) VALUES (?)", name);
+    sql.exec("UPDATE room_state SET schema_version = ? WHERE singleton = 1", CURRENT_ROOM_SCHEMA_VERSION);
+    return;
+  }
+  if (version === 14) {
+    // Keep the v13 table shape on this upgrade path. Some deployed schema 14
+    // rooms already removed these fields; migration 15 restores them.
+    return;
+  }
+  if (version === 15) {
+    // Schema 14 removed these fields, but this Worker still supports delegated
+    // posting. Restore them with posting disabled when a room crossed that
+    // schema before this compatibility release.
+    const columns = new Set(rows<{ name: string }>(sql.exec("PRAGMA table_info(room_state)")).map((column) => column.name));
+    if (!columns.has("get_post_hash")) sql.exec("ALTER TABLE room_state ADD COLUMN get_post_hash TEXT");
+    if (!columns.has("get_post_enabled")) sql.exec("ALTER TABLE room_state ADD COLUMN get_post_enabled INTEGER NOT NULL DEFAULT 0");
     sql.exec("UPDATE room_state SET schema_version = ? WHERE singleton = 1", CURRENT_ROOM_SCHEMA_VERSION);
     return;
   }
