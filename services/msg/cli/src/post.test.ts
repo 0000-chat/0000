@@ -13,12 +13,37 @@ test("parses a post command with inline content", () => {
   });
 });
 
+test("parses optional display name and name password while keeping author required", () => {
+  expect(parsePostCommand(["post", conversationUrl, "--author", "Agent A", "--display-name", "Agent Alpha", "--name-password", "chosen secret", "--content", "Hello"])).toEqual({
+    author: "Agent A",
+    content: "Hello",
+    conversationUrl,
+    displayName: "Agent Alpha",
+    namePassword: "chosen secret",
+  });
+  expect(() => parsePostCommand(["post", conversationUrl, "--display-name", "Agent Alpha", "--content", "Hello"])).toThrow("--author is required");
+  expect(() => parsePostCommand(["post", conversationUrl, "--author", "Agent A", "--display-name", ""])).toThrow("--display-name must not be empty");
+  expect(() => parsePostCommand(["post", conversationUrl, "--author", "Agent A", "--name-password", ""])).toThrow("--name-password must not be empty");
+});
+
 test("parses a post command for stdin content and preserves an explicit client message ID", () => {
   expect(parsePostCommand(["post", conversationUrl, "--author", "Agent A", "--client-message-id", "stable-id"])).toEqual({
     author: "Agent A",
     clientMessageId: "stable-id",
     conversationUrl,
   });
+});
+
+test("parses and validates the optional stale-context precondition", () => {
+  expect(parsePostCommand(["post", conversationUrl, "--author", "Agent A", "--based-on-sequence", "0", "--content", "Hello"])).toEqual({
+    author: "Agent A",
+    basedOnSequence: 0,
+    content: "Hello",
+    conversationUrl,
+  });
+  for (const value of ["-1", "1.5", "01", "9007199254740992"]) {
+    expect(() => parsePostCommand(["post", conversationUrl, "--author", "Agent A", "--based-on-sequence", value])).toThrow("--based-on-sequence must be a nonnegative safe integer");
+  }
 });
 
 test("rejects invalid post command fields and flags", () => {
@@ -57,6 +82,47 @@ test("retries an ambiguous transport failure with one generated client message I
   expect(delays).toEqual([250]);
 });
 
+test("retries an accepted response whose body read fails and keeps the committed message ID", async () => {
+  const bodies: Array<{ author: string; client_message_id: string; content: string }> = [];
+  const committed = new Set<string>();
+  const cancelled: number[] = [];
+  const delays: number[] = [];
+  let attempts = 0;
+
+  const receipt = await postMessage({
+    author: "Agent A",
+    content: "Hello",
+    conversationUrl,
+    fetch: async (_input, init) => {
+      const body = JSON.parse(String(init?.body)) as { author: string; client_message_id: string; content: string };
+      bodies.push(body);
+      committed.add(body.client_message_id);
+      attempts += 1;
+      if (attempts === 1) {
+        return {
+          body: { cancel: async () => { cancelled.push(attempts); } },
+          json: async () => { throw new TypeError("response stream reset after commit"); },
+          ok: true,
+          status: 201,
+        } as unknown as Response;
+      }
+      return Response.json(successReceipt({ replayed: true }), { status: 201 });
+    },
+    generatedClientMessageId: () => "generated-id",
+    sleep: async (delay) => { delays.push(delay); },
+  });
+
+  expect(receipt).toEqual(publicReceipt("generated-id", true));
+  expect(attempts).toBe(2);
+  expect(committed).toEqual(new Set(["generated-id"]));
+  expect(bodies).toEqual([
+    { author: "Agent A", client_message_id: "generated-id", content: "Hello" },
+    { author: "Agent A", client_message_id: "generated-id", content: "Hello" },
+  ]);
+  expect(cancelled).toEqual([1]);
+  expect(delays).toEqual([250]);
+});
+
 test("preserves an explicit client message ID", async () => {
   let body: unknown;
   const receipt = await postMessage({
@@ -74,6 +140,75 @@ test("preserves an explicit client message ID", async () => {
 
   expect(body).toEqual({ author: "Agent A", client_message_id: "caller-owned-id", content: "Hello" });
   expect(receipt).toEqual(publicReceipt("caller-owned-id", false));
+});
+
+test("sends display_name and name_password without exposing them in the message projection", async () => {
+  let body: unknown;
+  const receipt = await postMessage({
+    author: "Agent A",
+    content: "Hello",
+    conversationUrl,
+    displayName: "Agent Alpha",
+    namePassword: "caller-chosen password of any nonempty length",
+    fetch: async (_input, init) => {
+      body = JSON.parse(String(init?.body));
+      return Response.json(successReceipt({ replayed: false }), { status: 201 });
+    },
+    generatedClientMessageId: () => "generated-id",
+    sleep: async () => {},
+  });
+
+  expect(body).toEqual({ author: "Agent A", client_message_id: "generated-id", content: "Hello", display_name: "Agent Alpha", name_password: "caller-chosen password of any nonempty length" });
+  expect(receipt).toEqual(publicReceipt("generated-id", false));
+});
+
+test("returns a generated first-claim password and emits a save warning", async () => {
+  const statuses: string[] = [];
+  const receipt = await postMessage({
+    author: "Agent A",
+    content: "Hello",
+    conversationUrl,
+    fetch: async () => Response.json({ ...successReceipt({ replayed: false }), name_password: "Ab3dE7x9", name_password_notice: "Save this password; it will not be shown again." }, { status: 201 }),
+    generatedClientMessageId: () => "generated-id",
+    sleep: async () => {},
+    status: (text) => statuses.push(text),
+  });
+
+  expect(receipt).toEqual({ ...publicReceipt("generated-id", false), name_password: "Ab3dE7x9", name_password_notice: "Save this password; it will not be shown again." });
+  expect(statuses).toEqual(["Save this password; it will not be shown again."]);
+});
+
+test("rejects a generated name password unless it is exactly eight characters", async () => {
+  await expect(postMessage({
+    author: "Agent A",
+    content: "Hello",
+    conversationUrl,
+    fetch: async () => Response.json({ ...successReceipt({ replayed: false }), name_password: "short", name_password_notice: "Save this password; it will not be shown again." }, { status: 201 }),
+    generatedClientMessageId: () => "generated-id",
+    sleep: async () => {},
+  })).rejects.toThrow("invalid post receipt");
+});
+
+test("sends based_on_sequence and reports stale conflicts without retrying", async () => {
+  let attempts = 0;
+  const stale = postMessage({
+    author: "Agent A",
+    basedOnSequence: 12,
+    content: "Hello",
+    conversationUrl,
+    fetch: async (_input, init) => {
+      attempts += 1;
+      expect(JSON.parse(String(init?.body))).toEqual({ author: "Agent A", based_on_sequence: 12, client_message_id: "generated-id", content: "Hello" });
+      return Response.json({ error: { code: "stale_sequence", latest_message: 14, message: "stale", review_after: 12 } }, { status: 409 });
+    },
+    generatedClientMessageId: () => "generated-id",
+    sleep: async () => { throw new Error("A stale post must not retry."); },
+  });
+  const error = await stale.then(() => undefined, (reason: unknown) => reason);
+  expect(error).toBeInstanceOf(Error);
+  expect((error as Error).message).toContain("msg join 'https://msg.0000.chat/room-1' --after 12 --through 14 --limit 20");
+  expect((error as Error).message).toContain("explicitly resubmit");
+  expect(attempts).toBe(1);
 });
 
 test("retries each retryable HTTP status with the bounded schedule", async () => {
@@ -295,7 +430,7 @@ test("quotes a generated wait command as exact shell arguments", async () => {
 function successReceipt({ replayed }: { replayed: boolean }) {
   return {
     manage_url: "https://msg.0000.chat/manage/room-1/private",
-    message: { content: "Hello", sequence: 2 },
+    message: { content: "Hello", created_at: "2026-08-10T00:00:00.000Z", id: "message-2", sequence: 2 },
     replayed,
     wait: { after: 2, command: "npx --yes @0000chat/msg@latest wait 'https://msg.0000.chat/room-1' --after 2", requires_user_consent: true },
   };
@@ -305,6 +440,7 @@ function publicReceipt(clientMessageId: string, replayed: boolean) {
   return {
     client_message_id: clientMessageId,
     conversation_url: conversationUrl,
+    message: { created_at: "2026-08-10T00:00:00.000Z", id: "message-2", sequence: 2 },
     message_sequence: 2,
     replayed,
     wait: { after: 2, command: "npx --yes @0000chat/msg@latest wait 'https://msg.0000.chat/room-1' --after 2", requires_user_consent: true },

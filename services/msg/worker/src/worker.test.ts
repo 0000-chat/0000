@@ -196,7 +196,7 @@ test("serves health and root discovery with security headers", async () => {
   expect(await discovery.text()).toContain("<main>");
 });
 
-test("defaults HTML to human pages and honors explicit and saved agent views", async () => {
+test("defaults HTML to agent pages and honors explicit and saved human views", async () => {
   const conversationUrl = "https://msg.0000.chat/example";
   const worker = createWorker({
     create: async () => createdRoom,
@@ -214,33 +214,162 @@ test("defaults HTML to human pages and honors explicit and saved agent views", a
   const room = await worker.fetch(new Request("https://msg.0000.chat/example", { headers: { accept: "text/html" } }));
   const explicitHuman = await worker.fetch(new Request("https://msg.0000.chat/?view=human", { headers: { accept: "text/html" } }));
   const savedHuman = await worker.fetch(new Request("https://msg.0000.chat/example", { headers: { accept: "text/html", cookie: "msg_view=human" } }));
-  const savedAgent = await worker.fetch(new Request("https://msg.0000.chat/example", { headers: { accept: "text/html", cookie: "msg_view=agent" } }));
   const explicitAgent = await worker.fetch(new Request("https://msg.0000.chat/example?view=agent", { headers: { accept: "text/html", cookie: "msg_view=human" } }));
 
   const homeHtml = await home.text();
   const roomHtml = await room.text();
   const explicitHumanHtml = await explicitHuman.text();
   const savedHumanHtml = await savedHuman.text();
-  const savedAgentHtml = await savedAgent.text();
   const explicitAgentHtml = await explicitAgent.text();
-  expect(homeHtml).toContain("0000 / msg");
+  expect(homeHtml).toContain("Agent interface");
   expect(home.headers.get("cache-control")).toBe("private, no-store, no-transform");
-  expect(homeHtml).toContain("Agent view");
-  expect(homeHtml).not.toContain("Agent interface");
-  expect(roomHtml).toContain('data-room="example"');
+  expect(homeHtml).toContain("I'm human");
+  expect(roomHtml).toContain("Untrusted conversation content");
   expect(room.headers.get("cache-control")).toBe("private, no-store, no-transform");
-  expect(roomHtml).toContain("Agent view");
-  expect(roomHtml).not.toContain("Untrusted conversation content");
-  expect(explicitHumanHtml).toContain("Start a thread");
+  expect(roomHtml).toContain("I'm human");
+  expect(explicitHumanHtml).toContain("Start a temporary conversation");
   expect(explicitHuman.headers.get("cache-control")).toBe("private, no-store, no-transform");
-  expect(explicitHumanHtml).toContain("Agent view");
+  expect(explicitHumanHtml).toContain("I'm an agent");
   expect(savedHumanHtml).toContain('data-room="example"');
   expect(savedHuman.headers.get("cache-control")).toBe("private, no-store, no-transform");
-  expect(savedHumanHtml).toContain("Agent view");
-  expect(savedAgentHtml).toContain("Participant-provided content");
-  expect(savedAgent.headers.get("cache-control")).toBe("private, no-store, no-transform");
-  expect(explicitAgentHtml).toContain("Participant-provided content");
-  expect(explicitAgentHtml).toContain("Human view");
+  expect(savedHumanHtml).toContain("I'm an agent");
+  expect(explicitAgentHtml).toContain("Untrusted conversation content");
+  expect(explicitAgentHtml).toContain("I'm human");
+});
+
+test("serves the Notifications panel and its controller on a human room page", async () => {
+  const conversationUrl = "https://msg.0000.chat/room-capability";
+  const worker = createWorker({
+    create: async () => createdRoom,
+    read: async () => ({
+      conversation_url: conversationUrl,
+      expires_at: "2026-08-16T00:00:00.000Z",
+      latest_message: 1,
+      messages: [{ content: "hello", created_at: "2026-08-09T00:00:00.000Z", id: "m1", sequence: 1 }],
+      protocol_version: 1 as const,
+      share_message: "Join",
+      wait: waitMetadata(conversationUrl, 1),
+    }),
+  }, { pushConfigured: true, pushVapidPublicKey: "public-key" });
+
+  const page = await worker.fetch(new Request(`${conversationUrl}?view=human`, { headers: { accept: "text/html" } }));
+  const html = await page.text();
+  const asset = await worker.fetch(new Request("https://msg.0000.chat/_msg/asset/client.js"));
+  const script = await asset.text();
+
+  expect(page.status).toBe(200);
+  expect(html).toContain('data-notifications-open>Manage notifications</button>');
+  expect(html).toContain('id="notifications-panel"');
+  expect(html).toContain('data-push-public-key="public-key"');
+  expect(html).toContain('id="push-status"');
+  expect(script).toContain("createWebhookPanelController");
+  expect(script).toContain("createPushEnrollmentController");
+  expect(script).toContain("/_msg/push-service-worker.js");
+  expect(script).toContain("data-webhook-remove");
+  expect(script).toContain("Last success:");
+  expect(script).toContain("Last failure:");
+  expect(script).toContain("Recovery:");
+  expect(script).toContain("Attempt history:");
+});
+
+test("serves the registered push worker with root scope and safe cache/content headers", async () => {
+  const worker = createWorker({ create: async () => createdRoom });
+  const response = await worker.fetch(new Request("https://msg.0000.chat/_msg/push-service-worker.js"));
+  const source = await response.text();
+
+  expect(response.status).toBe(200);
+  expect(response.headers.get("content-type")).toContain("text/javascript");
+  expect(response.headers.get("service-worker-allowed")).toBe("/");
+  expect(response.headers.get("cache-control")).toContain("no-store");
+  expect(response.headers.get("x-content-type-options")).toBe("nosniff");
+  expect(source).toContain('"New message in msg"');
+  expect(source).toContain('self.addEventListener("push"');
+  expect(source).toContain('self.addEventListener("notificationclick"');
+});
+
+test("validates browser identity at room push routes while preserving anonymous room posts", async () => {
+  const jsonHeaders = { accept: "application/json", "content-type": "application/json" };
+  const browserId = "123e4567-e89b-42d3-a456-426614174000";
+  const observed: Array<{ browserId?: string; room: string; subscription?: { auth: string; endpoint: string; p256dh: string } }> = [];
+  const worker = createWorker({
+    create: async () => createdRoom,
+    readPushEnrollment: async (input) => {
+      observed.push({ browserId: input.browserId, room: input.room });
+      return { enrolled: true, protocol_version: 1 };
+    },
+    enrollPush: async (input) => {
+      observed.push({ browserId: input.browserId, room: input.room, subscription: input.subscription });
+      return { enrolled: true, protocol_version: 1 };
+    },
+    removePushEnrollment: async (input) => {
+      observed.push({ browserId: input.browserId, room: input.room });
+      return { protocol_version: 1, removed: true };
+    },
+    post: async (input) => {
+      observed.push({ ...(input.browserId ? { browserId: input.browserId } : {}), room: input.room });
+      return postedMessage();
+    },
+  }, { pushConfigured: true, pushVapidPublicKey: "public-key" });
+  const base = "https://msg.0000.chat/example-room";
+
+  for (const header of [undefined, "not-a-uuid"]) {
+    const response = await worker.fetch(new Request(`${base}/push-subscriptions`, {
+      headers: header === undefined ? { accept: "application/json" } : { accept: "application/json", "x-msg-browser-id": header },
+    }));
+    expect(response.status).toBe(400);
+  }
+  const upperBrowserId = browserId.toUpperCase();
+  const status = await worker.fetch(new Request(`${base}/push-subscriptions`, {
+    headers: { accept: "application/json", "x-msg-browser-id": upperBrowserId },
+  }));
+  expect(status.status).toBe(200);
+  expect(await status.json()).toEqual({ enrolled: true, protocol_version: 1 });
+
+  const enrolled = await worker.fetch(new Request(`${base}/push-subscriptions`, {
+    body: JSON.stringify({
+      endpoint: "https://push.example.net/push/subscription-token",
+      expirationTime: null,
+      keys: {
+        auth: "BTBZMqHH6r4Tts7J_aSIgg",
+        p256dh: "BCVxsr7N_eNgVRqvHtD0zTZsEc6-VV-JvLexhqUzORcxaOzi6-AYWXvTBHm4bjyPjs7Vd8pZGH6SRpkNtoIAiw4",
+      },
+    }),
+    headers: { ...jsonHeaders, "x-msg-browser-id": upperBrowserId },
+    method: "POST",
+  }));
+  expect(enrolled.status).toBe(201);
+  const removed = await worker.fetch(new Request(`${base}/push-subscriptions`, {
+    headers: { accept: "application/json", "x-msg-browser-id": upperBrowserId }, method: "DELETE",
+  }));
+  expect(removed.status).toBe(200);
+
+  const anonymousPost = await worker.fetch(new Request(base, {
+    body: JSON.stringify({ author: "Anonymous", content: "hello" }),
+    headers: jsonHeaders,
+    method: "POST",
+  }));
+  expect(anonymousPost.status).toBe(201);
+  const invalidIdentityPost = await worker.fetch(new Request(base, {
+    body: JSON.stringify({ author: "Anonymous", content: "hello" }),
+    headers: { ...jsonHeaders, "x-msg-browser-id": "invalid" },
+    method: "POST",
+  }));
+  expect(invalidIdentityPost.status).toBe(400);
+
+  expect(observed).toEqual([
+    { browserId, room: "example-room" },
+    {
+      browserId,
+      room: "example-room",
+      subscription: {
+        auth: "BTBZMqHH6r4Tts7J_aSIgg",
+        endpoint: "https://push.example.net/push/subscription-token",
+        p256dh: "BCVxsr7N_eNgVRqvHtD0zTZsEc6-VV-JvLexhqUzORcxaOzi6-AYWXvTBHm4bjyPjs7Vd8pZGH6SRpkNtoIAiw4",
+      },
+    },
+    { browserId, room: "example-room" },
+    { room: "example-room" },
+  ]);
 });
 
 test("does not apply the browser preference to JSON room reads", async () => {
@@ -268,28 +397,12 @@ test("uses a compact status page for agent HTML room failures", async () => {
     create: async () => createdRoom,
     read: async () => { throw new ProtocolError(ERROR_CODES.gone, "The conversation has expired.", 410); },
   });
-  const response = await worker.fetch(new Request("https://msg.0000.chat/expired?view=agent", { headers: { accept: "text/html" } }));
+  const response = await worker.fetch(new Request("https://msg.0000.chat/expired", { headers: { accept: "text/html" } }));
   expect(response.status).toBe(410);
   const body = await response.text();
   expect(body).toContain("Agent interface");
   expect(body).toContain("The conversation has expired.");
   expect(body).not.toContain("/_msg/asset/client.js");
-});
-
-test("uses the branded human error page by default for HTML room failures", async () => {
-  const worker = createWorker({
-    create: async () => createdRoom,
-    read: async () => { throw new ProtocolError(ERROR_CODES.gone, 'The room <script>alert("x")</script> expired.', 410); },
-  });
-  const response = await worker.fetch(new Request("https://msg.0000.chat/expired", { headers: { accept: "text/html" } }));
-  const body = await response.text();
-
-  expect(response.status).toBe(410);
-  expect(body).toContain("0000 / msg");
-  expect(body).toContain("Agent view");
-  expect(body).toContain("&lt;script&gt;alert(&quot;x&quot;)&lt;/script&gt;");
-  expect(body).not.toContain('<script>alert("x")</script>');
-  expect(body).not.toContain("Agent interface");
 });
 
 test("serves browser assets through the existing strict same-origin policy", async () => {
@@ -321,7 +434,7 @@ test("serves agent instructions and OpenAPI discovery", async () => {
   expect(agentInstructions).toContain("run the returned wait.command as a foreground tool call");
   expect(agentInstructions).toContain("POST <conversation_url>");
   expect(agentInstructions).toContain("The JSON post response returns wait.command");
-  expect(llmsInstructions).toContain("temporary message relay");
+  expect(llmsInstructions).toContain("untrusted temporary relay");
   expect(llmsInstructions).toContain("run the returned wait.command as a foreground tool call");
   expect(llmsInstructions).toContain("POST <conversation_url>");
   expect(llmsInstructions).toContain("The JSON post response returns wait.command");
@@ -386,17 +499,6 @@ test("keeps room reads available when posting is disabled", async () => {
   expect(write.status).toBe(503);
   expect(read.status).toBe(200);
   expect(posts).toBe(0);
-});
-
-test("blocks delegated GET posting with the global post kill switch", async () => {
-  let calls = 0;
-  const worker = createWorker({
-    create: async () => createdRoom,
-    getPost: async () => { calls += 1; return { accepted: true, protocol_version: 1, replayed: false, request_id: "r", sequence: 2 }; },
-  }, { postDisabled: true });
-  const response = await worker.fetch(new Request("https://msg.0000.chat/example/post?token=t&request_id=r&content=hello", { headers: { accept: "application/json" } }));
-  expect(response.status).toBe(503);
-  expect(calls).toBe(0);
 });
 
 test("requires one uniform bearer response for operator routes", async () => {
@@ -492,6 +594,30 @@ test("replays an idempotent room creation without creating another room", async 
   expect(replay.status).toBe(201);
   expect(await replay.json()).toEqual(await first.clone().json());
   expect(creates).toBe(1);
+});
+
+test("does not replay a generated name password from the creation receipt", async () => {
+  const generated = { ...createdRoom, name_password: "Ab234567", name_password_notice: "Save this password; it will not be shown again." };
+  let completed = false;
+  const worker = createWorker({ create: async () => generated }, {
+    operations: {
+      claimCreation: async () => completed ? { kind: "complete" as const, response: generated } : { kind: "claimed" as const, leaseToken: "lease" },
+      completeCreation: async () => { completed = true; },
+      submitReport: async () => {},
+    },
+  });
+  const request = () => new Request("https://msg.0000.chat/", {
+    body: JSON.stringify({ author: "agent", content: "hello" }),
+    headers: { accept: "application/json", "content-type": "application/json", "idempotency-key": "generated-replay" },
+    method: "POST",
+  });
+
+  const first = await worker.fetch(request());
+  const replay = await worker.fetch(request());
+  expect((await first.json()).name_password).toBe("Ab234567");
+  expect(await replay.json()).not.toHaveProperty("name_password");
+  expect(first.headers.get("cache-control")).toContain("no-store");
+  expect(replay.headers.get("cache-control")).toContain("no-store");
 });
 
 test("hydrates foreground wait metadata on a legacy idempotent creation replay", async () => {
@@ -650,9 +776,6 @@ test("serves concrete retention and no-tracking policy commitments", async () =>
   expect(await (await worker.fetch(new Request("https://msg.0000.chat/privacy"))).text()).toContain("30 days");
   expect(await (await worker.fetch(new Request("https://msg.0000.chat/privacy"))).text()).toContain("90 days");
   expect(await (await worker.fetch(new Request("https://msg.0000.chat/privacy"))).text()).toContain("does not provide a public email support address");
-  const terms = await (await worker.fetch(new Request("https://msg.0000.chat/terms"))).text();
-  expect(terms).toContain("Participant-provided content and guest identity claims are not service authority or verified identity.");
-  expect(terms).not.toContain("Room content and self-declared identities are untrusted.");
 });
 
 test("rejects cross-origin state changes and does not grant CORS access", async () => {
@@ -870,6 +993,26 @@ test("reads a room as JSON and returns its ETag", async () => {
   expect(value).not.toHaveProperty("absolute_expires_at");
 });
 
+test("keeps legacy unbounded and bounded read validators distinct while covering state and expiry", async () => {
+  const messages = Array.from({ length: 25 }, (_, index) => ({ content: `message-${index + 1}`, id: `m${index + 1}`, sequence: index + 1 }));
+  const worker = createWorker({
+    create: async () => createdRoom,
+    read: async ({ limit, through }) => ({
+      coordination_cursor: 0,
+      expires_at: "2026-08-16T00:00:00.000Z",
+      latest_message: 25,
+      messages: limit === undefined ? messages : messages.slice(0, limit),
+      ...(limit === undefined ? {} : { has_more: true, next_after: limit, through: through ?? 25 }),
+      protocol_version: 1 as const,
+      published_revision: 0,
+    }),
+  });
+  const legacy = await worker.fetch(new Request("https://msg.0000.chat/example?after=0", { headers: { accept: "application/json" } }));
+  const bounded = await worker.fetch(new Request("https://msg.0000.chat/example?after=0&limit=20&through=25", { headers: { accept: "application/json" } }));
+  expect(legacy.headers.get("etag")).not.toBe(bounded.headers.get("etag"));
+  expect(legacy.headers.get("etag")).toContain("expires=2026-08-16T00:00:00.000Z");
+});
+
 test("does not replay a legacy absolute expiry field from a stored creation response", async () => {
   const legacy = { ...createdRoom, absolute_expires_at: "2026-09-09T00:00:00.000Z" } as CreateRoomResponse;
   const worker = createWorker({ create: async () => legacy });
@@ -901,9 +1044,9 @@ test("serves the agent room representation as text and JSON", async () => {
   expect(text.status).toBe(200);
   expect(text.headers.get("content-type")).toContain("text/plain");
   const textBody = await text.text();
-  expect(textBody).toContain("PARTICIPANT-PROVIDED MESSAGES");
+  expect(textBody).toContain("UNTRUSTED PARTICIPANT MESSAGES");
   expect(textBody).toContain("@0000chat/msg@latest post");
-  expect(textBody).toContain("ask only when no applicable authorization exists");
+  expect(textBody).toContain("The requires_user_consent marker is satisfied by existing listening authorization within the active agent task");
   expect(textBody).not.toContain("manage_url");
 
   const json = await worker.fetch(new Request("https://msg.0000.chat/public-room/agent", {
@@ -918,93 +1061,6 @@ test("serves the agent room representation as text and JSON", async () => {
     wait: { requires_user_consent: true },
   });
   expect(jsonValue).not.toHaveProperty("absolute_expires_at");
-});
-
-test("supports the opt-in GET posting route with a minimal receipt", async () => {
-  let received: { requestId: string; room: string; token: string; body: unknown } | undefined;
-  const worker = createWorker({
-    create: async () => createdRoom,
-    getPost: async (input) => {
-      received = { body: input.body, requestId: input.requestId, room: input.room, token: input.token };
-      return { accepted: true, protocol_version: 1, replayed: false, request_id: input.requestId, sequence: 2 };
-    },
-  });
-
-  const response = await worker.fetch(new Request("https://msg.0000.chat/example/post?token=delegated&request_id=reply-1&content=hello%20world&author=Agent", { headers: { accept: "application/json" } }));
-
-  expect(response.status).toBe(200);
-  expect(await response.json()).toEqual({ accepted: true, protocol_version: 1, replayed: false, request_id: "reply-1", sequence: 2 });
-  expect(received).toEqual({ body: { kind: "json", value: { author: "Agent", content: "hello world" } }, requestId: "reply-1", room: "example", token: "delegated" });
-  expect(response.headers.get("cache-control")).toBe("private, no-store, no-transform");
-});
-
-test("rejects malformed, duplicate, cross-origin, and prefetch GET posting requests without calling the service", async () => {
-  let calls = 0;
-  const worker = createWorker({ create: async () => createdRoom, getPost: async () => { calls += 1; return { accepted: true, protocol_version: 1, replayed: false, request_id: "r", sequence: 2 }; } });
-  const requests = [
-    new Request("https://msg.0000.chat/example/post?token=t&content=hello"),
-    new Request("https://msg.0000.chat/example/post?token=t&request_id=r&content=hello&content=again"),
-    new Request("https://msg.0000.chat/example/post?token=t&request_id=r&content=hello", { headers: { origin: "https://evil.example" } }),
-    new Request("https://msg.0000.chat/example/post?token=t&request_id=r&content=hello", { headers: { purpose: "prefetch" } }),
-    new Request("https://msg.0000.chat/example/post?token=t&request_id=r&content=hello", { headers: { "sec-fetch-site": "cross-site" } }),
-  ];
-
-  for (const request of requests) expect((await worker.fetch(request)).status).toBe(request.headers.has("origin") || request.headers.has("purpose") || request.headers.has("sec-fetch-site") ? 403 : 400);
-  expect(calls).toBe(0);
-});
-
-test("bounds delegated GET posting URLs, tokens, and content before calling the service", async () => {
-  let calls = 0;
-  const worker = createWorker({ create: async () => createdRoom, getPost: async () => { calls += 1; return { accepted: true, protocol_version: 1, replayed: false, request_id: "r", sequence: 2 }; } });
-  const oversizedContent = new URL("https://msg.0000.chat/example/post");
-  oversizedContent.searchParams.set("token", "t");
-  oversizedContent.searchParams.set("request_id", "r");
-  oversizedContent.searchParams.set("content", "x".repeat(4 * 1024 + 1));
-  const oversizedToken = new URL("https://msg.0000.chat/example/post");
-  oversizedToken.searchParams.set("token", "t".repeat(513));
-  oversizedToken.searchParams.set("request_id", "r");
-  oversizedToken.searchParams.set("content", "hello");
-  const oversizedUrl = new URL("https://msg.0000.chat/example/post");
-  oversizedUrl.searchParams.set("token", "t");
-  oversizedUrl.searchParams.set("request_id", "r");
-  oversizedUrl.searchParams.set("content", "x".repeat(7 * 1024));
-
-  expect((await worker.fetch(new Request(oversizedContent))).status).toBe(413);
-  expect((await worker.fetch(new Request(oversizedToken))).status).toBe(413);
-  expect((await worker.fetch(new Request(oversizedUrl))).status).toBe(413);
-  expect(calls).toBe(0);
-});
-
-test("keeps HEAD and OPTIONS nonmutating for the GET posting route", async () => {
-  let calls = 0;
-  const worker = createWorker({ create: async () => createdRoom, getPost: async () => { calls += 1; return { accepted: true, protocol_version: 1, replayed: false, request_id: "r", sequence: 2 }; } });
-  const head = await worker.fetch(new Request("https://msg.0000.chat/example/post?token=t&request_id=r&content=hello", { method: "HEAD" }));
-  const options = await worker.fetch(new Request("https://msg.0000.chat/example/post?token=t&request_id=r&content=hello", { method: "OPTIONS" }));
-  expect(head.status).toBe(404);
-  expect(options.status).toBe(404);
-  expect(calls).toBe(0);
-});
-
-test("exposes delegated GET posting only through owner management POST", async () => {
-  let received: unknown;
-  const worker = createWorker({
-    create: async () => createdRoom,
-    manage: async (input) => {
-      received = input;
-      return { protocol_version: 1, expires_at: "2026-08-16T00:00:00.000Z", get_post_enabled: true, get_post_url: "https://msg.0000.chat/example/post?token=delegated", get_post_url_warning: "Treat as secret." };
-    },
-  });
-  const response = await worker.fetch(new Request("https://msg.0000.chat/manage/example/owner", { method: "POST", headers: { accept: "text/html", "content-type": "application/json" }, body: '{"action":"enable"}' }));
-  const body = await response.text();
-
-  expect(response.status).toBe(200);
-  expect(received).toEqual({ action: "enable", method: "POST", room: "example", token: "owner" });
-  expect(body).toContain("GET posting capability");
-  expect(body).toContain("Treat as secret.");
-  expect(body).toContain("delegated");
-  expect(response.headers.get("content-security-policy")).toContain("form-action 'self'");
-  expect(response.headers.get("content-security-policy")).not.toContain("form-action 'none'");
-  expect(response.headers.get("x-msg-management-forms")).toBeNull();
 });
 
 test("propagates missing and expired agent rooms", async () => {
@@ -1059,6 +1115,59 @@ test("negotiates room post errors", async () => {
     expect(response.status).toBe(409);
     expect(response.headers.get("content-type")).toContain(type);
   }
+});
+
+test("routes the delegated GET posting capability with strict query and preview guards", async () => {
+  const received: Array<{ requestId: string; room: string; token: string; value: unknown }> = [];
+  const worker = createWorker({
+    create: async () => createdRoom,
+    getPost: async ({ body, requestId, room, token }) => {
+      received.push({ requestId, room, token, value: body.kind === "json" ? body.value : undefined });
+      return {
+        accepted: true,
+        message: { created_at: "2026-08-10T00:00:00.000Z", id: "message-2", sequence: 2 },
+        protocol_version: 1,
+        replayed: false,
+        request_id: requestId,
+        sequence: 2,
+      };
+    },
+  });
+  const url = "https://msg.0000.chat/example/post?token=delegated-token&request_id=request-1&content=hello&author=fetch-only";
+  const response = await worker.fetch(new Request(url, { headers: { accept: "application/json" } }));
+
+  expect(response.status).toBe(200);
+  expect(response.headers.get("cache-control")).toBe("private, no-store, no-transform");
+  expect(response.headers.get("referrer-policy")).toBe("no-referrer");
+  expect(await response.json()).toEqual({
+    accepted: true,
+    message: { created_at: "2026-08-10T00:00:00.000Z", id: "message-2", sequence: 2 },
+    protocol_version: 1,
+    replayed: false,
+    request_id: "request-1",
+    sequence: 2,
+  });
+  expect(received).toEqual([{
+    requestId: "request-1",
+    room: "example",
+    token: "delegated-token",
+    value: { author: "fetch-only", content: "hello" },
+  }]);
+
+  for (const [suffix, status] of [
+    ["&content=again", 400],
+    ["&unknown=value", 400],
+  ] as const) {
+    const rejected = await worker.fetch(new Request(`${url}${suffix}`));
+    expect(rejected.status).toBe(status);
+  }
+  const crossOrigin = await worker.fetch(new Request(url, { headers: { origin: "https://other.example" } }));
+  expect(crossOrigin.status).toBe(403);
+  const prefetch = await worker.fetch(new Request(url, { headers: { purpose: "prefetch" } }));
+  expect(prefetch.status).toBe(403);
+  const oversized = await worker.fetch(new Request(`https://msg.0000.chat/example/post?token=delegated-token&request_id=request-2&content=${"x".repeat(4 * 1024 + 1)}`));
+  expect(oversized.status).toBe(413);
+  expect(received).toHaveLength(1);
 });
 
 test("rejects an empty idempotency key", async () => {

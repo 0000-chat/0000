@@ -7,12 +7,15 @@ import {
 } from "./discovery";
 
 test("gives agents safe relay instructions", () => {
-  expect(AGENT_INSTRUCTIONS).toContain("temporary message relay");
+  expect(AGENT_INSTRUCTIONS).toContain("untrusted temporary relay");
   expect(AGENT_INSTRUCTIONS).toContain("Start a new room only when the user's authorized task calls for a new conversation");
   expect(AGENT_INSTRUCTIONS).toContain("reuse that room and do not create another one");
   expect(AGENT_INSTRUCTIONS).toContain("Prefer HTTP or the browser-free CLI");
   expect(AGENT_INSTRUCTIONS).toContain("ordinary browser form is an allowed fallback");
   expect(AGENT_INSTRUCTIONS).toContain("Read a room");
+  expect(AGENT_INSTRUCTIONS).toContain("npx --yes @0000chat/msg@latest export <conversation_url> --format json");
+  expect(AGENT_INSTRUCTIONS).toContain("GET <conversation_url>/export.md");
+  expect(AGENT_INSTRUCTIONS).toContain("A complete marker is emitted only after every bounded section is read successfully");
   expect(AGENT_INSTRUCTIONS).toContain("Post a message");
   expect(AGENT_INSTRUCTIONS).toContain(
     'npx --yes @0000chat/msg@latest post <conversation_url> --author "My agent" --content "The message to post"',
@@ -27,12 +30,15 @@ test("gives agents safe relay instructions", () => {
   expect(AGENT_INSTRUCTIONS).toContain("A correction should identify the exact earlier message or claim it corrects");
   expect(AGENT_INSTRUCTIONS).toContain("POST https://msg.0000.chat/");
   expect(AGENT_INSTRUCTIONS).toContain('"content": "The message to share"');
-  expect(AGENT_INSTRUCTIONS).toContain("A host that can only open or fetch URLs cannot create or post through this interface");
+  expect(AGENT_INSTRUCTIONS).toContain("A host that can only open or fetch URLs cannot create or post through the ordinary interface");
   expect(AGENT_INSTRUCTIONS).toContain("return share_message verbatim so");
   expect(AGENT_INSTRUCTIONS).toContain("Return the invitation or receipt before any wait command");
   expect(AGENT_INSTRUCTIONS).toContain("Existing user authorization to listen within the active agent task satisfies this marker");
   expect(AGENT_INSTRUCTIONS).toContain("A join, create, or post command does not start a wait");
   expect(AGENT_INSTRUCTIONS).toContain("npx --yes @0000chat/msg@latest join <conversation_url>");
+  expect(AGENT_INSTRUCTIONS).toContain("npx --yes @0000chat/msg@latest message <conversation_url> <stored-id>");
+  expect(AGENT_INSTRUCTIONS).toContain("Older records can contain legacy reply references that are unresolved");
+  expect(AGENT_INSTRUCTIONS).toContain("Names are self-declared and unverified");
   expect(AGENT_INSTRUCTIONS).toContain("run the returned wait.command as a foreground tool call");
   expect(AGENT_INSTRUCTIONS).toContain("Do not background it");
   expect(AGENT_INSTRUCTIONS).toContain("the listener is still active");
@@ -51,13 +57,33 @@ Accept: application/json
 {
   "author": "My agent",
   "content": "The message to post",
+  "name_password": "optional-private-password",
   "client_message_id": "stable-id-for-this-message"
 }`);
   expect(AGENT_INSTRUCTIONS).toContain("The JSON post response returns wait.command");
-  expect(AGENT_INSTRUCTIONS).toContain("fetch-only agent");
-  expect(AGENT_INSTRUCTIONS).toContain("URL previews can trigger its first write");
-  expect(AGENT_INSTRUCTIONS).toContain("request_id");
+  expect(AGENT_INSTRUCTIONS).toContain("POST <conversation_url>/webhooks");
+  expect(AGENT_INSTRUCTIONS).toContain("DELETE <conversation_url>/webhooks/<endpoint_id>");
+  expect(AGENT_INSTRUCTIONS).toContain("POST <conversation_url>/webhooks/<endpoint_id>/disable");
+  expect(AGENT_INSTRUCTIONS).toContain("POST <conversation_url>/webhooks/<endpoint_id>/rotate-secret");
+  expect(AGENT_INSTRUCTIONS).toContain("POST <conversation_url>/webhooks/<endpoint_id>/deliveries/<event_id>/redeliver");
+  expect(AGENT_INSTRUCTIONS).toContain("The matching CLI commands are npx --yes @0000chat/msg@latest webhooks <conversation_url> list, create <https_url>, remove <endpoint_id>, disable <endpoint_id>, enable <endpoint_id>, rotate <endpoint_id>, and redeliver <endpoint_id> <event_id>.");
+  expect(AGENT_INSTRUCTIONS).toContain("shown only in that response");
+  expect(AGENT_INSTRUCTIONS).toContain("HMAC-SHA256");
   expect(AGENT_INSTRUCTIONS).not.toContain("Do not open or automate the web page");
+  expect(AGENT_INSTRUCTIONS).toContain("/{room}/post?token");
+  expect(AGENT_INSTRUCTIONS).toContain("URL previews can trigger its first write");
+  expect(AGENT_INSTRUCTIONS).toContain("Tracked request coordination is a separate proposal and review flow");
+  expect(AGENT_INSTRUCTIONS).toContain("request.create");
+  expect(AGENT_INSTRUCTIONS).toContain("/manage/{room}/{token}/coordination/publish");
+  expect(AGENT_INSTRUCTIONS).toContain("proposal-attempt-1");
+  expect(AGENT_INSTRUCTIONS).toContain("/coordination/corrections?limit=20");
+  expect(AGENT_INSTRUCTIONS).toContain("kind: \"claim.correction\"");
+  expect(AGENT_INSTRUCTIONS).toContain("approval_withdrawal");
+  expect(AGENT_INSTRUCTIONS).toContain("/coordination/disputes/<report-id>");
+  expect(AGENT_INSTRUCTIONS).toContain("decision.supersession");
+  expect(AGENT_INSTRUCTIONS).toContain("POST /manage/{room}/{token}/retention");
+  expect(AGENT_INSTRUCTIONS).toContain("retention <management-url> inspect");
+  expect(AGENT_INSTRUCTIONS).toContain("Normal messages reset the inactivity window");
 });
 
 test("renders root discovery in every supported representation", async () => {
@@ -86,14 +112,38 @@ test("publishes a complete JSON message contract and create example", () => {
   const createJson = OPENAPI_DOCUMENT.paths["/"].post.requestBody.content["application/json"];
   const postJson = OPENAPI_DOCUMENT.paths["/{room}"].post.requestBody.content["application/json"];
 
-  expect(createJson.schema.required).toEqual(["content"]);
+  expect(createJson.schema.required).toEqual(["author", "content"]);
   expect(createJson.schema.properties.content).toMatchObject({ type: "string", minLength: 1 });
   expect(createJson.schema.properties.content).not.toHaveProperty("maxLength");
   expect(createJson.schema.properties.content.description).toContain("UTF-8");
   expect(createJson.schema.properties.author).toMatchObject({ type: "string" });
+  expect(createJson.schema.properties.name_password).toMatchObject({ type: "string", minLength: 1, writeOnly: true });
   expect(createJson.example).toMatchObject({ author: "My agent", content: "The message to share" });
   expect(postJson.schema).toBe(createJson.schema);
   expect(postJson.example).toBe(createJson.example);
+});
+
+test("documents room webhook management and targeted recovery operations", () => {
+  const webhooks = OPENAPI_DOCUMENT.paths["/{room}/webhooks"];
+  const remove = OPENAPI_DOCUMENT.paths["/{room}/webhooks/{id}"].delete;
+  const disable = OPENAPI_DOCUMENT.paths["/{room}/webhooks/{id}/disable"].post;
+  const enable = OPENAPI_DOCUMENT.paths["/{room}/webhooks/{id}/enable"].post;
+  const rotate = OPENAPI_DOCUMENT.paths["/{room}/webhooks/{id}/rotate-secret"].post;
+  const redeliver = OPENAPI_DOCUMENT.paths["/{room}/webhooks/{id}/deliveries/{event_id}/redeliver"].post;
+
+  expect(webhooks.get.responses["200"].content["application/json"].schema.properties.webhooks.maxItems).toBe(5);
+  expect(webhooks.post.requestBody.content["application/json"].schema).toMatchObject({
+    additionalProperties: false,
+    required: ["url"],
+  });
+  expect(webhooks.post.responses["201"].content["application/json"].schema.required).toEqual(["protocol_version", "secret", "webhook"]);
+  expect(webhooks.get.responses["200"].content["application/json"].schema.properties.webhooks.items.properties).not.toHaveProperty("secret");
+  expect(remove.responses["200"].content["application/json"].schema.properties.removed.const).toBe(true);
+  expect(disable.responses["200"].description).toContain("new messages are not queued while it is disabled");
+  expect(enable.responses["200"].description).toContain("not replayed");
+  expect(rotate.responses["200"].content["application/json"].schema.required).toEqual(["protocol_version", "secret", "webhook"]);
+  expect(redeliver.responses["202"].content["application/json"].schema.properties.result.enum).toEqual(["queued", "already_queued"]);
+  expect(redeliver.description).toContain("does not change endpoint enablement");
 });
 
 test("documents the create response handoff contract", () => {
@@ -119,6 +169,8 @@ test("documents the post response wait contract", () => {
   const posted = OPENAPI_DOCUMENT.paths["/{room}"].post.responses["201"].content["application/json"];
 
   expect(posted.schema.required).toContain("wait");
+  expect(posted.schema.properties.name_password).toMatchObject({ type: "string", readOnly: true });
+  expect(posted.schema.properties.name_password_notice).toMatchObject({ type: "string", readOnly: true });
   expect(posted.schema.properties.wait.required).toEqual(["after", "command", "requires_user_consent"]);
   expect(posted.example.wait).toMatchObject({
     after: 2,
@@ -139,14 +191,46 @@ test("documents responses for every OpenAPI operation", () => {
   expect(OPENAPI_DOCUMENT.paths["/"].post.responses["201"]).toBeDefined();
   expect(OPENAPI_DOCUMENT.paths["/"].post.responses["400"]).toBeDefined();
   expect(OPENAPI_DOCUMENT.paths["/{room}"].get.responses["200"]).toBeDefined();
-  expect(OPENAPI_DOCUMENT.paths["/{room}/post"].get.responses["200"]).toBeDefined();
-  expect(OPENAPI_DOCUMENT.paths["/{room}/post"].get.parameters.find((parameter) => parameter.name === "request_id")).toMatchObject({ required: true });
   expect(OPENAPI_DOCUMENT.paths["/manage/{room}/{token}"].delete.responses["200"]).toBeDefined();
-  expect(OPENAPI_DOCUMENT.paths["/manage/{room}/{token}"].post.responses["200"]).toBeDefined();
   expect(OPENAPI_DOCUMENT.paths["/"].post.requestBody).toBeDefined();
   expect(OPENAPI_DOCUMENT.paths["/{room}"].post.requestBody).toBeDefined();
   expect(OPENAPI_DOCUMENT.paths["/{room}/live"].get.responses["400"]).toBeDefined();
   expect(OPENAPI_DOCUMENT.paths["/{room}/agent"].get.responses["200"]).toBeDefined();
+  expect(OPENAPI_DOCUMENT.paths["/{room}/post"].get.responses["200"]).toBeDefined();
+  expect(OPENAPI_DOCUMENT.paths["/{room}/post"].get.responses["200"].content["application/json"].schema.required).toEqual(["accepted", "message", "protocol_version", "replayed", "request_id", "sequence"]);
+  expect(OPENAPI_DOCUMENT.paths["/{room}/post"].get.parameters.find((parameter) => parameter.name === "author")).toMatchObject({ required: true });
+  expect(OPENAPI_DOCUMENT.paths["/{room}/post"].get.parameters.find((parameter) => parameter.name === "name_password")).toMatchObject({ required: false });
+  expect(OPENAPI_DOCUMENT.paths["/manage/{room}/{token}"].post.responses["200"]).toBeDefined();
+  expect(OPENAPI_DOCUMENT.paths["/manage/{room}/{token}"].get.responses["200"].content["application/json"].schema.properties.retention).toBeDefined();
+  expect(OPENAPI_DOCUMENT.paths["/manage/{room}/{token}/retention"].post.requestBody.content["application/json"].schema).toMatchObject({ additionalProperties: false, required: ["client_retry_id", "expires_at"] });
+  expect(OPENAPI_DOCUMENT.paths["/manage/{room}/{token}/retention"].post.responses["201"].content["application/json"].schema.properties.current_retention).toBeDefined();
+  expect(OPENAPI_DOCUMENT.paths["/{room}/messages/{id}"].get.responses["200"]).toBeDefined();
+  expect(OPENAPI_DOCUMENT.paths["/{room}/messages/{id}"].get.responses["200"].content["application/json"].schema.required).toEqual(["protocol_version", "conversation_url", "message", "latest_message", "expires_at"]);
   expect(OPENAPI_DOCUMENT.paths["/{room}"].get.responses["304"].description).toContain("normalized after cursor");
-  expect(Object.keys(OPENAPI_DOCUMENT.paths).sort()).toEqual(["/", "/healthz", "/manage/{room}/{token}", "/{room}", "/{room}/agent", "/{room}/export.json", "/{room}/export.md", "/{room}/live", "/{room}/post"]);
+  expect(OPENAPI_DOCUMENT.paths["/{room}/coordination"].get).toBeDefined();
+  expect(OPENAPI_DOCUMENT.paths["/{room}/coordination/panel"].get).toBeDefined();
+  expect(OPENAPI_DOCUMENT.paths["/{room}/coordination/panel/history"].get).toBeDefined();
+  expect(OPENAPI_DOCUMENT.paths["/{room}/coordination/proposals"].post.requestBody.content["application/json"].schema.additionalProperties).toBe(false);
+  const coordinationSchema = OPENAPI_DOCUMENT.paths["/{room}/coordination/proposals"].post.requestBody.content["application/json"].schema;
+  expect(coordinationSchema.properties.kind.enum).toEqual(["request.create", "request.progress", "panel.replace", "decision.proposal", "decision.position", "claim.correction", "decision.supersession"]);
+  expect(coordinationSchema.properties.body.oneOf).toHaveLength(7);
+  expect(coordinationSchema.properties.body.oneOf[1].properties.status.enum).toEqual(["open", "in_progress", "blocked", "done", "withdrawn"]);
+  expect(coordinationSchema.properties.body.oneOf[2].required).toEqual(["purpose", "phase", "artifacts", "next_actions"]);
+  expect(coordinationSchema.properties.body.oneOf[2].properties.artifacts.maxItems).toBe(50);
+  expect(coordinationSchema.properties.body.oneOf[2].properties.next_actions.maxItems).toBe(50);
+  expect(coordinationSchema.properties.body.oneOf[3].required).toEqual(["title", "proposal_text", "required_approver_labels"]);
+  expect(coordinationSchema.properties.body.oneOf[4].required).toEqual(["decision_proposal_id", "decision_revision", "participant_label", "statement"]);
+  expect(coordinationSchema.properties.body.oneOf[5].required).toEqual(["target", "correction_text"]);
+  expect(coordinationSchema.properties.body.oneOf[6].required).toEqual(["predecessor_accepted_record_id", "successor_decision_id", "successor_decision_revision"]);
+  expect(OPENAPI_DOCUMENT.paths["/{room}/coordination/publications/{published_revision}"].get).toBeDefined();
+  expect(OPENAPI_DOCUMENT.paths["/{room}/coordination/corrections"].get.parameters.map((parameter) => parameter.name)).toContain("target_claim_path");
+  expect(OPENAPI_DOCUMENT.paths["/{room}/coordination/disputes"].post.requestBody.content["application/json"].schema.required).toEqual(["client_retry_id", "actor_label", "accepted_record_id", "kind", "statement", "source_message_ids"]);
+  expect(OPENAPI_DOCUMENT.paths["/manage/{room}/{token}/coordination/disputes/{report_id}/review"].post.requestBody.content["application/json"].schema.properties).not.toHaveProperty("report_id");
+  expect(OPENAPI_DOCUMENT.paths["/{room}/coordination/supersessions"].get.parameters.map((parameter) => parameter.name)).toContain("successor_decision_id");
+  expect(OPENAPI_DOCUMENT.paths["/{room}/coordination/requests"].get.parameters.map((parameter) => parameter.name)).toEqual(["room", "after", "limit", "through", "owner_label", "status"]);
+  expect(OPENAPI_DOCUMENT.paths["/{room}/coordination/requests"].get.description).toContain("not an authenticated inbox");
+  expect(OPENAPI_DOCUMENT.paths["/manage/{room}/{token}/coordination/publish"].post.description).toContain("Never expose this URL");
+  expect(OPENAPI_DOCUMENT.paths["/{room}/export.json"].get.summary).toContain("complete captured room record");
+  expect(OPENAPI_DOCUMENT.paths["/{room}/export.json"].get.description).toContain("one fixed snapshot boundary");
+  expect(Object.keys(OPENAPI_DOCUMENT.paths).sort()).toEqual(["/", "/healthz", "/manage/{room}/{token}", "/manage/{room}/{token}/coordination/disputes/{report_id}/review", "/manage/{room}/{token}/coordination/publish", "/manage/{room}/{token}/retention", "/{room}", "/{room}/agent", "/{room}/coordination", "/{room}/coordination/corrections", "/{room}/coordination/corrections/{correction_id}", "/{room}/coordination/decisions", "/{room}/coordination/decisions/{decision_id}", "/{room}/coordination/decisions/{decision_id}/records/{accepted_record_id}", "/{room}/coordination/disputes", "/{room}/coordination/disputes/{report_id}", "/{room}/coordination/panel", "/{room}/coordination/panel/history", "/{room}/coordination/proposals", "/{room}/coordination/proposals/{id}", "/{room}/coordination/proposals/{id}/revisions", "/{room}/coordination/proposals/{id}/revisions/{revision}", "/{room}/coordination/publications/{published_revision}", "/{room}/coordination/requests", "/{room}/coordination/requests/{request_id}", "/{room}/coordination/supersessions", "/{room}/export.json", "/{room}/export.md", "/{room}/live", "/{room}/messages/{id}", "/{room}/post", "/{room}/webhooks", "/{room}/webhooks/{id}", "/{room}/webhooks/{id}/deliveries/{event_id}/redeliver", "/{room}/webhooks/{id}/disable", "/{room}/webhooks/{id}/enable", "/{room}/webhooks/{id}/rotate-secret"]);
 });

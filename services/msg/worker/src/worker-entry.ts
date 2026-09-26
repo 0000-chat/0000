@@ -14,20 +14,30 @@ export interface MsgProductionEnvironment extends MsgEnvironment {
   readonly MSG_RATE_LIMIT_READS?: MsgRateLimit;
   readonly MSG_RATE_LIMIT_POSTS?: MsgRateLimit;
   readonly MSG_RATE_LIMIT_LIVE?: MsgRateLimit;
+  readonly MSG_VAPID_PUBLIC_KEY?: string;
+  readonly MSG_VAPID_PRIVATE_KEY?: string;
+  readonly MSG_VAPID_SUBJECT?: string;
 }
 
 export default {
   fetch(request: Request, env: MsgProductionEnvironment): Promise<Response> {
     const roomService = env.ROOM_SERVICE ?? (env.ConversationRoom ? new DurableRoomService(env.ConversationRoom as RoomNamespace, env.MSG_PUBLIC_ORIGIN ?? "https://msg.0000.chat") : undefined);
-    if (!roomService) return createWorker({ async create() { throw new Error("The room service is not available."); } }).fetch(request);
+    if (!roomService) return createWorker(
+      { async create() { throw new Error("The room service is not available."); } },
+      { assets: env.ASSETS },
+    ).fetch(request);
     const operations = env.MSG_DB && env.MSG_DATA_ENCRYPTION_KEY_V1
       ? new D1OperationStore(env.MSG_DB, env.MSG_DATA_ENCRYPTION_KEY_V1)
       : undefined;
+    const pushConfigured = Boolean(env.MSG_VAPID_PUBLIC_KEY && env.MSG_VAPID_PRIVATE_KEY && env.MSG_VAPID_SUBJECT);
     return createWorker(roomService, {
+      assets: env.ASSETS,
       createDisabled: env.MSG_CREATE_DISABLED === "1",
       operations,
       operatorToken: env.MSG_OPERATOR_TOKEN,
       postDisabled: env.MSG_POST_DISABLED === "1",
+      pushConfigured,
+      pushVapidPublicKey: pushConfigured ? env.MSG_VAPID_PUBLIC_KEY : undefined,
       rateLimits: {
         creation: env.MSG_RATE_LIMIT_CREATION,
         live: env.MSG_RATE_LIMIT_LIVE,

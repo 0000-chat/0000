@@ -1,8 +1,9 @@
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { buildMermaidAsset } from "./mermaid-asset";
 
 const serviceRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 const monorepoRoot = join(serviceRoot, "../..");
@@ -30,6 +31,11 @@ export function createMsgWranglerConfig(databaseId: string): string {
   ].reduce((config, [from, to]) => config.replaceAll(from, to), template);
 }
 
+export function resolveMsgWranglerArguments(args: readonly string[]): readonly string[] {
+  if (args[0] !== "types" || !args[1] || args[1].startsWith("-")) return args;
+  return [args[0], resolve(serviceRoot, args[1]), ...args.slice(2)];
+}
+
 function main(args: readonly string[]): void {
   const dryRun = args.includes("--dry-run");
   const localCommand = args[0] === "types";
@@ -40,11 +46,12 @@ function main(args: readonly string[]): void {
       : undefined;
   if (!databaseId) throw new Error("MSG_D1_DATABASE_ID is required for a non-dry-run msg Wrangler command.");
 
+  buildMermaidAsset();
   const directory = mkdtempSync(join(tmpdir(), "0000-msg-wrangler-"));
   const generatedConfig = join(directory, "wrangler.msg.jsonc");
   try {
     writeFileSync(generatedConfig, createMsgWranglerConfig(databaseId), { mode: 0o600 });
-    const result = spawnSync("bunx", ["wrangler", ...args, "--config", generatedConfig], { cwd: monorepoRoot, stdio: "inherit" });
+    const result = spawnSync("bunx", ["wrangler", ...resolveMsgWranglerArguments(args), "--config", generatedConfig], { cwd: monorepoRoot, stdio: "inherit" });
     if (result.error) throw result.error;
     if (result.status !== 0) process.exitCode = result.status ?? 1;
   } finally {

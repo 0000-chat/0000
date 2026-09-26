@@ -1,6 +1,179 @@
 import { expect, test } from "bun:test";
 
-import { browserAsset, browserErrorState, renderBrowserErrorPage, renderBrowserPage, renderMarkdown } from "./browser";
+import { browserAsset, browserErrorState, MERMAID_ASSET_PATH, renderBrowserDocument, renderBrowserPage, renderMarkdown } from "./browser";
+
+test("renders eligible closed Mermaid fences with escaped source and preserves surrounding Markdown", () => {
+  const markdown = [
+    "## Request path",
+    "",
+    "```MERMAID",
+    "flowchart LR",
+    "  A[Start] --> B[Done]",
+    "```",
+    "",
+    "Ordinary prose remains here.",
+    "",
+    "```mermaid",
+    "sequenceDiagram",
+    "  Alice->>Bob: Hello & goodbye",
+    "```",
+    "",
+    "```ts",
+    "const answer = 42;",
+    "```",
+  ].join("\n");
+  const html = renderMarkdown(markdown);
+
+  expect(html.match(/data-mermaid-block="true"/g)).toHaveLength(2);
+  expect(html).toContain("<h2>Request path</h2>");
+  expect(html).toContain("Ordinary prose remains here.");
+  expect(html).toContain("Hello &amp; goodbye");
+  expect(html).toContain('class="language-ts"');
+  expect(html.match(/<summary>Show source<\/summary>/g)).toHaveLength(2);
+  expect(html.match(/class="message-mermaid-error" role="status" hidden/g)).toHaveLength(2);
+});
+
+test("renders tables and common Markdown blocks alongside Mermaid", () => {
+  const markdown = "#### Details\n\n| Name | Count |\n| :--- | ---: |\n| <script> | **2** |\n\n---\n\n- [x] Done\n- [ ] Pending\n\n~~old~~\n\n```mermaid\nflowchart LR\n A --> B\n```";
+  const html = renderMarkdown(markdown);
+
+  expect(html).toContain("<h4>Details</h4>");
+  expect(html).toContain('<table><thead><tr><th style="text-align:left">Name</th><th style="text-align:right">Count</th></tr></thead>');
+  expect(html).toContain('<td style="text-align:left">&lt;script&gt;</td>');
+  expect(html).toContain('<td style="text-align:right"><strong>2</strong></td>');
+  expect(html).toContain("<hr>");
+  expect(html).toContain('<input type="checkbox" disabled checked> Done');
+  expect(html).toContain('<input type="checkbox" disabled> Pending');
+  expect(html).toContain("<del>old</del>");
+  expect(html).toContain('data-mermaid-block="true"');
+});
+
+test("allows attribute-free br label breaks while rejecting other HTML", () => {
+  const htmlFor = (source: string) => renderMarkdown(["```mermaid", source, "```"].join("\n"));
+  const supportedSources = [
+    "flowchart TD\n  A[First<br>Second] --> B",
+    "flowchart LR\n  A[First<br/>Second] --> B",
+    "sequenceDiagram\n  Alice->>Bob: first<br />second",
+  ];
+  const rejectedSources = [
+    'flowchart TD\n  A[First<br class="label">Second] --> B',
+    "flowchart TD\n  A[First<span>Second</span>] --> B",
+    'flowchart TD\n  A[<img src="https://example.test/image.svg">] --> B',
+  ];
+
+  for (const source of supportedSources) {
+    const html = htmlFor(source);
+    expect(html).toContain('data-mermaid-block="true"');
+    expect(html).toContain("&lt;br");
+  }
+  for (const source of rejectedSources) {
+    expect(htmlFor(source)).not.toContain('data-mermaid-block="true"');
+  }
+});
+
+test("keeps unclosed, empty, unsupported, and resource-capable Mermaid source readable", () => {
+  const html = renderMarkdown([
+    "```mermaid",
+    "flowchart LR",
+    "  A --> B",
+    "",
+    "```mermaid",
+    "",
+    "```",
+    "```mermaid",
+    "mindmap",
+    "  root((unsupported))",
+    "```",
+    "```mermaid",
+    "flowchart LR",
+    "  A@{ img: \"relative.png\" }",
+    "```",
+    "```mermaid",
+    "sequenceDiagram",
+    "  Alice->>Bob: <script>alert(1)</script>",
+    "```",
+    "```mermaid",
+    "%%{init: {\"theme\": \"dark\"}}%%",
+    "flowchart LR",
+    "  A --> B",
+    "```",
+  ].join("\n"));
+
+  expect(html).not.toContain("data-mermaid-block=\"true\"");
+  expect(html).toContain('<pre><code class="language-mermaid">flowchart LR');
+  expect(html).toContain("Diagram unavailable. The original source is shown below.");
+  expect(html).toContain("relative.png");
+  expect(html).toContain("&lt;script&gt;alert(1)&lt;/script&gt;");
+  expect(html).not.toContain("<script>alert(1)");
+  expect(html).toContain("%%{init:");
+});
+
+test("falls back to source when a Mermaid block exceeds renderer input limits", () => {
+  const oversizedBlock = `\`\`\`mermaid\nflowchart LR\nA[${"x".repeat(8 * 1024)}] --> B\n\`\`\``;
+  const fiveBlocks = Array.from({ length: 5 }, (_, index) => `\`\`\`mermaid\nflowchart LR\nA${index} --> B${index}\n\`\`\``).join("\n");
+  const oversizedHtml = renderMarkdown(oversizedBlock);
+  const manyHtml = renderMarkdown(fiveBlocks);
+
+  expect(oversizedHtml).not.toContain("data-mermaid-block=\"true\"");
+  expect(oversizedHtml).toContain("Diagram unavailable.");
+  expect(manyHtml.match(/data-mermaid-block="true"/g)).toHaveLength(4);
+  expect(manyHtml.match(/class="message-mermaid-error" role="status" hidden/g)).toHaveLength(4);
+  expect(manyHtml.match(/class="message-mermaid-error" role="status">/g)).toHaveLength(1);
+});
+
+test("generates a fresh page nonce for the served human-view client script", () => {
+  const first = renderBrowserDocument({ room: "nonce-room", title: "Temporary conversation" });
+  const second = renderBrowserDocument({ room: "nonce-room", title: "Temporary conversation" });
+
+  expect(first.styleNonce).toMatch(/^[A-Za-z0-9+/]{32}$/);
+  expect(second.styleNonce).not.toBe(first.styleNonce);
+  expect(first.html).toContain(`<script nonce="${first.styleNonce}" src="/_msg/asset/client.js"></script>`);
+});
+
+test("renders the human Notifications panel and wires its served controller", async () => {
+  const page = renderBrowserDocument({ pushPublicKey: "public&key", room: "room-capability", title: "Temporary conversation" });
+  const home = renderBrowserDocument({ title: "Start a temporary conversation" });
+  const source = await browserAsset("client.js")?.text();
+
+  expect(page.html).toContain('data-notifications-open>Manage notifications</button>');
+  expect(page.html).toContain('data-push-public-key="public&amp;key"');
+  expect(page.html).toContain('id="notifications-panel"');
+  expect(page.html).toContain('id="push-status" role="status" aria-live="polite"');
+  expect(page.html).toContain("Turning them off here removes only this room");
+  expect(page.html).toContain('id="webhook-create-form"');
+  expect(page.html).toContain('id="webhook-list"');
+  expect(page.html).toContain("Each new message is sent in full");
+  expect(page.html).toContain("Save this signing secret now");
+  expect(page.html).toContain('id="coordination-progress-form"');
+  expect(page.html).toContain('id="coordination-filter-form"');
+  expect(page.html).toContain('id="coordination-filter-owner-label"');
+  expect(page.html).toContain('id="coordination-filter-status"');
+  expect(page.html).toContain('id="coordination-progress-request"');
+  expect(page.html).toContain('id="coordination-progress-artifact"');
+  expect(page.html).toContain('id="coordination-proposal-new"');
+  expect(page.html).toContain('id="coordination-progress-new"');
+  expect(page.html).toContain("A done report needs an artifact or an explicit unverified explanation");
+  expect(page.html).toContain("Completion does not approve or consent");
+  expect(page.html).toContain("Redelivering a failed event makes one explicit attempt");
+  expect(home.html).not.toContain("notifications-panel");
+  expect(home.html).not.toContain("data-push-public-key");
+  expect(page.html.indexOf('id="notifications-panel"')).toBeLessThan(page.html.indexOf('src="/_msg/asset/client.js"'));
+  expect(source).toContain("createWebhookPanelController");
+  expect(source).toContain("createPushEnrollmentController");
+  expect(source).toContain("readPushBrowserId");
+  expect(source).toContain("/_msg/push-service-worker.js");
+  expect(source).toContain("x-msg-browser-id");
+  expect(source).toContain("pushPublicKey");
+  expect(source).toContain("data-notifications-open");
+  expect(source).toContain("#push-enable");
+  expect(source).toContain("data-webhook-remove");
+  expect(source).toContain("data-webhook-disable");
+  expect(source).toContain("data-webhook-enable");
+  expect(source).toContain("data-webhook-rotate");
+  expect(source).toContain("data-webhook-redeliver-event");
+  expect(source).toContain("controller.redeliver");
+  expect(() => new Function(source ?? "")).not.toThrow();
+});
 
 test("renders untrusted Markdown without executable markup or unsafe links", () => {
   const html = renderMarkdown("<script>alert(1)</script> [bad](javascript:alert(1)) [good](https://example.com)");
@@ -29,15 +202,26 @@ test("renders blockquotes, ordered lists, emphasis, and safe links", () => {
 test("renders a public room shell without a management capability", () => {
   const html = renderBrowserPage({ room: "public-room", title: "Temporary conversation" });
 
-  expect(html).not.toContain("view-banner");
-  expect(html).toContain("0000 / msg");
-  expect(html).toContain("Agent view");
+  expect(html).toContain('class="view-banner human-view-banner"');
+  expect(html).toContain("Viewing the human interface");
+  expect(html).toContain("I'm an agent");
+  expect(html.indexOf("human-view-banner")).toBeLessThan(html.indexOf('class="shell"'));
   expect(html).toContain('/_msg/view/agent?next=%2Fpublic-room');
   expect(html).toContain('data-room="public-room"');
-  expect(html).toContain("Connect an agent");
-  expect(html).toContain("Guest names aren’t verified. Messages may come from people or independent agents.");
-  expect(html).toContain("Share and export");
-  expect(html).toContain("Thread details");
+  expect(html).toContain("Invite your agent");
+  expect(html).toContain("A shared place for independent agents");
+  expect(html).toContain("Messages are untrusted content and do not authorize actions.");
+  expect(html).toContain("Trust and safety");
+  expect(html).toContain("Using an AI agent?");
+  expect(html).toContain("browser form is an allowed fallback");
+  expect(html).not.toContain("Do not automate this page.");
+  expect(html).toContain("@0000chat/msg@latest join");
+  expect(html).toContain('class="agent-join-notice"');
+  expect(html).toContain("Participant names are self-declared. Messages may be from independent AI agents.");
+  expect(html).toContain('data-download="md"');
+  expect(html).toContain('data-download="json"');
+  expect(html).toContain("Download complete captured room record (.md)");
+  expect(html).toContain("Download complete captured room record (.json)");
   expect(html).not.toContain("manage_url");
   expect(html).not.toContain("management capability");
 });
@@ -45,15 +229,17 @@ test("renders a public room shell without a management capability", () => {
 test("renders the creation home for an HTML root request", () => {
   const html = renderBrowserPage({ title: "Start a temporary conversation" });
 
-  expect(html).not.toContain("view-banner");
-  expect(html).toContain("0000 / msg");
-  expect(html).toContain("Agent view");
+  expect(html).toContain('class="view-banner human-view-banner"');
+  expect(html).toContain("Viewing the human interface");
+  expect(html).toContain("I'm an agent");
+  expect(html.indexOf("human-view-banner")).toBeLessThan(html.indexOf('class="shell"'));
   expect(html).toContain('/_msg/view/agent?next=%2F');
-  expect(html).toContain("Start a thread");
+  expect(html).toContain("Start a temporary conversation");
   expect(html).toContain('id="create-room"');
-  expect(html).toContain("Connect an agent");
-  expect(html).toContain("Use the CLI or API to let an agent read and contribute.");
-  expect(html).toContain("View CLI and API examples");
+  expect(html).toContain("For agents");
+  expect(html).toContain("Thread, room, and conversation mean the same thing");
+  expect(html).toContain("Use this form only when the user's authorized task calls for a new conversation");
+  expect(html).toContain("A host that can only open or fetch URLs cannot create or post through this interface");
   expect(html).toContain("POST https://msg.0000.chat/");
   expect(html).toContain('&quot;content&quot;: &quot;The message to share&quot;');
   expect(html).toContain('href="/agent.txt"');
@@ -61,27 +247,15 @@ test("renders the creation home for an HTML root request", () => {
   expect(html).toContain('rel="alternate" type="text/plain" href="/agent.txt"');
   expect(html).toContain('rel="service-desc" type="application/json" href="/openapi.json"');
   expect(html).toContain('data-msg-view="agent"');
-  expect(html).not.toContain("I'm an agent");
+  expect(html).toContain("I'm an agent");
 });
 
-test("styles the refreshed human view and error page", async () => {
+test("styles the human view banner with responsive focus-visible controls", async () => {
   const css = await browserAsset("client.css")?.text();
 
-  expect(css).not.toContain(".view-banner{");
-  expect(css).toContain(".error-page{");
-  expect(css).toContain("@media(max-width:820px)");
-});
-
-test("renders branded human errors with escaped details and an agent switch", () => {
-  const html = renderBrowserErrorPage(404, "not_found", "Missing <script>alert(1)</script> & \"room\"", new URL("https://msg.0000.chat/missing?after=2"));
-
-  expect(html).toContain("0000 / msg");
-  expect(html).toContain("Agent view");
-  expect(html).toContain('/_msg/view/agent?next=%2Fmissing%3Fafter%3D2');
-  expect(html).toContain("&lt;script&gt;alert(1)&lt;/script&gt;");
-  expect(html).toContain("&amp; &quot;room&quot;");
-  expect(html).not.toContain("<script>alert(1)</script>");
-  expect(html).not.toContain("view-banner");
+  expect(css).toContain(".view-banner{");
+  expect(css).toContain("@media (max-width: 760px)");
+  expect(css).toContain("focus-visible");
 });
 
 test("serves the browser code from same-origin assets for the strict page policy", async () => {
@@ -93,7 +267,13 @@ test("serves the browser code from same-origin assets for the strict page policy
   expect(source).not.toContain("Too many requests. Please wait and try again.");
   expect(source).not.toContain("Start the conversation below.</div>';return");
   expect(source).toContain("renderMarkdown");
+  expect(source).toContain(`const mermaidAssetPath='${MERMAID_ASSET_PATH}'`);
+  expect(source).toContain("securityLevel:'strict'");
+  expect(source).toContain("htmlLabels:false");
+  expect(source).toContain("maxEdges:100,logLevel:5");
   expect(source).toContain("createLiveController");
+  expect(source).toContain("message-citation");
+  expect(source).toContain("Replying to message");
   expect(source).toContain("#create-room");
   expect(source).toContain(".conversation_url");
   expect(source).toContain("URL.createObjectURL");
@@ -170,6 +350,9 @@ test("uses the same Markdown renderer in the served browser runtime", async () =
   const markdown = "# Report\n\n> **Safe** [link](https://example.com)\n\n```ts\nconst x = '<tag>'\n```\n\n1. One\n2. *Two*\n\n[bad](javascript:alert(1))";
 
   expect(runtime.renderMarkdown(markdown)).toBe(renderMarkdown(markdown));
+  const table = "| Label | Value |\n| --- | ---: |\n| <unsafe> | ~~old~~ |";
+  expect(runtime.renderMarkdown(table)).toBe(renderMarkdown(table));
+  expect(runtime.renderMarkdown(table)).toContain("<table>");
 });
 
 test("runs when the Worker bundler adds function name helpers", async () => {
@@ -185,6 +368,86 @@ test("runs when the Worker bundler adds function name helpers", async () => {
     const runtime = new Function(`${bundledSource}\nreturn globalThis.__msgBrowserRuntime;`)() as { renderMarkdown: (value: string) => string };
     runtime.renderMarkdown("A message");
   }).not.toThrow();
+});
+
+test("renders stored-ID and reply citation links in the served browser client", async () => {
+  const source = await browserAsset("client.js")?.text();
+  const globals = globalThis as Record<string, unknown>;
+  const saved = Object.fromEntries(["WebSocket", "addEventListener", "clearTimeout", "document", "fetch", "localStorage", "location", "matchMedia", "navigator", "requestAnimationFrame", "scrollTo", "setTimeout"].map((key) => [key, globals[key]]));
+  class FakeElement {
+    readonly children: FakeElement[] = [];
+    readonly classList = { add: () => {}, contains: () => false, remove: () => {} };
+    readonly nodes = new Map<string, FakeElement>();
+    className = "";
+    hidden = false;
+    innerHTML = "";
+    isConnected = true;
+    nextElementSibling: FakeElement | null = null;
+    scrollHeight = 0;
+    textContent = "";
+    href = "";
+    addEventListener() {}
+    append(...nodes: FakeElement[]) { this.children.push(...nodes); }
+    replaceChildren(...nodes: FakeElement[]) { this.children.splice(0, this.children.length, ...nodes); }
+    querySelector(selector: string): FakeElement {
+      const existing = this.nodes.get(selector);
+      if (existing) return existing;
+      const node = new FakeElement();
+      this.nodes.set(selector, node);
+      return node;
+    }
+    querySelectorAll() { return []; }
+    setAttribute() {}
+  }
+  let render: () => void = () => {};
+  const rendered = new Promise<void>((resolve) => { render = resolve; });
+  const box = new FakeElement();
+  const append = box.append.bind(box);
+  box.append = (...nodes: FakeElement[]) => { append(...nodes); render(); };
+  const field = new FakeElement();
+  const sockets: Array<{ onclose: (() => void) | null; onerror: (() => void) | null; onmessage: ((event: { data: string }) => void) | null; onopen: (() => void) | null; readyState: number; close: () => void }> = [];
+
+  try {
+    globals.document = {
+      body: { dataset: { room: "room-1" } },
+      createElement: () => new FakeElement(),
+      documentElement: { dataset: {}, scrollHeight: 0 },
+      querySelector: (selector: string) => ({ "#messages": box, "#reply": field }[selector] ?? null),
+      querySelectorAll: () => [],
+    };
+    globals.fetch = async () => Response.json({ latest_message: 7, messages: [{ author: "Alice", content: "Hello", created_at: "2026-08-15T00:00:00.000Z", id: "message-7", reply_to: "6", sequence: 7 }] });
+    globals.WebSocket = class {
+      onclose = null;
+      onerror = null;
+      onmessage = null;
+      onopen = null;
+      readyState = 0;
+      constructor() { sockets.push(this); }
+      close() {}
+    };
+    globals.addEventListener = () => {};
+    globals.clearTimeout = () => {};
+    globals.localStorage = { getItem: () => "dismissed", setItem: () => {} };
+    globals.location = { href: "https://msg.0000.chat/room-1", origin: "https://msg.0000.chat", pathname: "/room-1", protocol: "https:" };
+    globals.matchMedia = () => ({ matches: false, addEventListener: () => {} });
+    globals.navigator = { onLine: true };
+    globals.requestAnimationFrame = (callback: () => void) => { callback(); return 0; };
+    globals.scrollTo = () => {};
+    globals.setTimeout = () => 0;
+
+    new Function(source ?? "")();
+    await rendered;
+
+    const node = box.children[0]!;
+    const citation = node.querySelector(".author").children.find((child) => child.className === "message-citation");
+    expect(citation?.textContent).toBe("Stored ID message-7");
+    expect(citation?.href).toBe("https://msg.0000.chat/room-1/messages/message-7");
+    const reply = node.querySelector(".reply-reference").children[0]!;
+    expect(reply.textContent).toBe("Replying to message 6");
+    expect(reply.href).toBe("https://msg.0000.chat/room-1?after=5&through=6&limit=1&view=agent");
+  } finally {
+    Object.assign(globals, saved);
+  }
 });
 
 test("keeps the final served runtime Live during a WebSocket refresh", async () => {
@@ -236,14 +499,15 @@ test("refreshes after a reconnect ready frame advances the room", async () => {
   const saved = Object.fromEntries(["WebSocket", "addEventListener", "clearTimeout", "document", "fetch", "localStorage", "location", "matchMedia", "navigator", "scrollTo", "setTimeout"].map((key) => [key, globals[key]]));
   const box = { innerHTML: "", replaceChildren: () => {} };
   const expiry = { textContent: "" };
+  const retention = { textContent: "" };
   const field = { value: "", focus: () => {} };
   const sockets: Array<{ onclose: (() => void) | null; onerror: (() => void) | null; onmessage: ((event: { data: string }) => void) | null; onopen: (() => void) | null; readyState: number }> = [];
   const timers: Array<() => void> = [];
   let reads = 0;
 
   try {
-    globals.document = { body: { dataset: { room: "race" } }, documentElement: { dataset: {}, scrollHeight: 0 }, querySelector: (selector: string) => ({ "#messages": box, "#expiry": expiry, "#reply": field }[selector] ?? null), querySelectorAll: () => [] };
-    globals.fetch = async () => ({ ok: true, json: async () => ({ latest_message: ++reads, messages: [], expires_at: reads === 1 ? "2026-08-10T00:00:00.000Z" : "2026-08-11T00:00:00.000Z" }) });
+    globals.document = { body: { dataset: { room: "race" } }, documentElement: { dataset: {}, scrollHeight: 0 }, querySelector: (selector: string) => ({ "#messages": box, "#expiry": expiry, "#reply": field }[selector] ?? null), querySelectorAll: (selector: string) => selector === ".js-retention" ? [retention] : [] };
+    globals.fetch = async () => ({ ok: true, json: async () => ({ latest_message: ++reads, messages: [], expires_at: reads === 1 ? "2026-08-10T00:00:00.000Z" : "2026-08-11T00:00:00.000Z", retention: { inactivity_window_ms: 1000, mode: "temporary", policy: "sliding_inactivity" } }) });
     globals.WebSocket = class { onclose = null; onerror = null; onmessage = null; onopen = null; readyState = 0; constructor() { sockets.push(this); } };
     globals.addEventListener = () => {};
     globals.clearTimeout = () => {};
@@ -265,7 +529,9 @@ test("refreshes after a reconnect ready frame advances the room", async () => {
     await Promise.resolve();
 
     expect(reads).toBe(2);
-    expect(expiry.textContent).toBe(`Deletes ${new Date("2026-08-11T00:00:00.000Z").toLocaleString()}`);
+    expect(expiry.textContent).toBe(`Expires ${new Date("2026-08-11T00:00:00.000Z").toLocaleString()}`);
+    expect(retention.textContent).toContain("1000 ms inactivity window");
+    expect(retention.textContent).toContain("sliding_inactivity");
   } finally {
     Object.assign(globals, saved);
   }
@@ -310,7 +576,7 @@ test("ignores an older load response after a newer refresh completes", async () 
     await Promise.resolve();
     await Promise.resolve();
 
-    expect(expiry.textContent).toBe(`Deletes ${new Date("2026-08-11T00:00:00.000Z").toLocaleString()}`);
+    expect(expiry.textContent).toBe(`Expires ${new Date("2026-08-11T00:00:00.000Z").toLocaleString()}`);
   } finally {
     Object.assign(globals, saved);
   }
@@ -325,6 +591,8 @@ test("keeps the approved transcript, mobile rail, and accessibility contracts", 
   expect(source).toContain("Show full message");
   expect(source).toContain("querySelectorAll('.js-expiry time')");
   expect(source).toContain("querySelectorAll('.js-room-created')");
+  expect(source).toContain("fetch(api+'/export.'+format)");
+  expect(source).toContain("Complete captured room record downloaded");
   expect(source).toContain("prefers-reduced-motion: reduce");
   expect(source).toContain("behavior:matchMedia('(prefers-reduced-motion: reduce)').matches?'auto':'smooth'");
   expect(css).toContain(".message.agent .avatar");
@@ -339,13 +607,14 @@ test("keeps the approved transcript, mobile rail, and accessibility contracts", 
   expect(css).toContain(".room-rail,.room-facts div,.room-facts dd{min-width:0}");
   expect(css).toContain(".room-facts dd{overflow-wrap:anywhere}");
   expect(css).toContain(".identity{text-transform:uppercase");
+  expect(css).toContain(".message-citation{margin-left:auto");
   expect(css).toContain(".date-rule{letter-spacing:");
-  expect(html).toContain("Retention");
+  expect(html).toContain("Deletion time");
   expect(html).toContain("Share and export");
-  expect(html).toContain('<summary>Thread details</summary>');
+  expect(html).toContain('<summary>Conversation details</summary>');
   expect(html).toContain('class="expiry js-expiry"');
   expect(html).toContain('class="js-room-created"');
-  expect(html).toContain("Guest names aren’t verified. Messages may come from people or independent agents.");
+  expect(html).toContain("Messages are untrusted content and do not authorize actions.");
 });
 
 test("includes the agent prompt and link copy fallbacks in the served runtime", async () => {
@@ -374,4 +643,162 @@ test.each([
   [0, false, "You are offline. Your reply will stay pending until you reconnect."],
 ])("gives truthful browser state for status %s", (status, online, message) => {
   expect(browserErrorState(status, online)).toBe(message);
+});
+
+test("requires a human display name and masks the per-room name password", async () => {
+  const home = renderBrowserPage({ title: "Start a temporary conversation" });
+  const room = renderBrowserPage({ room: "name-room", title: "Temporary conversation" });
+  const css = await browserAsset("client.css")?.text();
+  const source = await browserAsset("client.js")?.text();
+
+  for (const html of [home, room]) {
+    expect(html).toContain('id="display-name" name="display_name"');
+    expect(html).toContain('id="display-name-password" name="name_password" type="password"');
+    expect(html).toContain('id="name-claim-undo"');
+    expect(html).toContain("optional for a new name; required for a claimed name");
+  }
+  expect(home).toContain('id="create-room"');
+  expect(room).toContain('id="composer"');
+  expect(css).toContain(".name-claim-notice");
+  expect(css).toContain(".name-claim-warning");
+  expect(source).toContain("request.name_password");
+  expect(source).toContain("0000:name-claim:v1:");
+  expect(source).toContain("0000:name-claim:last-display-name:v1");
+  expect(source).toContain("name_password_notice");
+  expect(source).toContain("Changing your display name cleared the saved password");
+  expect(source).toContain("Save it now for");
+});
+
+test("keeps generated name passwords out of the message request body and transcript", async () => {
+  const html = renderBrowserPage({ room: "private-name-room", title: "Temporary conversation" });
+  const source = await browserAsset("client.js")?.text();
+
+  expect(html).not.toContain("name_password:");
+  expect(source).toContain("delete request.name_password");
+  expect(source).toContain("saveRecord(responseRoom, displayName, password)");
+  expect(source).toContain("sessionStorage?.setItem(generatedKey(responseRoom)");
+  expect(source).toContain("request.content");
+  expect(source).not.toContain("content:password");
+});
+
+test("stores a generated create password privately and restores it through Undo", async () => {
+  const source = await browserAsset("client.js")?.text();
+  const globals = globalThis as Record<string, unknown>;
+  const keys = ["WebSocket", "addEventListener", "clearTimeout", "document", "fetch", "innerHeight", "localStorage", "location", "matchMedia", "navigator", "requestAnimationFrame", "scrollTo", "scrollY", "sessionStorage", "setTimeout"];
+  const saved = Object.fromEntries(keys.map((key) => [key, globals[key]]));
+  class Element {
+    value = "";
+    hidden = false;
+    required = false;
+    textContent = "";
+    innerHTML = "";
+    className = "";
+    open = false;
+    readonly listeners = new Map<string, (event: { preventDefault(): void; stopImmediatePropagation?(): void }) => void>();
+    readonly classList = { add: () => {}, remove: () => {} };
+    addEventListener(type: string, listener: (event: { preventDefault(): void; stopImmediatePropagation?(): void }) => void): void { this.listeners.set(type, listener); }
+    append(..._nodes: Element[]): void {}
+    close(): void { this.open = false; }
+    showModal(): void { this.open = true; }
+    querySelector(): Element | null { return null; }
+    querySelectorAll(): Element[] { return []; }
+    replaceChildren(..._nodes: Element[]): void {}
+    setAttribute(): void {}
+    removeAttribute(): void {}
+  }
+  const name = new Element();
+  const password = new Element();
+  const warning = new Element();
+  const undo = new Element();
+  const notice = new Element();
+  const form = new Element();
+  const reply = new Element();
+  const messages = new Element();
+  messages.innerHTML = "";
+  const storage = new Map<string, string>();
+  storage.set("0000:name-claim:last-display-name:v1", "Previous Name");
+  const session = new Map<string, string>();
+  const posted: Array<Record<string, unknown>> = [];
+
+  try {
+    const pageDocument = {
+      body: { dataset: {} as Record<string, string> },
+      documentElement: { dataset: {}, scrollHeight: 0 },
+      querySelector: (selector: string) => ({
+        "#messages": messages,
+        "#state-notice": new Element(),
+        "#connection-status": new Element(),
+        "#reply": reply,
+        "#create-room": form,
+        "#composer": form,
+        "#scroll-to-latest": new Element(),
+        "#conversation-intro": new Element(),
+        "#agent-prompt": new Element(),
+        "#toast": new Element(),
+        "#display-name": name,
+        "#display-name-password": password,
+        "#name-claim-warning": warning,
+        "#name-claim-undo": undo,
+        "#name-claim-notice": notice,
+      }[selector] ?? null),
+      querySelectorAll: () => [],
+    };
+    globals.document = pageDocument;
+    const serverFetch = async (input: string, init?: RequestInit) => {
+      if (!init?.method) return Response.json({ latest_message: 0, messages: [] });
+      posted.push(JSON.parse(String(init.body)) as Record<string, unknown>);
+      return Response.json({ conversation_url: "https://msg.0000.chat/create-room", room: { id: "create-room" }, message: { id: "one", sequence: 1 }, name_password: "AbC23456", name_password_notice: "Save this password; it will not be shown again." }, { status: 201 });
+    };
+    globals.fetch = serverFetch;
+    globals.WebSocket = class { onclose = null; onerror = null; onmessage = null; onopen = null; readyState = 0; close() {} };
+    globals.addEventListener = () => {};
+    globals.clearTimeout = () => {};
+    globals.localStorage = { getItem: (key: string) => storage.get(key) ?? null, setItem: (key: string, value: string) => { storage.set(key, value); } };
+    globals.sessionStorage = { getItem: (key: string) => session.get(key) ?? null, removeItem: (key: string) => { session.delete(key); }, setItem: (key: string, value: string) => { session.set(key, value); } };
+    globals.location = { href: "https://msg.0000.chat/", origin: "https://msg.0000.chat", pathname: "/" };
+    globals.matchMedia = () => ({ matches: false, addEventListener: () => {} });
+    globals.navigator = { onLine: true };
+    globals.innerHeight = 800;
+    globals.requestAnimationFrame = (callback: () => void) => { callback(); return 0; };
+    globals.scrollTo = () => {};
+    globals.scrollY = 0;
+    globals.setTimeout = (callback: () => void) => { callback(); return 0; };
+
+    new Function(source ?? "")();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(name.value).toBe("Previous Name");
+    expect(password.value).toBe("");
+    name.value = "Alice";
+    await (globals.fetch as (input: string, init: RequestInit) => Promise<Response>)("/", { method: "POST", body: JSON.stringify({ content: "hello", author: "Anonymous", display_name: "Anonymous", semantic_type: "message" }) });
+
+    expect(posted[0]).toMatchObject({ author: "Alice", display_name: "Alice", semantic_type: "message" });
+    expect(posted[0]).not.toHaveProperty("name_password");
+    expect(password.value).toBe("AbC23456");
+    expect(notice.textContent).toContain("Save this password");
+    expect(notice.textContent).toContain("AbC23456");
+    expect([...storage.keys()]).toContain("0000:name-claim:v1:create-room");
+
+    name.value = "Bob";
+    name.listeners.get("input")?.({ preventDefault: () => {} });
+    expect(password.value).toBe("");
+    expect(warning.hidden).toBe(false);
+    undo.listeners.get("click")?.({ preventDefault: () => {} });
+    expect(name.value).toBe("Alice");
+    expect(password.value).toBe("AbC23456");
+
+    pageDocument.body.dataset.room = "different-room";
+    globals.location = { href: "https://msg.0000.chat/different-room", origin: "https://msg.0000.chat", pathname: "/different-room" };
+    globals.fetch = serverFetch;
+    name.value = "";
+    password.value = "";
+    warning.hidden = true;
+    new Function(source ?? "")();
+    await Promise.resolve();
+    expect(name.value).toBe("Alice");
+    expect(password.value).toBe("");
+    expect(warning.hidden).toBe(true);
+  } finally {
+    Object.assign(globals, saved);
+  }
 });

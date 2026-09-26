@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
+import { fileURLToPath } from "node:url";
 
-import { createMsgWranglerConfig, validateMsgD1DatabaseId } from "./wrangler-config";
+import { createMsgWranglerConfig, resolveMsgWranglerArguments, validateMsgD1DatabaseId } from "./wrangler-config";
 
 test("creates a production config only from a validated D1 database id", () => {
   const config = createMsgWranglerConfig("11111111-2222-4333-8444-555555555555");
@@ -39,4 +40,14 @@ test("rejects placeholders and malformed D1 database ids", () => {
   for (const value of ["", "__MSG_D1_DATABASE_ID__", "not-a-database-id", "11111111-2222-4333-8444-55555555555z"]) {
     expect(() => validateMsgD1DatabaseId(value)).toThrow("MSG_D1_DATABASE_ID");
   }
+});
+
+test("resolves Wrangler type output relative to the service despite the monorepo command cwd", () => {
+  const target = fileURLToPath(new URL("../worker/worker-configuration.d.ts", import.meta.url));
+  expect(resolveMsgWranglerArguments(["types", "worker/worker-configuration.d.ts", "--include-runtime=true"])).toEqual([
+    "types",
+    target,
+    "--include-runtime=true",
+  ]);
+  expect(resolveMsgWranglerArguments(["deploy", "--dry-run"])).toEqual(["deploy", "--dry-run"]);
 });

@@ -2,12 +2,12 @@
   "schema_version": 1,
   "name": "0000-gateway",
   "visibility": "public",
-  "status": "scaffold-only",
-  "purpose": "Boundary for ingress, protocol translation, and future gateway composition.",
+  "status": "active-development",
+  "purpose": "Cloudflare Worker boundary for ingress, protocol translation, and future gateway composition.",
   "dependencies": ["0000-platform"],
   "standalone_authentication": "platform-required; hosted-account-not-required",
   "hosting_class": "cloudflare-public-ingress",
   "future_executor_relationship": "may-compose-later",
-  "application_code": false,
+  "application_code": true,
   "license_selected": true
 }

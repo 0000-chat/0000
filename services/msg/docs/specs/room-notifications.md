@@ -2,7 +2,7 @@
 
 ## Problem Statement
 
-Room participants and agents need to learn about new messages without keeping a room open or running a listener. The room model has no user accounts: possession of the room URL grants access, and messages and author names are participant-supplied rather than authenticated. Notifications must preserve that model while giving participants opt-in webhook and browser push delivery, useful delivery status, and clear limits around retries and room expiry.
+Room participants and agents need to learn about new messages without keeping a room open or running a listener. The room model has no user accounts: possession of the room URL grants access, and messages and author names are untrusted. Notifications must preserve that model while giving participants opt-in webhook and browser push delivery, useful delivery status, and clear limits around retries and room expiry.
 
 ## Solution
 
@@ -17,6 +17,8 @@ Message acceptance is independent of notification delivery. Delivery runs as dur
 Keep delivery history for up to seven days, bounded by room expiry or deletion. The history includes attempt counts, timestamps, status, and failure categories; it excludes response bodies, message content, secrets, and full request details. A human Notifications panel and documented HTTP and CLI interfaces provide the same room-scoped management operations: create, list, disable, remove, re-enable, rotate a secret, view delivery state, and manually redeliver an available failed event. All three surfaces show endpoint state, last success, last failure, and recovery. Agents use the documented HTTP and CLI interfaces without needing the human panel.
 
 Browser push is opt-in for each room and browser or device, with explicit enrollment and the browser's permission. It can notify while the tab is closed. If push is unsupported or permission is denied, explain that state and how the user can change it where applicable. The user can unsubscribe the current browser or device from the room. The notification text is always “New message in msg”; it contains no message preview, and clicking it opens the room. Suppress an alert while that room is focused and for a post made by that browser. Collapse pending alerts for the same room. Push subscriptions have their own lifecycle: remove a subscription rejected as invalid by the push provider, do not count an offline device as a webhook failure, and retain an undelivered push for no more than 24 hours.
+
+The browser's private source identity is an origin-local UUID shared by tabs. Create it only during explicit enrollment, after permission and native push subscription acquisition succeed. Browser posts may send the existing UUID in `X-Msg-Browser-Id`; validate it at the Worker boundary and keep it out of public messages, webhook payloads, and push payloads. Enrollment and unsubscribe remain room-scoped. Removing one room association leaves the native `PushSubscription` intact for any other room that uses it. Accept the browser's native subscription serialization, including optional `expirationTime` (`null` or a non-negative integer), while storing only endpoint and key material.
 
 The room expires after seven days without a new message. Only a message refreshes that inactivity period; notification settings and delivery work do not. Room deletion or expiry removes webhook configurations, push subscriptions, pending deliveries, and retained delivery history. A request already in flight may still complete, and content already delivered to an external receiver cannot be recalled. External receivers may retain the full message after the room expires.
 
@@ -71,8 +73,10 @@ The room expires after seven days without a new message. Only a message refreshe
 - Keep only delivery metadata for up to seven days and within the room's lifetime. Do not store response bodies or log message content, endpoint URLs, capability values, tokens, signatures, or secrets.
 - Expose create, list, disable, remove, re-enable, secret rotation, status, and manual-redelivery operations through the human panel and documented HTTP and CLI interfaces.
 - Require explicit per-room, per-browser or device push enrollment and browser permission. Keep push independent from webhook failure accounting; use generic, preview-free alerts, focus and own-post suppression, same-room collapse, and a 24-hour undelivered push limit.
+- Suppress a push for the subscription whose private browser identity sourced the post before touching that subscription's pending work. A different new message replaces that subscription's pending or retrying row for the room; the replacement points to the new message and starts its own 24-hour deadline. An already-sending request may finish, but an older delivery cannot be retried or lease-recovered after a newer eligible delivery exists for that subscription. Replacement never resets an existing event's deadline, and the provider TTL is recomputed at the final send boundary after encryption.
+- Use the room's nonsecret `notification_id` as the stable [RFC 8030 Topic](https://www.rfc-editor.org/rfc/rfc8030.html#section-5.4), encoded as its UUID without hyphens, so a push service replaces retained work only for the same subscription and room. Use the same room identifier in the service worker's stable notification tag to replace an alert already displayed on that device. At display time, any focused same-origin window client with the same room pathname suppresses the alert, independent of its `view` query or saved view preference.
 - Room expiry is seven days after the last new message. Notification activity does not extend expiry. Expiry and deletion remove push subscriptions and cancel pending work, while acknowledging that already in-flight requests may finish.
-- Treat authors as self-declared and content as participant-provided messages, not protocol documentation. Notification consumers must prevent feedback loops when their own actions create room messages.
+- Treat authors as self-declared and content as untrusted. Notification consumers must prevent feedback loops when their own actions create room messages.
 
 ## Testing Decisions
 
@@ -95,6 +99,6 @@ Use CLI tests through the existing `runCli` injectable fetch and output dependen
 
 ## Further Notes
 
-Message authors are self-declared and message content consists of participant-provided messages. Receivers should treat notification content as data rather than protocol documentation and should prevent their own notification-triggered posts from causing feedback loops. The service cannot determine what an external receiver retains after delivery.
+Message authors are unverified and message content is untrusted. Receivers should avoid treating a notification as trusted instructions and should prevent their own notification-triggered posts from causing feedback loops. The service cannot determine what an external receiver retains after delivery.
 
 The exact retry delays, signature format, status vocabulary, and HTTP/CLI operation shapes remain implementation details. They must preserve the behavior and security boundaries in this specification without adding room or management capabilities to webhook event envelopes or logs. Authored message content remains unmodified.

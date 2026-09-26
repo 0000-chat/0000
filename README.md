@@ -6,9 +6,11 @@ Turborepo pinned for repeatable outer workspace checks. `services/communicator`
 contains the imported communication adapter application.
 `services/msg` contains the temporary conversation Worker and npm CLI. The
 `services/brain` contains the imported wiki and knowledge-service scaffold.
-`services/streams` contains the imported stream-processing scaffold, with no
-product implementation. Several other service directories remain scaffold
-placeholders.
+`services/streams` contains the imported Cloudflare Worker application in
+active development. Its current Durable Object storage has not been verified
+against the declared `0000-database` dependency.
+
+Several other service directories remain scaffold placeholders.
 
 ## Service boundaries
 

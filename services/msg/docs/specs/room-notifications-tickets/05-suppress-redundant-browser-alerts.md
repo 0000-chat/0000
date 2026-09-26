@@ -7,7 +7,7 @@ Refine browser push behavior so active participants do not receive redundant ale
 ## Acceptance criteria
 
 - [ ] If any tab in a browser has a particular room focused, that browser receives no push alert for that room. Focus in a different room does not suppress the alert.
-- [ ] A post made from a browser is not pushed back to that same browser. Suppression does not rely on a user account, a global user identity, or an author label as identity evidence.
+- [ ] A post made from a browser is not pushed back to that same browser. Suppression does not rely on a user account, a global user identity, or an author label being verified.
 - [ ] Pending alerts for the same room collapse into one visible alert. Alerts for separate rooms remain distinct, and one browser's focus or own post does not suppress another browser's alert.
 - [ ] Tests cover multiple tabs focused on the same room, focus in another room, multiple rooms, multiple browser subscriptions, and same-browser posts. Use the existing browser controller scheduling seam and approved Worker fake-push boundary to verify the visible behavior in the human browser flow.
 
