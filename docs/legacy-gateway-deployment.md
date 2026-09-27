@@ -9,4 +9,7 @@ As of the public release scaffold, `.github/workflows/deploy-gateway.yml` is a
 disabled manual-only placeholder. It does not contain deployment credentials or
 an invocation of Wrangler and cannot deploy from a public `main` merge. Private
 Cloud must provide and verify the replacement staging/promotion path before any
-runtime deployment is reconsidered.
+runtime deployment is reconsidered. Before cutover, revoke the former
+repository-level deployment credential as well: historical workflow runs retain
+their original workflow definition and can still be rerun even after the new
+workflow file is disabled.

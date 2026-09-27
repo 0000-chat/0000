@@ -26,9 +26,12 @@ never included.
 The release planner selects units from runtime paths and conservatively treats
 root manifests and lockfiles as affecting every unit. Documentation-only and
 other non-runtime changes still get a release record with zero artifacts and no
-runtime redeployment. A private Cloud workflow may consume a release record and
-pin the exact artifact digest for staging; this public workflow does not deploy
-any public production service or grant production credentials.
+runtime redeployment. The public workflow publishes those records but only
+dispatches private Cloud staging when the plan contains runtime artifacts, so a
+Brain, Platform, or Database validation change cannot be sent as an invalid
+zero-artifact runtime event. A private Cloud workflow may consume a release
+record and pin the exact artifact digest for staging; this public workflow does
+not deploy any public production service or grant production credentials.
 
 Gateway's `gateway-<version>.tar.gz` is an `application/gzip` archive with
 these root-level files:
@@ -88,11 +91,33 @@ also uploaded as release evidence; Cloud rejects a runtime event that omits an
 artifact or supplies a source-only Gateway artifact. This public workflow
 still does not claim that staging deployment has occurred.
 
-The trusted public-main workflow requires the `CLOUD_RELEASE_DISPATCH_TOKEN`
-repository secret and `CLOUD_RELEASE_REPOSITORY` repository variable. The
-variable names the private receiver as `owner/repository`; it is configuration,
-not a public source dependency. The token must be a narrowly scoped GitHub App
-installation token with Actions:write for that receiver's workflow-dispatch
-endpoint (not Contents:write, Phase, Cloudflare, or production access), and it
-is never available to pull-request workflows. The public workflow has no
-Cloudflare credentials and no public production deployment path.
+Before enabling the trusted public-main workflow, immutable releases must be
+enabled for this repository (or selected for it by the organization policy).
+The workflow checks that setting before creating a draft, uploads and verifies
+all record and artifact assets on the draft, and publishes only after the full
+set is present. A retry reuses the same SHA-derived draft or published release:
+it verifies existing asset digests, fills only missing draft assets, and refuses
+to mutate a published release.
+
+The release job mints an ephemeral GitHub App installation token at runtime
+from the `PUBLIC_RELEASE_APP_CLIENT_ID` repository variable and
+`PUBLIC_RELEASE_APP_PRIVATE_KEY` repository secret. The App installation must
+be restricted to this repository and grant only Contents:write,
+Workflows:write, and Administration:read (the last permission is needed to
+check the immutable-release setting). The token expires automatically and is
+revoked when the job ends; it is never exposed to pull-request workflows and
+is not a personal access token.
+
+The trusted public-main workflow separately mints a second ephemeral GitHub
+App installation token from the `CLOUD_RELEASE_APP_CLIENT_ID` repository
+variable and `CLOUD_RELEASE_APP_PRIVATE_KEY` repository secret. That App must
+be installed on the private receiver named by `CLOUD_RELEASE_REPOSITORY` and
+grant only Actions:write; the workflow-dispatch token cannot read or write the
+public repository, Phase, Cloudflare, or production resources.
+`CLOUD_RELEASE_REPOSITORY` remains a repository variable naming the receiver as
+`owner/repository`; the App installation and this variable must identify the
+same receiver. Both App tokens expire
+automatically and are revoked when the job ends; no broad static PAT or
+long-lived `CLOUD_RELEASE_DISPATCH_TOKEN` is used. Neither token is available
+to pull-request workflows. The public workflow has no Cloudflare credentials
+and no public production deployment path.

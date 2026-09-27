@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import test from "node:test";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   affectedUnits,
   assertReleaseConfig,
@@ -14,6 +17,9 @@ import { workerArtifactManifest } from "./worker.mjs";
 
 const config = readReleaseConfig();
 const head = "0123456789abcdef0123456789abcdef01234567";
+const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
+const releaseWorkflow = fs.readFileSync(path.join(repositoryRoot, ".github/workflows/release.yml"), "utf8");
+const legacyGatewayWorkflow = fs.readFileSync(path.join(repositoryRoot, ".github/workflows/deploy-gateway.yml"), "utf8");
 
 test("release unit configuration is valid and excludes private or non-runtime publications", () => {
   assert.doesNotThrow(() => assertReleaseConfig(config));
@@ -66,6 +72,45 @@ test("documentation-only changes create no runtime redeployment", () => {
   assert.equal(plan.runtime_redeployment, false);
   assert.deepEqual(plan.affected_units, []);
   assert.deepEqual(plan.artifacts, []);
+});
+
+test("validation-only service changes still publish a record without Cloud dispatch", () => {
+  for (const changedFile of [
+    "services/brain/src/worker.ts",
+    "services/platform/src/index.ts",
+    "services/database/src/index.ts"
+  ]) {
+    const plan = makePlan({ config, base: head, head, changedFiles: [changedFile] });
+    assert.equal(plan.change_class, "non-runtime");
+    assert.equal(plan.runtime_redeployment, false);
+    assert.deepEqual(plan.affected_units, []);
+    assert.deepEqual(plan.artifacts, []);
+  }
+});
+
+test("release workflow keeps every source SHA and protects the draft-to-immutable transition", () => {
+  assert.match(releaseWorkflow, /group: public-release-\$\{\{ github\.sha \}\}/);
+  assert.match(releaseWorkflow, /actions\/create-github-app-token@1b10c78c7865c340bc4f6099eb2f838309f1e8c3 # v3\.1\.1/);
+  assert.match(releaseWorkflow, /PUBLIC_RELEASE_APP_CLIENT_ID/);
+  assert.match(releaseWorkflow, /CLOUD_RELEASE_APP_CLIENT_ID/);
+  assert.match(releaseWorkflow, /repositories: \$\{\{ steps\.cloud-target\.outputs\.repository \}\}/);
+  assert.match(releaseWorkflow, /permission-workflows: write/);
+  assert.match(releaseWorkflow, /permission-administration: read/);
+  assert.match(releaseWorkflow, /permission-actions: write/);
+  assert.doesNotMatch(releaseWorkflow, /CLOUD_RELEASE_DISPATCH_TOKEN/);
+  assert.match(releaseWorkflow, /--draft/);
+  assert.match(releaseWorkflow, /--draft=false/);
+  assert.match(releaseWorkflow, /retry-provenance/);
+  assert.match(releaseWorkflow, /github\.run_attempt/);
+  assert.match(releaseWorkflow, /immutable releases must be enabled/);
+  assert.match(releaseWorkflow, /if: steps\.plan\.outputs\.runtime_redeployment == 'true'/);
+});
+
+test("legacy Gateway workflow cannot auto-deploy or retain a public deployment credential", () => {
+  assert.match(legacyGatewayWorkflow, /^  workflow_dispatch:\s*$/m);
+  assert.match(legacyGatewayWorkflow, /if: \$\{\{ false \}\}/);
+  assert.doesNotMatch(legacyGatewayWorkflow, /(^|\n)  push:/);
+  assert.doesNotMatch(legacyGatewayWorkflow, /wrangler|CLOUDFLARE_API_TOKEN/);
 });
 
 test("a Worker change only selects its deployable unit", () => {
