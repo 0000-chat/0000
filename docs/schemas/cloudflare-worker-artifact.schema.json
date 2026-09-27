@@ -116,6 +116,40 @@
         "head_sampling_rate": { "type": "number", "minimum": 0, "maximum": 1 }
       }
     },
+    "rate_limits": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "simple"],
+        "properties": {
+          "name": { "type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_]*$" },
+          "simple": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["limit", "period"],
+            "properties": {
+              "limit": { "type": "integer", "minimum": 1 },
+              "period": { "enum": [10, 60] }
+            }
+          }
+        }
+      }
+    },
+    "triggers": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["crons"],
+      "properties": {
+        "crons": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "pattern": "^[0-9*/?,L#-]+(?:\\s+[0-9*/?,L#-]+){4}$" }
+        }
+      }
+    },
     "migration_files": {
       "type": "array",
       "items": {

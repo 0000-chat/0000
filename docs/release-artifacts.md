@@ -98,14 +98,19 @@ The public build runs the pinned Mermaid asset generator before copying
 `services/msg/worker/public` into `assets/`. The embedded manifest records the
 `ASSETS` binding, D1 `MSG_DB` binding and migration directory, the
 `ConversationRoom` Durable Object binding, migration tag `v1`, required secret
-names (never values), observability settings, and a SHA-256 digest for every
-ordered migration file. The archive does not contain a Worker name, route,
-database ID, secret value, or production resource identifier.
+names (never values), observability settings, the four logical rate-limit
+contracts, the `17 3 * * *` cron contract, and a SHA-256 digest for every
+ordered migration file. Rate-limit namespace IDs are environment-owned and are
+injected by private Cloud from Phase; the public artifact never contains those
+IDs. The archive does not contain a Worker name, route, database ID, secret
+value, or production resource identifier.
 
 Cloud must verify those bytes and metadata before generating its own staging
-config. It applies the three D1 migrations in numeric order before the
-Wrangler deployment (which applies the Durable Object `v1` migration), then
-records a `/healthz` smoke response for `msg-staging.0000.chat`. The live
+config. It rejects any rewrite or removal of a migration already present at the
+release base, verifies the append-only ledger and exact migration digests, and
+applies the three D1 migrations in numeric order before the Wrangler deployment
+(which applies the Durable Object `v1` migration). It then records a `/healthz`
+smoke response for `msg-staging.0000.chat`. The live
 `msg.0000.chat` route and resources are invalid staging targets.
 
 After publishing the record and provenance evidence, public CI starts the

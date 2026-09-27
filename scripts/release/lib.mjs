@@ -111,6 +111,65 @@ function assertWorkerBuildConfig(unit, build) {
     }
   }
 
+  if (build.runtime !== undefined) {
+    const runtime = build.runtime;
+    if (!runtime || typeof runtime !== "object" || Array.isArray(runtime)) {
+      throw new Error(`release unit build.runtime must be an object: ${unit.name}`);
+    }
+    const unsupported = Object.keys(runtime).filter((key) => !["rate_limits", "triggers"].includes(key));
+    if (unsupported.length > 0) {
+      throw new Error(`release unit build.runtime has unsupported keys for ${unit.name}: ${unsupported.join(", ")}`);
+    }
+    if (runtime.rate_limits !== undefined) {
+      if (!Array.isArray(runtime.rate_limits) || runtime.rate_limits.length === 0) {
+        throw new Error(`release unit build.runtime.rate_limits must be non-empty: ${unit.name}`);
+      }
+      const names = new Set();
+      for (const rateLimit of runtime.rate_limits) {
+        if (
+          !rateLimit ||
+          typeof rateLimit !== "object" ||
+          Array.isArray(rateLimit) ||
+          typeof rateLimit.name !== "string" ||
+          !NAME_RE.test(rateLimit.name) ||
+          names.has(rateLimit.name) ||
+          !rateLimit.simple ||
+          typeof rateLimit.simple !== "object" ||
+          Array.isArray(rateLimit.simple) ||
+          !Number.isInteger(rateLimit.simple.limit) ||
+          rateLimit.simple.limit <= 0 ||
+          ![10, 60].includes(rateLimit.simple.period)
+        ) {
+          throw new Error(`release unit build.runtime.rate_limits are invalid: ${unit.name}`);
+        }
+        if (Object.keys(rateLimit).some((key) => !["name", "simple"].includes(key))) {
+          throw new Error(`release unit build.runtime.rate_limits contain unsupported fields: ${unit.name}`);
+        }
+        if (Object.keys(rateLimit.simple).some((key) => !["limit", "period"].includes(key))) {
+          throw new Error(`release unit build.runtime.rate_limits.simple contains unsupported fields: ${unit.name}`);
+        }
+        names.add(rateLimit.name);
+      }
+    }
+    if (runtime.triggers !== undefined) {
+      if (
+        !runtime.triggers ||
+        typeof runtime.triggers !== "object" ||
+        Array.isArray(runtime.triggers) ||
+        !Array.isArray(runtime.triggers.crons) ||
+        runtime.triggers.crons.length === 0 ||
+        Object.keys(runtime.triggers).some((key) => key !== "crons") ||
+        !runtime.triggers.crons.every(
+          (cron) =>
+            typeof cron === "string" &&
+            /^[0-9*/?,L#-]+(?:\s+[0-9*/?,L#-]+){4}$/.test(cron.trim()),
+        )
+      ) {
+        throw new Error(`release unit build.runtime.triggers are invalid: ${unit.name}`);
+      }
+    }
+  }
+
   for (const [key, label] of [["assets", "assets"], ["migrations", "migrations"]]) {
     const directory = build[key];
     if (directory === undefined) continue;

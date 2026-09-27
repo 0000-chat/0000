@@ -15,6 +15,7 @@ import {
   stableJson
 } from "./lib.mjs";
 import { neutralWranglerConfig, workerArtifactManifest } from "./worker.mjs";
+import { assertAppendOnlyD1Migrations, migrationMetadata } from "./migrations.mjs";
 
 function argument(name, fallback = undefined) {
   const index = process.argv.indexOf(name);
@@ -89,23 +90,6 @@ function buildDirectory(unit, definition, artifactRoot) {
   return { target: definition.directory, files };
 }
 
-function migrationMetadata(directory, files) {
-  if (!directory) return [];
-  const migrationPattern = /^[0-9]{4,}_[a-z0-9_]+\.sql$/;
-  const names = files.sort((left, right) => left.localeCompare(right));
-  if (names.length === 0) throw new Error("configured D1 migrations directory is empty");
-  let previous = -1;
-  return names.map((name) => {
-    const basename = path.posix.basename(name);
-    if (!migrationPattern.test(basename)) throw new Error(`invalid D1 migration filename: ${name}`);
-    const number = Number.parseInt(basename.split("_", 1)[0], 10);
-    if (number <= previous) throw new Error("D1 migrations must have strictly increasing numeric prefixes");
-    previous = number;
-    const bytes = fs.readFileSync(path.join(directory, name));
-    return { name: path.posix.join("migrations", name), digest: `sha256:${sha256(bytes)}` };
-  });
-}
-
 function stagingLabel(unit) {
   if (unit.name === "msg-worker") return "Msg Worker";
   if (unit.name === "gateway") return "Gateway";
@@ -117,6 +101,13 @@ function buildWorkerUnit(unit, plan) {
   const currentCommit = run("git", ["rev-parse", "HEAD"]).toString().trim();
   if (currentCommit !== commit) {
     throw new Error(`built artifact source checkout ${currentCommit} does not match release commit ${commit}`);
+  }
+  if (unit.build.migrations) {
+    assertAppendOnlyD1Migrations({
+      repositoryRoot,
+      source: unit.build.migrations.source,
+      baseCommit: plan.base_commit
+    });
   }
 
   const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), `0000-${unit.name}-`));

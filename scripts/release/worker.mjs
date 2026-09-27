@@ -19,14 +19,15 @@ export function neutralWranglerConfig(unit) {
   if (wrangler.migrations) config.migrations = wrangler.migrations;
   if (wrangler.d1_databases) config.d1_databases = wrangler.d1_databases;
   if (wrangler.observability) config.observability = wrangler.observability;
+  if (build.runtime?.triggers) config.triggers = build.runtime.triggers;
   return config;
 }
 
 /**
- * Return the exact manifest embedded in a prebuilt Gateway bundle.
+ * Return the exact manifest embedded in a prebuilt Worker bundle.
  *
- * Cloud owns the deployment name and route. Keep those values, and all
- * bindings or secrets, out of this public manifest.
+ * Cloud owns the deployment name and route. Keep those values, environment
+ * resource IDs, and secret values out of this public manifest.
  */
 export function workerArtifactManifest(unit, plan, extra = {}) {
   const manifest = {
@@ -56,5 +57,7 @@ export function workerArtifactManifest(unit, plan, extra = {}) {
   if (wrangler.d1_databases) manifest.d1_databases = wrangler.d1_databases;
   if (wrangler.secrets) manifest.required_secrets = wrangler.secrets.required;
   if (wrangler.observability) manifest.observability = wrangler.observability;
+  if (build.runtime?.rate_limits) manifest.rate_limits = build.runtime.rate_limits;
+  if (build.runtime?.triggers) manifest.triggers = build.runtime.triggers;
   return { ...manifest, ...extra };
 }

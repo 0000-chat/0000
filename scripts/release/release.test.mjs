@@ -13,7 +13,8 @@ import {
 } from "./lib.mjs";
 import { createReleaseEvent } from "./event.mjs";
 import { createReleaseRecord } from "./record.mjs";
-import { workerArtifactManifest } from "./worker.mjs";
+import { neutralWranglerConfig, workerArtifactManifest } from "./worker.mjs";
+import { migrationMetadata } from "./migrations.mjs";
 
 const config = readReleaseConfig();
 const head = "0123456789abcdef0123456789abcdef01234567";
@@ -66,6 +67,15 @@ test("release unit configuration is valid and excludes private or non-runtime pu
   assert.deepEqual(msg.build.wrangler.d1_databases, [
     { binding: "MSG_DB", database_name: "0000-msg-operations", migrations_dir: "migrations" }
   ]);
+  assert.deepEqual(msg.build.runtime, {
+    rate_limits: [
+      { name: "MSG_RATE_LIMIT_CREATION", simple: { limit: 6, period: 60 } },
+      { name: "MSG_RATE_LIMIT_READS", simple: { limit: 60, period: 60 } },
+      { name: "MSG_RATE_LIMIT_POSTS", simple: { limit: 20, period: 60 } },
+      { name: "MSG_RATE_LIMIT_LIVE", simple: { limit: 10, period: 60 } }
+    ],
+    triggers: { crons: ["17 3 * * *"] }
+  });
 });
 
 test("Gateway bundle manifest matches the Cloud staging contract exactly", () => {
@@ -112,8 +122,32 @@ test("Msg bundle manifest carries static asset, D1, and Durable Object metadata"
       "MSG_VAPID_PRIVATE_KEY",
       "MSG_VAPID_SUBJECT"
     ],
-    observability: { enabled: true, head_sampling_rate: 1 }
+    observability: { enabled: true, head_sampling_rate: 1 },
+    rate_limits: [
+      { name: "MSG_RATE_LIMIT_CREATION", simple: { limit: 6, period: 60 } },
+      { name: "MSG_RATE_LIMIT_READS", simple: { limit: 60, period: 60 } },
+      { name: "MSG_RATE_LIMIT_POSTS", simple: { limit: 20, period: 60 } },
+      { name: "MSG_RATE_LIMIT_LIVE", simple: { limit: 10, period: 60 } }
+    ],
+    triggers: { crons: ["17 3 * * *"] }
   });
+});
+
+test("Msg D1 migration metadata is ordered and content-addressed", () => {
+  const directory = path.join(repositoryRoot, "services/msg/worker/migrations");
+  const files = fs.readdirSync(directory);
+  assert.deepEqual(migrationMetadata(directory, files), [
+    { name: "migrations/0001_operations.sql", digest: "sha256:b7e5aa7e3dc060cc4a0737ad8167a8ae7a1e4b8d7242559150a058ce8309d67a" },
+    { name: "migrations/0002_operations_retention.sql", digest: "sha256:f4c1ca7d78d230806a4c21809bc2290fbaf54ff85f414f0f616392c0c3df3372" },
+    { name: "migrations/0003_creation_plan.sql", digest: "sha256:33933dda69e77a7f570c15c9d3f8b9d62be98a1378faefd1d0a3489bf81aad2c" }
+  ]);
+});
+
+test("Msg neutral Wrangler config retains the cron trigger without environment-owned rate-limit IDs", () => {
+  const msg = config.units.find((unit) => unit.name === "msg-worker");
+  const neutral = neutralWranglerConfig(msg);
+  assert.deepEqual(neutral.triggers, { crons: ["17 3 * * *"] });
+  assert.equal("ratelimits" in neutral, false);
 });
 
 test("documentation-only changes create no runtime redeployment", () => {
@@ -158,11 +192,15 @@ test("release workflow keeps every source SHA and protects the draft-to-immutabl
   assert.match(releaseWorkflow, /if: steps\.plan\.outputs\.runtime_redeployment == 'true'/);
 });
 
-test("legacy Gateway workflow cannot auto-deploy or retain a public deployment credential", () => {
+test("Gateway production fallback is manual and owner-confirmed", () => {
   assert.match(legacyGatewayWorkflow, /^  workflow_dispatch:\s*$/m);
-  assert.match(legacyGatewayWorkflow, /if: \$\{\{ false \}\}/);
   assert.doesNotMatch(legacyGatewayWorkflow, /(^|\n)  push:/);
-  assert.doesNotMatch(legacyGatewayWorkflow, /wrangler|CLOUDFLARE_API_TOKEN/);
+  assert.match(legacyGatewayWorkflow, /^      confirm_production_deploy:\s*$/m);
+  assert.match(legacyGatewayWorkflow, /required:\s*true/);
+  assert.match(
+    legacyGatewayWorkflow,
+    /github\.actor == 'donmasakayan' && github\.triggering_actor == 'donmasakayan' && inputs\.confirm_production_deploy == 'DEPLOY_GATEWAY'/
+  );
 });
 
 test("a Worker change only selects its deployable unit", () => {

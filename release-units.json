@@ -114,6 +114,15 @@
             ]
           },
           "observability": { "enabled": true, "head_sampling_rate": 1 }
+        },
+        "runtime": {
+          "rate_limits": [
+            { "name": "MSG_RATE_LIMIT_CREATION", "simple": { "limit": 6, "period": 60 } },
+            { "name": "MSG_RATE_LIMIT_READS", "simple": { "limit": 60, "period": 60 } },
+            { "name": "MSG_RATE_LIMIT_POSTS", "simple": { "limit": 20, "period": 60 } },
+            { "name": "MSG_RATE_LIMIT_LIVE", "simple": { "limit": 10, "period": 60 } }
+          ],
+          "triggers": { "crons": ["17 3 * * *"] }
         }
       }
     },
