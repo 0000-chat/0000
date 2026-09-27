@@ -46,6 +46,7 @@ test("release unit configuration is valid and excludes private or non-runtime pu
   });
   const msg = config.units.find((unit) => unit.name === "msg-worker");
   assert.equal(msg.kind, "cloudflare-worker-bundle");
+  assert.equal(msg.build.generated_entrypoint, "worker-entry.js");
   assert.deepEqual(msg.build.assets, {
     source: "services/msg/worker/public",
     directory: "assets",

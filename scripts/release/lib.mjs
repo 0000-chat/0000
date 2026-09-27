@@ -61,6 +61,16 @@ function assertWorkerBuildConfig(unit, build) {
       throw new Error(`release unit build.${key} must be a root-level artifact file: ${unit.name}`);
     }
   }
+  if (build.generated_entrypoint !== undefined) {
+    if (
+      typeof build.generated_entrypoint !== "string" ||
+      build.generated_entrypoint.length === 0 ||
+      build.generated_entrypoint.includes("/") ||
+      normalisePath(build.generated_entrypoint) !== build.generated_entrypoint
+    ) {
+      throw new Error(`release unit build.generated_entrypoint must be a root-level generated file: ${unit.name}`);
+    }
+  }
   if (!DATE_RE.test(build.compatibility_date)) {
     throw new Error(`release unit build.compatibility_date is invalid: ${unit.name}`);
   }

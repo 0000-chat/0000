@@ -72,6 +72,7 @@
         "type": "cloudflare-worker",
         "config_path": "services/msg/wrangler.jsonc",
         "entrypoint": "worker.js",
+        "generated_entrypoint": "worker-entry.js",
         "config": "wrangler.json",
         "files": ["worker.js", "wrangler.json", "artifact-manifest.json"],
         "compatibility_date": "2026-08-09",

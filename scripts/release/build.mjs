@@ -147,7 +147,7 @@ function buildWorkerUnit(unit, plan) {
       );
     }
 
-    const generatedWorker = path.join(wranglerOutput, unit.build.entrypoint);
+    const generatedWorker = path.join(wranglerOutput, unit.build.generated_entrypoint ?? unit.build.entrypoint);
     if (!fs.existsSync(generatedWorker) || !fs.statSync(generatedWorker).isFile()) {
       throw new Error(`Wrangler did not emit the configured Worker entrypoint: ${unit.build.entrypoint}`);
     }
