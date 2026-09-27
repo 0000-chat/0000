@@ -12,3 +12,6 @@ node_modules/
 # Monorepo-local agent and task output
 .agents/
 .turbo/
+
+# Local link to private controller design documents
+/docs/private-specs

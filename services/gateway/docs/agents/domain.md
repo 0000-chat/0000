@@ -14,6 +14,8 @@ may be composed later.
 
 Its vocabulary is recorded in the [Gateway glossary](../../CONTEXT.md), its
 accepted capability boundary in [ADR 0001](../adr/0001-curated-gateway-capabilities.md),
+its canonical MCP address and apex path ownership in
+[ADR 0002](../adr/0002-canonical-apex-mcp-address.md),
 and its approved foundation in the [planning record](../plans/2026-09-19-gateway-foundation.md)
 and [specification](../specs/gateway-foundation.md). These documents record
 approved scope and the current public boundary. They do not claim a production

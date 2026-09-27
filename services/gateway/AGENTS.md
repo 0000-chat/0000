@@ -38,3 +38,6 @@ Use the five default triage labels in `docs/agents/triage-labels.md`.
 
 This service uses a single-context domain-doc layout. See
 `docs/agents/domain.md`.
+
+When present, `docs/private-specs` links to approved private Gateway design
+documents in the controller checkout. The link is local and Git ignored.
