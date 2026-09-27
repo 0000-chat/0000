@@ -1,9 +1,14 @@
-name: Deploy Gateway
+name: Deploy Gateway (owner-confirmed)
 
 on:
-  push:
-    branches:
-      - main
+  # Production deployment must be an explicit owner action. Pushes to main
+  # are intentionally not a production promotion mechanism.
+  workflow_dispatch:
+    inputs:
+      confirm_production_deploy:
+        description: "Type DEPLOY_GATEWAY to authorize the production deploy."
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -14,6 +19,7 @@ concurrency:
 
 jobs:
   deploy:
+    if: github.actor == 'donmasakayan' && github.triggering_actor == 'donmasakayan' && inputs.confirm_production_deploy == 'DEPLOY_GATEWAY'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
