@@ -6,8 +6,10 @@ import { fileURLToPath } from "node:url";
 import {
   affectedUnits,
   assertReleaseConfig,
+  assertWorkerBuildConfigMatchesSource,
   classifyChanges,
   makePlan,
+  readJsonc,
   readReleaseConfig,
   releaseVersion
 } from "./lib.mjs";
@@ -121,6 +123,20 @@ test("Streams bundle preserves Durable Object bindings and migrations in neutral
     },
     observability: { enabled: true }
   });
+});
+
+test("Streams release metadata matches and derives from the checked-in Wrangler contract", () => {
+  const streams = config.units.find((unit) => unit.name === "streams");
+  const source = readJsonc(path.join(repositoryRoot, streams.build.config_path));
+  assert.doesNotThrow(() => assertWorkerBuildConfigMatchesSource(streams, streams.build));
+  assert.deepEqual(neutralWranglerConfig(streams, source), neutralWranglerConfig(streams));
+
+  const drifted = structuredClone(streams);
+  drifted.build.wrangler.migrations = [{ tag: "v2", new_sqlite_classes: ["StreamsRoom"] }];
+  assert.throws(
+    () => assertWorkerBuildConfigMatchesSource(drifted, drifted.build),
+    /build\.wrangler\.migrations does not match services\/streams\/wrangler\.jsonc/,
+  );
 });
 
 test("documentation-only changes create no runtime redeployment", () => {

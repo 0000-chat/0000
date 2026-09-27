@@ -9,6 +9,7 @@ import {
   assertReleaseConfig,
   normalisePath,
   readJson,
+  readJsonc,
   readReleaseConfig,
   repositoryRoot,
   sha256,
@@ -73,6 +74,7 @@ function buildWorkerUnit(unit, plan) {
   const wranglerOutput = path.join(temporaryRoot, "wrangler-output");
   const artifactRoot = path.join(temporaryRoot, "artifact");
   const wranglerConfig = repositoryPath(unit.build.config_path, `${unit.name} build.config_path`);
+  const sourceConfig = readJsonc(wranglerConfig);
   let logConfig;
   fs.mkdirSync(wranglerOutput);
   fs.mkdirSync(artifactRoot);
@@ -95,7 +97,11 @@ function buildWorkerUnit(unit, plan) {
     }
     const workerBytes = fs.readFileSync(generatedWorker);
     fs.writeFileSync(path.join(artifactRoot, unit.build.entrypoint), workerBytes);
-    fs.writeFileSync(path.join(artifactRoot, unit.build.config), stableJson(neutralWranglerConfig(unit)), "utf8");
+    fs.writeFileSync(
+      path.join(artifactRoot, unit.build.config),
+      stableJson(neutralWranglerConfig(unit, sourceConfig)),
+      "utf8",
+    );
 
     const manifest = workerArtifactManifest(unit, plan);
     fs.writeFileSync(path.join(artifactRoot, "artifact-manifest.json"), stableJson(manifest), "utf8");

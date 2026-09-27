@@ -11,9 +11,92 @@ export const publicReleaseRecordSchema = "docs/schemas/public-release-record.sch
 const SHA_RE = /^[0-9a-f]{40}$/;
 const NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+const WRANGLER_CONTRACT_KEYS = ["durable_objects", "migrations", "secrets", "observability"];
 
 export function readJson(filePath) {
   return JSON.parse(fs.readFileSync(filePath, "utf8"));
+}
+
+function stripJsoncComments(source) {
+  let result = "";
+  let inString = false;
+  let escaped = false;
+
+  for (let index = 0; index < source.length; index += 1) {
+    const character = source[index];
+    const next = source[index + 1];
+    if (inString) {
+      result += character;
+      if (escaped) escaped = false;
+      else if (character === "\\") escaped = true;
+      else if (character === '"') inString = false;
+      continue;
+    }
+    if (character === '"') {
+      inString = true;
+      result += character;
+      continue;
+    }
+    if (character === "/" && next === "/") {
+      result += "  ";
+      index += 1;
+      while (index + 1 < source.length && source[index + 1] !== "\n" && source[index + 1] !== "\r") {
+        result += " ";
+        index += 1;
+      }
+      continue;
+    }
+    if (character === "/" && next === "*") {
+      result += "  ";
+      index += 1;
+      while (index + 1 < source.length) {
+        index += 1;
+        if (source[index] === "*" && source[index + 1] === "/") {
+          result += "  ";
+          index += 1;
+          break;
+        }
+        result += source[index] === "\n" || source[index] === "\r" ? source[index] : " ";
+      }
+      continue;
+    }
+    result += character;
+  }
+  return result;
+}
+
+function stripJsoncTrailingCommas(source) {
+  let result = "";
+  let inString = false;
+  let escaped = false;
+
+  for (let index = 0; index < source.length; index += 1) {
+    const character = source[index];
+    if (inString) {
+      result += character;
+      if (escaped) escaped = false;
+      else if (character === "\\") escaped = true;
+      else if (character === '"') inString = false;
+      continue;
+    }
+    if (character === '"') {
+      inString = true;
+      result += character;
+      continue;
+    }
+    if (character === ",") {
+      let next = index + 1;
+      while (next < source.length && /\s/.test(source[next])) next += 1;
+      if (source[next] === "}" || source[next] === "]") continue;
+    }
+    result += character;
+  }
+  return result;
+}
+
+export function readJsonc(filePath) {
+  const source = fs.readFileSync(filePath, "utf8");
+  return JSON.parse(stripJsoncTrailingCommas(stripJsoncComments(source)));
 }
 
 export function readReleaseConfig(root = repositoryRoot) {
@@ -159,6 +242,48 @@ function assertWorkerBuildConfig(unit, build) {
       ) {
         throw new Error(`release unit build.wrangler.observability is invalid: ${unit.name}`);
       }
+    }
+  }
+  assertWorkerBuildConfigMatchesSource(unit, build);
+}
+
+function canonicalJson(value) {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.keys(value)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function jsonValuesEqual(left, right) {
+  return canonicalJson(left) === canonicalJson(right);
+}
+
+export function assertWorkerBuildConfigMatchesSource(unit, build) {
+  const sourcePath = path.join(repositoryRoot, build.config_path);
+  let source;
+  try {
+    source = readJsonc(sourcePath);
+  } catch (error) {
+    throw new Error(`could not read ${unit.name} Wrangler config ${build.config_path}: ${error.message}`);
+  }
+  if (!source || typeof source !== "object" || Array.isArray(source)) {
+    throw new Error(`Wrangler config must contain an object: ${unit.name}`);
+  }
+  if (source.compatibility_date !== build.compatibility_date) {
+    throw new Error(`release unit ${unit.name} compatibility_date does not match ${build.config_path}`);
+  }
+  if (!jsonValuesEqual(source.compatibility_flags, build.compatibility_flags)) {
+    throw new Error(`release unit ${unit.name} compatibility_flags do not match ${build.config_path}`);
+  }
+
+  const releaseContract = build.wrangler ?? {};
+  for (const key of WRANGLER_CONTRACT_KEYS) {
+    if (!jsonValuesEqual(source[key], releaseContract[key])) {
+      throw new Error(`release unit ${unit.name} build.wrangler.${key} does not match ${build.config_path}`);
     }
   }
 }

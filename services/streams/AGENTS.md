@@ -4,13 +4,15 @@ This directory contains the Streams service in the public `0000` monorepo.
 Read the root `AGENTS.md` for workspace-wide rules. Git commands from this
 directory use the monorepo root.
 
-The service's canonical metadata requires `0000-database` for durable storage.
+The service's canonical metadata requires `0000-platform` for authentication and
+`0000-database` for durable storage.
 The imported application currently stores records in a Cloudflare Durable
 Object backed by SQLite; database integration has not been verified. The
 Worker exposes browser, API, and MCP surfaces. Browser requests use Cloudflare
 Access, while MCP requests use the configured bearer token; a hosted 0000
 account is not required. The Wrangler route and migration configuration are
-present, but deployment has not been verified. No license has been selected.
+present, but deployment has not been verified. The public monorepo selects
+AGPL-3.0-only for this service.
 Keep product metadata canonical as `0000-streams`; the Bun workspace package is
 `@0000/streams`.
 
