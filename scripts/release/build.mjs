@@ -9,6 +9,7 @@ import {
   assertReleaseConfig,
   normalisePath,
   readJson,
+  readJsonc,
   readReleaseConfig,
   repositoryRoot,
   sha256,
@@ -52,11 +53,14 @@ function archiveUnit(unit, commit) {
   return gzipSync(tar, { level: 9, mtime: 0 });
 }
 
-function wranglerCommand() {
+function wranglerCommand(unit) {
   const configured = process.env.WRANGLER_BIN;
   if (configured) return configured;
-  const local = path.join(repositoryRoot, "services/gateway/node_modules/.bin/wrangler");
-  return fs.existsSync(local) ? local : "wrangler";
+  const serviceDirectory = path.dirname(unit.build.config_path);
+  const serviceLocal = path.join(repositoryRoot, serviceDirectory, "node_modules/.bin/wrangler");
+  if (fs.existsSync(serviceLocal)) return serviceLocal;
+  const rootLocal = path.join(repositoryRoot, "node_modules/.bin/wrangler");
+  return fs.existsSync(rootLocal) ? rootLocal : "wrangler";
 }
 
 function buildWorkerUnit(unit, plan) {
@@ -70,6 +74,7 @@ function buildWorkerUnit(unit, plan) {
   const wranglerOutput = path.join(temporaryRoot, "wrangler-output");
   const artifactRoot = path.join(temporaryRoot, "artifact");
   const wranglerConfig = repositoryPath(unit.build.config_path, `${unit.name} build.config_path`);
+  const sourceConfig = readJsonc(wranglerConfig);
   let logConfig;
   fs.mkdirSync(wranglerOutput);
   fs.mkdirSync(artifactRoot);
@@ -81,7 +86,7 @@ function buildWorkerUnit(unit, plan) {
       XDG_CONFIG_HOME: logConfig
     };
     run(
-      wranglerCommand(),
+      wranglerCommand(unit),
       ["deploy", "--dry-run", "--outdir", wranglerOutput, "--config", wranglerConfig],
       { env: environment }
     );
@@ -92,7 +97,11 @@ function buildWorkerUnit(unit, plan) {
     }
     const workerBytes = fs.readFileSync(generatedWorker);
     fs.writeFileSync(path.join(artifactRoot, unit.build.entrypoint), workerBytes);
-    fs.writeFileSync(path.join(artifactRoot, unit.build.config), stableJson(neutralWranglerConfig(unit)), "utf8");
+    fs.writeFileSync(
+      path.join(artifactRoot, unit.build.config),
+      stableJson(neutralWranglerConfig(unit, sourceConfig)),
+      "utf8",
+    );
 
     const manifest = workerArtifactManifest(unit, plan);
     fs.writeFileSync(path.join(artifactRoot, "artifact-manifest.json"), stableJson(manifest), "utf8");
@@ -142,7 +151,7 @@ function buildWorkerUnit(unit, plan) {
             "--no-bundle",
             "--strict",
             "--message",
-            `Gateway staging ${plan.release_version}`
+            `${unit.name === "gateway" ? "Gateway" : unit.name} staging ${plan.release_version}`
           ]
         }
       }

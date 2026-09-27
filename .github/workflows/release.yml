@@ -41,6 +41,9 @@ jobs:
         run: bun run check:application
       - name: Check Gateway service
         run: pnpm --dir services/gateway/tooling install --frozen-lockfile && pnpm --dir services/gateway run check:application
+      - name: Check Streams service
+        working-directory: services/streams
+        run: ./scripts/check
 
   release:
     name: Record and publish immutable release

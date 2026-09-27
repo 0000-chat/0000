@@ -50,6 +50,8 @@ export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
     try {
+      if (url.pathname === "/health" && request.method === "GET")
+        return json({ status: "ok", service: "streams" });
       if (url.pathname === "/mcp") {
         return handleMcpRequest(request, env.MCP_AUTH_TOKEN, (name, input) =>
           callTool(name, input, room(env)),

@@ -41,3 +41,6 @@ jobs:
           version: 10.14.0
       - run: pnpm --dir services/gateway/tooling install --frozen-lockfile
       - run: pnpm --dir services/gateway run check:application
+      - name: Check Streams service
+        working-directory: services/streams
+        run: ./scripts/check

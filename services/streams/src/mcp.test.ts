@@ -2,6 +2,42 @@ import { describe, expect, test } from "bun:test";
 import { handleMcpRequest, toolDefinitions, validateToolInput } from "./mcp";
 
 describe("Helm Streams MCP contracts", () => {
+  test("requires the exact bearer secret", async () => {
+    const request = (authorization?: string) =>
+      new Request("https://don.0000.gold/mcp", {
+        method: "POST",
+        headers: {
+          ...(authorization ? { authorization } : {}),
+          "content-type": "application/json",
+          "MCP-Protocol-Version": "2025-06-18",
+        },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "ping" }),
+      });
+    const execute = async () => null;
+
+    expect(
+      (await handleMcpRequest(request(), "test-token", execute)).status,
+    ).toBe(401);
+    expect(
+      (
+        await handleMcpRequest(
+          request("Bearer wrong-token"),
+          "test-token",
+          execute,
+        )
+      ).status,
+    ).toBe(401);
+    expect(
+      (
+        await handleMcpRequest(
+          request("Bearer test-token"),
+          "test-token",
+          execute,
+        )
+      ).status,
+    ).toBe(200);
+  });
+
   test("identifies the MCP server as 0000-streams", async () => {
     const response = await handleMcpRequest(
       new Request("https://don.0000.gold/mcp", {

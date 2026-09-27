@@ -6,14 +6,16 @@ import { fileURLToPath } from "node:url";
 import {
   affectedUnits,
   assertReleaseConfig,
+  assertWorkerBuildConfigMatchesSource,
   classifyChanges,
   makePlan,
+  readJsonc,
   readReleaseConfig,
   releaseVersion
 } from "./lib.mjs";
 import { createReleaseEvent } from "./event.mjs";
 import { createReleaseRecord } from "./record.mjs";
-import { workerArtifactManifest } from "./worker.mjs";
+import { neutralWranglerConfig, workerArtifactManifest } from "./worker.mjs";
 
 const config = readReleaseConfig();
 const head = "0123456789abcdef0123456789abcdef01234567";
@@ -44,6 +46,25 @@ test("release unit configuration is valid and excludes private or non-runtime pu
     compatibility_date: "2026-08-06",
     compatibility_flags: ["nodejs_compat"]
   });
+  const streams = config.units.find((unit) => unit.name === "streams");
+  assert.equal(streams.kind, "cloudflare-worker-bundle");
+  assert.deepEqual(streams.build.wrangler, {
+    durable_objects: {
+      bindings: [{ name: "STREAMS", class_name: "StreamsRoom" }]
+    },
+    migrations: [{ tag: "v1", new_sqlite_classes: ["StreamsRoom"] }],
+    secrets: {
+      required: [
+        "ACCESS_TEAM_NAME",
+        "ACCESS_AUD",
+        "DON_EMAIL",
+        "MCP_AUTH_TOKEN",
+        "GROK_WEBHOOK_URL",
+        "GROK_WEBHOOK_AUTHORIZATION"
+      ]
+    },
+    observability: { enabled: true }
+  });
 });
 
 test("Gateway bundle manifest matches the Cloud staging contract exactly", () => {
@@ -62,6 +83,60 @@ test("Gateway bundle manifest matches the Cloud staging contract exactly", () =>
     compatibility_date: "2026-08-06",
     compatibility_flags: ["nodejs_compat"]
   });
+});
+
+test("Streams bundle preserves Durable Object bindings and migrations in neutral config", () => {
+  const streams = config.units.find((unit) => unit.name === "streams");
+  const plan = makePlan({ config, base: head, head, changedFiles: ["services/streams/src/worker.ts"] });
+  assert.deepEqual(workerArtifactManifest(streams, plan), {
+    schema_version: 1,
+    product: "0000",
+    name: "streams",
+    version: plan.release_version,
+    kind: "cloudflare-worker-bundle",
+    media_type: "application/gzip",
+    source_commit: head,
+    compatibility: { api: "v1", config: "v1" },
+    entrypoint: "worker.js",
+    compatibility_date: "2026-09-05",
+    compatibility_flags: ["nodejs_compat"]
+  });
+  assert.deepEqual(neutralWranglerConfig(streams), {
+    $schema: "https://developers.cloudflare.com/workers/wrangler/config-schema.json",
+    main: "worker.js",
+    compatibility_date: "2026-09-05",
+    compatibility_flags: ["nodejs_compat"],
+    workers_dev: false,
+    durable_objects: {
+      bindings: [{ name: "STREAMS", class_name: "StreamsRoom" }]
+    },
+    migrations: [{ tag: "v1", new_sqlite_classes: ["StreamsRoom"] }],
+    secrets: {
+      required: [
+        "ACCESS_TEAM_NAME",
+        "ACCESS_AUD",
+        "DON_EMAIL",
+        "MCP_AUTH_TOKEN",
+        "GROK_WEBHOOK_URL",
+        "GROK_WEBHOOK_AUTHORIZATION"
+      ]
+    },
+    observability: { enabled: true }
+  });
+});
+
+test("Streams release metadata matches and derives from the checked-in Wrangler contract", () => {
+  const streams = config.units.find((unit) => unit.name === "streams");
+  const source = readJsonc(path.join(repositoryRoot, streams.build.config_path));
+  assert.doesNotThrow(() => assertWorkerBuildConfigMatchesSource(streams, streams.build));
+  assert.deepEqual(neutralWranglerConfig(streams, source), neutralWranglerConfig(streams));
+
+  const drifted = structuredClone(streams);
+  drifted.build.wrangler.migrations = [{ tag: "v2", new_sqlite_classes: ["StreamsRoom"] }];
+  assert.throws(
+    () => assertWorkerBuildConfigMatchesSource(drifted, drifted.build),
+    /build\.wrangler\.migrations does not match services\/streams\/wrangler\.jsonc/,
+  );
 });
 
 test("documentation-only changes create no runtime redeployment", () => {

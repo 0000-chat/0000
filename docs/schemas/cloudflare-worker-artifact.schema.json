@@ -21,7 +21,7 @@
   "properties": {
     "schema_version": { "const": 1 },
     "product": { "const": "0000" },
-    "name": { "const": "gateway" },
+    "name": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$" },
     "version": { "type": "string", "pattern": "^v[0-9]+\\.[0-9]+\\.[0-9]+-[0-9a-f]{40}$" },
     "kind": { "const": "cloudflare-worker-bundle" },
     "media_type": { "const": "application/gzip" },
