@@ -19,7 +19,7 @@ concurrency:
 
 jobs:
   deploy:
-    if: github.actor == 'donmasakayan' && inputs.confirm_production_deploy == 'DEPLOY_GATEWAY'
+    if: github.actor == 'donmasakayan' && github.triggering_actor == 'donmasakayan' && inputs.confirm_production_deploy == 'DEPLOY_GATEWAY'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
