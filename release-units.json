@@ -150,20 +150,60 @@
     },
     {
       "name": "communicator-matrix-gateway",
-      "kind": "private-docker-source",
+      "kind": "private-native-source",
       "runtime_paths": [
         "services/communicator/services/matrix-gateway/src/**",
         "services/communicator/services/matrix-gateway/Cargo.toml",
         "services/communicator/Cargo.toml",
         "services/communicator/Cargo.lock",
-        "services/communicator/rust-toolchain.toml"
+        "services/communicator/rust-toolchain.toml",
+        "services/communicator/deploy/matrix-gateway/**"
       ],
       "archive_paths": [
         "services/communicator/services/matrix-gateway/src",
         "services/communicator/services/matrix-gateway/Cargo.toml",
         "services/communicator/Cargo.toml",
         "services/communicator/Cargo.lock",
-        "services/communicator/rust-toolchain.toml"
+        "services/communicator/rust-toolchain.toml",
+        "services/communicator/deploy/matrix-gateway"
+      ]
+    },
+    {
+      "name": "communicator-bridge-images",
+      "kind": "external-container-lock",
+      "runtime_paths": [
+        "services/communicator/compose.yaml",
+        "services/communicator/deploy/images.lock.env",
+        "services/communicator/deploy/caddy/**",
+        "services/communicator/deploy/synapse/**",
+        "services/communicator/scripts/init-*.sh",
+        "services/communicator/scripts/render-*.py",
+        "services/communicator/scripts/validate-*.sh",
+        "services/communicator/scripts/validate_*_policy.py"
+      ],
+      "archive_paths": [
+        "services/communicator/compose.yaml",
+        "services/communicator/deploy/images.lock.env",
+        "services/communicator/deploy/caddy",
+        "services/communicator/deploy/synapse",
+        "services/communicator/scripts/init-runtime.sh",
+        "services/communicator/scripts/init-messenger-db.sh",
+        "services/communicator/scripts/init-messenger-runtime.sh",
+        "services/communicator/scripts/init-telegram-db.sh",
+        "services/communicator/scripts/init-telegram-runtime.sh",
+        "services/communicator/scripts/init-whatsapp-db.sh",
+        "services/communicator/scripts/init-whatsapp-runtime.sh",
+        "services/communicator/scripts/render-messenger-config.py",
+        "services/communicator/scripts/render-synapse-config.py",
+        "services/communicator/scripts/render-telegram-config.py",
+        "services/communicator/scripts/render-whatsapp-config.py",
+        "services/communicator/scripts/validate-core.sh",
+        "services/communicator/scripts/validate-messenger.sh",
+        "services/communicator/scripts/validate-telegram.sh",
+        "services/communicator/scripts/validate-whatsapp.sh",
+        "services/communicator/scripts/validate_messenger_policy.py",
+        "services/communicator/scripts/validate_telegram_policy.py",
+        "services/communicator/scripts/validate_whatsapp_policy.py"
       ]
     }
   ]

@@ -11,8 +11,9 @@ The release currently publishes these units:
 - Gateway as a deterministic, prebuilt Cloudflare Worker bundle;
 - Streams Worker source archive; and
 - Msg Worker as a deterministic, prebuilt Cloudflare Worker bundle;
-- Communicator control-plane Worker; and
-- Communicator Matrix Gateway source for the private Docker host.
+- Communicator control-plane Worker/UI source;
+- Communicator Matrix Gateway source for the private host; and
+- Communicator bridge image lock and Docker-host configuration source.
 
 The other units remain source archives until their own runtime packagers are
 implemented. They are not valid prebuilt Worker deployment inputs merely
@@ -112,6 +113,17 @@ applies the three D1 migrations in numeric order before the Wrangler deployment
 (which applies the Durable Object `v1` migration). It then records a `/healthz`
 smoke response for `msg-staging.0000.chat`. The live
 `msg.0000.chat` route and resources are invalid staging targets.
+
+Communicator publishes three source archives rather than deployable binaries:
+`communicator-control-plane-<version>.tar.gz` is a Cloudflare Worker/UI source
+archive, `communicator-matrix-gateway-<version>.tar.gz` is a
+`private-native-source` archive containing the Rust source and reviewable
+systemd package, and `communicator-bridge-images-<version>.tar.gz` is an
+`external-container-lock` archive containing Compose wiring, pinned external
+image references, and provider templates. Cloud may validate their immutable
+asset metadata and archive shape offline, but these units do not authorize a
+Cloudflare deployment, native-host rollout, registry push, SSH access, or
+provider login.
 
 After publishing the record and provenance evidence, public CI starts the
 private Cloud `staging.yml` workflow through the GitHub Actions
