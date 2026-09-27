@@ -1,0 +1,146 @@
+name: Public release
+
+on:
+  push:
+    branches:
+      - main
+
+permissions: {}
+
+concurrency:
+  group: public-release-main
+  cancel-in-progress: false
+
+jobs:
+  quality:
+    name: Validate release source
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.14.0
+      - run: bun install --frozen-lockfile
+      - run: bun run check
+      - run: bun run test:release
+      - run: bun run check:turbo
+      - run: bun run check:turbo:dry
+      - name: Check Brain service
+        working-directory: services/brain
+        run: bun run check:application
+      - name: Check Gateway service
+        run: pnpm --dir services/gateway/tooling install --frozen-lockfile && pnpm --dir services/gateway run check:application
+
+  release:
+    name: Record and publish immutable release
+    needs: quality
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.sha }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Plan affected runtime units
+        id: plan
+        env:
+          RELEASE_PLAN: ${{ runner.temp }}/0000-release-plan.json
+        run: node scripts/release/plan.mjs --base "${{ github.event.before }}" --head "$GITHUB_SHA" --output "$RELEASE_PLAN" --github-output "$GITHUB_OUTPUT"
+      - name: Build deterministic affected artifacts
+        env:
+          RELEASE_PLAN: ${{ runner.temp }}/0000-release-plan.json
+          ARTIFACT_DIR: ${{ runner.temp }}/0000-release-artifacts
+        run: node scripts/release/build.mjs --plan "$RELEASE_PLAN" --output-dir "$ARTIFACT_DIR"
+      - name: Write release record
+        env:
+          RELEASE_PLAN: ${{ runner.temp }}/0000-release-plan.json
+          ARTIFACT_DIR: ${{ runner.temp }}/0000-release-artifacts
+          RELEASE_RECORD: ${{ runner.temp }}/0000-release-record.json
+        run: node scripts/release/record.mjs --plan "$RELEASE_PLAN" --artifact-dir "$ARTIFACT_DIR" --output "$RELEASE_RECORD"
+      - name: Attest release artifacts
+        if: steps.plan.outputs.runtime_redeployment == 'true'
+        id: attest
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: ${{ runner.temp }}/0000-release-artifacts/*.tar.gz
+      - name: Write Cloud staging event
+        id: event
+        env:
+          RELEASE_PLAN: ${{ runner.temp }}/0000-release-plan.json
+          RELEASE_RECORD: ${{ runner.temp }}/0000-release-record.json
+          RELEASE_EVENT: ${{ runner.temp }}/0000-release-event.json
+          ATTESTATION_URL: ${{ steps.attest.outputs['attestation-url'] }}
+          WORKFLOW_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          args=(
+            --plan "$RELEASE_PLAN"
+            --record "$RELEASE_RECORD"
+            --output "$RELEASE_EVENT"
+            --workflow "$GITHUB_WORKFLOW"
+            --run-id "$GITHUB_RUN_ID"
+            --workflow-run-url "$WORKFLOW_RUN_URL"
+          )
+          if [ -n "${ATTESTATION_URL:-}" ]; then
+            args+=(--attestation "$ATTESTATION_URL")
+          fi
+          node scripts/release/event.mjs "${args[@]}"
+      - name: Upload release evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: public-release-${{ steps.plan.outputs.release_version }}
+          path: |
+            ${{ runner.temp }}/0000-release-record.json
+            ${{ runner.temp }}/0000-release-event.json
+            ${{ runner.temp }}/0000-release-artifacts/
+          if-no-files-found: error
+      - name: Create or update immutable GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.plan.outputs.release_version }}
+          RELEASE_RECORD: ${{ runner.temp }}/0000-release-record.json
+          RELEASE_EVENT: ${{ runner.temp }}/0000-release-event.json
+          ARTIFACT_DIR: ${{ runner.temp }}/0000-release-artifacts
+        run: |
+          set -euo pipefail
+          assets=("$RELEASE_RECORD" "$RELEASE_EVENT")
+          for artifact in "$ARTIFACT_DIR"/*.tar.gz; do
+            if [ -f "$artifact" ]; then assets+=("$artifact"); fi
+          done
+          if ! gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "$RELEASE_TAG" --notes "Deterministic public release for $GITHUB_SHA. Runtime promotion is private-only."
+          fi
+          gh release upload "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" "${assets[@]}" --clobber
+      - name: Notify private Cloud staging
+        env:
+          CLOUD_RELEASE_DISPATCH_TOKEN: ${{ secrets.CLOUD_RELEASE_DISPATCH_TOKEN }}
+          GH_TOKEN: ${{ secrets.CLOUD_RELEASE_DISPATCH_TOKEN }}
+          RELEASE_EVENT: ${{ runner.temp }}/0000-release-event.json
+        run: |
+          set -euo pipefail
+          if [ -z "${CLOUD_RELEASE_DISPATCH_TOKEN:-}" ]; then
+            echo "CLOUD_RELEASE_DISPATCH_TOKEN (Cloud Actions:write credential) is required to start private staging." >&2
+            exit 1
+          fi
+          release_event=$(tr -d '\n' < "$RELEASE_EVENT")
+          gh api --method POST \
+            repos/0000-chat/0000-cloud/actions/workflows/staging.yml/dispatches \
+            --raw-field ref=main \
+            --raw-field "inputs[release_event]=$release_event"

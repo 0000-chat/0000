@@ -20,6 +20,7 @@ jobs:
           node-version: 24
       - run: bun install --frozen-lockfile
       - run: bun run check
+      - run: bun run test:release
       - run: bun run check:turbo
       - run: bun run check:turbo:dry
       - name: Check Brain service

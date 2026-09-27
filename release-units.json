@@ -1,0 +1,103 @@
+{
+  "schema_version": 1,
+  "product": "0000",
+  "release": {
+    "version_prefix": "v0.0.0-",
+    "compatibility": {
+      "api": "v1",
+      "config": "v1"
+    }
+  },
+  "units": [
+    {
+      "name": "gateway",
+      "kind": "cloudflare-worker-source",
+      "runtime_paths": [
+        "services/gateway/src/**",
+        "services/gateway/package.json",
+        "services/gateway/tsconfig.json",
+        "services/gateway/wrangler.jsonc"
+      ],
+      "archive_paths": [
+        "services/gateway/src",
+        "services/gateway/package.json",
+        "services/gateway/tsconfig.json",
+        "services/gateway/wrangler.jsonc"
+      ]
+    },
+    {
+      "name": "streams",
+      "kind": "cloudflare-worker-source",
+      "runtime_paths": [
+        "services/streams/src/**",
+        "services/streams/package.json",
+        "services/streams/tsconfig.json",
+        "services/streams/wrangler.jsonc"
+      ],
+      "archive_paths": [
+        "services/streams/src",
+        "services/streams/package.json",
+        "services/streams/tsconfig.json",
+        "services/streams/wrangler.jsonc"
+      ]
+    },
+    {
+      "name": "msg-worker",
+      "kind": "cloudflare-worker-source",
+      "runtime_paths": [
+        "services/msg/worker/**",
+        "services/msg/package.json",
+        "services/msg/wrangler.jsonc",
+        "services/msg/scripts/mermaid-asset.ts",
+        "services/msg/scripts/wrangler-config.ts"
+      ],
+      "archive_paths": [
+        "services/msg/worker",
+        "services/msg/package.json",
+        "services/msg/wrangler.jsonc",
+        "services/msg/scripts/mermaid-asset.ts",
+        "services/msg/scripts/wrangler-config.ts"
+      ]
+    },
+    {
+      "name": "communicator-control-plane",
+      "kind": "cloudflare-worker-source",
+      "runtime_paths": [
+        "services/communicator/apps/control-plane/**",
+        "services/communicator/packages/contracts/**",
+        "services/communicator/packages/test-fixtures/**",
+        "services/communicator/package.json",
+        "services/communicator/pnpm-lock.yaml",
+        "services/communicator/pnpm-workspace.yaml",
+        "services/communicator/tsconfig.base.json"
+      ],
+      "archive_paths": [
+        "services/communicator/apps/control-plane",
+        "services/communicator/packages/contracts",
+        "services/communicator/packages/test-fixtures",
+        "services/communicator/package.json",
+        "services/communicator/pnpm-lock.yaml",
+        "services/communicator/pnpm-workspace.yaml",
+        "services/communicator/tsconfig.base.json"
+      ]
+    },
+    {
+      "name": "communicator-matrix-gateway",
+      "kind": "private-docker-source",
+      "runtime_paths": [
+        "services/communicator/services/matrix-gateway/src/**",
+        "services/communicator/services/matrix-gateway/Cargo.toml",
+        "services/communicator/Cargo.toml",
+        "services/communicator/Cargo.lock",
+        "services/communicator/rust-toolchain.toml"
+      ],
+      "archive_paths": [
+        "services/communicator/services/matrix-gateway/src",
+        "services/communicator/services/matrix-gateway/Cargo.toml",
+        "services/communicator/Cargo.toml",
+        "services/communicator/Cargo.lock",
+        "services/communicator/rust-toolchain.toml"
+      ]
+    }
+  ]
+}

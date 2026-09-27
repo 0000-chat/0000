@@ -50,6 +50,12 @@ tooling check; `check:turbo:dry` only prints the task graph. Run
 Communicator application has its own nested pnpm workspace and checks; see
 [`services/communicator/README.md`](services/communicator/README.md).
 
+Public release planning and artifact rules are documented in
+[`docs/release-artifacts.md`](docs/release-artifacts.md). Run
+`bun run test:release` for the deterministic affected-unit and release-record
+tests. A public `main` merge creates a release record; only affected runtime
+units receive source artifacts, while SDK and CLI packages remain checks-only.
+
 The import procedure and preservation records are documented in
 [`services/brain/docs/migration/2026-09-17-monorepo-import.md`](services/brain/docs/migration/2026-09-17-monorepo-import.md),
 [`services/communicator/docs/migration/2026-09-15-monorepo-import.md`](services/communicator/docs/migration/2026-09-15-monorepo-import.md),
