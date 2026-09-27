@@ -52,11 +52,64 @@ function archiveUnit(unit, commit) {
   return gzipSync(tar, { level: 9, mtime: 0 });
 }
 
-function wranglerCommand() {
+function wranglerCommand(unit) {
   const configured = process.env.WRANGLER_BIN;
   if (configured) return configured;
-  const local = path.join(repositoryRoot, "services/gateway/node_modules/.bin/wrangler");
+  const service = unit.build.config_path.split("/")[1];
+  const local = path.join(repositoryRoot, `services/${service}/node_modules/.bin/wrangler`);
   return fs.existsSync(local) ? local : "wrangler";
+}
+
+function copyDirectory(source, destination) {
+  if (!fs.existsSync(source) || !fs.statSync(source).isDirectory()) {
+    throw new Error(`configured Worker directory does not exist: ${source}`);
+  }
+  const copiedFiles = [];
+  fs.mkdirSync(destination, { recursive: true });
+  for (const entry of fs.readdirSync(source, { withFileTypes: true }).sort((left, right) => left.name.localeCompare(right.name))) {
+    const sourcePath = path.join(source, entry.name);
+    const destinationPath = path.join(destination, entry.name);
+    if (entry.isSymbolicLink()) throw new Error(`configured Worker directory contains a symlink: ${sourcePath}`);
+    if (entry.isDirectory()) {
+      copiedFiles.push(...copyDirectory(sourcePath, destinationPath).map((file) => path.join(entry.name, file)));
+      continue;
+    }
+    if (!entry.isFile()) throw new Error(`configured Worker directory contains a special file: ${sourcePath}`);
+    fs.copyFileSync(sourcePath, destinationPath);
+    copiedFiles.push(entry.name);
+  }
+  return copiedFiles;
+}
+
+function buildDirectory(unit, definition, artifactRoot) {
+  if (!definition) return { target: undefined, files: [] };
+  const source = repositoryPath(definition.source, `${unit.name} build directory source`);
+  const target = path.join(artifactRoot, definition.directory);
+  const files = copyDirectory(source, target);
+  return { target: definition.directory, files };
+}
+
+function migrationMetadata(directory, files) {
+  if (!directory) return [];
+  const migrationPattern = /^[0-9]{4,}_[a-z0-9_]+\.sql$/;
+  const names = files.sort((left, right) => left.localeCompare(right));
+  if (names.length === 0) throw new Error("configured D1 migrations directory is empty");
+  let previous = -1;
+  return names.map((name) => {
+    const basename = path.posix.basename(name);
+    if (!migrationPattern.test(basename)) throw new Error(`invalid D1 migration filename: ${name}`);
+    const number = Number.parseInt(basename.split("_", 1)[0], 10);
+    if (number <= previous) throw new Error("D1 migrations must have strictly increasing numeric prefixes");
+    previous = number;
+    const bytes = fs.readFileSync(path.join(directory, name));
+    return { name: path.posix.join("migrations", name), digest: `sha256:${sha256(bytes)}` };
+  });
+}
+
+function stagingLabel(unit) {
+  if (unit.name === "msg-worker") return "Msg Worker";
+  if (unit.name === "gateway") return "Gateway";
+  return unit.name;
 }
 
 function buildWorkerUnit(unit, plan) {
@@ -80,11 +133,19 @@ function buildWorkerUnit(unit, plan) {
       ...process.env,
       XDG_CONFIG_HOME: logConfig
     };
-    run(
-      wranglerCommand(),
-      ["deploy", "--dry-run", "--outdir", wranglerOutput, "--config", wranglerConfig],
-      { env: environment }
-    );
+    if (unit.build.wrapper) {
+      run(
+        "bun",
+        [repositoryPath(unit.build.wrapper, `${unit.name} build.wrapper`), "deploy", "--dry-run", "--outdir", wranglerOutput],
+        { env: environment }
+      );
+    } else {
+      run(
+        wranglerCommand(unit),
+        ["deploy", "--dry-run", "--outdir", wranglerOutput, "--config", wranglerConfig],
+        { env: environment }
+      );
+    }
 
     const generatedWorker = path.join(wranglerOutput, unit.build.entrypoint);
     if (!fs.existsSync(generatedWorker) || !fs.statSync(generatedWorker).isFile()) {
@@ -94,7 +155,13 @@ function buildWorkerUnit(unit, plan) {
     fs.writeFileSync(path.join(artifactRoot, unit.build.entrypoint), workerBytes);
     fs.writeFileSync(path.join(artifactRoot, unit.build.config), stableJson(neutralWranglerConfig(unit)), "utf8");
 
-    const manifest = workerArtifactManifest(unit, plan);
+    const assets = buildDirectory(unit, unit.build.assets, artifactRoot);
+    const migrations = buildDirectory(unit, unit.build.migrations, artifactRoot);
+    const migrationFiles = migrationMetadata(
+      migrations.target ? path.join(artifactRoot, migrations.target) : undefined,
+      migrations.files
+    );
+    const manifest = workerArtifactManifest(unit, plan, migrationFiles.length > 0 ? { migration_files: migrationFiles } : {});
     fs.writeFileSync(path.join(artifactRoot, "artifact-manifest.json"), stableJson(manifest), "utf8");
 
     const missing = unit.build.files.filter((file) => !fs.existsSync(path.join(artifactRoot, file)));
@@ -102,6 +169,8 @@ function buildWorkerUnit(unit, plan) {
       throw new Error(`built artifact is missing configured files for ${unit.name}: ${missing.join(", ")}`);
     }
 
+    const directories = [assets.target, migrations.target].filter(Boolean);
+    const archivePaths = [...unit.build.files, ...directories];
     const tar = run(
       "tar",
       [
@@ -116,7 +185,7 @@ function buildWorkerUnit(unit, plan) {
         "-",
         "-C",
         artifactRoot,
-        ...unit.build.files
+        ...archivePaths
       ],
       { maxBuffer: 128 * 1024 * 1024 }
     );
@@ -129,6 +198,8 @@ function buildWorkerUnit(unit, plan) {
         entrypoint: unit.build.entrypoint,
         config: unit.build.config,
         files: unit.build.files,
+        directories,
+        migration_files: migrationFiles,
         entrypoint_digest: `sha256:${sha256(workerBytes)}`,
         deployment: {
           tool: "wrangler",
@@ -142,7 +213,7 @@ function buildWorkerUnit(unit, plan) {
             "--no-bundle",
             "--strict",
             "--message",
-            `Gateway staging ${plan.release_version}`
+            `${stagingLabel(unit)} staging ${plan.release_version}`
           ]
         }
       }

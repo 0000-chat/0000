@@ -90,6 +90,141 @@ function assertWorkerBuildConfig(unit, build) {
   if (!build.files.includes("artifact-manifest.json")) {
     throw new Error(`release unit build.files must include artifact-manifest.json: ${unit.name}`);
   }
+
+  if (build.wrapper !== undefined) {
+    if (
+      typeof build.wrapper !== "string" ||
+      !build.wrapper.startsWith("services/") ||
+      normalisePath(build.wrapper) !== build.wrapper
+    ) {
+      throw new Error(`release unit build.wrapper must be a normalized services path: ${unit.name}`);
+    }
+  }
+
+  for (const [key, label] of [["assets", "assets"], ["migrations", "migrations"]]) {
+    const directory = build[key];
+    if (directory === undefined) continue;
+    if (!directory || typeof directory !== "object" || Array.isArray(directory)) {
+      throw new Error(`release unit build.${label} must be an object: ${unit.name}`);
+    }
+    for (const field of ["source", "directory"]) {
+      if (
+        typeof directory[field] !== "string" ||
+        directory[field].length === 0 ||
+        normalisePath(directory[field]) !== directory[field]
+      ) {
+        throw new Error(`release unit build.${label}.${field} must be a normalized relative path: ${unit.name}`);
+      }
+    }
+    if (!directory.source.startsWith("services/")) {
+      throw new Error(`release unit build.${label}.source must be under services/: ${unit.name}`);
+    }
+    if (key === "assets") {
+      if (typeof directory.binding !== "string" || !NAME_RE.test(directory.binding)) {
+        throw new Error(`release unit build.assets.binding must be an identifier: ${unit.name}`);
+      }
+      if (typeof directory.run_worker_first !== "boolean") {
+        throw new Error(`release unit build.assets.run_worker_first must be boolean: ${unit.name}`);
+      }
+    }
+  }
+
+  if (build.wrangler !== undefined) {
+    const wrangler = build.wrangler;
+    if (!wrangler || typeof wrangler !== "object" || Array.isArray(wrangler)) {
+      throw new Error(`release unit build.wrangler must be an object: ${unit.name}`);
+    }
+    const unsupported = Object.keys(wrangler).filter(
+      (key) => !["durable_objects", "migrations", "d1_databases", "secrets", "observability"].includes(key),
+    );
+    if (unsupported.length > 0) {
+      throw new Error(`release unit build.wrangler has unsupported keys for ${unit.name}: ${unsupported.join(", ")}`);
+    }
+    const durableObjects = wrangler.durable_objects;
+    if (durableObjects !== undefined) {
+      if (!durableObjects || typeof durableObjects !== "object" || Array.isArray(durableObjects)) {
+        throw new Error(`release unit build.wrangler.durable_objects must be an object: ${unit.name}`);
+      }
+      if (!Array.isArray(durableObjects.bindings) || durableObjects.bindings.length === 0) {
+        throw new Error(`release unit build.wrangler.durable_objects.bindings must be non-empty: ${unit.name}`);
+      }
+      for (const binding of durableObjects.bindings) {
+        if (
+          !binding ||
+          typeof binding !== "object" ||
+          Array.isArray(binding) ||
+          typeof binding.name !== "string" ||
+          !NAME_RE.test(binding.name) ||
+          typeof binding.class_name !== "string" ||
+          !NAME_RE.test(binding.class_name)
+        ) {
+          throw new Error(`release unit build.wrangler durable object bindings are invalid: ${unit.name}`);
+        }
+      }
+    }
+    if (wrangler.migrations !== undefined) {
+      if (!Array.isArray(wrangler.migrations) || wrangler.migrations.length === 0) {
+        throw new Error(`release unit build.wrangler.migrations must be non-empty: ${unit.name}`);
+      }
+      const tags = new Set();
+      for (const migration of wrangler.migrations) {
+        if (
+          !migration ||
+          typeof migration !== "object" ||
+          Array.isArray(migration) ||
+          typeof migration.tag !== "string" ||
+          !/^v[0-9]+$/.test(migration.tag) ||
+          tags.has(migration.tag) ||
+          !Array.isArray(migration.new_sqlite_classes) ||
+          !migration.new_sqlite_classes.every((name) => typeof name === "string" && NAME_RE.test(name))
+        ) {
+          throw new Error(`release unit build.wrangler migrations are invalid: ${unit.name}`);
+        }
+        tags.add(migration.tag);
+      }
+    }
+    if (wrangler.d1_databases !== undefined) {
+      if (!Array.isArray(wrangler.d1_databases) || wrangler.d1_databases.length === 0) {
+        throw new Error(`release unit build.wrangler.d1_databases must be non-empty: ${unit.name}`);
+      }
+      for (const database of wrangler.d1_databases) {
+        if (
+          !database ||
+          typeof database !== "object" ||
+          Array.isArray(database) ||
+          typeof database.binding !== "string" ||
+          !NAME_RE.test(database.binding) ||
+          typeof database.database_name !== "string" ||
+          database.database_name.length === 0 ||
+          typeof database.migrations_dir !== "string" ||
+          normalisePath(database.migrations_dir) !== database.migrations_dir
+        ) {
+          throw new Error(`release unit build.wrangler d1_databases are invalid: ${unit.name}`);
+        }
+      }
+    }
+    if (wrangler.secrets !== undefined) {
+      if (
+        !wrangler.secrets ||
+        typeof wrangler.secrets !== "object" ||
+        Array.isArray(wrangler.secrets) ||
+        !Array.isArray(wrangler.secrets.required) ||
+        !wrangler.secrets.required.every((name) => typeof name === "string" && NAME_RE.test(name))
+      ) {
+        throw new Error(`release unit build.wrangler.secrets.required is invalid: ${unit.name}`);
+      }
+    }
+    if (wrangler.observability !== undefined) {
+      if (
+        !wrangler.observability ||
+        typeof wrangler.observability !== "object" ||
+        Array.isArray(wrangler.observability) ||
+        wrangler.observability.enabled !== true
+      ) {
+        throw new Error(`release unit build.wrangler.observability must enable observability: ${unit.name}`);
+      }
+    }
+  }
 }
 
 export function assertReleaseConfig(config) {

@@ -44,6 +44,27 @@ test("release unit configuration is valid and excludes private or non-runtime pu
     compatibility_date: "2026-08-06",
     compatibility_flags: ["nodejs_compat"]
   });
+  const msg = config.units.find((unit) => unit.name === "msg-worker");
+  assert.equal(msg.kind, "cloudflare-worker-bundle");
+  assert.deepEqual(msg.build.assets, {
+    source: "services/msg/worker/public",
+    directory: "assets",
+    binding: "ASSETS",
+    run_worker_first: true
+  });
+  assert.deepEqual(msg.build.migrations, {
+    source: "services/msg/worker/migrations",
+    directory: "migrations"
+  });
+  assert.deepEqual(msg.build.wrangler.durable_objects, {
+    bindings: [{ name: "ConversationRoom", class_name: "ConversationRoom" }]
+  });
+  assert.deepEqual(msg.build.wrangler.migrations, [
+    { tag: "v1", new_sqlite_classes: ["ConversationRoom"] }
+  ]);
+  assert.deepEqual(msg.build.wrangler.d1_databases, [
+    { binding: "MSG_DB", database_name: "0000-msg-operations", migrations_dir: "migrations" }
+  ]);
 });
 
 test("Gateway bundle manifest matches the Cloud staging contract exactly", () => {
@@ -61,6 +82,36 @@ test("Gateway bundle manifest matches the Cloud staging contract exactly", () =>
     entrypoint: "worker.js",
     compatibility_date: "2026-08-06",
     compatibility_flags: ["nodejs_compat"]
+  });
+});
+
+test("Msg bundle manifest carries static asset, D1, and Durable Object metadata", () => {
+  const msg = config.units.find((unit) => unit.name === "msg-worker");
+  const plan = makePlan({ config, base: head, head, changedFiles: ["services/msg/worker/src/worker.ts"] });
+  assert.deepEqual(workerArtifactManifest(msg, plan), {
+    schema_version: 1,
+    product: "0000",
+    name: "msg-worker",
+    version: plan.release_version,
+    kind: "cloudflare-worker-bundle",
+    media_type: "application/gzip",
+    source_commit: head,
+    compatibility: { api: "v1", config: "v1" },
+    entrypoint: "worker.js",
+    compatibility_date: "2026-08-09",
+    compatibility_flags: ["nodejs_compat"],
+    assets: { binding: "ASSETS", directory: "assets", run_worker_first: true },
+    durable_objects: { bindings: [{ name: "ConversationRoom", class_name: "ConversationRoom" }] },
+    migrations: [{ tag: "v1", new_sqlite_classes: ["ConversationRoom"] }],
+    d1_databases: [{ binding: "MSG_DB", database_name: "0000-msg-operations", migrations_dir: "migrations" }],
+    required_secrets: [
+      "MSG_DATA_ENCRYPTION_KEY_V1",
+      "MSG_OPERATOR_TOKEN",
+      "MSG_VAPID_PUBLIC_KEY",
+      "MSG_VAPID_PRIVATE_KEY",
+      "MSG_VAPID_SUBJECT"
+    ],
+    observability: { enabled: true, head_sampling_rate: 1 }
   });
 });
 
