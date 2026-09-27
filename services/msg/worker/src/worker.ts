@@ -34,6 +34,7 @@ import { emitMsgEvent } from "./observability";
 import { normalizeWebhookUrl } from "./webhooks";
 import { PUSH_SERVICE_WORKER_PATH, pushServiceWorkerResponse } from "./push-service-worker";
 import { parsePushBrowserId, parsePushSubscription } from "./push-subscriptions";
+import { handleMcpRequest } from "./mcp";
 
 export interface MsgWorker {
   fetch(request: Request): Promise<Response>;
@@ -60,6 +61,7 @@ export interface MsgWorkerOptions {
   readonly operations?: Operations;
   readonly operatorToken?: string;
   readonly postDisabled?: boolean;
+  readonly publicOrigin?: string;
   readonly pushConfigured?: boolean;
   readonly pushVapidPublicKey?: string;
   readonly rateLimits?: MsgRateLimits;
@@ -199,6 +201,15 @@ async function route(request: Request, service: RoomService, options: MsgWorkerO
       });
     }
     return notFound();
+  }
+  if (url.pathname === "/mcp") {
+    return handleMcpRequest(request, service, {
+      createDisabled: options.createDisabled,
+      operations: options.operations,
+      postDisabled: options.postDisabled,
+      publicOrigin: options.publicOrigin,
+      rateLimits: options.rateLimits,
+    });
   }
   if (request.method !== "GET" && request.method !== "HEAD" && !isSameOrigin(request, url)) {
     throw new ProtocolError(ERROR_CODES.forbidden, "Cross-origin state changes are not allowed.", 403);
@@ -792,7 +803,7 @@ function rejectGetPostPrefetch(request: Request): void {
   }
 }
 
-async function parseManagementAction(request: Request): Promise<"disable" | "enable" | "rotate"> {
+async function parseManagementAction(request: Request): Promise<"disable" | "enable" | "rotate" | "enable_mcp" | "disable_mcp"> {
   const body = await parseRequestBody(request, { maxBytes: 512 });
   let action: unknown;
   if (body.kind === "json") {
@@ -812,8 +823,8 @@ async function parseManagementAction(request: Request): Promise<"disable" | "ena
     }
     action = values.get("action");
   }
-  if (action !== "enable" && action !== "disable" && action !== "rotate") {
-    throw new ProtocolError(ERROR_CODES.invalidBody, "The management action must be enable, disable, or rotate.", 400);
+  if (action !== "enable" && action !== "disable" && action !== "rotate" && action !== "enable_mcp" && action !== "disable_mcp") {
+    throw new ProtocolError(ERROR_CODES.invalidBody, "The management action must be enable, disable, rotate, enable_mcp, or disable_mcp.", 400);
   }
   return action;
 }
@@ -1264,6 +1275,7 @@ export default {
     const service = env.ROOM_SERVICE ?? (env.ConversationRoom ? new DurableRoomService(env.ConversationRoom, env.MSG_PUBLIC_ORIGIN ?? "https://msg.0000.chat") : unavailableService);
     return createWorker(service, {
       assets: env.ASSETS,
+      publicOrigin: env.MSG_PUBLIC_ORIGIN,
       pushConfigured: Boolean(env.MSG_VAPID_PUBLIC_KEY && env.MSG_VAPID_PRIVATE_KEY && env.MSG_VAPID_SUBJECT),
       pushVapidPublicKey: env.MSG_VAPID_PUBLIC_KEY,
     }).fetch(request);

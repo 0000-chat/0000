@@ -24,7 +24,7 @@ export default {
     const roomService = env.ROOM_SERVICE ?? (env.ConversationRoom ? new DurableRoomService(env.ConversationRoom as RoomNamespace, env.MSG_PUBLIC_ORIGIN ?? "https://msg.0000.chat") : undefined);
     if (!roomService) return createWorker(
       { async create() { throw new Error("The room service is not available."); } },
-      { assets: env.ASSETS },
+      { assets: env.ASSETS, publicOrigin: env.MSG_PUBLIC_ORIGIN },
     ).fetch(request);
     const operations = env.MSG_DB && env.MSG_DATA_ENCRYPTION_KEY_V1
       ? new D1OperationStore(env.MSG_DB, env.MSG_DATA_ENCRYPTION_KEY_V1)
@@ -36,6 +36,7 @@ export default {
       operations,
       operatorToken: env.MSG_OPERATOR_TOKEN,
       postDisabled: env.MSG_POST_DISABLED === "1",
+      publicOrigin: env.MSG_PUBLIC_ORIGIN,
       pushConfigured,
       pushVapidPublicKey: pushConfigured ? env.MSG_VAPID_PUBLIC_KEY : undefined,
       rateLimits: {
