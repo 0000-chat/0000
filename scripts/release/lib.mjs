@@ -90,6 +90,77 @@ function assertWorkerBuildConfig(unit, build) {
   if (!build.files.includes("artifact-manifest.json")) {
     throw new Error(`release unit build.files must include artifact-manifest.json: ${unit.name}`);
   }
+
+  if (build.wrangler !== undefined) {
+    if (!build.wrangler || typeof build.wrangler !== "object" || Array.isArray(build.wrangler)) {
+      throw new Error(`release unit build.wrangler must be an object: ${unit.name}`);
+    }
+    const allowed = new Set(["durable_objects", "migrations", "secrets", "observability"]);
+    const unsupported = Object.keys(build.wrangler).filter((key) => !allowed.has(key));
+    if (unsupported.length > 0) {
+      throw new Error(`release unit build.wrangler contains environment-specific keys: ${unit.name}: ${unsupported.join(", ")}`);
+    }
+    if (build.wrangler.durable_objects !== undefined) {
+      const bindings = build.wrangler.durable_objects?.bindings;
+      if (
+        !build.wrangler.durable_objects ||
+        typeof build.wrangler.durable_objects !== "object" ||
+        Array.isArray(build.wrangler.durable_objects) ||
+        !Array.isArray(bindings) ||
+        bindings.length === 0 ||
+        !bindings.every(
+          (binding) =>
+            binding &&
+            typeof binding === "object" &&
+            !Array.isArray(binding) &&
+            typeof binding.name === "string" &&
+            NAME_RE.test(binding.name) &&
+            typeof binding.class_name === "string" &&
+            NAME_RE.test(binding.class_name),
+        )
+      ) {
+        throw new Error(`release unit build.wrangler.durable_objects.bindings is invalid: ${unit.name}`);
+      }
+    }
+    if (build.wrangler.migrations !== undefined) {
+      if (
+        !Array.isArray(build.wrangler.migrations) ||
+        build.wrangler.migrations.length === 0 ||
+        !build.wrangler.migrations.every(
+          (migration) =>
+            migration &&
+            typeof migration === "object" &&
+            !Array.isArray(migration) &&
+            typeof migration.tag === "string" &&
+            NAME_RE.test(migration.tag),
+        )
+      ) {
+        throw new Error(`release unit build.wrangler.migrations is invalid: ${unit.name}`);
+      }
+    }
+    if (build.wrangler.secrets !== undefined) {
+      const required = build.wrangler.secrets?.required;
+      if (
+        !build.wrangler.secrets ||
+        typeof build.wrangler.secrets !== "object" ||
+        Array.isArray(build.wrangler.secrets) ||
+        !Array.isArray(required) ||
+        !required.every((secret) => typeof secret === "string" && NAME_RE.test(secret))
+      ) {
+        throw new Error(`release unit build.wrangler.secrets.required is invalid: ${unit.name}`);
+      }
+    }
+    if (build.wrangler.observability !== undefined) {
+      if (
+        !build.wrangler.observability ||
+        typeof build.wrangler.observability !== "object" ||
+        Array.isArray(build.wrangler.observability) ||
+        typeof build.wrangler.observability.enabled !== "boolean"
+      ) {
+        throw new Error(`release unit build.wrangler.observability is invalid: ${unit.name}`);
+      }
+    }
+  }
 }
 
 export function assertReleaseConfig(config) {

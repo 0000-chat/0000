@@ -9,7 +9,8 @@ affected runtime units, the `sha256:` digest of each artifact, and the
 The release currently publishes these units:
 
 - Gateway as a deterministic, prebuilt Cloudflare Worker bundle;
-- Streams Worker;
+- Streams as a deterministic, prebuilt Cloudflare Worker bundle, including its
+  Durable Object binding and SQLite migration metadata;
 - msg Worker;
 - Communicator control-plane Worker; and
 - Communicator Matrix Gateway source for the private Docker host.
@@ -58,6 +59,14 @@ the same immutable GitHub release tag, verify the release-record digest and the
 asset digest before extraction, and reject any archive whose manifest does not
 match the event's release identity, kind, media type, compatibility, and
 entrypoint contract.
+
+Streams uses the same archive shape and contract under
+`streams-<version>.tar.gz`. Its route-free `wrangler.json` additionally
+contains the public Durable Object binding (`STREAMS` -> `StreamsRoom`), the
+SQLite migration tag `v1`, required secret names, and observability settings.
+Cloud must preserve those binding and migration declarations when generating
+the staging config; only the Worker name, staging route, account, and secret
+values are environment-owned.
 
 The route-free `wrangler.json` in the archive contains only the entrypoint and
 compatibility settings. The Gateway bundle contains no Worker name, route,

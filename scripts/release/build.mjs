@@ -52,11 +52,14 @@ function archiveUnit(unit, commit) {
   return gzipSync(tar, { level: 9, mtime: 0 });
 }
 
-function wranglerCommand() {
+function wranglerCommand(unit) {
   const configured = process.env.WRANGLER_BIN;
   if (configured) return configured;
-  const local = path.join(repositoryRoot, "services/gateway/node_modules/.bin/wrangler");
-  return fs.existsSync(local) ? local : "wrangler";
+  const serviceDirectory = path.dirname(unit.build.config_path);
+  const serviceLocal = path.join(repositoryRoot, serviceDirectory, "node_modules/.bin/wrangler");
+  if (fs.existsSync(serviceLocal)) return serviceLocal;
+  const rootLocal = path.join(repositoryRoot, "node_modules/.bin/wrangler");
+  return fs.existsSync(rootLocal) ? rootLocal : "wrangler";
 }
 
 function buildWorkerUnit(unit, plan) {
@@ -81,7 +84,7 @@ function buildWorkerUnit(unit, plan) {
       XDG_CONFIG_HOME: logConfig
     };
     run(
-      wranglerCommand(),
+      wranglerCommand(unit),
       ["deploy", "--dry-run", "--outdir", wranglerOutput, "--config", wranglerConfig],
       { env: environment }
     );
@@ -142,7 +145,7 @@ function buildWorkerUnit(unit, plan) {
             "--no-bundle",
             "--strict",
             "--message",
-            `Gateway staging ${plan.release_version}`
+            `${unit.name === "gateway" ? "Gateway" : unit.name} staging ${plan.release_version}`
           ]
         }
       }

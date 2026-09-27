@@ -37,7 +37,7 @@
     },
     {
       "name": "streams",
-      "kind": "cloudflare-worker-source",
+      "kind": "cloudflare-worker-bundle",
       "runtime_paths": [
         "services/streams/src/**",
         "services/streams/package.json",
@@ -49,7 +49,33 @@
         "services/streams/package.json",
         "services/streams/tsconfig.json",
         "services/streams/wrangler.jsonc"
-      ]
+      ],
+      "build": {
+        "type": "cloudflare-worker",
+        "config_path": "services/streams/wrangler.jsonc",
+        "entrypoint": "worker.js",
+        "config": "wrangler.json",
+        "files": ["worker.js", "wrangler.json", "artifact-manifest.json"],
+        "compatibility_date": "2026-09-05",
+        "compatibility_flags": ["nodejs_compat"],
+        "wrangler": {
+          "durable_objects": {
+            "bindings": [{ "name": "STREAMS", "class_name": "StreamsRoom" }]
+          },
+          "migrations": [{ "tag": "v1", "new_sqlite_classes": ["StreamsRoom"] }],
+          "secrets": {
+            "required": [
+              "ACCESS_TEAM_NAME",
+              "ACCESS_AUD",
+              "DON_EMAIL",
+              "MCP_AUTH_TOKEN",
+              "GROK_WEBHOOK_URL",
+              "GROK_WEBHOOK_AUTHORIZATION"
+            ]
+          },
+          "observability": { "enabled": true }
+        }
+      }
     },
     {
       "name": "msg-worker",

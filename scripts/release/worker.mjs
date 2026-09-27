@@ -4,12 +4,13 @@ export function neutralWranglerConfig(unit) {
     main: unit.build.entrypoint,
     compatibility_date: unit.build.compatibility_date,
     compatibility_flags: unit.build.compatibility_flags,
-    workers_dev: false
+    workers_dev: false,
+    ...(unit.build.wrangler ?? {})
   };
 }
 
 /**
- * Return the exact manifest embedded in a prebuilt Gateway bundle.
+ * Return the exact manifest embedded in a prebuilt Worker bundle.
  *
  * Cloud owns the deployment name and route. Keep those values, and all
  * bindings or secrets, out of this public manifest.
