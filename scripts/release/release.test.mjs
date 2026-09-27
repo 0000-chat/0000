@@ -106,11 +106,15 @@ test("release workflow keeps every source SHA and protects the draft-to-immutabl
   assert.match(releaseWorkflow, /if: steps\.plan\.outputs\.runtime_redeployment == 'true'/);
 });
 
-test("legacy Gateway workflow cannot auto-deploy or retain a public deployment credential", () => {
+test("Gateway production fallback is manual and owner-confirmed", () => {
   assert.match(legacyGatewayWorkflow, /^  workflow_dispatch:\s*$/m);
-  assert.match(legacyGatewayWorkflow, /if: \$\{\{ false \}\}/);
   assert.doesNotMatch(legacyGatewayWorkflow, /(^|\n)  push:/);
-  assert.doesNotMatch(legacyGatewayWorkflow, /wrangler|CLOUDFLARE_API_TOKEN/);
+  assert.match(legacyGatewayWorkflow, /^      confirm_production_deploy:\s*$/m);
+  assert.match(legacyGatewayWorkflow, /required:\s*true/);
+  assert.match(
+    legacyGatewayWorkflow,
+    /github\.actor == 'donmasakayan' && github\.triggering_actor == 'donmasakayan' && inputs\.confirm_production_deploy == 'DEPLOY_GATEWAY'/
+  );
 });
 
 test("a Worker change only selects its deployable unit", () => {
