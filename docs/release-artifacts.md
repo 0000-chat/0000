@@ -33,6 +33,14 @@ zero-artifact runtime event. A private Cloud workflow may consume a release
 record and pin the exact artifact digest for staging; this public workflow does
 not deploy any public production service or grant production credentials.
 
+Until Platform, Database, and Brain have release units, their documented
+metadata and check-only files remain validation-only. Any other changed path
+under those service roots, or under `apps/`, is treated as a possible runtime
+change and fails release planning until an explicit release unit is configured.
+This fail-closed guard prevents new source, configuration, or migration code
+from being silently skipped; it does not change the units selected for the
+currently deployed services.
+
 Gateway's `gateway-<version>.tar.gz` is an `application/gzip` archive with
 these root-level files:
 

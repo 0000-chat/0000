@@ -76,15 +76,45 @@ test("documentation-only changes create no runtime redeployment", () => {
 
 test("validation-only service changes still publish a record without Cloud dispatch", () => {
   for (const changedFile of [
-    "services/brain/src/worker.ts",
-    "services/platform/src/index.ts",
-    "services/database/src/index.ts"
+    "services/brain/0000-product.json",
+    "services/platform/scripts/check",
+    "services/database/package.json",
+    "services/platform/docs/README.md"
   ]) {
     const plan = makePlan({ config, base: head, head, changedFiles: [changedFile] });
-    assert.equal(plan.change_class, "non-runtime");
+    assert.equal(plan.change_class, changedFile.endsWith("README.md") ? "documentation" : "non-runtime");
     assert.equal(plan.runtime_redeployment, false);
     assert.deepEqual(plan.affected_units, []);
     assert.deepEqual(plan.artifacts, []);
+  }
+});
+
+test("scaffold runtime paths fail closed until a release unit is configured", () => {
+  for (const service of ["platform", "database", "brain"]) {
+    for (const runtimePath of ["src/index.ts", "config/runtime.json", "migrations/0001_init.sql"]) {
+      assert.throws(
+        () => makePlan({ config, base: head, head, changedFiles: [`services/${service}/${runtimePath}`] }),
+        /unmapped runtime changes require an explicit release unit before merge/,
+      );
+    }
+  }
+
+  for (const runtimePath of ["src/index.ts", "config/runtime.json", "migrations/0001_init.sql"]) {
+    assert.throws(
+      () => makePlan({ config, base: head, head, changedFiles: [`apps/0000/${runtimePath}`] }),
+      /unmapped runtime changes require an explicit release unit before merge/,
+    );
+  }
+
+  for (const changedFile of [
+    "services/brain/scripts/run-worker.ts",
+    "services/platform/.github/workflows/deploy.yml",
+    "apps/0000/package.json"
+  ]) {
+    assert.throws(
+      () => makePlan({ config, base: head, head, changedFiles: [changedFile] }),
+      /unmapped runtime changes require an explicit release unit before merge/,
+    );
   }
 });
 

@@ -186,8 +186,89 @@ export function isDocumentationPath(file) {
   );
 }
 
+const SCAFFOLD_ONLY_SERVICE_ROOTS = [
+  "services/platform",
+  "services/database",
+  "services/brain"
+];
+
+const VALIDATION_ONLY_FILE_NAMES = new Set([
+  ".env.example",
+  ".gitignore",
+  ".gitkeep",
+  ".nvmrc",
+  ".oxlintrc.json",
+  "0000-product.json",
+  "AGENTS.md",
+  "CONTEXT.md",
+  "biome.json",
+  "package.json",
+  "pnpm-lock.yaml",
+  "pnpm-workspace.yaml",
+  "rust-toolchain.toml"
+]);
+
+const VALIDATION_ONLY_DIRECTORY_NAMES = new Set([".githooks", "docs"]);
+
+function pathInside(file, root) {
+  return file === root || file.startsWith(`${root}/`);
+}
+
+function isValidationOnlyPath(file) {
+  if (isDocumentationPath(file)) return true;
+
+  const scaffoldRoot = SCAFFOLD_ONLY_SERVICE_ROOTS.find((root) => pathInside(file, root));
+  if (scaffoldRoot) {
+    const relative = file.slice(scaffoldRoot.length + 1);
+    const segments = relative.split("/");
+    const basename = segments.at(-1);
+    if (segments.some((segment) => VALIDATION_ONLY_DIRECTORY_NAMES.has(segment))) return true;
+    if (segments[0] === ".github" && segments[1] === "workflows" && basename === "quality.yml") return true;
+    if (segments[0] === "scripts" && /^(?:check|format(?:-check)?|install-tools|lint)(?:\.[^/]*)?$/.test(basename)) {
+      return true;
+    }
+    if (VALIDATION_ONLY_FILE_NAMES.has(basename)) return true;
+    if (/^tsconfig(?:\.[^/]+)?\.json$/.test(basename)) return true;
+    return false;
+  }
+
+  // `apps/` is not a release unit yet. Keep repository-level markers and
+  // documentation harmless, but require every other future app path to opt
+  // into an explicit release unit before it can be merged.
+  if (pathInside(file, "apps")) {
+    const relative = file.slice("apps/".length);
+    const segments = relative.split("/");
+    const basename = segments.at(-1);
+    if (isDocumentationPath(file)) return true;
+    if (basename === ".gitkeep" || basename === ".gitignore") return true;
+    if (segments.includes("docs")) return true;
+    return false;
+  }
+
+  return false;
+}
+
+export function unmappedRuntimeChanges(changedFiles) {
+  const files = [...new Set(changedFiles)].sort();
+  return files.filter(
+    (file) =>
+      (SCAFFOLD_ONLY_SERVICE_ROOTS.some((root) => pathInside(file, root)) || pathInside(file, "apps")) &&
+      !isValidationOnlyPath(file),
+  );
+}
+
+function assertNoUnmappedRuntimeChanges(changedFiles) {
+  const unmapped = unmappedRuntimeChanges(changedFiles);
+  if (unmapped.length > 0) {
+    throw new Error(
+      `unmapped runtime changes require an explicit release unit before merge: ${unmapped.join(", ")}`,
+    );
+  }
+}
+
 export function classifyChanges(changedFiles, units) {
   const files = [...new Set(changedFiles)].sort();
+  assertNoUnmappedRuntimeChanges(files);
   if (units.length > 0) return "runtime";
   if (files.length === 0) return "empty";
   if (files.every(isDocumentationPath)) return "documentation";
