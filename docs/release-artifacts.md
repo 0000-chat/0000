@@ -68,10 +68,13 @@ Cloud must preserve those binding and migration declarations when generating
 the staging config; only the Worker name, staging route, account, and secret
 values are environment-owned.
 
-The route-free `wrangler.json` in the archive contains only the entrypoint and
-compatibility settings. The Gateway bundle contains no Worker name, route,
-custom domain, binding, or secret. Cloud ignores that public config for
-deployment, writes an environment-owned staging config for
+The route-free Gateway `wrangler.json` in the archive contains only the
+entrypoint and compatibility settings. The Gateway bundle contains no Worker
+name, route, custom domain, binding, or secret. Streams' route-free config
+retains only its public Durable Object, migration, required-secret-name, and
+observability metadata in addition to the entrypoint and compatibility
+settings. Cloud ignores public environment selection for deployment, writes an
+environment-owned staging config for
 `0000-gateway-staging` and `gateway-staging.0000.chat`, and invokes:
 
 ```sh
