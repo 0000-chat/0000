@@ -13,16 +13,23 @@ function argument(name, fallback = undefined) {
 export function createReleaseRecord(plan, metadata) {
   const artifacts = [...metadata]
     .sort((left, right) => left.name.localeCompare(right.name))
-    .map((artifact) => ({
-      name: artifact.name,
-      version: artifact.version,
-      digest: artifact.digest,
-      kind: artifact.kind,
-      media_type: artifact.media_type,
-      compatibility: artifact.compatibility,
-      source_commit: artifact.source_commit,
-      archive_paths: artifact.archive_paths
-    }));
+    .map((artifact) => {
+      const record = {
+        name: artifact.name,
+        version: artifact.version,
+        digest: artifact.digest,
+        asset_name: artifact.asset_name,
+        kind: artifact.kind,
+        media_type: artifact.media_type,
+        compatibility: artifact.compatibility,
+        source_commit: artifact.source_commit,
+        archive_paths: artifact.archive_paths
+      };
+      for (const key of ["artifact_format", "entrypoint", "config", "files", "entrypoint_digest", "deployment"]) {
+        if (artifact[key] !== undefined) record[key] = artifact[key];
+      }
+      return record;
+    });
   return {
     $schema: plan.$schema,
     schema_version: 1,
@@ -44,11 +51,14 @@ export function createReleaseRecord(plan, metadata) {
         version: plan.release_version,
         compatibility: plan.compatibility
       },
-      artifacts: artifacts.map(({ name, version, digest, compatibility }) => ({
+      artifacts: artifacts.map(({ name, version, digest, compatibility, kind, media_type, asset_name }) => ({
         name,
         version,
         digest,
-        compatibility
+        compatibility,
+        kind,
+        media_type,
+        asset_name
       }))
     },
     publication_policy: {

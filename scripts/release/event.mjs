@@ -66,7 +66,15 @@ export function createReleaseEvent(plan, record, provenance) {
       version: plan.release_version,
       commit: plan.source_commit,
       artifacts: artifacts
-        .map(({ name, version, digest, compatibility }) => ({ name, version, digest, compatibility }))
+        .map(({ name, version, digest, compatibility, kind, media_type, asset_name }) => ({
+          name,
+          version,
+          digest,
+          compatibility,
+          kind,
+          media_type,
+          asset_name
+        }))
         .sort((left, right) => left.name.localeCompare(right.name)),
       provenance: normalizedProvenance
     },

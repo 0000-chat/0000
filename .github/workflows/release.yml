@@ -59,6 +59,10 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 24
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+      - run: bun install --frozen-lockfile
       - name: Plan affected runtime units
         id: plan
         env:
@@ -120,14 +124,81 @@ jobs:
           ARTIFACT_DIR: ${{ runner.temp }}/0000-release-artifacts
         run: |
           set -euo pipefail
+
+          resolve_tag_commit() {
+            local reference object_type object_sha
+            reference=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG" --jq '.object.type + "\t" + .object.sha')
+            for _ in 1 2 3 4 5 6 7 8; do
+              object_type=${reference%%$'\t'*}
+              object_sha=${reference#*$'\t'}
+              if [ "$object_type" = "commit" ]; then
+                printf '%s\n' "$object_sha"
+                return 0
+              fi
+              if [ "$object_type" != "tag" ]; then
+                return 1
+              fi
+              reference=$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$object_sha" --jq '.object.type + "\t" + .object.sha')
+            done
+            return 1
+          }
+
+          release_exists=false
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            release_exists=true
+          fi
+          if tag_commit=$(resolve_tag_commit 2>/dev/null); then
+            if [ "$tag_commit" != "$GITHUB_SHA" ]; then
+              echo "release tag $RELEASE_TAG resolves to $tag_commit, expected $GITHUB_SHA" >&2
+              exit 1
+            fi
+          elif [ "$release_exists" = true ]; then
+            echo "release $RELEASE_TAG exists but its tag cannot be resolved" >&2
+            exit 1
+          else
+            gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "$RELEASE_TAG" --notes "Deterministic public release for $GITHUB_SHA. Runtime promotion is private-only."
+            tag_commit=$(resolve_tag_commit)
+            if [ "$tag_commit" != "$GITHUB_SHA" ]; then
+              echo "new release tag $RELEASE_TAG resolves to $tag_commit, expected $GITHUB_SHA" >&2
+              exit 1
+            fi
+          fi
+
+          if ! gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "release $RELEASE_TAG is not readable after tag validation" >&2
+            exit 1
+          fi
+
+          upload_immutable() {
+            local asset_path="$1"
+            local asset_name expected actual verify_dir downloaded
+            asset_name=$(basename "$asset_path")
+            downloaded=$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq ".assets[] | select(.name == \"$asset_name\") | .name")
+            expected=$(sha256sum "$asset_path" | awk '{print $1}')
+            if [ -n "$downloaded" ]; then
+              verify_dir=$(mktemp -d "$RUNNER_TEMP/0000-release-verify.XXXXXX")
+              gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --pattern "$asset_name" --dir "$verify_dir"
+              actual=$(sha256sum "$verify_dir/$asset_name" | awk '{print $1}')
+              if [ "$actual" != "$expected" ]; then
+                echo "existing release asset $asset_name has digest $actual, expected $expected" >&2
+                exit 1
+              fi
+              echo "verified immutable release asset $asset_name"
+            else
+              gh release upload "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" "$asset_path"
+            fi
+          }
+
           assets=("$RELEASE_RECORD" "$RELEASE_EVENT")
+          for metadata in "$ARTIFACT_DIR"/*.artifact.json; do
+            if [ -f "$metadata" ]; then assets+=("$metadata"); fi
+          done
           for artifact in "$ARTIFACT_DIR"/*.tar.gz; do
             if [ -f "$artifact" ]; then assets+=("$artifact"); fi
           done
-          if ! gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "$RELEASE_TAG" --notes "Deterministic public release for $GITHUB_SHA. Runtime promotion is private-only."
-          fi
-          gh release upload "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" "${assets[@]}" --clobber
+          for asset in "${assets[@]}"; do
+            upload_immutable "$asset"
+          done
       - name: Notify private Cloud staging
         env:
           CLOUD_RELEASE_DISPATCH_TOKEN: ${{ secrets.CLOUD_RELEASE_DISPATCH_TOKEN }}

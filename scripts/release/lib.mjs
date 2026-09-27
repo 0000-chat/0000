@@ -10,6 +10,7 @@ export const publicReleaseRecordSchema = "docs/schemas/public-release-record.sch
 
 const SHA_RE = /^[0-9a-f]{40}$/;
 const NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
 export function readJson(filePath) {
   return JSON.parse(fs.readFileSync(filePath, "utf8"));
@@ -28,6 +29,67 @@ export function normalisePath(value) {
     throw new Error(`release path escapes the repository: ${value}`);
   }
   return normalised;
+}
+
+function assertWorkerBuildConfig(unit, build) {
+  if (!build || typeof build !== "object" || Array.isArray(build)) {
+    throw new Error(`release unit build configuration must be an object: ${unit.name}`);
+  }
+  if (build.type !== "cloudflare-worker") {
+    throw new Error(`unsupported release build type: ${unit.name}`);
+  }
+  if (unit.kind !== "cloudflare-worker-bundle") {
+    throw new Error(`cloudflare Worker build requires cloudflare-worker-bundle kind: ${unit.name}`);
+  }
+
+  const configPath = build.config_path;
+  if (typeof configPath !== "string" || !configPath.startsWith("services/")) {
+    throw new Error(`release unit build.config_path must be under services/: ${unit.name}`);
+  }
+  if (normalisePath(configPath) !== configPath) {
+    throw new Error(`release unit build.config_path must be normalized: ${unit.name}`);
+  }
+
+  for (const key of ["entrypoint", "config"]) {
+    const value = build[key];
+    if (
+      typeof value !== "string" ||
+      value.length === 0 ||
+      value.includes("/") ||
+      normalisePath(value) !== value
+    ) {
+      throw new Error(`release unit build.${key} must be a root-level artifact file: ${unit.name}`);
+    }
+  }
+  if (!DATE_RE.test(build.compatibility_date)) {
+    throw new Error(`release unit build.compatibility_date is invalid: ${unit.name}`);
+  }
+  if (
+    !Array.isArray(build.compatibility_flags) ||
+    build.compatibility_flags.length === 0 ||
+    !build.compatibility_flags.every((flag) => typeof flag === "string" && NAME_RE.test(flag))
+  ) {
+    throw new Error(`release unit build.compatibility_flags must be non-empty identifiers: ${unit.name}`);
+  }
+  if (
+    !Array.isArray(build.files) ||
+    build.files.length === 0 ||
+    new Set(build.files).size !== build.files.length ||
+    !build.files.every(
+      (file) =>
+        typeof file === "string" &&
+        !file.includes("/") &&
+        normalisePath(file) === file,
+    )
+  ) {
+    throw new Error(`release unit build.files must list root-level artifact files: ${unit.name}`);
+  }
+  if (!build.files.includes(build.entrypoint) || !build.files.includes(build.config)) {
+    throw new Error(`release unit build.files must include entrypoint and config: ${unit.name}`);
+  }
+  if (!build.files.includes("artifact-manifest.json")) {
+    throw new Error(`release unit build.files must include artifact-manifest.json: ${unit.name}`);
+  }
 }
 
 export function assertReleaseConfig(config) {
@@ -58,6 +120,7 @@ export function assertReleaseConfig(config) {
     if (!Array.isArray(unit.archive_paths) || unit.archive_paths.length === 0) {
       throw new Error(`release unit has no archive paths: ${unit.name}`);
     }
+    if (unit.build !== undefined) assertWorkerBuildConfig(unit, unit.build);
     for (const value of [...unit.runtime_paths, ...unit.archive_paths]) {
       const normalised = normalisePath(value.replace(/\*+$/, ""));
       if (!normalised.startsWith("services/")) {

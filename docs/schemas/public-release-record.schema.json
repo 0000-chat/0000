@@ -74,27 +74,50 @@
     "artifact": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["name", "version", "digest", "kind", "media_type", "compatibility", "source_commit", "archive_paths"],
+      "required": ["name", "version", "digest", "kind", "media_type", "asset_name", "compatibility", "source_commit", "archive_paths"],
       "properties": {
         "name": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$" },
         "version": { "type": "string", "pattern": "^v[0-9]+\\.[0-9]+\\.[0-9]+-[0-9a-f]{40}$" },
         "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
         "kind": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$" },
         "media_type": { "const": "application/gzip" },
+        "asset_name": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*\\.tar\\.gz$" },
         "compatibility": { "$ref": "#/$defs/compatibility" },
         "source_commit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
-        "archive_paths": { "type": "array", "items": { "type": "string" } }
+        "archive_paths": { "type": "array", "items": { "type": "string" } },
+        "artifact_format": { "type": "string", "const": "0000-cloudflare-worker-bundle-v1" },
+        "entrypoint": { "type": "string", "pattern": "^[A-Za-z0-9._-]+$" },
+        "config": { "type": "string", "pattern": "^[A-Za-z0-9._-]+$" },
+        "files": {
+          "type": "array",
+          "items": { "type": "string", "pattern": "^[A-Za-z0-9._-]+$" }
+        },
+        "entrypoint_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "deployment": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["tool", "mode", "route_configuration", "command"],
+          "properties": {
+            "tool": { "const": "wrangler" },
+            "mode": { "const": "prebuilt" },
+            "route_configuration": { "const": "cloud" },
+            "command": { "type": "array", "items": { "type": "string" }, "minItems": 1 }
+          }
+        }
       }
     },
     "cloud-artifact": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["name", "version", "digest", "compatibility"],
+      "required": ["name", "version", "digest", "compatibility", "kind", "media_type", "asset_name"],
       "properties": {
         "name": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$" },
         "version": { "type": "string", "pattern": "^v[0-9]+\\.[0-9]+\\.[0-9]+-[0-9a-f]{40}$" },
         "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
-        "compatibility": { "$ref": "#/$defs/compatibility" }
+        "compatibility": { "$ref": "#/$defs/compatibility" },
+        "kind": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$" },
+        "media_type": { "const": "application/gzip" },
+        "asset_name": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*\\.tar\\.gz$" }
       }
     }
   }
