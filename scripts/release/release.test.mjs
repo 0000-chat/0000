@@ -29,7 +29,8 @@ test("release unit configuration is valid and excludes private or non-runtime pu
     "streams",
     "msg-worker",
     "communicator-control-plane",
-    "communicator-matrix-gateway"
+    "communicator-matrix-gateway",
+    "communicator-bridge-images"
   ]);
   assert.equal(names.some((name) => /sdk|cli|cloud/i.test(name)), false);
   assert.equal(config.units.some((unit) => unit.archive_paths.some((entry) => /sdk|cli|cloud/i.test(entry))), false);
@@ -44,6 +45,44 @@ test("release unit configuration is valid and excludes private or non-runtime pu
     compatibility_date: "2026-08-06",
     compatibility_flags: ["nodejs_compat"]
   });
+});
+
+test("Communicator release units keep Worker, native gateway, and external images separate", () => {
+  const controlPlane = config.units.find((unit) => unit.name === "communicator-control-plane");
+  const matrixGateway = config.units.find((unit) => unit.name === "communicator-matrix-gateway");
+  const bridgeImages = config.units.find((unit) => unit.name === "communicator-bridge-images");
+
+  assert.equal(controlPlane.kind, "cloudflare-worker-source");
+  assert.equal(matrixGateway.kind, "private-native-source");
+  assert.equal(bridgeImages.kind, "external-container-lock");
+  assert.equal(
+    matrixGateway.archive_paths.some((entry) => entry.includes("deploy/matrix-gateway")),
+    true
+  );
+  assert.equal(bridgeImages.archive_paths.includes("services/communicator/deploy/images.lock.env"), true);
+  assert.equal(
+    matrixGateway.archive_paths.some((entry) => entry.includes("images.lock.env")),
+    false
+  );
+  assert.equal(
+    controlPlane.archive_paths.some((entry) => entry.includes("deploy/images.lock.env")),
+    false
+  );
+});
+
+test("Communicator changes select only their corresponding source release unit", () => {
+  assert.deepEqual(
+    affectedUnits(config, ["services/communicator/apps/control-plane/worker/index.ts"]).map((unit) => unit.name),
+    ["communicator-control-plane"]
+  );
+  assert.deepEqual(
+    affectedUnits(config, ["services/communicator/services/matrix-gateway/src/main.rs"]).map((unit) => unit.name),
+    ["communicator-matrix-gateway"]
+  );
+  assert.deepEqual(
+    affectedUnits(config, ["services/communicator/deploy/images.lock.env"]).map((unit) => unit.name),
+    ["communicator-bridge-images"]
+  );
 });
 
 test("Gateway bundle manifest matches the Cloud staging contract exactly", () => {

@@ -11,8 +11,19 @@ The release currently publishes these units:
 - Gateway as a deterministic, prebuilt Cloudflare Worker bundle;
 - Streams Worker;
 - msg Worker;
-- Communicator control-plane Worker; and
-- Communicator Matrix Gateway source for the private Docker host.
+- Communicator control-plane Worker/UI source;
+- Communicator's native Matrix Gateway and systemd package source; and
+- Communicator's external bridge image lock and Docker-host configuration
+  source.
+
+The Communicator units are source archives, not prebuilt Worker or native
+binary deployment inputs. The control-plane archive contains the Worker and
+UI source plus its nested workspace; it does not authorize a Cloudflare
+deployment. The Matrix Gateway archive contains the Rust source, pinned Rust
+workspace, and reviewable systemd package. The bridge archive contains the
+Compose wiring, pinned external image references, and provider configuration
+templates; public CI does not build, publish, or claim ownership of those
+third-party images.
 
 The other units remain source archives until their own runtime packagers are
 implemented. They are not valid prebuilt Worker deployment inputs merely
@@ -78,6 +89,16 @@ published as a public artifact. The live `gateway.0000.chat` name and route
 are invalid staging targets. Cloud owns staging, canary, production, and
 rollback promotion; this repository does not deploy or claim live staging
 health.
+
+Communicator's `communicator-control-plane-<version>.tar.gz`,
+`communicator-matrix-gateway-<version>.tar.gz`, and
+`communicator-bridge-images-<version>.tar.gz` assets are deterministic source
+archives. Their artifact kinds are respectively `cloudflare-worker-source`,
+`private-native-source`, and `external-container-lock`. Cloud may validate the
+immutable asset metadata and archive shape offline, but this release does not
+select a Worker name, Cloudflare account, private host, binary rollout path,
+SSH target, Docker registry, or Matrix/provider credentials. Those values must
+be designed and verified before a deployment consumer is added.
 
 After publishing the record and provenance evidence, public CI starts the
 private Cloud `staging.yml` workflow through the GitHub Actions
