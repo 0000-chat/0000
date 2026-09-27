@@ -2,9 +2,15 @@
 set -eu
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-cache_dir="${XDG_CACHE_HOME:-${HOME}/.cache}/0000-scaffold/npm"
-mkdir -p "$cache_dir"
 cd "$root"
 
-npx --yes --prefer-offline --workspaces=false --cache "$cache_dir" --package "oxlint@1.82.0" -- oxlint --version
-npx --yes --prefer-offline --workspaces=false --cache "$cache_dir" --package "@biomejs/biome@2.5.13" -- biome --version
+test -x "$root/node_modules/.bin/oxlint" || {
+    echo "Streams tooling is not installed; run bun install --frozen-lockfile first." >&2
+    exit 1
+}
+test -x "$root/node_modules/.bin/biome" || {
+    echo "Streams tooling is not installed; run bun install --frozen-lockfile first." >&2
+    exit 1
+}
+"$root/node_modules/.bin/oxlint" --version
+"$root/node_modules/.bin/biome" --version

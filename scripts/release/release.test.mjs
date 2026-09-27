@@ -6,8 +6,10 @@ import { fileURLToPath } from "node:url";
 import {
   affectedUnits,
   assertReleaseConfig,
+  assertWorkerBuildConfigMatchesSource,
   classifyChanges,
   makePlan,
+  readJsonc,
   readReleaseConfig,
   releaseVersion
 } from "./lib.mjs";
@@ -46,36 +48,24 @@ test("release unit configuration is valid and excludes private or non-runtime pu
     compatibility_date: "2026-08-06",
     compatibility_flags: ["nodejs_compat"]
   });
-  const msg = config.units.find((unit) => unit.name === "msg-worker");
-  assert.equal(msg.kind, "cloudflare-worker-bundle");
-  assert.equal(msg.build.generated_entrypoint, "worker-entry.js");
-  assert.deepEqual(msg.build.assets, {
-    source: "services/msg/worker/public",
-    directory: "assets",
-    binding: "ASSETS",
-    run_worker_first: true
-  });
-  assert.deepEqual(msg.build.migrations, {
-    source: "services/msg/worker/migrations",
-    directory: "migrations"
-  });
-  assert.deepEqual(msg.build.wrangler.durable_objects, {
-    bindings: [{ name: "ConversationRoom", class_name: "ConversationRoom" }]
-  });
-  assert.deepEqual(msg.build.wrangler.migrations, [
-    { tag: "v1", new_sqlite_classes: ["ConversationRoom"] }
-  ]);
-  assert.deepEqual(msg.build.wrangler.d1_databases, [
-    { binding: "MSG_DB", database_name: "0000-msg-operations", migrations_dir: "migrations" }
-  ]);
-  assert.deepEqual(msg.build.runtime, {
-    rate_limits: [
-      { name: "MSG_RATE_LIMIT_CREATION", simple: { limit: 6, period: 60 } },
-      { name: "MSG_RATE_LIMIT_READS", simple: { limit: 60, period: 60 } },
-      { name: "MSG_RATE_LIMIT_POSTS", simple: { limit: 20, period: 60 } },
-      { name: "MSG_RATE_LIMIT_LIVE", simple: { limit: 10, period: 60 } }
-    ],
-    triggers: { crons: ["17 3 * * *"] }
+  const streams = config.units.find((unit) => unit.name === "streams");
+  assert.equal(streams.kind, "cloudflare-worker-bundle");
+  assert.deepEqual(streams.build.wrangler, {
+    durable_objects: {
+      bindings: [{ name: "STREAMS", class_name: "StreamsRoom" }]
+    },
+    migrations: [{ tag: "v1", new_sqlite_classes: ["StreamsRoom"] }],
+    secrets: {
+      required: [
+        "ACCESS_TEAM_NAME",
+        "ACCESS_AUD",
+        "DON_EMAIL",
+        "MCP_AUTH_TOKEN",
+        "GROK_WEBHOOK_URL",
+        "GROK_WEBHOOK_AUTHORIZATION"
+      ]
+    },
+    observability: { enabled: true }
   });
 });
 
@@ -189,6 +179,60 @@ test("Msg neutral Wrangler config retains the cron trigger without environment-o
   assert.equal("ratelimits" in neutral, false);
 });
 
+test("Streams bundle preserves Durable Object bindings and migrations in neutral config", () => {
+  const streams = config.units.find((unit) => unit.name === "streams");
+  const plan = makePlan({ config, base: head, head, changedFiles: ["services/streams/src/worker.ts"] });
+  assert.deepEqual(workerArtifactManifest(streams, plan), {
+    schema_version: 1,
+    product: "0000",
+    name: "streams",
+    version: plan.release_version,
+    kind: "cloudflare-worker-bundle",
+    media_type: "application/gzip",
+    source_commit: head,
+    compatibility: { api: "v1", config: "v1" },
+    entrypoint: "worker.js",
+    compatibility_date: "2026-09-05",
+    compatibility_flags: ["nodejs_compat"]
+  });
+  assert.deepEqual(neutralWranglerConfig(streams), {
+    $schema: "https://developers.cloudflare.com/workers/wrangler/config-schema.json",
+    main: "worker.js",
+    compatibility_date: "2026-09-05",
+    compatibility_flags: ["nodejs_compat"],
+    workers_dev: false,
+    durable_objects: {
+      bindings: [{ name: "STREAMS", class_name: "StreamsRoom" }]
+    },
+    migrations: [{ tag: "v1", new_sqlite_classes: ["StreamsRoom"] }],
+    secrets: {
+      required: [
+        "ACCESS_TEAM_NAME",
+        "ACCESS_AUD",
+        "DON_EMAIL",
+        "MCP_AUTH_TOKEN",
+        "GROK_WEBHOOK_URL",
+        "GROK_WEBHOOK_AUTHORIZATION"
+      ]
+    },
+    observability: { enabled: true }
+  });
+});
+
+test("Streams release metadata matches and derives from the checked-in Wrangler contract", () => {
+  const streams = config.units.find((unit) => unit.name === "streams");
+  const source = readJsonc(path.join(repositoryRoot, streams.build.config_path));
+  assert.doesNotThrow(() => assertWorkerBuildConfigMatchesSource(streams, streams.build));
+  assert.deepEqual(neutralWranglerConfig(streams, source), neutralWranglerConfig(streams));
+
+  const drifted = structuredClone(streams);
+  drifted.build.wrangler.migrations = [{ tag: "v2", new_sqlite_classes: ["StreamsRoom"] }];
+  assert.throws(
+    () => assertWorkerBuildConfigMatchesSource(drifted, drifted.build),
+    /build\.wrangler\.migrations does not match services\/streams\/wrangler\.jsonc/,
+  );
+});
+
 test("documentation-only changes create no runtime redeployment", () => {
   const changed = ["README.md", "docs/release-artifacts.md", "services/gateway/docs/README.md"];
   assert.deepEqual(affectedUnits(config, changed), []);
@@ -201,15 +245,45 @@ test("documentation-only changes create no runtime redeployment", () => {
 
 test("validation-only service changes still publish a record without Cloud dispatch", () => {
   for (const changedFile of [
-    "services/brain/src/worker.ts",
-    "services/platform/src/index.ts",
-    "services/database/src/index.ts"
+    "services/brain/0000-product.json",
+    "services/platform/scripts/check",
+    "services/database/package.json",
+    "services/platform/docs/README.md"
   ]) {
     const plan = makePlan({ config, base: head, head, changedFiles: [changedFile] });
-    assert.equal(plan.change_class, "non-runtime");
+    assert.equal(plan.change_class, changedFile.endsWith("README.md") ? "documentation" : "non-runtime");
     assert.equal(plan.runtime_redeployment, false);
     assert.deepEqual(plan.affected_units, []);
     assert.deepEqual(plan.artifacts, []);
+  }
+});
+
+test("scaffold runtime paths fail closed until a release unit is configured", () => {
+  for (const service of ["platform", "database", "brain"]) {
+    for (const runtimePath of ["src/index.ts", "config/runtime.json", "migrations/0001_init.sql"]) {
+      assert.throws(
+        () => makePlan({ config, base: head, head, changedFiles: [`services/${service}/${runtimePath}`] }),
+        /unmapped runtime changes require an explicit release unit before merge/,
+      );
+    }
+  }
+
+  for (const runtimePath of ["src/index.ts", "config/runtime.json", "migrations/0001_init.sql"]) {
+    assert.throws(
+      () => makePlan({ config, base: head, head, changedFiles: [`apps/0000/${runtimePath}`] }),
+      /unmapped runtime changes require an explicit release unit before merge/,
+    );
+  }
+
+  for (const changedFile of [
+    "services/brain/scripts/run-worker.ts",
+    "services/platform/.github/workflows/deploy.yml",
+    "apps/0000/package.json"
+  ]) {
+    assert.throws(
+      () => makePlan({ config, base: head, head, changedFiles: [changedFile] }),
+      /unmapped runtime changes require an explicit release unit before merge/,
+    );
   }
 });
 

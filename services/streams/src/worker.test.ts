@@ -70,6 +70,19 @@ function makeEnv(stub: ReturnType<typeof makeStub>): Env {
 }
 
 describe("Helm Streams Worker decision routes", () => {
+  test("exposes an unauthenticated health response for staging smoke tests", async () => {
+    const response = await worker.fetch(
+      new Request("https://streams-staging.0000.chat/health"),
+      makeEnv(makeStub({ action: "submitted" })),
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      status: "ok",
+      service: "streams",
+    });
+  });
+
   test("keeps MCP before Access authentication", async () => {
     accessCalls = 0;
     const stub = makeStub({ action: "submitted" });

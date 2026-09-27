@@ -12,11 +12,12 @@
     "dev": "bunx wrangler@4.133.0 dev --config wrangler.jsonc",
     "lint": "./scripts/lint src",
     "test": "bun test src",
-    "typecheck": "bunx --package typescript@6.0.3 tsc --noEmit -p tsconfig.json",
+    "typecheck": "./node_modules/.bin/tsc --noEmit -p tsconfig.json",
     "types": "bunx wrangler@4.133.0 types src/worker-configuration.d.ts --config wrangler.jsonc",
     "deploy": "bunx wrangler@4.133.0 deploy --config wrangler.jsonc"
   },
   "devDependencies": {
+    "@biomejs/biome": "2.5.13",
     "@types/node": "22.20.3",
     "oxlint": "1.82.0",
     "typescript": "6.0.3",

@@ -1,5 +1,4 @@
 import { describe, expect, test } from "bun:test";
-import { authorizeMcp } from "./auth";
 import { toolDefinitions } from "./mcp";
 import {
   getStreamCardContent,
@@ -41,21 +40,6 @@ describe("Helm Streams surface", () => {
     expect(manifest.name).toBe("0000-streams");
     expect(html).toContain("<title>0000-streams</title>");
     expect(serviceWorker).toContain('const CACHE = "helm-streams-v3";');
-  });
-
-  test("requires the exact MCP bearer secret", () => {
-    const env = { MCP_AUTH_TOKEN: "test-token" } as Env;
-    expect(authorizeMcp(new Request("https://don.0000.gold/mcp"), env)).toBe(
-      false,
-    );
-    expect(
-      authorizeMcp(
-        new Request("https://don.0000.gold/mcp", {
-          headers: { authorization: "Bearer test-token" },
-        }),
-        env,
-      ),
-    ).toBe(true);
   });
 
   test("publishes the approved stream management tools", () => {

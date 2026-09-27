@@ -11,9 +11,92 @@ export const publicReleaseRecordSchema = "docs/schemas/public-release-record.sch
 const SHA_RE = /^[0-9a-f]{40}$/;
 const NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+const WRANGLER_CONTRACT_KEYS = ["durable_objects", "migrations", "secrets", "observability"];
 
 export function readJson(filePath) {
   return JSON.parse(fs.readFileSync(filePath, "utf8"));
+}
+
+function stripJsoncComments(source) {
+  let result = "";
+  let inString = false;
+  let escaped = false;
+
+  for (let index = 0; index < source.length; index += 1) {
+    const character = source[index];
+    const next = source[index + 1];
+    if (inString) {
+      result += character;
+      if (escaped) escaped = false;
+      else if (character === "\\") escaped = true;
+      else if (character === '"') inString = false;
+      continue;
+    }
+    if (character === '"') {
+      inString = true;
+      result += character;
+      continue;
+    }
+    if (character === "/" && next === "/") {
+      result += "  ";
+      index += 1;
+      while (index + 1 < source.length && source[index + 1] !== "\n" && source[index + 1] !== "\r") {
+        result += " ";
+        index += 1;
+      }
+      continue;
+    }
+    if (character === "/" && next === "*") {
+      result += "  ";
+      index += 1;
+      while (index + 1 < source.length) {
+        index += 1;
+        if (source[index] === "*" && source[index + 1] === "/") {
+          result += "  ";
+          index += 1;
+          break;
+        }
+        result += source[index] === "\n" || source[index] === "\r" ? source[index] : " ";
+      }
+      continue;
+    }
+    result += character;
+  }
+  return result;
+}
+
+function stripJsoncTrailingCommas(source) {
+  let result = "";
+  let inString = false;
+  let escaped = false;
+
+  for (let index = 0; index < source.length; index += 1) {
+    const character = source[index];
+    if (inString) {
+      result += character;
+      if (escaped) escaped = false;
+      else if (character === "\\") escaped = true;
+      else if (character === '"') inString = false;
+      continue;
+    }
+    if (character === '"') {
+      inString = true;
+      result += character;
+      continue;
+    }
+    if (character === ",") {
+      let next = index + 1;
+      while (next < source.length && /\s/.test(source[next])) next += 1;
+      if (source[next] === "}" || source[next] === "]") continue;
+    }
+    result += character;
+  }
+  return result;
+}
+
+export function readJsonc(filePath) {
+  const source = fs.readFileSync(filePath, "utf8");
+  return JSON.parse(stripJsoncTrailingCommas(stripJsoncComments(source)));
 }
 
 export function readReleaseConfig(root = repositoryRoot) {
@@ -59,16 +142,6 @@ function assertWorkerBuildConfig(unit, build) {
       normalisePath(value) !== value
     ) {
       throw new Error(`release unit build.${key} must be a root-level artifact file: ${unit.name}`);
-    }
-  }
-  if (build.generated_entrypoint !== undefined) {
-    if (
-      typeof build.generated_entrypoint !== "string" ||
-      build.generated_entrypoint.length === 0 ||
-      build.generated_entrypoint.includes("/") ||
-      normalisePath(build.generated_entrypoint) !== build.generated_entrypoint
-    ) {
-      throw new Error(`release unit build.generated_entrypoint must be a root-level generated file: ${unit.name}`);
     }
   }
   if (!DATE_RE.test(build.compatibility_date)) {
@@ -138,15 +211,11 @@ function assertWorkerBuildConfig(unit, build) {
           Array.isArray(rateLimit.simple) ||
           !Number.isInteger(rateLimit.simple.limit) ||
           rateLimit.simple.limit <= 0 ||
-          ![10, 60].includes(rateLimit.simple.period)
+          ![10, 60].includes(rateLimit.simple.period) ||
+          Object.keys(rateLimit).some((key) => !["name", "simple"].includes(key)) ||
+          Object.keys(rateLimit.simple).some((key) => !["limit", "period"].includes(key))
         ) {
           throw new Error(`release unit build.runtime.rate_limits are invalid: ${unit.name}`);
-        }
-        if (Object.keys(rateLimit).some((key) => !["name", "simple"].includes(key))) {
-          throw new Error(`release unit build.runtime.rate_limits contain unsupported fields: ${unit.name}`);
-        }
-        if (Object.keys(rateLimit.simple).some((key) => !["limit", "period"].includes(key))) {
-          throw new Error(`release unit build.runtime.rate_limits.simple contains unsupported fields: ${unit.name}`);
         }
         names.add(rateLimit.name);
       }
@@ -160,9 +229,7 @@ function assertWorkerBuildConfig(unit, build) {
         runtime.triggers.crons.length === 0 ||
         Object.keys(runtime.triggers).some((key) => key !== "crons") ||
         !runtime.triggers.crons.every(
-          (cron) =>
-            typeof cron === "string" &&
-            /^[0-9*/?,L#-]+(?:\s+[0-9*/?,L#-]+){4}$/.test(cron.trim()),
+          (cron) => typeof cron === "string" && /^[0-9*/?,L#-]+(?:\s+[0-9*/?,L#-]+){4}$/.test(cron.trim()),
         )
       ) {
         throw new Error(`release unit build.runtime.triggers are invalid: ${unit.name}`);
@@ -199,64 +266,57 @@ function assertWorkerBuildConfig(unit, build) {
   }
 
   if (build.wrangler !== undefined) {
-    const wrangler = build.wrangler;
-    if (!wrangler || typeof wrangler !== "object" || Array.isArray(wrangler)) {
+    if (!build.wrangler || typeof build.wrangler !== "object" || Array.isArray(build.wrangler)) {
       throw new Error(`release unit build.wrangler must be an object: ${unit.name}`);
     }
-    const unsupported = Object.keys(wrangler).filter(
-      (key) => !["durable_objects", "migrations", "d1_databases", "secrets", "observability"].includes(key),
-    );
+    const allowed = new Set(["durable_objects", "migrations", "d1_databases", "secrets", "observability"]);
+    const unsupported = Object.keys(build.wrangler).filter((key) => !allowed.has(key));
     if (unsupported.length > 0) {
-      throw new Error(`release unit build.wrangler has unsupported keys for ${unit.name}: ${unsupported.join(", ")}`);
+      throw new Error(`release unit build.wrangler contains environment-specific keys: ${unit.name}: ${unsupported.join(", ")}`);
     }
-    const durableObjects = wrangler.durable_objects;
-    if (durableObjects !== undefined) {
-      if (!durableObjects || typeof durableObjects !== "object" || Array.isArray(durableObjects)) {
-        throw new Error(`release unit build.wrangler.durable_objects must be an object: ${unit.name}`);
-      }
-      if (!Array.isArray(durableObjects.bindings) || durableObjects.bindings.length === 0) {
-        throw new Error(`release unit build.wrangler.durable_objects.bindings must be non-empty: ${unit.name}`);
-      }
-      for (const binding of durableObjects.bindings) {
-        if (
-          !binding ||
-          typeof binding !== "object" ||
-          Array.isArray(binding) ||
-          typeof binding.name !== "string" ||
-          !NAME_RE.test(binding.name) ||
-          typeof binding.class_name !== "string" ||
-          !NAME_RE.test(binding.class_name)
-        ) {
-          throw new Error(`release unit build.wrangler durable object bindings are invalid: ${unit.name}`);
-        }
-      }
-    }
-    if (wrangler.migrations !== undefined) {
-      if (!Array.isArray(wrangler.migrations) || wrangler.migrations.length === 0) {
-        throw new Error(`release unit build.wrangler.migrations must be non-empty: ${unit.name}`);
-      }
-      const tags = new Set();
-      for (const migration of wrangler.migrations) {
-        if (
-          !migration ||
-          typeof migration !== "object" ||
-          Array.isArray(migration) ||
-          typeof migration.tag !== "string" ||
-          !/^v[0-9]+$/.test(migration.tag) ||
-          tags.has(migration.tag) ||
-          !Array.isArray(migration.new_sqlite_classes) ||
-          !migration.new_sqlite_classes.every((name) => typeof name === "string" && NAME_RE.test(name))
-        ) {
-          throw new Error(`release unit build.wrangler migrations are invalid: ${unit.name}`);
-        }
-        tags.add(migration.tag);
+    if (build.wrangler.durable_objects !== undefined) {
+      const bindings = build.wrangler.durable_objects?.bindings;
+      if (
+        !build.wrangler.durable_objects ||
+        typeof build.wrangler.durable_objects !== "object" ||
+        Array.isArray(build.wrangler.durable_objects) ||
+        !Array.isArray(bindings) ||
+        bindings.length === 0 ||
+        !bindings.every(
+          (binding) =>
+            binding &&
+            typeof binding === "object" &&
+            !Array.isArray(binding) &&
+            typeof binding.name === "string" &&
+            NAME_RE.test(binding.name) &&
+            typeof binding.class_name === "string" &&
+            NAME_RE.test(binding.class_name),
+        )
+      ) {
+        throw new Error(`release unit build.wrangler.durable_objects.bindings is invalid: ${unit.name}`);
       }
     }
-    if (wrangler.d1_databases !== undefined) {
-      if (!Array.isArray(wrangler.d1_databases) || wrangler.d1_databases.length === 0) {
+    if (build.wrangler.migrations !== undefined) {
+      if (
+        !Array.isArray(build.wrangler.migrations) ||
+        build.wrangler.migrations.length === 0 ||
+        !build.wrangler.migrations.every(
+          (migration) =>
+            migration &&
+            typeof migration === "object" &&
+            !Array.isArray(migration) &&
+            typeof migration.tag === "string" &&
+            NAME_RE.test(migration.tag),
+        )
+      ) {
+        throw new Error(`release unit build.wrangler.migrations is invalid: ${unit.name}`);
+      }
+    }
+    if (build.wrangler.d1_databases !== undefined) {
+      if (!Array.isArray(build.wrangler.d1_databases) || build.wrangler.d1_databases.length === 0) {
         throw new Error(`release unit build.wrangler.d1_databases must be non-empty: ${unit.name}`);
       }
-      for (const database of wrangler.d1_databases) {
+      for (const database of build.wrangler.d1_databases) {
         if (
           !database ||
           typeof database !== "object" ||
@@ -272,26 +332,69 @@ function assertWorkerBuildConfig(unit, build) {
         }
       }
     }
-    if (wrangler.secrets !== undefined) {
+    if (build.wrangler.secrets !== undefined) {
+      const required = build.wrangler.secrets?.required;
       if (
-        !wrangler.secrets ||
-        typeof wrangler.secrets !== "object" ||
-        Array.isArray(wrangler.secrets) ||
-        !Array.isArray(wrangler.secrets.required) ||
-        !wrangler.secrets.required.every((name) => typeof name === "string" && NAME_RE.test(name))
+        !build.wrangler.secrets ||
+        typeof build.wrangler.secrets !== "object" ||
+        Array.isArray(build.wrangler.secrets) ||
+        !Array.isArray(required) ||
+        !required.every((secret) => typeof secret === "string" && NAME_RE.test(secret))
       ) {
         throw new Error(`release unit build.wrangler.secrets.required is invalid: ${unit.name}`);
       }
     }
-    if (wrangler.observability !== undefined) {
+    if (build.wrangler.observability !== undefined) {
       if (
-        !wrangler.observability ||
-        typeof wrangler.observability !== "object" ||
-        Array.isArray(wrangler.observability) ||
-        wrangler.observability.enabled !== true
+        !build.wrangler.observability ||
+        typeof build.wrangler.observability !== "object" ||
+        Array.isArray(build.wrangler.observability) ||
+        typeof build.wrangler.observability.enabled !== "boolean"
       ) {
-        throw new Error(`release unit build.wrangler.observability must enable observability: ${unit.name}`);
+        throw new Error(`release unit build.wrangler.observability is invalid: ${unit.name}`);
       }
+    }
+  }
+  if (!build.wrapper) assertWorkerBuildConfigMatchesSource(unit, build);
+}
+
+function canonicalJson(value) {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.keys(value)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function jsonValuesEqual(left, right) {
+  return canonicalJson(left) === canonicalJson(right);
+}
+
+export function assertWorkerBuildConfigMatchesSource(unit, build) {
+  const sourcePath = path.join(repositoryRoot, build.config_path);
+  let source;
+  try {
+    source = readJsonc(sourcePath);
+  } catch (error) {
+    throw new Error(`could not read ${unit.name} Wrangler config ${build.config_path}: ${error.message}`);
+  }
+  if (!source || typeof source !== "object" || Array.isArray(source)) {
+    throw new Error(`Wrangler config must contain an object: ${unit.name}`);
+  }
+  if (source.compatibility_date !== build.compatibility_date) {
+    throw new Error(`release unit ${unit.name} compatibility_date does not match ${build.config_path}`);
+  }
+  if (!jsonValuesEqual(source.compatibility_flags, build.compatibility_flags)) {
+    throw new Error(`release unit ${unit.name} compatibility_flags do not match ${build.config_path}`);
+  }
+
+  const releaseContract = build.wrangler ?? {};
+  for (const key of WRANGLER_CONTRACT_KEYS) {
+    if (!jsonValuesEqual(source[key], releaseContract[key])) {
+      throw new Error(`release unit ${unit.name} build.wrangler.${key} does not match ${build.config_path}`);
     }
   }
 }
@@ -390,8 +493,89 @@ export function isDocumentationPath(file) {
   );
 }
 
+const SCAFFOLD_ONLY_SERVICE_ROOTS = [
+  "services/platform",
+  "services/database",
+  "services/brain"
+];
+
+const VALIDATION_ONLY_FILE_NAMES = new Set([
+  ".env.example",
+  ".gitignore",
+  ".gitkeep",
+  ".nvmrc",
+  ".oxlintrc.json",
+  "0000-product.json",
+  "AGENTS.md",
+  "CONTEXT.md",
+  "biome.json",
+  "package.json",
+  "pnpm-lock.yaml",
+  "pnpm-workspace.yaml",
+  "rust-toolchain.toml"
+]);
+
+const VALIDATION_ONLY_DIRECTORY_NAMES = new Set([".githooks", "docs"]);
+
+function pathInside(file, root) {
+  return file === root || file.startsWith(`${root}/`);
+}
+
+function isValidationOnlyPath(file) {
+  if (isDocumentationPath(file)) return true;
+
+  const scaffoldRoot = SCAFFOLD_ONLY_SERVICE_ROOTS.find((root) => pathInside(file, root));
+  if (scaffoldRoot) {
+    const relative = file.slice(scaffoldRoot.length + 1);
+    const segments = relative.split("/");
+    const basename = segments.at(-1);
+    if (segments.some((segment) => VALIDATION_ONLY_DIRECTORY_NAMES.has(segment))) return true;
+    if (segments[0] === ".github" && segments[1] === "workflows" && basename === "quality.yml") return true;
+    if (segments[0] === "scripts" && /^(?:check|format(?:-check)?|install-tools|lint)(?:\.[^/]*)?$/.test(basename)) {
+      return true;
+    }
+    if (VALIDATION_ONLY_FILE_NAMES.has(basename)) return true;
+    if (/^tsconfig(?:\.[^/]+)?\.json$/.test(basename)) return true;
+    return false;
+  }
+
+  // `apps/` is not a release unit yet. Keep repository-level markers and
+  // documentation harmless, but require every other future app path to opt
+  // into an explicit release unit before it can be merged.
+  if (pathInside(file, "apps")) {
+    const relative = file.slice("apps/".length);
+    const segments = relative.split("/");
+    const basename = segments.at(-1);
+    if (isDocumentationPath(file)) return true;
+    if (basename === ".gitkeep" || basename === ".gitignore") return true;
+    if (segments.includes("docs")) return true;
+    return false;
+  }
+
+  return false;
+}
+
+export function unmappedRuntimeChanges(changedFiles) {
+  const files = [...new Set(changedFiles)].sort();
+  return files.filter(
+    (file) =>
+      (SCAFFOLD_ONLY_SERVICE_ROOTS.some((root) => pathInside(file, root)) || pathInside(file, "apps")) &&
+      !isValidationOnlyPath(file),
+  );
+}
+
+function assertNoUnmappedRuntimeChanges(changedFiles) {
+  const unmapped = unmappedRuntimeChanges(changedFiles);
+  if (unmapped.length > 0) {
+    throw new Error(
+      `unmapped runtime changes require an explicit release unit before merge: ${unmapped.join(", ")}`,
+    );
+  }
+}
+
 export function classifyChanges(changedFiles, units) {
   const files = [...new Set(changedFiles)].sort();
+  assertNoUnmappedRuntimeChanges(files);
   if (units.length > 0) return "runtime";
   if (files.length === 0) return "empty";
   if (files.every(isDocumentationPath)) return "documentation";

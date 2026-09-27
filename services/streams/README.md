@@ -6,15 +6,17 @@ metadata and validation tools. The monorepo root owns the Bun and Turborepo
 workspace; this service package keeps the `@0000/streams` workspace identity.
 
 Streams provides the boundary for ordered streams of events or records. The
-canonical product metadata requires `0000-database` for durable storage; the
-imported implementation currently stores records in a Cloudflare Durable
-Object backed by SQLite. That database integration has not been verified.
+canonical product metadata requires `0000-platform` for authentication and
+`0000-database` for durable storage; the imported implementation currently
+stores records in a Cloudflare Durable Object backed by SQLite. That database
+integration has not been verified.
 
 The Worker exposes browser, API, and MCP surfaces. Browser requests use
 Cloudflare Access, while MCP requests use the configured bearer token. A hosted
 0000 account is not required. Cloudflare is the public ingress and runtime
 class. The Wrangler route and migration configuration are present, but this
-service's deployment has not been verified. No license has been selected.
+service's deployment has not been verified. The public monorepo selects
+AGPL-3.0-only for this service.
 
 From the monorepo root, run the workspace checks:
 

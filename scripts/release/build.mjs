@@ -9,6 +9,7 @@ import {
   assertReleaseConfig,
   normalisePath,
   readJson,
+  readJsonc,
   readReleaseConfig,
   repositoryRoot,
   sha256,
@@ -56,9 +57,11 @@ function archiveUnit(unit, commit) {
 function wranglerCommand(unit) {
   const configured = process.env.WRANGLER_BIN;
   if (configured) return configured;
-  const service = unit.build.config_path.split("/")[1];
-  const local = path.join(repositoryRoot, `services/${service}/node_modules/.bin/wrangler`);
-  return fs.existsSync(local) ? local : "wrangler";
+  const serviceDirectory = path.dirname(unit.build.config_path);
+  const serviceLocal = path.join(repositoryRoot, serviceDirectory, "node_modules/.bin/wrangler");
+  if (fs.existsSync(serviceLocal)) return serviceLocal;
+  const rootLocal = path.join(repositoryRoot, "node_modules/.bin/wrangler");
+  return fs.existsSync(rootLocal) ? rootLocal : "wrangler";
 }
 
 function copyDirectory(source, destination) {
@@ -114,6 +117,7 @@ function buildWorkerUnit(unit, plan) {
   const wranglerOutput = path.join(temporaryRoot, "wrangler-output");
   const artifactRoot = path.join(temporaryRoot, "artifact");
   const wranglerConfig = repositoryPath(unit.build.config_path, `${unit.name} build.config_path`);
+  const sourceConfig = readJsonc(wranglerConfig);
   let logConfig;
   fs.mkdirSync(wranglerOutput);
   fs.mkdirSync(artifactRoot);
@@ -144,7 +148,11 @@ function buildWorkerUnit(unit, plan) {
     }
     const workerBytes = fs.readFileSync(generatedWorker);
     fs.writeFileSync(path.join(artifactRoot, unit.build.entrypoint), workerBytes);
-    fs.writeFileSync(path.join(artifactRoot, unit.build.config), stableJson(neutralWranglerConfig(unit)), "utf8");
+    fs.writeFileSync(
+      path.join(artifactRoot, unit.build.config),
+      stableJson(neutralWranglerConfig(unit, sourceConfig)),
+      "utf8",
+    );
 
     const assets = buildDirectory(unit, unit.build.assets, artifactRoot);
     const migrations = buildDirectory(unit, unit.build.migrations, artifactRoot);

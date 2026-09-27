@@ -9,11 +9,22 @@ affected runtime units, the `sha256:` digest of each artifact, and the
 The release currently publishes these units:
 
 - Gateway as a deterministic, prebuilt Cloudflare Worker bundle;
-- Streams Worker source archive; and
-- Msg Worker as a deterministic, prebuilt Cloudflare Worker bundle;
+- Streams as a deterministic, prebuilt Cloudflare Worker bundle, including its
+  Durable Object binding and SQLite migration metadata;
+- Msg as a deterministic, prebuilt Cloudflare Worker bundle;
 - Communicator control-plane Worker/UI source;
-- Communicator Matrix Gateway source for the private host; and
-- Communicator bridge image lock and Docker-host configuration source.
+- Communicator's native Matrix Gateway and systemd package source; and
+- Communicator's external bridge image lock and Docker-host configuration
+  source.
+
+The Communicator units are source archives, not prebuilt Worker or native
+binary deployment inputs. The control-plane archive contains the Worker and
+UI source plus its nested workspace; it does not authorize a Cloudflare
+deployment. The Matrix Gateway archive contains the Rust source, pinned Rust
+workspace, and reviewable systemd package. The bridge archive contains the
+Compose wiring, pinned external image references, and provider configuration
+templates; public CI does not build, publish, or claim ownership of those
+third-party images.
 
 The other units remain source archives until their own runtime packagers are
 implemented. They are not valid prebuilt Worker deployment inputs merely
@@ -33,6 +44,14 @@ Brain, Platform, or Database validation change cannot be sent as an invalid
 zero-artifact runtime event. A private Cloud workflow may consume a release
 record and pin the exact artifact digest for staging; this public workflow does
 not deploy any public production service or grant production credentials.
+
+Until Platform, Database, and Brain have release units, their documented
+metadata and check-only files remain validation-only. Any other changed path
+under those service roots, or under `apps/`, is treated as a possible runtime
+change and fails release planning until an explicit release unit is configured.
+This fail-closed guard prevents new source, configuration, or migration code
+from being silently skipped; it does not change the units selected for the
+currently deployed services.
 
 Gateway's `gateway-<version>.tar.gz` is an `application/gzip` archive with
 these root-level files:
@@ -60,10 +79,21 @@ asset digest before extraction, and reject any archive whose manifest does not
 match the event's release identity, kind, media type, compatibility, and
 entrypoint contract.
 
-The route-free `wrangler.json` in the archive contains only the entrypoint and
-compatibility settings. The Gateway bundle contains no Worker name, route,
-custom domain, binding, or secret. Cloud ignores that public config for
-deployment, writes an environment-owned staging config for
+Streams uses the same archive shape and contract under
+`streams-<version>.tar.gz`. Its route-free `wrangler.json` additionally
+contains the public Durable Object binding (`STREAMS` -> `StreamsRoom`), the
+SQLite migration tag `v1`, required secret names, and observability settings.
+Cloud must preserve those binding and migration declarations when generating
+the staging config; only the Worker name, staging route, account, and secret
+values are environment-owned.
+
+The route-free Gateway `wrangler.json` in the archive contains only the
+entrypoint and compatibility settings. The Gateway bundle contains no Worker
+name, route, custom domain, binding, or secret. Streams' route-free config
+retains only its public Durable Object, migration, required-secret-name, and
+observability metadata in addition to the entrypoint and compatibility
+settings. Cloud ignores public environment selection for deployment, writes an
+environment-owned staging config for
 `0000-gateway-staging` and `gateway-staging.0000.chat`, and invokes:
 
 ```sh
@@ -111,19 +141,18 @@ config. It rejects any rewrite or removal of a migration already present at the
 release base, verifies the append-only ledger and exact migration digests, and
 applies the three D1 migrations in numeric order before the Wrangler deployment
 (which applies the Durable Object `v1` migration). It then records a `/healthz`
-smoke response for `msg-staging.0000.chat`. The live
-`msg.0000.chat` route and resources are invalid staging targets.
+smoke response for `msg-staging.0000.chat`. The live `msg.0000.chat` route and
+resources are invalid staging targets.
 
-Communicator publishes three source archives rather than deployable binaries:
-`communicator-control-plane-<version>.tar.gz` is a Cloudflare Worker/UI source
-archive, `communicator-matrix-gateway-<version>.tar.gz` is a
-`private-native-source` archive containing the Rust source and reviewable
-systemd package, and `communicator-bridge-images-<version>.tar.gz` is an
-`external-container-lock` archive containing Compose wiring, pinned external
-image references, and provider templates. Cloud may validate their immutable
-asset metadata and archive shape offline, but these units do not authorize a
-Cloudflare deployment, native-host rollout, registry push, SSH access, or
-provider login.
+Communicator's `communicator-control-plane-<version>.tar.gz`,
+`communicator-matrix-gateway-<version>.tar.gz`, and
+`communicator-bridge-images-<version>.tar.gz` assets are deterministic source
+archives. Their artifact kinds are respectively `cloudflare-worker-source`,
+`private-native-source`, and `external-container-lock`. Cloud may validate the
+immutable asset metadata and archive shape offline, but this release does not
+select a Worker name, Cloudflare account, private host, binary rollout path,
+SSH target, Docker registry, or Matrix/provider credentials. Those values must
+be designed and verified before a deployment consumer is added.
 
 After publishing the record and provenance evidence, public CI starts the
 private Cloud `staging.yml` workflow through the GitHub Actions
