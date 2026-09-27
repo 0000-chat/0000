@@ -174,11 +174,102 @@ function assertWorkerBuildConfig(unit, build) {
     throw new Error(`release unit build.files must include artifact-manifest.json: ${unit.name}`);
   }
 
+  if (build.wrapper !== undefined) {
+    if (
+      typeof build.wrapper !== "string" ||
+      !build.wrapper.startsWith("services/") ||
+      normalisePath(build.wrapper) !== build.wrapper
+    ) {
+      throw new Error(`release unit build.wrapper must be a normalized services path: ${unit.name}`);
+    }
+  }
+
+  if (build.runtime !== undefined) {
+    const runtime = build.runtime;
+    if (!runtime || typeof runtime !== "object" || Array.isArray(runtime)) {
+      throw new Error(`release unit build.runtime must be an object: ${unit.name}`);
+    }
+    const unsupported = Object.keys(runtime).filter((key) => !["rate_limits", "triggers"].includes(key));
+    if (unsupported.length > 0) {
+      throw new Error(`release unit build.runtime has unsupported keys for ${unit.name}: ${unsupported.join(", ")}`);
+    }
+    if (runtime.rate_limits !== undefined) {
+      if (!Array.isArray(runtime.rate_limits) || runtime.rate_limits.length === 0) {
+        throw new Error(`release unit build.runtime.rate_limits must be non-empty: ${unit.name}`);
+      }
+      const names = new Set();
+      for (const rateLimit of runtime.rate_limits) {
+        if (
+          !rateLimit ||
+          typeof rateLimit !== "object" ||
+          Array.isArray(rateLimit) ||
+          typeof rateLimit.name !== "string" ||
+          !NAME_RE.test(rateLimit.name) ||
+          names.has(rateLimit.name) ||
+          !rateLimit.simple ||
+          typeof rateLimit.simple !== "object" ||
+          Array.isArray(rateLimit.simple) ||
+          !Number.isInteger(rateLimit.simple.limit) ||
+          rateLimit.simple.limit <= 0 ||
+          ![10, 60].includes(rateLimit.simple.period) ||
+          Object.keys(rateLimit).some((key) => !["name", "simple"].includes(key)) ||
+          Object.keys(rateLimit.simple).some((key) => !["limit", "period"].includes(key))
+        ) {
+          throw new Error(`release unit build.runtime.rate_limits are invalid: ${unit.name}`);
+        }
+        names.add(rateLimit.name);
+      }
+    }
+    if (runtime.triggers !== undefined) {
+      if (
+        !runtime.triggers ||
+        typeof runtime.triggers !== "object" ||
+        Array.isArray(runtime.triggers) ||
+        !Array.isArray(runtime.triggers.crons) ||
+        runtime.triggers.crons.length === 0 ||
+        Object.keys(runtime.triggers).some((key) => key !== "crons") ||
+        !runtime.triggers.crons.every(
+          (cron) => typeof cron === "string" && /^[0-9*/?,L#-]+(?:\s+[0-9*/?,L#-]+){4}$/.test(cron.trim()),
+        )
+      ) {
+        throw new Error(`release unit build.runtime.triggers are invalid: ${unit.name}`);
+      }
+    }
+  }
+
+  for (const [key, label] of [["assets", "assets"], ["migrations", "migrations"]]) {
+    const directory = build[key];
+    if (directory === undefined) continue;
+    if (!directory || typeof directory !== "object" || Array.isArray(directory)) {
+      throw new Error(`release unit build.${label} must be an object: ${unit.name}`);
+    }
+    for (const field of ["source", "directory"]) {
+      if (
+        typeof directory[field] !== "string" ||
+        directory[field].length === 0 ||
+        normalisePath(directory[field]) !== directory[field]
+      ) {
+        throw new Error(`release unit build.${label}.${field} must be a normalized relative path: ${unit.name}`);
+      }
+    }
+    if (!directory.source.startsWith("services/")) {
+      throw new Error(`release unit build.${label}.source must be under services/: ${unit.name}`);
+    }
+    if (key === "assets") {
+      if (typeof directory.binding !== "string" || !NAME_RE.test(directory.binding)) {
+        throw new Error(`release unit build.assets.binding must be an identifier: ${unit.name}`);
+      }
+      if (typeof directory.run_worker_first !== "boolean") {
+        throw new Error(`release unit build.assets.run_worker_first must be boolean: ${unit.name}`);
+      }
+    }
+  }
+
   if (build.wrangler !== undefined) {
     if (!build.wrangler || typeof build.wrangler !== "object" || Array.isArray(build.wrangler)) {
       throw new Error(`release unit build.wrangler must be an object: ${unit.name}`);
     }
-    const allowed = new Set(["durable_objects", "migrations", "secrets", "observability"]);
+    const allowed = new Set(["durable_objects", "migrations", "d1_databases", "secrets", "observability"]);
     const unsupported = Object.keys(build.wrangler).filter((key) => !allowed.has(key));
     if (unsupported.length > 0) {
       throw new Error(`release unit build.wrangler contains environment-specific keys: ${unit.name}: ${unsupported.join(", ")}`);
@@ -221,6 +312,26 @@ function assertWorkerBuildConfig(unit, build) {
         throw new Error(`release unit build.wrangler.migrations is invalid: ${unit.name}`);
       }
     }
+    if (build.wrangler.d1_databases !== undefined) {
+      if (!Array.isArray(build.wrangler.d1_databases) || build.wrangler.d1_databases.length === 0) {
+        throw new Error(`release unit build.wrangler.d1_databases must be non-empty: ${unit.name}`);
+      }
+      for (const database of build.wrangler.d1_databases) {
+        if (
+          !database ||
+          typeof database !== "object" ||
+          Array.isArray(database) ||
+          typeof database.binding !== "string" ||
+          !NAME_RE.test(database.binding) ||
+          typeof database.database_name !== "string" ||
+          database.database_name.length === 0 ||
+          typeof database.migrations_dir !== "string" ||
+          normalisePath(database.migrations_dir) !== database.migrations_dir
+        ) {
+          throw new Error(`release unit build.wrangler d1_databases are invalid: ${unit.name}`);
+        }
+      }
+    }
     if (build.wrangler.secrets !== undefined) {
       const required = build.wrangler.secrets?.required;
       if (
@@ -244,7 +355,7 @@ function assertWorkerBuildConfig(unit, build) {
       }
     }
   }
-  assertWorkerBuildConfigMatchesSource(unit, build);
+  if (!build.wrapper) assertWorkerBuildConfigMatchesSource(unit, build);
 }
 
 function canonicalJson(value) {

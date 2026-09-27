@@ -11,7 +11,7 @@ The release currently publishes these units:
 - Gateway as a deterministic, prebuilt Cloudflare Worker bundle;
 - Streams as a deterministic, prebuilt Cloudflare Worker bundle, including its
   Durable Object binding and SQLite migration metadata;
-- msg Worker;
+- Msg as a deterministic, prebuilt Cloudflare Worker bundle;
 - Communicator control-plane Worker/UI source;
 - Communicator's native Matrix Gateway and systemd package source; and
 - Communicator's external bridge image lock and Docker-host configuration
@@ -109,6 +109,40 @@ published as a public artifact. The live `gateway.0000.chat` name and route
 are invalid staging targets. Cloud owns staging, canary, production, and
 rollback promotion; this repository does not deploy or claim live staging
 health.
+
+Msg's `msg-worker-<version>.tar.gz` is also an `application/gzip` prebuilt
+Cloudflare Worker bundle. Its deterministic archive contains the generated
+Worker, a route-free neutral config, the manifest, the generated Mermaid
+static asset tree, and the ordered D1 migration files:
+
+```text
+worker.js
+wrangler.json
+artifact-manifest.json
+assets/_msg/asset/mermaid-11.17.2.min.js
+migrations/0001_operations.sql
+migrations/0002_operations_retention.sql
+migrations/0003_creation_plan.sql
+```
+
+The public build runs the pinned Mermaid asset generator before copying
+`services/msg/worker/public` into `assets/`. The embedded manifest records the
+`ASSETS` binding, D1 `MSG_DB` binding and migration directory, the
+`ConversationRoom` Durable Object binding, migration tag `v1`, required secret
+names (never values), observability settings, the four logical rate-limit
+contracts, the `17 3 * * *` cron contract, and a SHA-256 digest for every
+ordered migration file. Rate-limit namespace IDs are environment-owned and are
+injected by private Cloud from Phase; the public artifact never contains those
+IDs. The archive does not contain a Worker name, route, database ID, secret
+value, or production resource identifier.
+
+Cloud must verify those bytes and metadata before generating its own staging
+config. It rejects any rewrite or removal of a migration already present at the
+release base, verifies the append-only ledger and exact migration digests, and
+applies the three D1 migrations in numeric order before the Wrangler deployment
+(which applies the Durable Object `v1` migration). It then records a `/healthz`
+smoke response for `msg-staging.0000.chat`. The live `msg.0000.chat` route and
+resources are invalid staging targets.
 
 Communicator's `communicator-control-plane-<version>.tar.gz`,
 `communicator-matrix-gateway-<version>.tar.gz`, and

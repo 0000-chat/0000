@@ -92,6 +92,23 @@
           "type": "array",
           "items": { "type": "string", "pattern": "^[A-Za-z0-9._-]+$" }
         },
+        "directories": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string", "pattern": "^[A-Za-z0-9._-]+$" }
+        },
+        "migration_files": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name", "digest"],
+            "properties": {
+              "name": { "type": "string", "pattern": "^migrations/[0-9]{4,}_[a-z0-9_]+\\.sql$" },
+              "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
+            }
+          }
+        },
         "entrypoint_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
         "deployment": {
           "type": "object",

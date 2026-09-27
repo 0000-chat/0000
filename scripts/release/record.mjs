@@ -25,7 +25,16 @@ export function createReleaseRecord(plan, metadata) {
         source_commit: artifact.source_commit,
         archive_paths: artifact.archive_paths
       };
-      for (const key of ["artifact_format", "entrypoint", "config", "files", "entrypoint_digest", "deployment"]) {
+      for (const key of [
+        "artifact_format",
+        "entrypoint",
+        "config",
+        "files",
+        "directories",
+        "migration_files",
+        "entrypoint_digest",
+        "deployment"
+      ]) {
         if (artifact[key] !== undefined) record[key] = artifact[key];
       }
       return record;

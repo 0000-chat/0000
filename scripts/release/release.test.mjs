@@ -16,6 +16,7 @@ import {
 import { createReleaseEvent } from "./event.mjs";
 import { createReleaseRecord } from "./record.mjs";
 import { neutralWranglerConfig, workerArtifactManifest } from "./worker.mjs";
+import { migrationMetadata } from "./migrations.mjs";
 
 const config = readReleaseConfig();
 const head = "0123456789abcdef0123456789abcdef01234567";
@@ -122,6 +123,60 @@ test("Gateway bundle manifest matches the Cloud staging contract exactly", () =>
     compatibility_date: "2026-08-06",
     compatibility_flags: ["nodejs_compat"]
   });
+});
+
+test("Msg bundle manifest carries static asset, D1, and Durable Object metadata", () => {
+  const msg = config.units.find((unit) => unit.name === "msg-worker");
+  const plan = makePlan({ config, base: head, head, changedFiles: ["services/msg/worker/src/worker.ts"] });
+  assert.deepEqual(workerArtifactManifest(msg, plan), {
+    schema_version: 1,
+    product: "0000",
+    name: "msg-worker",
+    version: plan.release_version,
+    kind: "cloudflare-worker-bundle",
+    media_type: "application/gzip",
+    source_commit: head,
+    compatibility: { api: "v1", config: "v1" },
+    entrypoint: "worker.js",
+    compatibility_date: "2026-08-09",
+    compatibility_flags: ["nodejs_compat"],
+    assets: { binding: "ASSETS", directory: "assets", run_worker_first: true },
+    durable_objects: { bindings: [{ name: "ConversationRoom", class_name: "ConversationRoom" }] },
+    migrations: [{ tag: "v1", new_sqlite_classes: ["ConversationRoom"] }],
+    d1_databases: [{ binding: "MSG_DB", database_name: "0000-msg-operations", migrations_dir: "migrations" }],
+    required_secrets: [
+      "MSG_DATA_ENCRYPTION_KEY_V1",
+      "MSG_OPERATOR_TOKEN",
+      "MSG_VAPID_PUBLIC_KEY",
+      "MSG_VAPID_PRIVATE_KEY",
+      "MSG_VAPID_SUBJECT"
+    ],
+    observability: { enabled: true, head_sampling_rate: 1 },
+    rate_limits: [
+      { name: "MSG_RATE_LIMIT_CREATION", simple: { limit: 6, period: 60 } },
+      { name: "MSG_RATE_LIMIT_READS", simple: { limit: 60, period: 60 } },
+      { name: "MSG_RATE_LIMIT_POSTS", simple: { limit: 20, period: 60 } },
+      { name: "MSG_RATE_LIMIT_LIVE", simple: { limit: 10, period: 60 } }
+    ],
+    triggers: { crons: ["17 3 * * *"] }
+  });
+});
+
+test("Msg D1 migration metadata is ordered and content-addressed", () => {
+  const directory = path.join(repositoryRoot, "services/msg/worker/migrations");
+  const files = fs.readdirSync(directory);
+  assert.deepEqual(migrationMetadata(directory, files), [
+    { name: "migrations/0001_operations.sql", digest: "sha256:b7e5aa7e3dc060cc4a0737ad8167a8ae7a1e4b8d7242559150a058ce8309d67a" },
+    { name: "migrations/0002_operations_retention.sql", digest: "sha256:f4c1ca7d78d230806a4c21809bc2290fbaf54ff85f414f0f616392c0c3df3372" },
+    { name: "migrations/0003_creation_plan.sql", digest: "sha256:33933dda69e77a7f570c15c9d3f8b9d62be98a1378faefd1d0a3489bf81aad2c" }
+  ]);
+});
+
+test("Msg neutral Wrangler config retains the cron trigger without environment-owned rate-limit IDs", () => {
+  const msg = config.units.find((unit) => unit.name === "msg-worker");
+  const neutral = neutralWranglerConfig(msg);
+  assert.deepEqual(neutral.triggers, { crons: ["17 3 * * *"] });
+  assert.equal("ratelimits" in neutral, false);
 });
 
 test("Streams bundle preserves Durable Object bindings and migrations in neutral config", () => {
