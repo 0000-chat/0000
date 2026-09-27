@@ -11,7 +11,8 @@ not require a hosted 0000 account; Brain uses the operator's Platform for
 common identity and authorization.
 
 Cloudflare is the public ingress and normal runtime class. No resources are
-provisioned by this service, and no license is selected.
+provisioned by this service. The service uses AGPL-3.0-only under the public
+monorepo license topology.
 
 Run ./scripts/check for the service validation. The outer monorepo check
 validates the @0000/brain workspace wrapper.

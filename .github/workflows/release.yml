@@ -131,6 +131,7 @@ jobs:
       - name: Notify private Cloud staging
         env:
           CLOUD_RELEASE_DISPATCH_TOKEN: ${{ secrets.CLOUD_RELEASE_DISPATCH_TOKEN }}
+          CLOUD_RELEASE_REPOSITORY: ${{ vars.CLOUD_RELEASE_REPOSITORY }}
           GH_TOKEN: ${{ secrets.CLOUD_RELEASE_DISPATCH_TOKEN }}
           RELEASE_EVENT: ${{ runner.temp }}/0000-release-event.json
         run: |
@@ -139,8 +140,12 @@ jobs:
             echo "CLOUD_RELEASE_DISPATCH_TOKEN (Cloud Actions:write credential) is required to start private staging." >&2
             exit 1
           fi
+          if [[ ! "${CLOUD_RELEASE_REPOSITORY:-}" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
+            echo "CLOUD_RELEASE_REPOSITORY must be configured as owner/repository." >&2
+            exit 1
+          fi
           release_event=$(tr -d '\n' < "$RELEASE_EVENT")
           gh api --method POST \
-            repos/0000-chat/0000-cloud/actions/workflows/staging.yml/dispatches \
+            "repos/$CLOUD_RELEASE_REPOSITORY/actions/workflows/staging.yml/dispatches" \
             --raw-field ref=main \
             --raw-field "inputs[release_event]=$release_event"

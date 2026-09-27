@@ -45,8 +45,8 @@ if metadata.get("schema_version") != 1 or metadata.get("name") != "0000-communic
     raise SystemExit("invalid product metadata")
 if metadata.get("status") == "scaffold-only" or metadata.get("application_code") is not True:
     raise SystemExit("product metadata still describes a scaffold")
-if metadata.get("license_selected") is not False:
-    raise SystemExit("license selection changed during migration")
+if metadata.get("license_selected") is not True:
+    raise SystemExit("Communicator must record its selected public license")
 
 readme = (root / "README.md").read_text(encoding="utf-8")
 for required_text in ("Cloudflare", "Matrix Gateway", "Standalone public"):

@@ -190,6 +190,62 @@ test("rejects room writes while the post kill switch is enabled", async () => {
   expect(response.status).toBe(503);
 });
 
+test("keeps GET posting off by default and manages a separate delegated capability", async () => {
+  const { room: durable } = await room();
+  const management = "management-token";
+  const delegated = "delegated-token";
+  await durable.fetch(request("/initialize", { management_hash: await hashCapability(management), initial: { content: "first", author: "a", display_name: "a", semantic_type: "message" } }));
+
+  const beforeEnable = await durable.fetch(request("/get-post", { token: delegated, request_id: "r1", input: { content: "blocked", author: "b", display_name: "b", semantic_type: "message" } }));
+  const enabled = await durable.fetch(new Request(`https://room/manage?token=${management}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "enable", get_post_token: delegated }) }));
+  const posted = await durable.fetch(request("/get-post", { token: delegated, request_id: "r1", input: { content: "second", author: "b", display_name: "b", semantic_type: "message" } }));
+  const replay = await durable.fetch(request("/get-post", { token: delegated, request_id: "r1", input: { content: "second", author: "b", display_name: "b", semantic_type: "message" } }));
+
+  expect(beforeEnable.status).toBe(404);
+  expect(enabled.status).toBe(200);
+  expect(await enabled.json()).toMatchObject({ get_post_enabled: true });
+  expect(await posted.json()).toMatchObject({ accepted: true, replayed: false, request_id: "r1", sequence: 2 });
+  expect(await replay.json()).toMatchObject({ accepted: true, replayed: true, request_id: "r1", sequence: 2 });
+  expect(await (await durable.fetch(new Request("https://room/read?after=0"))).text()).toContain("second");
+});
+
+test("revokes and rotates GET posting capabilities before the next write transaction", async () => {
+  const { room: durable } = await room();
+  const management = "management-token";
+  await durable.fetch(request("/initialize", { management_hash: await hashCapability(management), initial: { content: "first", author: "a", display_name: "a", semantic_type: "message" } }));
+  const manage = (action: string, token?: string) => new Request(`https://room/manage?token=${management}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action, ...(token ? { get_post_token: token } : {}) }) });
+  await durable.fetch(manage("enable", "old-token"));
+  await durable.fetch(manage("rotate", "new-token"));
+
+  const old = await durable.fetch(request("/get-post", { token: "old-token", request_id: "old", input: { content: "old", author: "b", display_name: "b", semantic_type: "message" } }));
+  const current = await durable.fetch(request("/get-post", { token: "new-token", request_id: "new", input: { content: "new", author: "b", display_name: "b", semantic_type: "message" } }));
+  await durable.fetch(manage("disable"));
+  const disabled = await durable.fetch(request("/get-post", { token: "new-token", request_id: "disabled", input: { content: "disabled", author: "b", display_name: "b", semantic_type: "message" } }));
+
+  expect(old.status).toBe(404);
+  expect(current.status).toBe(200);
+  expect(disabled.status).toBe(404);
+  expect((await (await durable.fetch(new Request("https://room/read?after=0"))).json()).latest_message).toBe(2);
+});
+
+test("prefixes delegated GET retries to avoid accidental POST key collisions", async () => {
+  const { room: durable } = await room();
+  const management = "management-token";
+  const input = { content: "same logical message", author: "b", display_name: "b", semantic_type: "message" };
+  await durable.fetch(request("/initialize", { management_hash: await hashCapability(management), initial: { content: "first", author: "a", display_name: "a", semantic_type: "message" } }));
+  await durable.fetch(new Request(`https://room/manage?token=${management}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "enable", get_post_token: "delegated-token" }) }));
+  const post = await durable.fetch(request("/messages", { idempotency_key: "shared-request", input }));
+  const getPost = await durable.fetch(request("/get-post", { token: "delegated-token", request_id: "shared-request", input }));
+  const getRetry = await durable.fetch(request("/get-post", { token: "delegated-token", request_id: "shared-request", input }));
+  const conflict = await durable.fetch(request("/get-post", { token: "delegated-token", request_id: "shared-request", input: { ...input, content: "different" } }));
+
+  expect(post.status).toBe(200);
+  expect(await getPost.json()).toMatchObject({ accepted: true, replayed: false, sequence: 3, request_id: "shared-request" });
+  expect(await getRetry.json()).toMatchObject({ accepted: true, replayed: true, sequence: 3, request_id: "shared-request" });
+  expect(conflict.status).toBe(409);
+  expect((await (await durable.fetch(new Request("https://room/read?after=0"))).json()).latest_message).toBe(3);
+});
+
 test("allows forced deletion only through the internal Durable Object route", async () => {
   const { context, room: durable } = await room();
   await durable.fetch(request("/initialize", { management_hash: "hash", initial: { content: "first", author: "a", display_name: "a", semantic_type: "message" } }));
@@ -326,6 +382,110 @@ test("migrates a capped legacy room before its old alarm can expire it", async (
   expect(replay.status).toBe(200);
   expect(await replay.json()).toMatchObject({ replayed: true, message: { id: "legacy-message", reply_to: "999" } });
   expect(restarted.context.alarmAt).toBe(lastMessageAt + ROOM_LIMITS.inactivityTtlMs);
+});
+
+test("reads a room created by the standalone v4 Worker", async () => {
+  const database = new Database(":memory:");
+  database.exec(`
+    CREATE TABLE room_schema (singleton INTEGER PRIMARY KEY CHECK(singleton = 1), version INTEGER NOT NULL);
+    CREATE TABLE room_state (
+      singleton INTEGER PRIMARY KEY CHECK(singleton = 1), schema_version INTEGER NOT NULL,
+      protocol_version INTEGER NOT NULL, created_at INTEGER NOT NULL, last_message_at INTEGER NOT NULL,
+      inactivity_expires_at INTEGER NOT NULL, absolute_expires_at INTEGER NOT NULL,
+      next_sequence INTEGER NOT NULL, message_count INTEGER NOT NULL, total_bytes INTEGER NOT NULL,
+      status TEXT NOT NULL, tombstone_expires_at INTEGER, management_hash TEXT
+    );
+    CREATE TABLE messages (
+      sequence INTEGER PRIMARY KEY, id TEXT NOT NULL UNIQUE, content TEXT NOT NULL, author TEXT NOT NULL,
+      display_name TEXT NOT NULL, client TEXT, semantic_type TEXT NOT NULL, reply_to TEXT,
+      created_at INTEGER NOT NULL, client_message_id TEXT UNIQUE, byte_count INTEGER NOT NULL,
+      idempotency_key TEXT
+    );
+    CREATE TABLE name_claims (normalized_name TEXT PRIMARY KEY, password_hash TEXT NOT NULL, created_at INTEGER NOT NULL);
+    CREATE TABLE legacy_names (normalized_name TEXT PRIMARY KEY);
+    INSERT INTO room_schema VALUES (1, 4);
+    INSERT INTO room_state VALUES (1, 4, 1, 1, 1, 9999999999999, 9999999999999, 2, 1, 1, 'active', NULL, 'hash');
+    INSERT INTO messages VALUES (1, 'id', 'x', 'author', 'display', NULL, 'message', NULL, 1, NULL, 1, NULL);
+  `);
+  database.query("INSERT INTO name_claims (normalized_name, password_hash, created_at) VALUES (?, ?, ?)").run("author", await hashCapability("old-password"), 1);
+
+  const { room: durable } = await room(database, () => 1_000);
+  const response = await durable.fetch(new Request("https://room/read?after=0"));
+
+  expect(response.status).toBe(200);
+  expect(await response.json()).toMatchObject({ latest_message: 1, messages: [{ sequence: 1, display_name: "display" }] });
+  const wrongPassword = await durable.fetch(request("/messages", { input: { content: "second", author: "author", display_name: "display", semantic_type: "message", name_password: "wrong-password" } }));
+  expect(wrongPassword.status).toBe(409);
+});
+
+test("opens and reads a schema 14 room after restoring removed delegated-posting columns", async () => {
+  const database = new Database(":memory:");
+  const initial = await room(database, () => 1_000);
+  const created = await initial.room.fetch(request("/initialize", {
+    now: 1_000,
+    management_hash: "management-hash",
+    initial: { content: "first", author: "agent", display_name: "Agent", semantic_type: "message" },
+  }));
+  expect(created.status).toBe(200);
+
+  database.exec("ALTER TABLE room_state DROP COLUMN get_post_hash; ALTER TABLE room_state DROP COLUMN get_post_enabled;");
+  database.query("UPDATE room_schema SET version = 14 WHERE singleton = 1").run();
+  database.query("UPDATE room_state SET schema_version = 14 WHERE singleton = 1").run();
+
+  const restarted = await room(database, () => 2_000);
+  const response = await restarted.room.fetch(new Request("https://room/read?after=0"));
+
+  expect(response.status).toBe(200);
+  expect(await response.json()).toMatchObject({ latest_message: 1, messages: [{ content: "first", sequence: 1 }] });
+  expect(database.query("SELECT get_post_hash, get_post_enabled FROM room_state WHERE singleton = 1").get()).toEqual({ get_post_hash: null, get_post_enabled: 0 });
+});
+
+test("repairs missing coordination tables when a high-version room is read", async () => {
+  const database = new Database(":memory:");
+  const initial = await room(database, () => 1_000);
+  const created = await initial.room.fetch(request("/initialize", {
+    now: 1_000,
+    management_hash: "management-hash",
+    initial: { content: "fixture", author: "agent", display_name: "Agent", semantic_type: "message" },
+  }));
+  expect(created.status).toBe(200);
+
+  const coordinationTables = [
+    "coordination_proposals",
+    "coordination_requests",
+    "coordination_events",
+    "coordination_retries",
+    "coordination_panel",
+    "coordination_decisions",
+    "coordination_decision_positions",
+    "coordination_decision_accepted_records",
+    "coordination_decision_approval_evidence",
+    "coordination_supersessions",
+    "coordination_corrections",
+    "coordination_disputes",
+    "coordination_dispute_reviews",
+  ];
+  for (const table of coordinationTables) database.exec(`DROP TABLE IF EXISTS ${table}`);
+  database.exec("UPDATE room_schema SET version = 15 WHERE singleton = 1; UPDATE room_state SET schema_version = 15 WHERE singleton = 1");
+
+  const restarted = await room(database, () => 2_000);
+  const [{ DurableRoomService }, { createWorker }] = await Promise.all([
+    import("./room-service"),
+    import("./worker"),
+  ]);
+  const service = new DurableRoomService({
+    getByName: () => ({ fetch: (input) => restarted.room.fetch(input) }),
+  }, "https://msg.0000.chat");
+  const response = await createWorker(service).fetch(new Request("https://msg.0000.chat/fixture-room/agent?after=0", {
+    headers: { accept: "application/json" },
+  }));
+
+  expect(response.status).toBe(200);
+  expect(await response.json()).toMatchObject({ latest_message: 1, messages: [{ sequence: 1 }] });
+  expect(database.query("SELECT version FROM room_schema WHERE singleton = 1").get()).toEqual({ version: 17 });
+  const repairedTables = (database.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name GLOB 'coordination_*' ORDER BY name").all() as { name: string }[]).map(({ name }) => name);
+  expect(repairedTables).toEqual(coordinationTables.sort());
+  database.close();
 });
 
 test("does not expose the legacy absolute expiry field in room responses", async () => {
@@ -690,4 +850,57 @@ test("accepts a reconnect cursor and reports the current latest sequence", async
   await durable.fetch(request("/messages", { now: now + 1, input: { content: "second", author: "a", display_name: "a", semantic_type: "message" } }));
   expect((await durable.fetch(new Request("https://room/live?after=1"))).status).toBe(101);
   expect(JSON.parse(context.sockets[0].sent[0])).toMatchObject({ type: "ready", latest_message: 2 });
+});
+
+test("supports direct MCP posting, status, owner control, and name password replay", async () => {
+  const database = new Database(":memory:");
+  let now = 1_000;
+  const { room: durable } = await room(database, () => now);
+  const management = "owner-token";
+  try {
+    const initialized = await durable.fetch(request("/initialize", {
+      management_hash: await hashCapability(management),
+      initial: { content: "first", author: "owner", display_name: "owner", name_password: "owner-secret", semantic_type: "message" },
+    }));
+    expect(initialized.status).toBe(200);
+
+    const status = await durable.fetch(new Request("https://room/status"));
+    expect(await status.json()).toMatchObject({ active: true, agent_posting_enabled: true, latest_message: 1 });
+
+    now += 1;
+    const posted = await durable.fetch(new Request("https://room/mcp-post", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ input: { content: "from mcp", author: "agent", display_name: "agent", client_message_id: "mcp-1", semantic_type: "message" } }),
+    }));
+    expect(posted.status).toBe(200);
+    const postedValue = await posted.json() as Record<string, unknown>;
+    expect(postedValue).toMatchObject({ accepted: true, replayed: false, request_id: "mcp-1", sequence: 2 });
+    expect(postedValue.name_password).toEqual(expect.any(String));
+    expect(postedValue.name_password_notice).toEqual(expect.any(String));
+
+    const replay = await durable.fetch(new Request("https://room/mcp-post", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ input: { content: "from mcp", author: "agent", display_name: "agent", client_message_id: "mcp-1", name_password: postedValue.name_password, semantic_type: "message" } }),
+    }));
+    const replayValue = await replay.json() as Record<string, unknown>;
+    expect(replayValue).toMatchObject({ accepted: true, replayed: true, sequence: 2 });
+    expect(replayValue).not.toHaveProperty("name_password");
+
+    const disabled = await durable.fetch(request(`/manage?token=${management}`, { action: "disable_mcp" }));
+    expect(await disabled.json()).toMatchObject({ agent_posting_enabled: false });
+    expect((await durable.fetch(new Request("https://room/status"))).status).toBe(200);
+    expect(await (await durable.fetch(new Request("https://room/status"))).json()).toMatchObject({ agent_posting_enabled: false });
+    expect((await durable.fetch(new Request("https://room/mcp-post", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ input: { content: "blocked", author: "agent", display_name: "agent", client_message_id: "mcp-2", name_password: postedValue.name_password, semantic_type: "message" } }),
+    }))).status).toBe(404);
+
+    const enabled = await durable.fetch(request(`/manage?token=${management}`, { action: "enable_mcp" }));
+    expect(await enabled.json()).toMatchObject({ agent_posting_enabled: true });
+  } finally {
+    database.close();
+  }
 });

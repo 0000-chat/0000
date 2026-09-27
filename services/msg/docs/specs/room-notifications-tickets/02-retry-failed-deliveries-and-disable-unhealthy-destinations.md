@@ -23,4 +23,3 @@ Show delivery attempts, last success, last failure, current endpoint state, reco
 ## Parent
 
 [Room Notifications spec](https://github.com/0000-chat/0000-full/issues/24)
-

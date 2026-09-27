@@ -8,6 +8,14 @@ permissions:
   contents: read
 
 jobs:
+  topology:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+      - run: bun run check:topology
   check:
     runs-on: ubuntu-latest
     steps:
@@ -21,6 +29,8 @@ jobs:
       - run: bun install --frozen-lockfile
       - run: bun run check
       - run: bun run test:release
+      - name: Check license topology
+        run: bun run check:licenses
       - run: bun run check:turbo
       - run: bun run check:turbo:dry
       - name: Check Brain service

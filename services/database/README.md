@@ -7,7 +7,8 @@ service's pnpm quality tooling. See
 for the preserved standalone history and migration record.
 
 `0000-database` aims to give 0000 products and services a dependable home for
-their durable data.
+their durable data. It requires `0000-platform` for common identity and
+authentication; standalone use does not require a hosted 0000 account.
 
 It should make data easy to store, find, change, and retain without requiring
 each service to solve persistence on its own. It should give consumers clear

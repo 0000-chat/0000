@@ -1,0 +1,131 @@
+{
+  "schemaVersion": 1,
+  "policy": {
+    "agpl": {
+      "spdx": "AGPL-3.0-only",
+      "classification": "agpl-runtime",
+      "text": "LICENSE-AGPL-3.0.txt",
+      "source": "https://www.gnu.org/licenses/agpl-3.0.txt",
+      "sha256": "0d96a4ff68ad6d4b6f1f30f713b18d5184912ba8dd389f86aa7710db079abcb0"
+    },
+    "apache": {
+      "spdx": "Apache-2.0",
+      "classification": "apache-integration",
+      "text": "LICENSE-APACHE-2.0.txt",
+      "source": "https://www.apache.org/licenses/LICENSE-2.0.txt",
+      "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+    }
+  },
+  "repository": {
+    "name": "0000",
+    "license": "AGPL-3.0-only",
+    "classification": "agpl-runtime",
+    "manifest": "package.json"
+  },
+  "packages": {
+    "packages/contracts": {
+      "name": "@0000/contracts",
+      "license": "Apache-2.0",
+      "classification": "apache-integration",
+      "manifest": "packages/contracts/package.json"
+    },
+    "packages/platform-client": {
+      "name": "@0000/platform-client",
+      "license": "Apache-2.0",
+      "classification": "apache-integration",
+      "manifest": "packages/platform-client/package.json"
+    },
+    "packages/sdk": {
+      "name": "@0000/sdk",
+      "license": "Apache-2.0",
+      "classification": "apache-integration",
+      "manifest": "packages/sdk/package.json"
+    },
+    "services/brain": {
+      "name": "@0000/brain",
+      "license": "AGPL-3.0-only",
+      "classification": "agpl-runtime",
+      "manifest": "services/brain/package.json"
+    },
+    "services/communicator": {
+      "name": "@0000/communicator",
+      "license": "AGPL-3.0-only",
+      "classification": "agpl-runtime",
+      "manifest": "services/communicator/package.json"
+    },
+    "services/communicator/apps/control-plane": {
+      "name": "@communicator/control-plane",
+      "license": "AGPL-3.0-only",
+      "classification": "agpl-runtime",
+      "manifest": "services/communicator/apps/control-plane/package.json"
+    },
+    "services/communicator/packages/contracts": {
+      "name": "@communicator/contracts",
+      "license": "Apache-2.0",
+      "classification": "apache-integration",
+      "manifest": "services/communicator/packages/contracts/package.json"
+    },
+    "services/communicator/packages/test-fixtures": {
+      "name": "@communicator/test-fixtures",
+      "license": "Apache-2.0",
+      "classification": "apache-integration",
+      "manifest": "services/communicator/packages/test-fixtures/package.json"
+    },
+    "services/database": {
+      "name": "@0000/database",
+      "license": "AGPL-3.0-only",
+      "classification": "agpl-runtime",
+      "manifest": "services/database/package.json"
+    },
+    "services/gateway": {
+      "name": "@0000/gateway",
+      "license": "AGPL-3.0-only",
+      "classification": "agpl-runtime",
+      "manifest": "services/gateway/package.json"
+    },
+    "services/gateway/tooling": {
+      "name": "0000-gateway",
+      "license": "AGPL-3.0-only",
+      "classification": "agpl-runtime",
+      "manifest": "services/gateway/tooling/package.json"
+    },
+    "services/msg": {
+      "name": "@0000/msg",
+      "license": "AGPL-3.0-only",
+      "classification": "agpl-runtime",
+      "manifest": "services/msg/package.json"
+    },
+    "services/msg/cli": {
+      "name": "@0000chat/msg",
+      "license": "MIT",
+      "classification": "legacy-exception",
+      "manifest": "services/msg/cli/package.json",
+      "licenseText": "services/msg/cli/LICENSE",
+      "sha256": "521b03adebffd3c4e2696f2327ad57850220ca0e7ea85c3bf96818cb42f71830",
+      "review": {
+        "status": "reviewed",
+        "decision": "preserve-without-relicensing",
+        "reason": "The existing published msg CLI already declares MIT. This slice records its disposition while copyright authority and a migration decision remain open."
+      }
+    },
+    "services/msg/worker": {
+      "name": "@0000/msg-worker",
+      "license": "AGPL-3.0-only",
+      "classification": "agpl-runtime",
+      "manifest": "services/msg/worker/package.json"
+    },
+    "services/platform": {
+      "name": "@0000/platform",
+      "license": "AGPL-3.0-only",
+      "classification": "agpl-runtime",
+      "manifest": "services/platform/package.json"
+    },
+    "services/streams": {
+      "name": "@0000/streams",
+      "license": "AGPL-3.0-only",
+      "classification": "agpl-runtime",
+      "manifest": "services/streams/package.json"
+    }
+  },
+  "excluded": {}
+}

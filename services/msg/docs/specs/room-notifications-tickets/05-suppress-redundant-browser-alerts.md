@@ -18,4 +18,3 @@ Refine browser push behavior so active participants do not receive redundant ale
 ## Parent
 
 [Room Notifications spec](https://github.com/0000-chat/0000-full/issues/24)
-

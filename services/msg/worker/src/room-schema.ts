@@ -1,7 +1,7 @@
 import { ROOM_LIMITS } from "./room-domain";
 import { WEBHOOK_RETRY_INITIAL_DELAY_MS, WEBHOOK_RETRY_WINDOW_MS } from "./webhook-policy";
 
-export const CURRENT_ROOM_SCHEMA_VERSION = 13;
+export const CURRENT_ROOM_SCHEMA_VERSION = 17;
 
 interface SqlStorage {
   exec(query: string, ...values: unknown[]): Iterable<unknown>;
@@ -13,7 +13,7 @@ interface TransactionalStorage {
 }
 
 /** Applies only forward, ordered SQLite migrations. Future data fails closed. */
-export function migrateRoomSchema(storage: TransactionalStorage, inactivityTtlMs = ROOM_LIMITS.inactivityTtlMs): void {
+export function migrateRoomSchema(storage: TransactionalStorage, inactivityTtlMs = ROOM_LIMITS.inactivityTtlMs, now = Date.now()): void {
   storage.sql.exec("CREATE TABLE IF NOT EXISTS room_schema (singleton INTEGER PRIMARY KEY CHECK(singleton = 1), version INTEGER NOT NULL)");
   storage.transactionSync(() => {
     const versionRow = rows<{ version: number }>(storage.sql.exec("SELECT version FROM room_schema WHERE singleton = 1"))[0];
@@ -26,14 +26,14 @@ export function migrateRoomSchema(storage: TransactionalStorage, inactivityTtlMs
     if (version > CURRENT_ROOM_SCHEMA_VERSION) throw new Error("The room schema is newer than this Worker supports.");
     while (version < CURRENT_ROOM_SCHEMA_VERSION) {
       const next = version + 1;
-      applyMigration(storage.sql, next, inactivityTtlMs);
+      applyMigration(storage.sql, next, inactivityTtlMs, now);
       storage.sql.exec("UPDATE room_schema SET version = ? WHERE singleton = 1", next);
       version = next;
     }
   });
 }
 
-function applyMigration(sql: SqlStorage, version: number, inactivityTtlMs: number): void {
+function applyMigration(sql: SqlStorage, version: number, inactivityTtlMs: number, now: number): void {
   if (version === 1) {
     sql.exec(`
       CREATE TABLE IF NOT EXISTS room_state (
@@ -71,31 +71,15 @@ function applyMigration(sql: SqlStorage, version: number, inactivityTtlMs: numbe
     return;
   }
   if (version === 4) {
-    const columns = rows<{ name: string }>(sql.exec("PRAGMA table_info(room_state)"));
-    if (!columns.some((column) => column.name === "notification_id")) sql.exec("ALTER TABLE room_state ADD COLUMN notification_id TEXT");
-    const roomsWithoutNotificationId = rows<{ singleton: number }>(sql.exec("SELECT singleton FROM room_state WHERE notification_id IS NULL"));
-    for (const room of roomsWithoutNotificationId) sql.exec("UPDATE room_state SET notification_id = ?, schema_version = ? WHERE singleton = ?", crypto.randomUUID(), CURRENT_ROOM_SCHEMA_VERSION, room.singleton);
-    sql.exec(`
-      CREATE TABLE IF NOT EXISTS webhook_endpoints (
-        id TEXT PRIMARY KEY, url TEXT NOT NULL, secret TEXT NOT NULL,
-        created_at INTEGER NOT NULL, status TEXT NOT NULL CHECK(status = 'active')
-      );
-      CREATE TABLE IF NOT EXISTS webhook_deliveries (
-        id TEXT PRIMARY KEY, endpoint_id TEXT NOT NULL, event_id TEXT NOT NULL,
-        message_id TEXT NOT NULL, message_sequence INTEGER NOT NULL,
-        created_at INTEGER NOT NULL, due_at INTEGER NOT NULL,
-        attempted_at INTEGER, completed_at INTEGER, lease_expires_at INTEGER,
-        status TEXT NOT NULL CHECK(status IN ('pending', 'sending', 'delivered', 'failed')),
-        attempt_count INTEGER NOT NULL, failure_category TEXT
-      );
-      CREATE INDEX IF NOT EXISTS webhook_deliveries_due ON webhook_deliveries(status, due_at, created_at);
-      CREATE INDEX IF NOT EXISTS webhook_deliveries_endpoint ON webhook_deliveries(endpoint_id, created_at DESC);
-      CREATE INDEX IF NOT EXISTS webhook_deliveries_retention ON webhook_deliveries(created_at);
-    `);
-    sql.exec("UPDATE room_state SET schema_version = ? WHERE singleton = 1", CURRENT_ROOM_SCHEMA_VERSION);
+    ensureVersionFourSchema(sql);
     return;
   }
   if (version === 5) {
+    // The old standalone Worker also used room_schema version 4, but its v4
+    // migration created name tables instead of these webhook tables. When a
+    // room crosses into this Worker, bootstrap this Worker's v4 shape before
+    // applying the ordered v5 migration.
+    if (!tableExists(sql, "webhook_endpoints") || !tableExists(sql, "webhook_deliveries")) ensureVersionFourSchema(sql);
     sql.exec("ALTER TABLE webhook_endpoints RENAME TO webhook_endpoints_v4");
     sql.exec(`
       CREATE TABLE webhook_endpoints (
@@ -433,8 +417,9 @@ function applyMigration(sql: SqlStorage, version: number, inactivityTtlMs: numbe
     return;
   }
   if (version === 13) {
-    // Name claims are intentionally not backfilled from messages. Names that
-    // existed before this migration remain unclaimed and unprotected forever.
+    // Name claims are not inferred from messages. Historical names without an
+    // existing claim become legacy, while claims stored by an older Worker
+    // retain their password protection.
     sql.exec(`
       CREATE TABLE IF NOT EXISTS name_claims (
         normalized_name TEXT PRIMARY KEY,
@@ -446,14 +431,46 @@ function applyMigration(sql: SqlStorage, version: number, inactivityTtlMs: numbe
         normalized_name TEXT PRIMARY KEY
       );
     `);
+    const claimedNames = new Set(rows<{ normalized_name: string }>(sql.exec("SELECT normalized_name FROM name_claims")).map(({ normalized_name }) => normalized_name));
     const legacyNames = new Set<string>();
     for (const message of rows<{ author: string; display_name: string }>(sql.exec("SELECT author, display_name FROM messages"))) {
       for (const value of [message.author, message.display_name]) {
         const normalized = normalizeLegacyName(value);
-        if (normalized) legacyNames.add(normalized);
+        if (normalized && !claimedNames.has(normalized)) legacyNames.add(normalized);
       }
     }
     for (const name of legacyNames) sql.exec("INSERT OR IGNORE INTO legacy_names (normalized_name) VALUES (?)", name);
+    sql.exec("UPDATE room_state SET schema_version = ? WHERE singleton = 1", CURRENT_ROOM_SCHEMA_VERSION);
+    return;
+  }
+  if (version === 14) {
+    // Keep the v13 table shape on this upgrade path. Some deployed schema 14
+    // rooms already removed these fields; migration 15 restores them.
+    return;
+  }
+  if (version === 15) {
+    // Schema 14 removed these fields, but this Worker still supports delegated
+    // posting. Restore them with posting disabled when a room crossed that
+    // schema before this compatibility release.
+    const columns = new Set(rows<{ name: string }>(sql.exec("PRAGMA table_info(room_state)")).map((column) => column.name));
+    if (!columns.has("get_post_hash")) sql.exec("ALTER TABLE room_state ADD COLUMN get_post_hash TEXT");
+    if (!columns.has("get_post_enabled")) sql.exec("ALTER TABLE room_state ADD COLUMN get_post_enabled INTEGER NOT NULL DEFAULT 0");
+    sql.exec("UPDATE room_state SET schema_version = ? WHERE singleton = 1", CURRENT_ROOM_SCHEMA_VERSION);
+    return;
+  }
+  if (version === 16) {
+    // Version numbers from older deployments do not guarantee that every
+    // coordination table exists. Reapply the idempotent table migrations so
+    // rooms with a higher recorded version recover missing additive schema.
+    for (const compatibilityVersion of [9, 10, 11, 12]) {
+      applyMigration(sql, compatibilityVersion, inactivityTtlMs, now);
+    }
+    return;
+  }
+  if (version === 17) {
+    const columns = new Set(rows<{ name: string }>(sql.exec("PRAGMA table_info(room_state)")).map((column) => column.name));
+    if (!columns.has("mcp_post_enabled")) sql.exec("ALTER TABLE room_state ADD COLUMN mcp_post_enabled INTEGER NOT NULL DEFAULT 1");
+    sql.exec("UPDATE room_state SET mcp_post_enabled = CASE WHEN status = 'active' AND inactivity_expires_at > ? THEN 1 ELSE 0 END WHERE singleton = 1", now);
     sql.exec("UPDATE room_state SET schema_version = ? WHERE singleton = 1", CURRENT_ROOM_SCHEMA_VERSION);
     return;
   }
@@ -461,4 +478,31 @@ function applyMigration(sql: SqlStorage, version: number, inactivityTtlMs: numbe
 }
 
 function rows<T>(cursor: Iterable<unknown>): T[] { return [...cursor] as T[]; }
+function tableExists(sql: SqlStorage, name: string): boolean {
+  return rows<{ name: string }>(sql.exec("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?", name)).length > 0;
+}
+function ensureVersionFourSchema(sql: SqlStorage): void {
+  const columns = rows<{ name: string }>(sql.exec("PRAGMA table_info(room_state)"));
+  if (!columns.some((column) => column.name === "notification_id")) sql.exec("ALTER TABLE room_state ADD COLUMN notification_id TEXT");
+  const roomsWithoutNotificationId = rows<{ singleton: number }>(sql.exec("SELECT singleton FROM room_state WHERE notification_id IS NULL"));
+  for (const room of roomsWithoutNotificationId) sql.exec("UPDATE room_state SET notification_id = ?, schema_version = ? WHERE singleton = ?", crypto.randomUUID(), CURRENT_ROOM_SCHEMA_VERSION, room.singleton);
+  sql.exec(`
+    CREATE TABLE IF NOT EXISTS webhook_endpoints (
+      id TEXT PRIMARY KEY, url TEXT NOT NULL, secret TEXT NOT NULL,
+      created_at INTEGER NOT NULL, status TEXT NOT NULL CHECK(status = 'active')
+    );
+    CREATE TABLE IF NOT EXISTS webhook_deliveries (
+      id TEXT PRIMARY KEY, endpoint_id TEXT NOT NULL, event_id TEXT NOT NULL,
+      message_id TEXT NOT NULL, message_sequence INTEGER NOT NULL,
+      created_at INTEGER NOT NULL, due_at INTEGER NOT NULL,
+      attempted_at INTEGER, completed_at INTEGER, lease_expires_at INTEGER,
+      status TEXT NOT NULL CHECK(status IN ('pending', 'sending', 'delivered', 'failed')),
+      attempt_count INTEGER NOT NULL, failure_category TEXT
+    );
+    CREATE INDEX IF NOT EXISTS webhook_deliveries_due ON webhook_deliveries(status, due_at, created_at);
+    CREATE INDEX IF NOT EXISTS webhook_deliveries_endpoint ON webhook_deliveries(endpoint_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS webhook_deliveries_retention ON webhook_deliveries(created_at);
+  `);
+  sql.exec("UPDATE room_state SET schema_version = ? WHERE singleton = 1", CURRENT_ROOM_SCHEMA_VERSION);
+}
 function normalizeLegacyName(value: string): string { return value.trim().toLowerCase(); }

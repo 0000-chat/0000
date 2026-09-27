@@ -4,9 +4,9 @@
   "visibility": "public",
   "status": "active-development",
   "purpose": "Communication adapters and tenant-scoped delivery-channel application.",
-  "dependencies": [],
-  "standalone_authentication": "not-required",
+  "dependencies": ["0000-platform"],
+  "standalone_authentication": "platform-required; hosted-account-not-required",
   "hosting_class": "cloudflare-public-ingress",
   "application_code": true,
-  "license_selected": false
+  "license_selected": true
 }

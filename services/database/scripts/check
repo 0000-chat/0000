@@ -48,8 +48,8 @@ if metadata.get("schema_version") != 1 or metadata.get("name") != "0000-database
     raise SystemExit("invalid product metadata")
 if metadata.get("status") != "scaffold-only" or metadata.get("application_code") is not False:
     raise SystemExit("product is not marked scaffold-only")
-if metadata.get("license_selected") is not False:
-    raise SystemExit("scaffold must not select a license")
+if metadata.get("license_selected") is not True:
+    raise SystemExit("Database must record its selected public license")
 readme = (root / "README.md").read_text(encoding="utf-8")
 if "`0000-database` aims" not in readme or "`0000-streams` depends" not in readme:
     raise SystemExit("README must state the database purpose and confirmed dependency")

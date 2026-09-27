@@ -5,9 +5,10 @@ Gateway now has its first Cloudflare Worker application: public liveness
 `GET /health` and a public stateless MCP endpoint at `/mcp` exposing only the
 `gateway_info` diagnostic. These are operational probes, not Gateway
 Capabilities. This milestone makes no downstream service calls and has no
-Platform auth middleware, service bindings, database, secret, or selected
-license. It composes `mcp-use`; it does not fork or vendor it. The service may
-compose the Executor SDK later.
+Platform auth middleware, service bindings, database, or secret. It requires
+Platform for the shared identity boundary even though these public probes do
+not authenticate requests. It composes `mcp-use`; it does not fork or vendor
+it. The service may compose the Executor SDK later.
 
 The foundation plan, specification, and ADR are approved. This documentation
 does not claim a production deployment or live hostname evidence.

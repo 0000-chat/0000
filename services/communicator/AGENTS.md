@@ -17,9 +17,10 @@ The monorepo import record is
 `docs/migration/2026-09-15-monorepo-import.md`; use it for the source ref and
 local-state preservation details.
 
-Standalone public components do not require hosted platform authentication.
-Cloudflare is the public ingress and normal runtime class. Run `./scripts/check`
-for the relocated application and tooling check. Run
+Standalone public use does not require a hosted 0000 account. Communicator
+uses `0000-platform` for common identity and authentication. Cloudflare is the
+public ingress and normal runtime class. Run `./scripts/check` for the
+relocated application and tooling check. Run
 `pnpm run check:application` for the full nested Rust and pnpm workspace check.
 The imported application currently has a recorded pre-existing tooling
 baseline, so a check failure in those tools must be reconciled through

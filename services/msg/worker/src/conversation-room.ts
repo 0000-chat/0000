@@ -4,7 +4,7 @@ import { ERROR_CODES, isStaleRevisionDetails, isStaleSequenceDetails, ProtocolEr
 import { CLAIM_CORRECTION_KIND, coordinationMutationFingerprint, coordinationStorageBytes, COORDINATION_DEFAULT_LIMIT, COORDINATION_KIND, COORDINATION_MAX_LIMIT, COORDINATION_PANEL_KIND, COORDINATION_PROGRESS_KIND, DECISION_POSITION_KIND, DECISION_PROPOSAL_KIND, DECISION_SUPERSESSION_KIND, DISPUTE_REPORTED_EVENT_KIND, DISPUTE_REVIEWED_EVENT_KIND, MAX_COORDINATION_PAGE_BYTES, parseCoordinationClaimPath, parseCoordinationDispute, parseCoordinationDisputeReview, parseCoordinationListSelectors, parseCoordinationProposal, parseCoordinationPublish, parseCoordinationRevision, RETENTION_EXTENDED_EVENT_KIND, type ClaimCorrectionBody, type CoordinationClaimTarget, type CoordinationDecisionApproval, type CoordinationDisputeInput, type CoordinationDisputeReviewInput, type CoordinationEventKind, type CoordinationKind, type CoordinationPanelBody, type CoordinationProgressBody, type CoordinationProposalBody, type CoordinationProposalInput, type CoordinationPublishInput, type CoordinationRequestBody, type CoordinationStatus, type DecisionPositionBody, type DecisionProposalBody, type DecisionSupersessionBody } from "./coordination-domain";
 import { byteLength, compareCapabilities, DEFAULT_READ_LIMIT, hashCapability, MAX_READ_MESSAGE_BYTES, messageStorageBytes, parseRetentionExtension, retentionMetadata, ROOM_LIMITS, validateBasedOnSequence, validateBoundedCursor, validateCursor, validateReadLimit, validateRequestId, validateThrough } from "./room-domain";
 import type { MessageInput } from "./room-domain";
-import { NAME_PASSWORD_NOTICE, PROTOCOL_VERSION, type CoordinationAcceptedRecord, type CoordinationAcceptedRecordAnnotations, type CoordinationCorrection, type CoordinationDecision, type CoordinationDecisionApprovalEvidence, type CoordinationDecisionHistoryEntry, type CoordinationDecisionPosition, type CoordinationDisputeReport, type CoordinationDisputeReview, type CoordinationEvidenceItem, type CoordinationPanel, type CoordinationPanelHistoryEntry, type CoordinationProgress, type CoordinationProposal, type CoordinationProposalSummary, type CoordinationRequest, type CoordinationRequestSummary, type CoordinationSourceMessage, type CoordinationSupersession, type CreateWebhookResponse, type ManageWebhookResponse, type RedeliverWebhookResponse, type RotateWebhookSecretResponse, type WebhookAttemptMetadata, type WebhookDeliveryMetadata, type WebhookSummary } from "./protocol";
+import { MCP_READ_BYTE_BUDGET_BYTES, NAME_PASSWORD_NOTICE, PROTOCOL_VERSION, type CoordinationAcceptedRecord, type CoordinationAcceptedRecordAnnotations, type CoordinationCorrection, type CoordinationDecision, type CoordinationDecisionApprovalEvidence, type CoordinationDecisionHistoryEntry, type CoordinationDecisionPosition, type CoordinationDisputeReport, type CoordinationDisputeReview, type CoordinationEvidenceItem, type CoordinationPanel, type CoordinationPanelHistoryEntry, type CoordinationProgress, type CoordinationProposal, type CoordinationProposalSummary, type CoordinationRequest, type CoordinationRequestSummary, type CoordinationSourceMessage, type CoordinationSupersession, type CreateWebhookResponse, type ManageWebhookResponse, type RedeliverWebhookResponse, type RotateWebhookSecretResponse, type WebhookAttemptMetadata, type WebhookDeliveryMetadata, type WebhookSummary } from "./protocol";
 import { CURRENT_ROOM_SCHEMA_VERSION, migrateRoomSchema } from "./room-schema";
 import { discardWebhookResponseBody, generateWebhookSecret, normalizeWebhookUrl, redactWebhookUrl, signWebhookPayload, webhookRequestTarget } from "./webhooks";
 import { createWebPushRequest } from "./web-push-crypto";
@@ -59,6 +59,7 @@ interface RoomState {
   readonly management_hash: string | null;
   readonly get_post_enabled: number;
   readonly get_post_hash: string | null;
+  readonly mcp_post_enabled: number;
   readonly coordination_cursor: number;
   readonly published_revision: number;
   readonly message_count: number;
@@ -397,7 +398,7 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
     this.limits = resolveRoomLimits(env);
     this.now = now ?? (() => this.testNowOverride ?? resolveNow(env));
     this.signWebhook = signWebhook;
-    migrateRoomSchema(this.ctx.storage, this.limits.inactivityTtlMs);
+    migrateRoomSchema(this.ctx.storage, this.limits.inactivityTtlMs, this.now());
   }
 
   async fetch(request: Request): Promise<Response> {
@@ -429,6 +430,7 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
       const messageMatch = /^\/messages\/([^/]+)$/u.exec(url.pathname);
       if (request.method === "GET" && messageMatch) return await this.readMessage(decodePathSegment(messageMatch[1]!));
       if (request.method === "GET" && url.pathname === "/read") return await this.read(url);
+      if (request.method === "GET" && url.pathname === "/status") return await this.status();
       if (request.method === "GET" && url.pathname === "/coordination") return await this.readCoordinationOverview();
       if (request.method === "GET" && url.pathname === "/coordination/panel") return await this.readCoordinationPanel(url);
       if (request.method === "GET" && url.pathname === "/coordination/panel/history") return await this.listCoordinationPanelHistory(url);
@@ -467,6 +469,7 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
       if (request.method === "DELETE" && url.pathname === "/manage") return await this.manage(request, true);
       if (request.method === "POST" && url.pathname === "/manage") return await this.managePost(request);
       if (request.method === "POST" && url.pathname === "/get-post") return await this.getPost(request);
+      if (request.method === "POST" && url.pathname === "/mcp-post") return await this.mcpPost(request);
       if (request.method === "GET" && url.pathname === "/live") return await this.live(url);
       if (request.method === "GET" && (url.pathname === "/export.md" || url.pathname === "/export.json")) return await this.export(url.pathname === "/export.json", request);
       return this.error(ERROR_CODES.notFound, "The requested resource was not found.", 404);
@@ -578,7 +581,7 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
       const bytes = messageStorageBytes(messageInput, undefined, id);
       const inactivity = now + this.limits.inactivityTtlMs;
       this.ctx.storage.sql.exec(
-        "INSERT INTO room_state (singleton, schema_version, protocol_version, created_at, last_message_at, inactivity_expires_at, absolute_expires_at, next_sequence, message_count, total_bytes, status, tombstone_expires_at, management_hash, notification_id, get_post_hash, get_post_enabled, coordination_cursor, published_revision) VALUES (1, ?, ?, ?, ?, ?, ?, 2, 1, ?, 'active', NULL, ?, ?, NULL, 0, 0, 0)",
+        "INSERT INTO room_state (singleton, schema_version, protocol_version, created_at, last_message_at, inactivity_expires_at, absolute_expires_at, next_sequence, message_count, total_bytes, status, tombstone_expires_at, management_hash, notification_id, get_post_hash, get_post_enabled, mcp_post_enabled, coordination_cursor, published_revision) VALUES (1, ?, ?, ?, ?, ?, ?, 2, 1, ?, 'active', NULL, ?, ?, NULL, 0, 1, 0, 0)",
         CURRENT_ROOM_SCHEMA_VERSION, PROTOCOL_VERSION, now, now, inactivity, inactivity, bytes, input.management_hash, notificationId,
       );
       this.insertMessage({ ...messageInput, byte_count: bytes, created_at: now, id, sequence: 1, source_browser_id: null });
@@ -598,7 +601,9 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
   private async read(url: URL): Promise<Response> {
     await this.prepareActive(this.now());
     const state = this.requireActiveState();
-    const bounded = url.searchParams.has("limit") || url.searchParams.has("through");
+    const rawByteBudget = url.searchParams.get("max_bytes");
+    const byteBudget = rawByteBudget === null ? undefined : parseReadByteBudget(rawByteBudget);
+    const bounded = url.searchParams.has("limit") || url.searchParams.has("through") || byteBudget !== undefined;
     const after = bounded ? validateBoundedCursor(url.searchParams.get("after"), "after") : validateCursor(url.searchParams.get("after"));
     if (!bounded) {
       const messages = rows<StoredMessage>(this.ctx.storage.sql.exec("SELECT * FROM messages WHERE sequence > ? ORDER BY sequence ASC", after)).map((message) => this.toMessage(message));
@@ -612,12 +617,41 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
     if (through > latest) throw new ProtocolError(ERROR_CODES.invalidBody, "The through cursor is in the future.", 400);
     if (after > through) throw new ProtocolError(ERROR_CODES.invalidBody, "The after cursor must not be greater than through.", 400);
 
-    const candidates = rows<StoredMessage>(this.ctx.storage.sql.exec(
+    const candidateRows = rows<StoredMessage>(this.ctx.storage.sql.exec(
       "SELECT * FROM messages WHERE sequence > ? AND sequence <= ? ORDER BY sequence ASC LIMIT ?",
       after,
       through,
       limit + 1,
-    )).map((message) => this.toMessage(message));
+    ));
+    if (byteBudget !== undefined) {
+      const messages: ReturnType<ConversationRoom["toMessage"]>[] = [];
+      let consumedBytes = 0;
+      for (const candidate of candidateRows) {
+        if (messages.length >= limit) break;
+        if (messages.length === 0 && candidate.byte_count > byteBudget) {
+          throw new ProtocolError(ERROR_CODES.bodyTooLarge, "The first room message exceeds the read byte budget.", 413);
+        }
+        if (consumedBytes + candidate.byte_count > byteBudget) break;
+        messages.push(this.toMessage(candidate));
+        consumedBytes += candidate.byte_count;
+      }
+      const hasMore = messages.length < candidateRows.length;
+      return this.json({
+        protocol_version: PROTOCOL_VERSION,
+        messages,
+        latest_message: latest,
+        expires_at: iso(state.inactivity_expires_at),
+        retention: retentionMetadata(state.inactivity_expires_at, this.limits.inactivityTtlMs),
+        coordination_cursor: state.coordination_cursor,
+        published_revision: state.published_revision,
+        coordination_overview: this.coordinationOverviewValue(state),
+        access_warning: "All authors and display names are self-declared and unverified.",
+        next_after: messages.at(-1)?.sequence ?? after,
+        has_more: hasMore,
+        through,
+      });
+    }
+    const candidates = candidateRows.map((message) => this.toMessage(message));
     const messages = [] as ReturnType<ConversationRoom["toMessage"]>[];
     let serializedBytes = 2; // The [] wrapper around the serialized message array.
     let oversized = false;
@@ -1896,6 +1930,57 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
     });
   }
 
+  private async mcpPost(request: Request): Promise<Response> {
+    if (this.config.MSG_POST_DISABLED === "1") {
+      throw new ProtocolError(ERROR_CODES.serviceUnavailable, "New messages are temporarily unavailable.", 503);
+    }
+    const input = await request.json() as { input?: NameAwareMessageInput };
+    if (!input.input || typeof input.input.client_message_id !== "string") {
+      throw new ProtocolError(ERROR_CODES.invalidBody, "The client_message_id field is required.", 400);
+    }
+    const requestId = validateRequestId(input.input.client_message_id);
+    const password = await prepareNamePassword(input.input);
+    const now = this.now();
+    const result = this.commitMessage(input.input, {
+      basedOnSequence: undefined,
+      idempotencyKey: `mcp:${requestId}`,
+      namePassword: password,
+      sourceBrowserId: null,
+      authorize: (state) => {
+        if (state.mcp_post_enabled !== 1) {
+          throw new ProtocolError(ERROR_CODES.notFound, "The requested resource was not found.", 404);
+        }
+      },
+    }, now);
+    if (result.expired) {
+      await this.expire(now, "Conversation expired");
+      throw new ProtocolError(ERROR_CODES.gone, "The conversation has expired.", 410);
+    }
+    await this.schedule();
+    if (!result.replayed) this.broadcast({ protocol_version: PROTOCOL_VERSION, type: "message.created", sequence: result.message.sequence, latest_message: result.state.next_sequence - 1, expires_at: iso(result.state.inactivity_expires_at) });
+    return this.json({
+      accepted: true,
+      expires_at: iso(result.state.inactivity_expires_at),
+      ...(result.generatedPassword === undefined ? {} : { name_password: result.generatedPassword, name_password_notice: NAME_PASSWORD_NOTICE }),
+      protocol_version: PROTOCOL_VERSION,
+      replayed: result.replayed,
+      request_id: requestId,
+      sequence: result.message.sequence,
+    });
+  }
+
+  private async status(): Promise<Response> {
+    const state = this.requireState();
+    const active = state.status === "active" && this.now() < state.inactivity_expires_at;
+    return this.json({
+      active,
+      agent_posting_enabled: active && state.mcp_post_enabled === 1 && this.config.MSG_POST_DISABLED !== "1",
+      expires_at: iso(state.inactivity_expires_at),
+      latest_message: Math.max(0, state.next_sequence - 1),
+      protocol_version: PROTOCOL_VERSION,
+    });
+  }
+
   private async getPost(request: Request): Promise<Response> {
     if (this.config.MSG_POST_DISABLED === "1") {
       throw new ProtocolError(ERROR_CODES.serviceUnavailable, "New messages are temporarily unavailable.", 503);
@@ -2093,6 +2178,7 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
     return this.json({
       protocol_version: PROTOCOL_VERSION,
       expires_at: iso(result.state.inactivity_expires_at),
+      agent_posting_enabled: result.state.mcp_post_enabled === 1 && this.config.MSG_POST_DISABLED !== "1",
       get_post_enabled: result.state.get_post_enabled === 1,
       maximum_expires_at: iso(result.maximum),
       minimum_expires_at: iso(result.state.inactivity_expires_at),
@@ -2200,8 +2286,26 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
     const url = new URL(request.url);
     const token = url.searchParams.get("token") ?? "";
     const input: unknown = await request.json();
-    if (!isRecord(input) || (input.action !== "enable" && input.action !== "disable" && input.action !== "rotate")) {
-      throw new ProtocolError(ERROR_CODES.invalidBody, "The management action must be enable, disable, or rotate.", 400);
+    if (!isRecord(input) || (input.action !== "enable" && input.action !== "disable" && input.action !== "rotate" && input.action !== "enable_mcp" && input.action !== "disable_mcp")) {
+      throw new ProtocolError(ERROR_CODES.invalidBody, "The management action must be enable, disable, rotate, enable_mcp, or disable_mcp.", 400);
+    }
+    if (input.action === "enable_mcp" || input.action === "disable_mcp") {
+      const managementHash = await hashToken(token);
+      const now = this.now();
+      const result = this.ctx.storage.transactionSync(() => {
+        const state = this.requireState();
+        if (!state.management_hash || !compareCapabilities(managementHash, state.management_hash)) {
+          throw new ProtocolError(ERROR_CODES.notFound, "The requested resource was not found.", 404);
+        }
+        if (state.status !== "active" || now >= state.inactivity_expires_at) return { expired: true as const };
+        this.ctx.storage.sql.exec("UPDATE room_state SET mcp_post_enabled = ? WHERE singleton = 1", input.action === "enable_mcp" ? 1 : 0);
+        return { expired: false as const, state: this.requireState() };
+      });
+      if (result.expired) {
+        await this.expire(now, "Conversation expired");
+        throw new ProtocolError(ERROR_CODES.gone, "The conversation has expired.", 410);
+      }
+      return this.json({ protocol_version: PROTOCOL_VERSION, expires_at: iso(result.state.inactivity_expires_at), agent_posting_enabled: result.state.mcp_post_enabled === 1 });
     }
     const delegatedToken = input.action === "disable" ? undefined : input.get_post_token;
     if (input.action !== "disable" && (typeof delegatedToken !== "string" || !delegatedToken)) {
@@ -3464,7 +3568,7 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
       this.ctx.storage.sql.exec("DELETE FROM coordination_supersessions");
       this.ctx.storage.sql.exec("DELETE FROM name_claims");
       this.ctx.storage.sql.exec("DELETE FROM legacy_names");
-      this.ctx.storage.sql.exec("UPDATE room_state SET status = 'deleted', tombstone_expires_at = ?, management_hash = NULL, get_post_hash = NULL, get_post_enabled = 0, message_count = 0, total_bytes = 0, coordination_cursor = 0, published_revision = 0 WHERE singleton = 1", now + this.limits.tombstoneTtlMs);
+      this.ctx.storage.sql.exec("UPDATE room_state SET status = 'deleted', tombstone_expires_at = ?, management_hash = NULL, get_post_hash = NULL, get_post_enabled = 0, mcp_post_enabled = 0, message_count = 0, total_bytes = 0, coordination_cursor = 0, published_revision = 0 WHERE singleton = 1", now + this.limits.tombstoneTtlMs);
       return true;
     });
   }
@@ -5377,6 +5481,12 @@ function resolveNow(env: ConversationRoomEnv): number {
   return now;
 }
 function sameInput(message: StoredMessage, input: MessageInput): boolean { return message.content === input.content && message.author === input.author && message.display_name === input.display_name && message.client === (input.client ?? null) && message.semantic_type === input.semantic_type && message.reply_to === (input.reply_to ?? null) && message.client_message_id === (input.client_message_id ?? null); }
+function parseReadByteBudget(value: string): number {
+  if (!/^[1-9][0-9]*$/u.test(value)) throw new ProtocolError(ERROR_CODES.invalidBody, "The read byte budget is invalid.", 400);
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed)) throw new ProtocolError(ERROR_CODES.invalidBody, "The read byte budget is invalid.", 400);
+  return Math.min(parsed, MCP_READ_BYTE_BUDGET_BYTES);
+}
 function normalizedNames(input: Pick<MessageInput, "author" | "display_name">): readonly string[] {
   return [...new Set([normalizeName(input.author), normalizeName(input.display_name)])];
 }

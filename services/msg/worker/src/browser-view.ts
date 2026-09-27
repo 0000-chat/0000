@@ -11,7 +11,7 @@ export function selectBrowserView(url: URL, cookieHeader: string | null): Browse
     .map((part) => part.trim())
     .find((part) => part.startsWith(`${VIEW_COOKIE}=`))
     ?.slice(VIEW_COOKIE.length + 1);
-  return saved === "agent" || saved === "human" ? saved : "agent";
+  return saved === "agent" || saved === "human" ? saved : "human";
 }
 
 export function viewSwitchHref(url: URL, target: BrowserView): string {
