@@ -1,0 +1,124 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://0000.chat/schemas/public-release-record-v1.json",
+  "title": "0000 public release record",
+  "description": "Deterministic public release metadata consumed by private Cloud promotion.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["$schema", "schema_version", "product", "release", "artifacts", "cloud_selection", "publication_policy"],
+  "properties": {
+    "$schema": { "type": "string" },
+    "schema_version": { "const": 1 },
+    "product": { "const": "0000" },
+    "release": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "source", "compatibility", "change_class", "runtime_redeployment"],
+      "properties": {
+        "version": { "type": "string", "pattern": "^v[0-9]+\\.[0-9]+\\.[0-9]+-[0-9a-f]{40}$" },
+        "source": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["repository", "ref", "commit"],
+          "properties": {
+            "repository": { "const": "0000-chat/0000" },
+            "ref": { "const": "refs/heads/main" },
+            "commit": { "type": "string", "pattern": "^[0-9a-f]{40}$" }
+          }
+        },
+        "compatibility": { "$ref": "#/$defs/compatibility" },
+        "change_class": { "enum": ["empty", "documentation", "non-runtime", "runtime"] },
+        "runtime_redeployment": { "type": "boolean" }
+      }
+    },
+    "artifacts": { "type": "array", "items": { "$ref": "#/$defs/artifact" } },
+    "cloud_selection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["release", "artifacts"],
+      "properties": {
+        "release": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["version", "compatibility"],
+          "properties": {
+            "version": { "type": "string", "pattern": "^v[0-9]+\\.[0-9]+\\.[0-9]+-[0-9a-f]{40}$" },
+            "compatibility": { "$ref": "#/$defs/compatibility" }
+          }
+        },
+        "artifacts": { "type": "array", "items": { "$ref": "#/$defs/cloud-artifact" } }
+      }
+    },
+    "publication_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["production_deployment", "sdk_publication", "cli_publication", "cloud_promotion"],
+      "properties": {
+        "production_deployment": { "const": false },
+        "sdk_publication": { "const": false },
+        "cli_publication": { "const": false },
+        "cloud_promotion": { "const": "private-only" }
+      }
+    }
+  },
+  "$defs": {
+    "compatibility": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["api", "config"],
+      "properties": {
+        "api": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$" },
+        "config": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$" }
+      }
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version", "digest", "kind", "media_type", "asset_name", "compatibility", "source_commit", "archive_paths"],
+      "properties": {
+        "name": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$" },
+        "version": { "type": "string", "pattern": "^v[0-9]+\\.[0-9]+\\.[0-9]+-[0-9a-f]{40}$" },
+        "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "kind": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$" },
+        "media_type": { "const": "application/gzip" },
+        "asset_name": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*\\.tar\\.gz$" },
+        "compatibility": { "$ref": "#/$defs/compatibility" },
+        "source_commit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+        "archive_paths": { "type": "array", "items": { "type": "string" } },
+        "artifact_format": { "type": "string", "const": "0000-cloudflare-worker-bundle-v1" },
+        "entrypoint": { "type": "string", "pattern": "^[A-Za-z0-9._-]+$" },
+        "config": { "type": "string", "pattern": "^[A-Za-z0-9._-]+$" },
+        "files": {
+          "type": "array",
+          "items": { "type": "string", "pattern": "^[A-Za-z0-9._-]+$" }
+        },
+        "entrypoint_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "deployment": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["tool", "mode", "route_configuration", "command"],
+          "properties": {
+            "tool": { "const": "wrangler" },
+            "mode": { "const": "prebuilt" },
+            "route_configuration": { "const": "cloud" },
+            "command": { "type": "array", "items": { "type": "string" }, "minItems": 1 }
+          }
+        }
+      }
+    },
+    "cloud-artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version", "digest", "compatibility", "kind", "media_type", "asset_name"],
+      "properties": {
+        "name": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$" },
+        "version": { "type": "string", "pattern": "^v[0-9]+\\.[0-9]+\\.[0-9]+-[0-9a-f]{40}$" },
+        "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "compatibility": { "$ref": "#/$defs/compatibility" },
+        "kind": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$" },
+        "media_type": { "const": "application/gzip" },
+        "asset_name": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*\\.tar\\.gz$" }
+      }
+    }
+  }
+}

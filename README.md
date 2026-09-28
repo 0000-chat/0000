@@ -59,6 +59,12 @@ From `services/streams`, `bun run check` validates its workspace wrapper and
 `bun run check:application` runs the imported scaffold and tooling checks; see
 [`services/streams/README.md`](services/streams/README.md).
 
+Public release planning and artifact rules are documented in
+[`docs/release-artifacts.md`](docs/release-artifacts.md). Run
+`bun run test:release` for the deterministic affected-unit and release-record
+tests. Release scaffolding is dormant until a separately reviewed activation
+workflow is merged; this branch configures only the Gateway artifact.
+
 The import procedure and preservation records are documented in
 [`services/brain/docs/migration/2026-09-17-monorepo-import.md`](services/brain/docs/migration/2026-09-17-monorepo-import.md),
 [`services/communicator/docs/migration/2026-09-15-monorepo-import.md`](services/communicator/docs/migration/2026-09-15-monorepo-import.md),

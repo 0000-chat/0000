@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "product": "0000",
+  "release": {
+    "version_prefix": "v0.0.0-",
+    "compatibility": {
+      "api": "v1",
+      "config": "v1"
+    }
+  },
+  "units": [
+    {
+      "name": "gateway",
+      "kind": "cloudflare-worker-bundle",
+      "runtime_paths": [
+        "services/gateway/src/**",
+        "services/gateway/package.json",
+        "services/gateway/tsconfig.json",
+        "services/gateway/tooling/pnpm-lock.yaml",
+        "services/gateway/wrangler.jsonc"
+      ],
+      "archive_paths": [
+        "services/gateway/src",
+        "services/gateway/package.json",
+        "services/gateway/tsconfig.json",
+        "services/gateway/wrangler.jsonc"
+      ],
+      "build": {
+        "type": "cloudflare-worker",
+        "config_path": "services/gateway/wrangler.jsonc",
+        "entrypoint": "worker.js",
+        "config": "wrangler.json",
+        "files": ["worker.js", "wrangler.json", "artifact-manifest.json"],
+        "compatibility_date": "2026-08-06",
+        "compatibility_flags": ["nodejs_compat"]
+      }
+    }
+  ]
+}
