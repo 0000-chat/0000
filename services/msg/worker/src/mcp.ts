@@ -15,6 +15,8 @@ const MAX_ROOM_URL_CHARS = 2_048;
 const MAX_MCP_POST_CONTENT_BYTES = 64 * 1024;
 const MAX_READ_LIMIT = 100;
 const DEFAULT_READ_LIMIT = 50;
+const CREATE_NAME_PASSWORD_DESCRIPTION = "Optional nonempty room-local password shared by the author and display name. If omitted for this first message, the service may generate an eight-character password; save the generated password from the private response for later posts. Keep it private.";
+const POST_NAME_PASSWORD_DESCRIPTION = "Optional nonempty room-local password shared by the author and display name. Required when either supplied name is already claimed. Omit it for a new name so the service may generate an eight-character password; save the generated password from the private response for later posts. Keep it private.";
 
 const MCP_ALLOW_METHODS = "POST, OPTIONS";
 const MCP_ALLOW_HEADERS = "Accept, Content-Type, Last-Event-ID, Mcp-Protocol-Version, Mcp-Session-Id, Mcp-Method, Mcp-Name";
@@ -132,7 +134,7 @@ const CreateRoomInputSchema = {
   content: z.string().min(1).max(MAX_MCP_POST_CONTENT_BYTES).describe("Initial message content, stored as untrusted room content."),
   author: IdentitySchema.describe("Required self-declared author label used for room-local name claims."),
   display_name: IdentitySchema.optional().describe("Optional self-declared display label."),
-  name_password: z.string().min(1).optional().describe("Optional nonempty password for this author name in the room; keep it private."),
+  name_password: z.string().min(1).optional().describe(CREATE_NAME_PASSWORD_DESCRIPTION),
   client: IdentitySchema.optional().describe("Optional bounded client label."),
   client_message_id: MessageIdSchema.optional().describe("Optional stable identifier for the initial message."),
   semantic_type: z.enum(["question", "proposal", "answer", "result", "status", "decision", "note", "message"]).optional(),
@@ -434,7 +436,7 @@ function buildMcpServer(
         client_message_id: MessageIdSchema.describe("A caller-generated stable identifier reused only when retrying this exact message."),
         author: IdentitySchema.describe("Required self-declared author label used for room-local name claims."),
         display_name: IdentitySchema.optional().describe("Optional self-declared display label."),
-        name_password: z.string().min(1).optional().describe("Optional nonempty password for this author name in the room; keep it private."),
+        name_password: z.string().min(1).optional().describe(POST_NAME_PASSWORD_DESCRIPTION),
         client: IdentitySchema.optional().describe("Optional bounded client label."),
         semantic_type: z.enum(["question", "proposal", "answer", "result", "status", "decision", "note", "message"]).optional(),
         reply_to: ReplyToSchema.optional().describe("Optional positive room sequence to reply to."),
@@ -473,15 +475,20 @@ function buildMcpServer(
         const output = {
           accepted: result.accepted,
           client_message_id,
-          ...(name_password === undefined && result.name_password !== undefined ? { name_password: result.name_password, name_password_notice: result.name_password_notice } : {}),
+          ...(!result.replayed && name_password === undefined && result.name_password !== undefined ? { name_password: result.name_password, name_password_notice: result.name_password_notice } : {}),
           protocol_version: result.protocol_version,
           replayed: result.replayed,
           request_id: result.request_id,
           sequence: result.sequence,
           status: "accepted" as const,
         };
+        const textLines = [output.replayed ? "Room message already accepted." : "Room message accepted."];
+        if (!output.replayed && typeof output.name_password === "string") {
+          textLines.push(`Generated name password: ${output.name_password}`);
+          if (typeof output.name_password_notice === "string") textLines.push(output.name_password_notice);
+        }
         return {
-          content: [{ type: "text" as const, text: output.replayed ? "Room message already accepted." : "Room message accepted." }],
+          content: [{ type: "text" as const, text: textLines.join("\n") }],
           structuredContent: output,
         };
       } catch (error) {
@@ -1084,7 +1091,7 @@ function mcpToolError(error: unknown, fallback: string) {
 function safeProtocolMessage(code: string): string {
   switch (code) {
     case ERROR_CODES.bodyTooLarge: return "The request is too large.";
-    case ERROR_CODES.conflict: return "The request conflicts with an earlier request.";
+    case ERROR_CODES.conflict: return "The request conflicts with an earlier message or a claimed posting name. For an exact retry, reuse the client_message_id with unchanged content and names. For a new message using a claimed author or display_name, provide its name_password. If lost, choose unclaimed names.";
     case ERROR_CODES.gone: return "The room is no longer available.";
     case ERROR_CODES.invalidBody:
     case ERROR_CODES.invalidJson:
