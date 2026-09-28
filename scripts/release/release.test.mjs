@@ -19,6 +19,7 @@ const config = readReleaseConfig();
 const head = "0123456789abcdef0123456789abcdef01234567";
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const releaseWorkflowPath = path.join(repositoryRoot, ".github/workflows/release.yml");
+const releaseWorkflow = fs.readFileSync(releaseWorkflowPath, "utf8");
 const legacyGatewayWorkflow = fs.readFileSync(path.join(repositoryRoot, ".github/workflows/deploy-gateway.yml"), "utf8");
 
 test("release unit configuration is valid and excludes private or non-runtime publications", () => {
@@ -83,17 +84,89 @@ test("non-Gateway service changes publish no runtime artifact", () => {
   }
 });
 
-test("release scaffolding is dormant until a separate activation workflow is reviewed", () => {
-  assert.equal(fs.existsSync(releaseWorkflowPath), false);
+test("activation workflow creates an immutable release for every main merge", () => {
+  assert.match(releaseWorkflow, /^  push:\s*\n    branches:\s*\n      - main$/m);
+  assert.doesNotMatch(releaseWorkflow, /^\s+paths(?:-ignore)?:/m);
+  assert.match(releaseWorkflow, /group: public-release-\$\{\{ github\.sha \}\}/);
+  assert.match(releaseWorkflow, /Create, populate, and publish immutable GitHub release/);
+  assert.match(releaseWorkflow, /immutable releases must be enabled/);
+  assert.match(releaseWorkflow, /--draft/);
+  assert.match(releaseWorkflow, /--draft=false/);
+  assert.match(releaseWorkflow, /release_immutable=.*\.immutable/);
 });
 
-test("activation-workflow and documentation changes produce zero runtime artifacts", () => {
-  for (const changed of [[".github/workflows/release.yml"], ["docs/release-activation.md"]]) {
-    const plan = makePlan({ config, base: head, head, changedFiles: changed });
+test("activation-workflow-only merge publishes a zero-artifact record", () => {
+  const plan = makePlan({ config, base: head, head, changedFiles: [".github/workflows/release.yml"] });
+  assert.equal(plan.change_class, "non-runtime");
+  assert.equal(plan.runtime_redeployment, false);
+  assert.deepEqual(plan.affected_units, []);
+  assert.deepEqual(plan.artifacts, []);
+
+  const record = createReleaseRecord(plan, []);
+  assert.equal(record.release.runtime_redeployment, false);
+  assert.deepEqual(record.artifacts, []);
+  assert.deepEqual(record.cloud_selection.artifacts, []);
+});
+
+test("Gateway-only runtime changes package exactly one deployable artifact", () => {
+  const plan = makePlan({ config, base: head, head, changedFiles: ["services/gateway/src/worker.ts"] });
+  assert.equal(plan.change_class, "runtime");
+  assert.equal(plan.runtime_redeployment, true);
+  assert.deepEqual(plan.affected_units, ["gateway"]);
+  assert.deepEqual(plan.artifacts, [{
+    name: "gateway",
+    version: plan.release_version,
+    kind: "cloudflare-worker-bundle",
+    compatibility: { api: "v1", config: "v1" },
+    archive_paths: [
+      "services/gateway/src",
+      "services/gateway/package.json",
+      "services/gateway/tsconfig.json",
+      "services/gateway/wrangler.jsonc"
+    ]
+  }]);
+});
+
+test("the first activation does not add Msg, Streams, or Communicator release units", () => {
+  for (const changedFile of [
+    "services/msg/worker/src/worker.ts",
+    "services/streams/src/worker.ts",
+    "services/communicator/apps/control-plane/worker/index.ts"
+  ]) {
+    const plan = makePlan({ config, base: head, head, changedFiles: [changedFile] });
     assert.equal(plan.runtime_redeployment, false);
     assert.deepEqual(plan.affected_units, []);
     assert.deepEqual(plan.artifacts, []);
   }
+  assert.doesNotMatch(releaseWorkflow, /(?:Msg|Streams|Communicator)/);
+});
+
+test("Cloud dispatch is App-authenticated and fails closed for non-runtime plans", () => {
+  assert.match(releaseWorkflow, /PUBLIC_RELEASE_APP_CLIENT_ID/);
+  assert.match(releaseWorkflow, /PUBLIC_RELEASE_APP_PRIVATE_KEY/);
+  assert.match(releaseWorkflow, /CLOUD_RELEASE_REPOSITORY/);
+  assert.match(releaseWorkflow, /CLOUD_RELEASE_APP_CLIENT_ID/);
+  assert.match(releaseWorkflow, /CLOUD_RELEASE_APP_PRIVATE_KEY/);
+  assert.match(releaseWorkflow, /actions\/create-github-app-token@1b10c78c7865c340bc4f6099eb2f838309f1e8c3 # v3\.1\.1/);
+  assert.match(releaseWorkflow, /permission-workflows: write/);
+  assert.match(releaseWorkflow, /permission-administration: read/);
+  assert.match(releaseWorkflow, /permission-actions: write/);
+  assert.match(releaseWorkflow, /repositories: \$\{\{ steps\.cloud-target\.outputs\.repository \}\}/);
+  assert.doesNotMatch(releaseWorkflow, /CLOUD_RELEASE_DISPATCH_TOKEN/);
+
+  const cloudDispatch = releaseWorkflow.slice(releaseWorkflow.indexOf("- name: Validate private Cloud dispatch target"));
+  assert.match(cloudDispatch, /if: steps\.plan\.outputs\.runtime_redeployment == 'true'/);
+  assert.match(cloudDispatch, /CLOUD_RELEASE_REPOSITORY must be configured as owner\/repository/);
+  assert.match(cloudDispatch, /CLOUD_RELEASE_APP_PRIVATE_KEY repository secret is required/);
+  assert.match(cloudDispatch, /the ephemeral Cloud Actions:write token is required/);
+  assert.doesNotMatch(cloudDispatch, /CLOUDFLARE_API_TOKEN|wrangler\s+deploy/);
+
+  const activationPlan = makePlan({ config, base: head, head, changedFiles: [".github/workflows/release.yml"] });
+  assert.equal(activationPlan.runtime_redeployment, false);
+  assert.match(
+    cloudDispatch,
+    /^        if: steps\.plan\.outputs\.runtime_redeployment == 'true'$/m
+  );
 });
 
 test("Gateway production fallback is manual and owner-confirmed", () => {
