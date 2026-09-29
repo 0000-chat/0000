@@ -62,8 +62,11 @@ From `services/streams`, `bun run check` validates its workspace wrapper and
 Public release planning and artifact rules are documented in
 [`docs/release-artifacts.md`](docs/release-artifacts.md). Run
 `bun run test:release` for the deterministic affected-unit and release-record
-tests. Release scaffolding is dormant until a separately reviewed activation
-workflow is merged; this branch configures only the Gateway artifact.
+tests. The public release workflow runs for every merge pushed to `main` and
+publishes an immutable release record. This repository configures exactly one
+runtime artifact, the Gateway bundle; non-runtime changes remain
+Cloud-silent, while the combined release-setup merge selects Gateway because
+the release-unit map is a global runtime input.
 
 The import procedure and preservation records are documented in
 [`services/brain/docs/migration/2026-09-17-monorepo-import.md`](services/brain/docs/migration/2026-09-17-monorepo-import.md),

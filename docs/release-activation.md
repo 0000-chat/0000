@@ -1,11 +1,17 @@
-# Release activation follow-up
+# Public release activation
 
-This document records the activation boundary for the dormant public release
-scaffold. It is documentation only: this change does not add a GitHub release
-workflow and does not publish or dispatch a runtime artifact when merged.
+This document records the activation boundary for the public release
+scaffold and workflow. The scaffold and activation are intended to land in one
+reviewed `main` merge: the public workflow runs for every subsequent push to
+`main`, publishes an immutable release record, and dispatches private Cloud
+only when the release plan contains a runtime artifact.
 
-The follow-up activation PR must be reviewed independently and prove the
-following sequence:
+The combined release-setup merge changes `release-units.json`, which is a
+global runtime input. Its first-main-merge plan therefore selects exactly one
+unit, `gateway`, and produces one prebuilt Worker bundle. This is a release
+artifact and private staging dispatch, not a public production deployment.
+
+The workflow and tests prove the following sequence for later merges:
 
 1. A docs-only or activation-workflow-only merge plans zero affected runtime
    units and produces an empty artifact list.

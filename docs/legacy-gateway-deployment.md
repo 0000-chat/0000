@@ -12,4 +12,4 @@ fallback. It runs only through `workflow_dispatch`, requires the exact
 commit is still the current `main`, deploys Gateway, and smoke-tests
 `gateway.0000.chat`. Private Cloud owns normal staging, promotion, and
 rollback; this manual fallback is not an automatic path and is not part of the
-dormant release scaffold.
+public release workflow.

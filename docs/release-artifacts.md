@@ -1,9 +1,10 @@
 # Public release artifacts
 
-This branch carries the deterministic release engine and the public contract
-for the first release unit: the Gateway Worker. The scaffolding is deliberately
-dormant. There is no public release workflow in this branch, so merging it to
-`main` creates no release record, no artifact, and no Cloud workflow dispatch.
+This repository carries the deterministic release engine, public release
+workflow, and public contract for the first release unit: the Gateway Worker.
+Every merge pushed to `main` creates an immutable release record. Runtime
+plans publish the selected artifacts and may dispatch private Cloud staging;
+the workflow never deploys public production.
 
 `release-units.json` is the public path-to-unit map. It contains exactly one
 runtime unit, `gateway`, and its only deployable output is a prebuilt,
@@ -19,11 +20,13 @@ Root package and lockfile inputs conservatively select every configured unit;
 because this slice has one unit, that still means Gateway only.
 
 Documentation changes and an activation-workflow-only change produce a plan
-with `runtime_redeployment: false` and an empty artifact list. That is the
-required first activation proof: a separate follow-up activation PR may be
-merged and must produce zero runtime artifacts before any Gateway runtime
-change is released. The activation PR must not add Msg, Streams, or
-Communicator units as a side effect.
+with `runtime_redeployment: false` and an empty artifact list. The combined
+release-setup merge also changes `release-units.json`, a global runtime input,
+so its first-main-merge plan intentionally selects Gateway and publishes one
+prebuilt Worker artifact. This makes the first public-main merge a complete
+release setup while keeping production deployment private and manual-only.
+The activation workflow must not add Msg, Streams, or Communicator units as a
+side effect.
 
 Run the local contract tests with:
 
@@ -56,13 +59,12 @@ production credentials and does not deploy the bundle.
 
 ## Activation boundary
 
-Activation is a separate, reviewed follow-up PR. It may add the trusted public
-workflow only after the dormant scaffold is merged and the docs-only/activation
-plan is observed to contain zero runtime artifacts. The activation workflow
-must dispatch Cloud only when the plan contains the single Gateway artifact,
-must retain immutable release provenance, and must not make a `main` merge a
-production deployment. A later Gateway source/config change is the first
-change permitted to produce one runtime artifact.
+The trusted public workflow is reviewed together with the release scaffold. It
+dispatches Cloud only when the plan contains the single Gateway artifact,
+retains immutable release provenance, and never makes a `main` merge a
+production deployment. Later Gateway source/config changes also produce one
+runtime artifact; changes outside the configured runtime paths remain
+zero-artifact releases.
 
 Cloud should consume the archive and matching metadata from the same immutable
 release, verify the digest and provenance, and own staging, canary,
