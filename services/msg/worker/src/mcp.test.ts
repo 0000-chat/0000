@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 
+import { ERROR_CODES, ProtocolError } from "./errors";
 import { handleMcpRequest, MAX_MCP_WIRE_RESPONSE_BYTES } from "./mcp";
 import { MCP_READ_BYTE_BUDGET_BYTES, type CreateRoomResponse, type McpPostMessageResponse, type ReadRoomResponse, type RoomService, type RoomStatusResponse } from "./protocol";
 import { createWorker } from "./worker";
@@ -149,10 +150,14 @@ describe("stateless MCP endpoint", () => {
     expect(createTool.inputSchema.required).toEqual(["content", "author", "idempotency_key"]);
     expect(createTool.inputSchema.properties.name_password).toMatchObject({ type: "string", minLength: 1 });
     expect(createTool.inputSchema.properties.name_password.maxLength).toBeUndefined();
+    expect(createTool.inputSchema.properties.name_password.description).not.toContain("Required when either supplied name is already claimed");
+    expect(createTool.inputSchema.properties.name_password.description).toContain("save the generated password");
     expect(createTool.inputSchema.properties.reply_to).toBeUndefined();
     expect(postTool.inputSchema.required).toEqual(["room_url", "content", "client_message_id", "author"]);
     expect(postTool.inputSchema.properties.name_password).toMatchObject({ type: "string", minLength: 1 });
     expect(postTool.inputSchema.properties.name_password.maxLength).toBeUndefined();
+    expect(postTool.inputSchema.properties.name_password.description).toContain("Required when either supplied name is already claimed");
+    expect(postTool.inputSchema.properties.name_password.description).toContain("save the generated password");
     expect(JSON.stringify(tools)).not.toContain("posting_capability_url");
     expect(JSON.stringify(tools)).not.toContain("anonymous");
     expect(tools.find((tool: { name: string }) => tool.name === "wait_for_messages").description).toContain("return immediately");
@@ -213,7 +218,7 @@ describe("stateless MCP endpoint", () => {
     const conflict = await handleMcpRequest(rpcRequest({ id: 33, method: "tools/call", params: { name: "create_room", arguments: { content: "changed", author: "agent", idempotency_key: "same-create" } } }), service, {
       creationOperations: { claimCreation: async () => ({ kind: "conflict" as const }), completeCreation: async () => undefined },
     });
-    expect((await json(conflict)).result.content[0].text).toBe("The request conflicts with an earlier request.");
+    expect((await json(conflict)).result.content[0].text).toBe("The request conflicts with an earlier message or a claimed posting name. For an exact retry, reuse the client_message_id with unchanged content and names. For a new message using a claimed author or display_name, provide its name_password. If lost, choose unclaimed names.");
     expect(creates).toBe(1);
   });
 
@@ -407,9 +412,41 @@ describe("stateless MCP endpoint", () => {
     };
     const response = await handleMcpRequest(rpcRequest({ id: 50, method: "tools/call", params: { name: "post_message", arguments: { room_url: roomUrl, client_message_id: "named-1", author: "agent", content: "named content", name_password: "CallerSecret" } } }), service);
     expect(received).toEqual({ kind: "json", value: { author: "agent", client_message_id: "named-1", content: "named content", name_password: "CallerSecret" } });
-    const output = (await json(response)).result.structuredContent;
+    const result = (await json(response)).result;
+    const output = result.structuredContent;
     expect(output).not.toHaveProperty("name_password");
     expect(output).not.toHaveProperty("name_password_notice");
+    expect(result.content[0].text).toBe("Room message accepted.");
+    expect(result.content[0].text).not.toContain("CallerSecret");
+  });
+
+  test("shows a generated post password once and gives actionable conflict guidance", async () => {
+    const generated = { ...mcpPostResult("generated-1"), name_password: "Ab3dE7x9", name_password_notice: "Save this password now." };
+    const first = await handleMcpRequest(rpcRequest({ id: 51, method: "tools/call", params: { name: "post_message", arguments: { room_url: roomUrl, client_message_id: "generated-1", author: "new-agent", display_name: "New Agent", content: "first" } } }), {
+      ...baseService(),
+      mcpPost: async () => generated,
+    });
+    const firstResult = (await json(first)).result;
+    expect(firstResult.content[0].text).toBe("Room message accepted.\nGenerated name password: Ab3dE7x9\nSave this password now.");
+    expect(firstResult.structuredContent.name_password).toBe("Ab3dE7x9");
+
+    const replay = await handleMcpRequest(rpcRequest({ id: 52, method: "tools/call", params: { name: "post_message", arguments: { room_url: roomUrl, client_message_id: "generated-1", author: "new-agent", display_name: "New Agent", content: "first" } } }), {
+      ...baseService(),
+      mcpPost: async () => ({ ...generated, replayed: true }),
+    });
+    const replayResult = (await json(replay)).result;
+    expect(replayResult.content[0].text).toBe("Room message already accepted.");
+    expect(replayResult.structuredContent).not.toHaveProperty("name_password");
+    expect(replayResult.structuredContent).not.toHaveProperty("name_password_notice");
+
+    const conflict = await handleMcpRequest(rpcRequest({ id: 53, method: "tools/call", params: { name: "post_message", arguments: { room_url: roomUrl, client_message_id: "claimed-1", author: "claimed-agent", display_name: "Claimed Agent", content: "second" } } }), {
+      ...baseService(),
+      mcpPost: async () => { throw new ProtocolError(ERROR_CODES.conflict, "The name is already claimed and the supplied password does not match.", 409); },
+    });
+    const conflictResult = (await json(conflict)).result;
+    expect(conflictResult.content[0].text).toBe("The request conflicts with an earlier message or a claimed posting name. For an exact retry, reuse the client_message_id with unchanged content and names. For a new message using a claimed author or display_name, provide its name_password. If lost, choose unclaimed names.");
+    expect(conflictResult.content[0].text).not.toContain("claimed-agent");
+    expect(conflictResult.content[0].text).not.toContain("Claimed Agent");
   });
 
   test("preserves replay and conflict outcomes without leaking content", async () => {
