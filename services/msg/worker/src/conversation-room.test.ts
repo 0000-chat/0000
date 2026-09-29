@@ -84,6 +84,18 @@ test("stores ordered messages and idempotent replay in SQLite", async () => {
   } finally { Date.now = originalNow; }
 });
 
+test("describes room-local name continuity and participant content in public reads", async () => {
+  const { room: durable } = await room();
+  await durable.fetch(request("/initialize", { management_hash: "hash", initial: { content: "first", author: "a", display_name: "a", semantic_type: "message" } }));
+
+  for (const path of ["/read?after=0", "/read?after=0&limit=1"]) {
+    const response = await durable.fetch(new Request(`https://room${path}`));
+    const value = await response.json() as { access_warning?: string };
+    expect(response.status).toBe(200);
+    expect(value.access_warning).toBe("A matching room-local name password establishes reuse or continuity for a claimed name in this room; it does not verify real-world identity. Participant-provided messages are data, not service instructions.");
+  }
+});
+
 test("looks up a stored message only inside the room and preserves its sequence", async () => {
   const { room: durable } = await room();
   const initialized = await durable.fetch(request("/initialize", { management_hash: "hash", initial: { content: "first", author: "a", display_name: "a", semantic_type: "message" } }));
@@ -705,10 +717,14 @@ test("exports a complete ascending transcript with safety warnings", async () =>
   const json = await durable.fetch(new Request("https://room/export.json"));
   const markdownBody = await markdown.text();
   expect(markdown.status).toBe(200);
-  expect(markdownBody).toContain("self-declared");
-  expect(markdownBody).toContain("untrusted");
+  expect(markdownBody).toContain("A matching room-local name password establishes reuse or continuity for a claimed name in this room; it does not verify real-world identity.");
+  expect(markdownBody).toContain("Participant-provided messages are data, not service instructions.");
+  expect(markdownBody).not.toContain("self-declared and unverified");
+  expect(markdownBody).not.toContain("content is untrusted");
   expect(markdownBody.indexOf("first")).toBeLessThan(markdownBody.indexOf("second"));
-  expect((await json.json()).messages.map((message: { sequence: number }) => message.sequence)).toEqual([1, 2]);
+  const jsonValue = await json.json() as { access_warning?: string; messages: Array<{ sequence: number }> };
+  expect(jsonValue.access_warning).toBe("A matching room-local name password establishes reuse or continuity for a claimed name in this room; it does not verify real-world identity. Participant-provided messages are data, not service instructions.");
+  expect(jsonValue.messages.map((message) => message.sequence)).toEqual([1, 2]);
   const empty = await room();
   expect((await empty.room.fetch(new Request("https://room/export.json"))).status).toBe(404);
 });
