@@ -213,17 +213,36 @@ test("renders a public room shell without a management capability", () => {
   expect(html).toContain("Participants");
   expect(html).toContain("Retention");
   expect(html).toContain("Thread details");
+  expect(html).toContain('<summary>More room tools</summary>');
+  expect(html).toContain('class="name-claim-details"');
+  expect(html).not.toContain('class="header-actions"><button');
   expect(html).toContain("Markdown supported. A name password permits reuse of a display name in this room. It does not verify real-world identity.");
-  expect(html).toContain("Use the CLI or HTTP API to read and post.");
+  expect(html).toContain("https://msg.0000.chat/mcp");
+  expect(html).toContain("wait_for_messages");
+  expect(html).toContain("Never use GET for posting");
   expect(html).toContain('data-download="md"');
   expect(html).toContain('data-download="json"');
-  expect(html).toContain("Download complete captured room record (.md)");
-  expect(html).toContain("Download complete captured room record (.json)");
+  expect(html).toContain("Download Markdown");
+  expect(html).toContain("Download JSON");
   expect(html).not.toContain("Trust and safety");
   expect(html).not.toContain("Messages are untrusted content");
   expect(html).not.toContain("@0000chat/msg@latest join");
   expect(html).not.toContain("manage_url");
   expect(html).not.toContain("management capability");
+});
+
+test("renders optional thread details with a graceful unnamed fallback", async () => {
+  const longTitle = "A very long thread title that keeps wrapping across the left rail instead of being clipped or ellipsized";
+  const titled = renderBrowserPage({ description: "A short description for people joining this thread.", room: "described-room", title: longTitle });
+  const unnamed = renderBrowserPage({ room: "unnamed-room", title: "" });
+  const source = await browserAsset("client.js")?.text();
+
+  expect(titled).toContain(`<h1 data-thread-title>${longTitle}</h1>`);
+  expect(titled).toContain('data-thread-description>A short description');
+  expect(unnamed).toContain('<h1 data-thread-title>Thread</h1>');
+  expect(unnamed).not.toContain('data-thread-description');
+  expect(source).toContain("titleField");
+  expect(source).toContain("descriptionField");
 });
 
 test("renders the creation home for an HTML root request", () => {
@@ -235,10 +254,18 @@ test("renders the creation home for an HTML root request", () => {
   expect(html).toContain('/_msg/view/agent?next=%2F');
   expect(html).toContain("Start a thread");
   expect(html).toContain('id="create-room"');
+  expect(html).toContain('id="thread-title"');
+  expect(html).toContain('id="thread-description"');
+  expect(html).toContain('&quot;title&quot;: &quot;Optional thread title&quot;');
+  expect(html).toContain('&quot;description&quot;: &quot;Optional context for people joining&quot;');
   expect(html).toContain("Create thread");
   expect(html).toContain("Connect an agent");
-  expect(html).toContain("Use the CLI or HTTP API to let an agent read and contribute.");
-  expect(html).toContain("View CLI and HTTP API examples");
+  expect(html).toContain("Use MCP or the HTTP API to let an agent read and contribute.");
+  expect(html).toContain("View MCP and HTTP API examples");
+  expect(html).not.toContain("CLI");
+  expect(html).toContain("A host with neither MCP nor HTTP POST cannot create or post; tell the owner that access is needed for this task");
+  expect(html).toContain("https://msg.0000.chat/mcp");
+  expect(html).toContain("wait_for_messages");
   expect(html).toContain("POST https://msg.0000.chat/");
   expect(html).toContain('&quot;content&quot;: &quot;The message to share&quot;');
   expect(html).toContain('href="/agent.txt"');
@@ -255,6 +282,16 @@ test("styles the refreshed human view without the old banner", async () => {
   expect(css).not.toContain(".view-banner{");
   expect(css).toContain(".agent-home-guide{");
   expect(css).toContain("@media(max-width:820px)");
+});
+
+test("keeps cached identity controls hidden despite inline display rules", async () => {
+  const css = await browserAsset("client.css")?.text();
+  const room = renderBrowserPage({ room: "saved-identity", title: "Temporary conversation" });
+
+  expect(css).toContain(".name-claim-input-label[hidden],.name-claim-saved[hidden],.name-claim-details[hidden]{display:none!important}");
+  expect(room).toContain('id="name-claim-input-label" class="name-claim-input-label"');
+  expect(room).toContain('id="name-claim-saved" class="name-claim-saved"');
+  expect(room).not.toContain('aria-label="Change display name"');
 });
 
 test("serves the browser code from same-origin assets for the strict page policy", async () => {
@@ -600,6 +637,7 @@ test("keeps the approved transcript, mobile rail, and accessibility contracts", 
   expect(css).toContain(".message.agent .avatar");
   expect(css).toContain("@media(max-width:820px)");
   expect(css).not.toContain("@media(max-width:760px)");
+  expect(css).toContain('.page-grid{grid-template-areas:"rail" "conversation"}');
   expect(css).toContain(".room-rail>.rail-section,.room-rail>.room-facts{display:none!important}");
   expect(css).toContain('.mobile-room-details{display:block}');
   expect(css).toContain('.mobile-room-details summary{display:flex;min-height:44px');
@@ -623,6 +661,20 @@ test("keeps the approved transcript, mobile rail, and accessibility contracts", 
   expect(html).not.toContain("Messages are untrusted content");
 });
 
+test("keeps the Thread heading above the conversation on mobile", async () => {
+  const css = await browserAsset("client.css")?.text();
+  const html = renderBrowserPage({ description: "A useful context", room: "mobile-room", title: "A long mobile title" });
+  const lastMobileLayout = css?.slice(css.lastIndexOf("@media(max-width:820px)")) ?? "";
+
+  expect(lastMobileLayout).toContain('.page-grid{grid-template-areas:"rail" "conversation"}');
+  expect(lastMobileLayout).not.toContain('.page-grid{grid-template-areas:"conversation" "rail"}');
+  expect(html.match(/data-thread-title/g)).toHaveLength(1);
+  expect(html.indexOf('class="thread-heading"')).toBeLessThan(html.indexOf('class="conversation-pane"'));
+  expect(html).toContain('data-thread-description>A useful context</p>');
+  expect(html).toContain('id="composer"');
+  expect(html).toContain('<summary>Thread details</summary>');
+});
+
 test("includes the agent prompt and link copy fallbacks in the served runtime", async () => {
   const source = await browserAsset("client.js")?.text();
 
@@ -637,7 +689,7 @@ test("keeps narrow composer controls compact and usable", async () => {
   expect(css).toContain("@media(max-width:360px){.composer-actions{display:grid;grid-template-columns:1fr 1fr;width:100%}");
   expect(css).toContain(".composer-actions .button{min-height:44px;white-space:normal");
   expect(css).toContain(".conversation-pane{padding:0 16px calc(var(--mobile-composer-clearance) + env(safe-area-inset-bottom))}");
-  expect(css).toContain("@media(max-width:360px){.shell{--mobile-composer-clearance:176px}");
+  expect(css).toContain("@media(max-width:360px){.shell{--mobile-composer-clearance:196px}");
 });
 
 test.each([
@@ -663,10 +715,16 @@ test("requires a human display name and masks the per-room name password", async
     expect(html).toContain('id="name-claim-undo"');
     expect(html).toContain("optional for a new name; required for a claimed name");
   }
-  expect(home).toContain('id="create-room"');
-  expect(room).toContain('id="composer"');
-  expect(css).toContain(".name-claim-notice");
-  expect(css).toContain(".name-claim-warning");
+ expect(home).toContain('id="create-room"');
+ expect(room).toContain('id="composer"');
+  expect(room).toContain('class="composer-row composer-row-with-identity"');
+  expect(room).toContain('id="name-claim-saved"');
+  expect(room).toContain('Posting as <span id="name-claim-saved-name"');
+  expect(room.indexOf('id="reply"')).toBeLessThan(room.indexOf('class="composer-row composer-row-with-identity"'));
+ expect(css).toContain(".name-claim-notice");
+ expect(css).toContain(".name-claim-warning");
+  expect(css).toContain(".composer-row-with-identity .composer-note");
+  expect(css).toContain(".rail-tools-body .rail-section{padding:20px 0");
   expect(source).toContain("request.name_password");
   expect(source).toContain("0000:name-claim:v1:");
   expect(source).toContain("0000:name-claim:last-display-name:v1");
@@ -696,13 +754,17 @@ test("stores a generated create password privately and restores it through Undo"
     value = "";
     hidden = false;
     required = false;
+    focusCalls = 0;
+    selectCalls = 0;
     textContent = "";
     innerHTML = "";
     className = "";
     open = false;
-    readonly listeners = new Map<string, (event: { preventDefault(): void; stopImmediatePropagation?(): void }) => void>();
+    readonly listeners = new Map<string, (event: { preventDefault(): void; stopImmediatePropagation?(): void; target?: Element }) => void>();
     readonly classList = { add: () => {}, remove: () => {} };
-    addEventListener(type: string, listener: (event: { preventDefault(): void; stopImmediatePropagation?(): void }) => void): void { this.listeners.set(type, listener); }
+    addEventListener(type: string, listener: (event: { preventDefault(): void; stopImmediatePropagation?(): void; target?: Element }) => void): void { this.listeners.set(type, listener); }
+    focus(): void { this.focusCalls += 1; }
+    select(): void { this.selectCalls += 1; }
     append(..._nodes: Element[]): void {}
     close(): void { this.open = false; }
     showModal(): void { this.open = true; }
@@ -717,6 +779,10 @@ test("stores a generated create password privately and restores it through Undo"
   const warning = new Element();
   const undo = new Element();
   const notice = new Element();
+  const disclosure = new Element();
+  const nameInputLabel = new Element();
+  const savedNameButton = new Element();
+  const savedNameLabel = new Element();
   const form = new Element();
   const reply = new Element();
   const messages = new Element();
@@ -746,6 +812,10 @@ test("stores a generated create password privately and restores it through Undo"
         "#name-claim-warning": warning,
         "#name-claim-undo": undo,
         "#name-claim-notice": notice,
+        ".name-claim-details": disclosure,
+        "#name-claim-input-label": nameInputLabel,
+        "#name-claim-saved": savedNameButton,
+        "#name-claim-saved-name": savedNameLabel,
       }[selector] ?? null),
       querySelectorAll: () => [],
     };
@@ -775,6 +845,12 @@ test("stores a generated create password privately and restores it through Undo"
     await Promise.resolve();
     expect(name.value).toBe("Previous Name");
     expect(password.value).toBe("");
+    expect(nameInputLabel.hidden).toBe(false);
+    expect(savedNameButton.hidden).toBe(true);
+    name.value = "";
+    form.listeners.get("invalid")?.({ preventDefault: () => {}, target: name });
+    expect(disclosure.open).toBe(false);
+    expect(name.focusCalls).toBe(1);
     name.value = "Alice";
     await (globals.fetch as (input: string, init: RequestInit) => Promise<Response>)("/", { method: "POST", body: JSON.stringify({ content: "hello", author: "Anonymous", display_name: "Anonymous", semantic_type: "message" }) });
 
@@ -804,6 +880,35 @@ test("stores a generated create password privately and restores it through Undo"
     expect(name.value).toBe("Alice");
     expect(password.value).toBe("");
     expect(warning.hidden).toBe(true);
+
+    storage.set("0000:name-claim:v1:saved-room", JSON.stringify({ display_name: "Taylor", password: "saved-secret" }));
+    pageDocument.body.dataset.room = "saved-room";
+    globals.location = { href: "https://msg.0000.chat/saved-room", origin: "https://msg.0000.chat", pathname: "/saved-room" };
+    name.value = "";
+    password.value = "";
+    new Function(source ?? "")();
+    await Promise.resolve();
+    expect(name.value).toBe("Taylor");
+    expect(password.value).toBe("saved-secret");
+    expect(savedNameButton.hidden).toBe(false);
+    expect(savedNameLabel.textContent).toBe("Taylor");
+    expect(nameInputLabel.hidden).toBe(true);
+    expect(disclosure.hidden).toBe(true);
+    const focusCalls = name.focusCalls;
+    const selectCalls = name.selectCalls;
+    savedNameButton.listeners.get("click")?.({ preventDefault: () => {} });
+    expect(password.value).toBe("saved-secret");
+    expect(savedNameButton.hidden).toBe(true);
+    expect(nameInputLabel.hidden).toBe(false);
+    expect(name.focusCalls).toBe(focusCalls + 1);
+    expect(name.selectCalls).toBe(selectCalls + 1);
+    name.listeners.get("keydown")?.({ key: "Escape", preventDefault: () => {} });
+    expect(savedNameButton.hidden).toBe(false);
+    expect(nameInputLabel.hidden).toBe(true);
+    expect(password.value).toBe("saved-secret");
+    savedNameButton.listeners.get("click")?.({ preventDefault: () => {} });
+    await (globals.fetch as (input: string, init: RequestInit) => Promise<Response>)("/saved-room", { method: "POST", body: JSON.stringify({ content: "hello", author: "Anonymous", display_name: "Anonymous", semantic_type: "message" }) });
+    expect(posted.at(-1)).toMatchObject({ author: "Taylor", display_name: "Taylor", name_password: "saved-secret" });
   } finally {
     Object.assign(globals, saved);
   }
