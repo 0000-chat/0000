@@ -1,0 +1,236 @@
+{
+  "schema_version": 1,
+  "product": "0000",
+  "release": {
+    "version_prefix": "v0.0.0-",
+    "compatibility": {
+      "api": "v1",
+      "config": "v1"
+    }
+  },
+  "units": [
+    {
+      "name": "gateway",
+      "kind": "cloudflare-worker-bundle",
+      "runtime_paths": [
+        "services/gateway/src/**",
+        "services/gateway/package.json",
+        "services/gateway/tsconfig.json",
+        "services/gateway/tooling/pnpm-lock.yaml",
+        "services/gateway/wrangler.jsonc"
+      ],
+      "archive_paths": [
+        "services/gateway/src",
+        "services/gateway/package.json",
+        "services/gateway/tsconfig.json",
+        "services/gateway/wrangler.jsonc"
+      ],
+      "build": {
+        "type": "cloudflare-worker",
+        "config_path": "services/gateway/wrangler.jsonc",
+        "entrypoint": "worker.js",
+        "config": "wrangler.json",
+        "files": ["worker.js", "wrangler.json", "artifact-manifest.json"],
+        "compatibility_date": "2026-08-06",
+        "compatibility_flags": ["nodejs_compat"]
+      }
+    },
+    {
+      "name": "streams",
+      "kind": "cloudflare-worker-bundle",
+      "runtime_paths": [
+        "services/streams/src/**",
+        "services/streams/package.json",
+        "services/streams/tsconfig.json",
+        "services/streams/wrangler.jsonc"
+      ],
+      "archive_paths": [
+        "services/streams/src",
+        "services/streams/package.json",
+        "services/streams/tsconfig.json",
+        "services/streams/wrangler.jsonc"
+      ],
+      "build": {
+        "type": "cloudflare-worker",
+        "config_path": "services/streams/wrangler.jsonc",
+        "entrypoint": "worker.js",
+        "config": "wrangler.json",
+        "files": ["worker.js", "wrangler.json", "artifact-manifest.json"],
+        "compatibility_date": "2026-09-05",
+        "compatibility_flags": ["nodejs_compat"],
+        "wrangler": {
+          "durable_objects": {
+            "bindings": [{ "name": "STREAMS", "class_name": "StreamsRoom" }]
+          },
+          "migrations": [{ "tag": "v1", "new_sqlite_classes": ["StreamsRoom"] }],
+          "secrets": {
+            "required": [
+              "ACCESS_TEAM_NAME",
+              "ACCESS_AUD",
+              "DON_EMAIL",
+              "MCP_AUTH_TOKEN",
+              "GROK_WEBHOOK_URL",
+              "GROK_WEBHOOK_AUTHORIZATION"
+            ]
+          },
+          "observability": { "enabled": true }
+        }
+      }
+    },
+    {
+      "name": "msg-worker",
+      "kind": "cloudflare-worker-bundle",
+      "runtime_paths": [
+        "services/msg/worker/**",
+        "services/msg/package.json",
+        "services/msg/wrangler.jsonc",
+        "services/msg/scripts/mermaid-asset.ts",
+        "services/msg/scripts/wrangler-config.ts"
+      ],
+      "archive_paths": [
+        "services/msg/worker",
+        "services/msg/package.json",
+        "services/msg/wrangler.jsonc",
+        "services/msg/scripts/mermaid-asset.ts",
+        "services/msg/scripts/wrangler-config.ts"
+      ],
+      "build": {
+        "type": "cloudflare-worker",
+        "config_path": "services/msg/wrangler.jsonc",
+        "entrypoint": "worker.js",
+        "generated_entrypoint": "worker-entry.js",
+        "config": "wrangler.json",
+        "files": ["worker.js", "wrangler.json", "artifact-manifest.json"],
+        "compatibility_date": "2026-08-09",
+        "compatibility_flags": ["nodejs_compat"],
+        "wrapper": "services/msg/scripts/wrangler-config.ts",
+        "assets": {
+          "source": "services/msg/worker/public",
+          "directory": "assets",
+          "binding": "ASSETS",
+          "run_worker_first": true
+        },
+        "migrations": {
+          "source": "services/msg/worker/migrations",
+          "directory": "migrations"
+        },
+        "wrangler": {
+          "durable_objects": {
+            "bindings": [
+              { "name": "ConversationRoom", "class_name": "ConversationRoom" }
+            ]
+          },
+          "migrations": [
+            { "tag": "v1", "new_sqlite_classes": ["ConversationRoom"] }
+          ],
+          "d1_databases": [
+            {
+              "binding": "MSG_DB",
+              "database_name": "0000-msg-operations",
+              "migrations_dir": "migrations"
+            }
+          ],
+          "secrets": {
+            "required": [
+              "MSG_DATA_ENCRYPTION_KEY_V1",
+              "MSG_OPERATOR_TOKEN",
+              "MSG_VAPID_PUBLIC_KEY",
+              "MSG_VAPID_PRIVATE_KEY",
+              "MSG_VAPID_SUBJECT"
+            ]
+          },
+          "observability": { "enabled": true, "head_sampling_rate": 1 }
+        },
+        "runtime": {
+          "rate_limits": [
+            { "name": "MSG_RATE_LIMIT_CREATION", "simple": { "limit": 6, "period": 60 } },
+            { "name": "MSG_RATE_LIMIT_READS", "simple": { "limit": 60, "period": 60 } },
+            { "name": "MSG_RATE_LIMIT_POSTS", "simple": { "limit": 20, "period": 60 } },
+            { "name": "MSG_RATE_LIMIT_LIVE", "simple": { "limit": 10, "period": 60 } }
+          ],
+          "triggers": { "crons": ["17 3 * * *"] }
+        }
+      }
+    },
+    {
+      "name": "communicator-control-plane",
+      "kind": "cloudflare-worker-source",
+      "runtime_paths": [
+        "services/communicator/apps/control-plane/**",
+        "services/communicator/packages/contracts/**",
+        "services/communicator/packages/test-fixtures/**",
+        "services/communicator/package.json",
+        "services/communicator/pnpm-lock.yaml",
+        "services/communicator/pnpm-workspace.yaml",
+        "services/communicator/tsconfig.base.json"
+      ],
+      "archive_paths": [
+        "services/communicator/apps/control-plane",
+        "services/communicator/packages/contracts",
+        "services/communicator/packages/test-fixtures",
+        "services/communicator/package.json",
+        "services/communicator/pnpm-lock.yaml",
+        "services/communicator/pnpm-workspace.yaml",
+        "services/communicator/tsconfig.base.json"
+      ]
+    },
+    {
+      "name": "communicator-matrix-gateway",
+      "kind": "private-native-source",
+      "runtime_paths": [
+        "services/communicator/services/matrix-gateway/src/**",
+        "services/communicator/services/matrix-gateway/Cargo.toml",
+        "services/communicator/Cargo.toml",
+        "services/communicator/Cargo.lock",
+        "services/communicator/rust-toolchain.toml",
+        "services/communicator/deploy/matrix-gateway/**"
+      ],
+      "archive_paths": [
+        "services/communicator/services/matrix-gateway/src",
+        "services/communicator/services/matrix-gateway/Cargo.toml",
+        "services/communicator/Cargo.toml",
+        "services/communicator/Cargo.lock",
+        "services/communicator/rust-toolchain.toml",
+        "services/communicator/deploy/matrix-gateway"
+      ]
+    },
+    {
+      "name": "communicator-bridge-images",
+      "kind": "external-container-lock",
+      "runtime_paths": [
+        "services/communicator/compose.yaml",
+        "services/communicator/deploy/images.lock.env",
+        "services/communicator/deploy/caddy/**",
+        "services/communicator/deploy/synapse/**",
+        "services/communicator/scripts/init-*.sh",
+        "services/communicator/scripts/render-*.py",
+        "services/communicator/scripts/validate-*.sh",
+        "services/communicator/scripts/validate_*_policy.py"
+      ],
+      "archive_paths": [
+        "services/communicator/compose.yaml",
+        "services/communicator/deploy/images.lock.env",
+        "services/communicator/deploy/caddy",
+        "services/communicator/deploy/synapse",
+        "services/communicator/scripts/init-runtime.sh",
+        "services/communicator/scripts/init-messenger-db.sh",
+        "services/communicator/scripts/init-messenger-runtime.sh",
+        "services/communicator/scripts/init-telegram-db.sh",
+        "services/communicator/scripts/init-telegram-runtime.sh",
+        "services/communicator/scripts/init-whatsapp-db.sh",
+        "services/communicator/scripts/init-whatsapp-runtime.sh",
+        "services/communicator/scripts/render-messenger-config.py",
+        "services/communicator/scripts/render-synapse-config.py",
+        "services/communicator/scripts/render-telegram-config.py",
+        "services/communicator/scripts/render-whatsapp-config.py",
+        "services/communicator/scripts/validate-core.sh",
+        "services/communicator/scripts/validate-messenger.sh",
+        "services/communicator/scripts/validate-telegram.sh",
+        "services/communicator/scripts/validate-whatsapp.sh",
+        "services/communicator/scripts/validate_messenger_policy.py",
+        "services/communicator/scripts/validate_telegram_policy.py",
+        "services/communicator/scripts/validate_whatsapp_policy.py"
+      ]
+    }
+  ]
+}

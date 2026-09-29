@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -6,8 +6,8 @@ import { fileURLToPath } from "node:url";
 import { buildMermaidAsset } from "./mermaid-asset";
 
 const serviceRoot = dirname(dirname(fileURLToPath(import.meta.url)));
-const monorepoRoot = join(serviceRoot, "../..");
 const configPath = join(serviceRoot, "wrangler.jsonc");
+const localWrangler = join(serviceRoot, "node_modules/.bin/wrangler");
 const placeholder = "__MSG_D1_DATABASE_ID__";
 const dryRunDatabaseId = "00000000-0000-4000-8000-000000000000";
 const databaseIdPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
@@ -24,7 +24,7 @@ export function createMsgWranglerConfig(databaseId: string): string {
   if (!template.includes(placeholder)) throw new Error("The msg Wrangler config template is missing its D1 placeholder.");
   return [
     [placeholder, databaseId],
-    ["../../node_modules/wrangler/config-schema.json", join(monorepoRoot, "node_modules/wrangler/config-schema.json")],
+    ["../../node_modules/wrangler/config-schema.json", join(serviceRoot, "node_modules/wrangler/config-schema.json")],
     ["worker/src/worker-entry.ts", join(serviceRoot, "worker/src/worker-entry.ts")],
     ["./worker/public", join(serviceRoot, "worker/public")],
     ["worker/migrations", join(serviceRoot, "worker/migrations")],
@@ -34,6 +34,13 @@ export function createMsgWranglerConfig(databaseId: string): string {
 export function resolveMsgWranglerArguments(args: readonly string[]): readonly string[] {
   if (args[0] !== "types" || !args[1] || args[1].startsWith("-")) return args;
   return [args[0], resolve(serviceRoot, args[1]), ...args.slice(2)];
+}
+
+export function resolveMsgWranglerCommand(): string {
+  if (!existsSync(localWrangler)) {
+    throw new Error("The pinned service-local Wrangler binary is missing; install the locked Msg workspace dependencies.");
+  }
+  return localWrangler;
 }
 
 function main(args: readonly string[]): void {
@@ -51,7 +58,7 @@ function main(args: readonly string[]): void {
   const generatedConfig = join(directory, "wrangler.msg.jsonc");
   try {
     writeFileSync(generatedConfig, createMsgWranglerConfig(databaseId), { mode: 0o600 });
-    const result = spawnSync("bunx", ["wrangler", ...resolveMsgWranglerArguments(args), "--config", generatedConfig], { cwd: monorepoRoot, stdio: "inherit" });
+    const result = spawnSync(resolveMsgWranglerCommand(), [...resolveMsgWranglerArguments(args), "--config", generatedConfig], { cwd: serviceRoot, stdio: "inherit" });
     if (result.error) throw result.error;
     if (result.status !== 0) process.exitCode = result.status ?? 1;
   } finally {

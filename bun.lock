@@ -76,6 +76,7 @@
       "name": "@0000/streams",
       "version": "0.0.0",
       "devDependencies": {
+        "@biomejs/biome": "2.5.13",
         "@types/node": "22.20.3",
         "oxlint": "1.82.0",
         "typescript": "6.0.3",
