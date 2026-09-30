@@ -1,0 +1,166 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://0000.chat/schemas/cloudflare-worker-artifact-v1.json",
+  "title": "0000 prebuilt Cloudflare Worker artifact manifest",
+  "description": "Exact metadata embedded in a public, environment-neutral Worker bundle.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "product",
+    "name",
+    "version",
+    "kind",
+    "media_type",
+    "source_commit",
+    "compatibility",
+    "entrypoint",
+    "compatibility_date",
+    "compatibility_flags"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "product": { "const": "0000" },
+    "name": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$" },
+    "version": { "type": "string", "pattern": "^v[0-9]+\\.[0-9]+\\.[0-9]+-[0-9a-f]{40}$" },
+    "kind": { "const": "cloudflare-worker-bundle" },
+    "media_type": { "const": "application/gzip" },
+    "source_commit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "compatibility": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["api", "config"],
+      "properties": {
+        "api": { "const": "v1" },
+        "config": { "const": "v1" }
+      }
+    },
+    "entrypoint": { "const": "worker.js" },
+    "compatibility_date": { "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$" },
+    "compatibility_flags": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "const": "nodejs_compat" }
+    },
+    "assets": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["binding", "directory", "run_worker_first"],
+      "properties": {
+        "binding": { "type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_]*$" },
+        "directory": { "type": "string", "pattern": "^[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*$" },
+        "run_worker_first": { "type": "boolean" }
+      }
+    },
+    "durable_objects": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["bindings"],
+      "properties": {
+        "bindings": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name", "class_name"],
+            "properties": {
+              "name": { "type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_]*$" },
+              "class_name": { "type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_]*$" }
+            }
+          }
+        }
+      }
+    },
+    "migrations": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["tag", "new_sqlite_classes"],
+        "properties": {
+          "tag": { "type": "string", "pattern": "^v[0-9]+$" },
+          "new_sqlite_classes": {
+            "type": "array",
+            "items": { "type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_]*$" }
+          }
+        }
+      }
+    },
+    "d1_databases": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["binding", "database_name", "migrations_dir"],
+        "properties": {
+          "binding": { "type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_]*$" },
+          "database_name": { "type": "string", "minLength": 1 },
+          "migrations_dir": { "type": "string", "pattern": "^[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*$" }
+        }
+      }
+    },
+    "required_secrets": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_]*$" }
+    },
+    "observability": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled"],
+      "properties": {
+        "enabled": { "const": true },
+        "head_sampling_rate": { "type": "number", "minimum": 0, "maximum": 1 }
+      }
+    },
+    "rate_limits": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "simple"],
+        "properties": {
+          "name": { "type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_]*$" },
+          "simple": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["limit", "period"],
+            "properties": {
+              "limit": { "type": "integer", "minimum": 1 },
+              "period": { "enum": [10, 60] }
+            }
+          }
+        }
+      }
+    },
+    "triggers": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["crons"],
+      "properties": {
+        "crons": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "pattern": "^[0-9*/?,L#-]+(?:\\s+[0-9*/?,L#-]+){4}$" }
+        }
+      }
+    },
+    "migration_files": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "digest"],
+        "properties": {
+          "name": { "type": "string", "pattern": "^migrations/[0-9]{4,}_[a-z0-9_]+\\.sql$" },
+          "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
+        }
+      }
+    }
+  }
+}

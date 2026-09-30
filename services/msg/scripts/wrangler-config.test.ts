@@ -1,7 +1,12 @@
 import { expect, test } from "bun:test";
 import { fileURLToPath } from "node:url";
 
-import { createMsgWranglerConfig, resolveMsgWranglerArguments, validateMsgD1DatabaseId } from "./wrangler-config";
+import {
+  createMsgWranglerConfig,
+  resolveMsgWranglerArguments,
+  resolveMsgWranglerCommand,
+  validateMsgD1DatabaseId,
+} from "./wrangler-config";
 
 test("creates a production config only from a validated D1 database id", () => {
   const config = createMsgWranglerConfig("11111111-2222-4333-8444-555555555555");
@@ -50,4 +55,8 @@ test("resolves Wrangler type output relative to the service despite the monorepo
     "--include-runtime=true",
   ]);
   expect(resolveMsgWranglerArguments(["deploy", "--dry-run"])).toEqual(["deploy", "--dry-run"]);
+});
+
+test("uses the installed service-local Wrangler binary", () => {
+  expect(resolveMsgWranglerCommand()).toMatch(/services[\\/]msg[\\/]node_modules[\\/]\.bin[\\/]wrangler$/);
 });

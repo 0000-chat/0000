@@ -1,0 +1,415 @@
+name: Public release
+
+on:
+  # Every merge pushed to main receives an immutable release record. The
+  # planner decides whether that record contains a runtime artifact.
+  push:
+    branches:
+      - main
+
+permissions: {}
+
+concurrency:
+  group: public-release-${{ github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  quality:
+    name: Validate release source
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.14.0
+      - run: bun install --frozen-lockfile
+      - run: bun run check
+      - run: bun run test:release
+      - run: bun run check:turbo
+      - run: bun run check:turbo:dry
+      - name: Check Brain service
+        working-directory: services/brain
+        run: bun run check:application
+      - name: Check Gateway service
+        run: pnpm --dir services/gateway/tooling install --frozen-lockfile && pnpm --dir services/gateway run check:application
+
+  release:
+    name: Record and publish immutable release
+    needs: quality
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.sha }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+      - run: bun install --frozen-lockfile
+      - name: Plan affected runtime units
+        id: plan
+        env:
+          RELEASE_PLAN: ${{ runner.temp }}/0000-release-plan.json
+        run: node scripts/release/plan.mjs --base "${{ github.event.before }}" --head "$GITHUB_SHA" --output "$RELEASE_PLAN" --github-output "$GITHUB_OUTPUT"
+      - name: Build deterministic affected artifacts
+        env:
+          RELEASE_PLAN: ${{ runner.temp }}/0000-release-plan.json
+          ARTIFACT_DIR: ${{ runner.temp }}/0000-release-artifacts
+        run: node scripts/release/build.mjs --plan "$RELEASE_PLAN" --output-dir "$ARTIFACT_DIR"
+      - name: Write release record
+        env:
+          RELEASE_PLAN: ${{ runner.temp }}/0000-release-plan.json
+          ARTIFACT_DIR: ${{ runner.temp }}/0000-release-artifacts
+          RELEASE_RECORD: ${{ runner.temp }}/0000-release-record.json
+        run: node scripts/release/record.mjs --plan "$RELEASE_PLAN" --artifact-dir "$ARTIFACT_DIR" --output "$RELEASE_RECORD"
+      - name: Validate public release App configuration
+        env:
+          PUBLIC_RELEASE_APP_CLIENT_ID: ${{ vars.PUBLIC_RELEASE_APP_CLIENT_ID }}
+          PUBLIC_RELEASE_APP_PRIVATE_KEY: ${{ secrets.PUBLIC_RELEASE_APP_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${PUBLIC_RELEASE_APP_CLIENT_ID:-}" ]; then
+            echo "PUBLIC_RELEASE_APP_CLIENT_ID repository variable is required." >&2
+            exit 1
+          fi
+          if [ -z "${PUBLIC_RELEASE_APP_PRIVATE_KEY:-}" ]; then
+            echo "PUBLIC_RELEASE_APP_PRIVATE_KEY repository secret is required." >&2
+            exit 1
+          fi
+      - name: Mint ephemeral public release GitHub App token
+        id: release-app-token
+        uses: actions/create-github-app-token@1b10c78c7865c340bc4f6099eb2f838309f1e8c3 # v3.1.1
+        with:
+          client-id: ${{ vars.PUBLIC_RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.PUBLIC_RELEASE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+          permission-workflows: write
+          permission-administration: read
+      - name: Reuse release provenance on retry
+        id: retry-provenance
+        env:
+          GH_TOKEN: ${{ steps.release-app-token.outputs.token }}
+          RELEASE_TAG: ${{ steps.plan.outputs.release_version }}
+          RELEASE_RECORD: ${{ runner.temp }}/0000-release-record.json
+          RELEASE_EVENT: ${{ runner.temp }}/0000-release-event.json
+        run: |
+          set -euo pipefail
+
+          if ! gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "reuse=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          release_draft=$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq '.isDraft')
+          record_asset=$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[] | select(.name == "0000-release-record.json") | .name')
+          event_asset=$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[] | select(.name == "0000-release-event.json") | .name')
+          if [ -z "$record_asset" ] || [ -z "$event_asset" ]; then
+            if [ "$release_draft" != "true" ]; then
+              echo "published release $RELEASE_TAG is missing immutable provenance assets" >&2
+              exit 1
+            fi
+            echo "reuse=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          retry_dir=$(mktemp -d "$RUNNER_TEMP/0000-release-provenance.XXXXXX")
+          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --pattern "0000-release-record.json" --dir "$retry_dir"
+          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --pattern "0000-release-event.json" --dir "$retry_dir"
+          if ! cmp -- "$RELEASE_RECORD" "$retry_dir/0000-release-record.json"; then
+            echo "release record for $RELEASE_TAG differs from the retry input" >&2
+            exit 1
+          fi
+
+          record_commit=$(jq -r '.release.source.commit // empty' "$RELEASE_RECORD")
+          event_commit=$(jq -r '.release.commit // empty' "$retry_dir/0000-release-event.json")
+          record_version=$(jq -r '.release.version // empty' "$RELEASE_RECORD")
+          event_version=$(jq -r '.release.version // empty' "$retry_dir/0000-release-event.json")
+          if [ "$record_commit" != "$GITHUB_SHA" ] || [ "$event_commit" != "$GITHUB_SHA" ] || [ "$record_version" != "$RELEASE_TAG" ] || [ "$event_version" != "$RELEASE_TAG" ]; then
+            echo "release provenance assets do not match $RELEASE_TAG/$GITHUB_SHA" >&2
+            exit 1
+          fi
+          if [ "$(jq -r '.release.runtime_redeployment // false' "$RELEASE_RECORD")" = "true" ] && [ -z "$(jq -r '.release.provenance.attestation // empty' "$retry_dir/0000-release-event.json")" ]; then
+            echo "runtime release $RELEASE_TAG has no reusable artifact attestation" >&2
+            exit 1
+          fi
+
+          cp "$retry_dir/0000-release-event.json" "$RELEASE_EVENT"
+          echo "reuse=true" >> "$GITHUB_OUTPUT"
+      - name: Attest release artifacts
+        if: steps.plan.outputs.runtime_redeployment == 'true' && steps.retry-provenance.outputs.reuse != 'true'
+        id: attest
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: ${{ runner.temp }}/0000-release-artifacts/*.tar.gz
+      - name: Write Cloud staging event
+        id: event
+        env:
+          RELEASE_PLAN: ${{ runner.temp }}/0000-release-plan.json
+          RELEASE_RECORD: ${{ runner.temp }}/0000-release-record.json
+          RELEASE_EVENT: ${{ runner.temp }}/0000-release-event.json
+          ATTESTATION_URL: ${{ steps.attest.outputs['attestation-url'] }}
+          WORKFLOW_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [ "${{ steps.retry-provenance.outputs.reuse }}" = "true" ]; then
+            exit 0
+          fi
+          args=(
+            --plan "$RELEASE_PLAN"
+            --record "$RELEASE_RECORD"
+            --output "$RELEASE_EVENT"
+            --workflow "$GITHUB_WORKFLOW"
+            --run-id "$GITHUB_RUN_ID"
+            --workflow-run-url "$WORKFLOW_RUN_URL"
+          )
+          if [ -n "${ATTESTATION_URL:-}" ]; then
+            args+=(--attestation "$ATTESTATION_URL")
+          fi
+          node scripts/release/event.mjs "${args[@]}"
+      - name: Upload release evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: public-release-${{ steps.plan.outputs.release_version }}-attempt-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/0000-release-record.json
+            ${{ runner.temp }}/0000-release-event.json
+            ${{ runner.temp }}/0000-release-artifacts/
+          if-no-files-found: error
+      - name: Validate private Cloud dispatch target
+        if: steps.plan.outputs.runtime_redeployment == 'true' && vars.CLOUD_RELEASE_DISPATCH_ENABLED == 'true'
+        id: cloud-target
+        env:
+          CLOUD_RELEASE_REPOSITORY: ${{ vars.CLOUD_RELEASE_REPOSITORY }}
+          CLOUD_RELEASE_APP_CLIENT_ID: ${{ vars.CLOUD_RELEASE_APP_CLIENT_ID }}
+          CLOUD_RELEASE_APP_PRIVATE_KEY: ${{ secrets.CLOUD_RELEASE_APP_PRIVATE_KEY }}
+          EXPECTED_CLOUD_OWNER: ${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+          if [[ ! "${CLOUD_RELEASE_REPOSITORY:-}" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
+            echo "CLOUD_RELEASE_REPOSITORY must be configured as owner/repository." >&2
+            exit 1
+          fi
+          if [ "${CLOUD_RELEASE_REPOSITORY%%/*}" != "$EXPECTED_CLOUD_OWNER" ]; then
+            echo "CLOUD_RELEASE_REPOSITORY must use the public repository owner for the scoped Cloud App token." >&2
+            exit 1
+          fi
+          if [ -z "${CLOUD_RELEASE_APP_CLIENT_ID:-}" ]; then
+            echo "CLOUD_RELEASE_APP_CLIENT_ID repository variable is required." >&2
+            exit 1
+          fi
+          if [ -z "${CLOUD_RELEASE_APP_PRIVATE_KEY:-}" ]; then
+            echo "CLOUD_RELEASE_APP_PRIVATE_KEY repository secret is required." >&2
+            exit 1
+          fi
+          echo "repository=${CLOUD_RELEASE_REPOSITORY#*/}" >> "$GITHUB_OUTPUT"
+      - name: Mint ephemeral Cloud dispatch GitHub App token
+        if: steps.plan.outputs.runtime_redeployment == 'true' && vars.CLOUD_RELEASE_DISPATCH_ENABLED == 'true'
+        id: cloud-dispatch-token
+        uses: actions/create-github-app-token@1b10c78c7865c340bc4f6099eb2f838309f1e8c3 # v3.1.1
+        with:
+          client-id: ${{ vars.CLOUD_RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.CLOUD_RELEASE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ steps.cloud-target.outputs.repository }}
+          permission-actions: write
+      - name: Create, populate, and publish immutable GitHub release
+        env:
+          GH_TOKEN: ${{ steps.release-app-token.outputs.token }}
+          RELEASE_TAG: ${{ steps.plan.outputs.release_version }}
+          RELEASE_RECORD: ${{ runner.temp }}/0000-release-record.json
+          RELEASE_EVENT: ${{ runner.temp }}/0000-release-event.json
+          ARTIFACT_DIR: ${{ runner.temp }}/0000-release-artifacts
+        run: |
+          set -euo pipefail
+
+          immutable_releases=$(gh api "repos/$GITHUB_REPOSITORY/immutable-releases" --jq '.enabled')
+          if [ "$immutable_releases" != "true" ]; then
+            echo "immutable releases must be enabled before publishing $RELEASE_TAG" >&2
+            exit 1
+          fi
+
+          resolve_tag_commit() {
+            local reference object_type object_sha
+            reference=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG" --jq '.object.type + "\t" + .object.sha')
+            for _ in 1 2 3 4 5 6 7 8; do
+              object_type=${reference%%$'\t'*}
+              object_sha=${reference#*$'\t'}
+              if [ "$object_type" = "commit" ]; then
+                printf '%s\n' "$object_sha"
+                return 0
+              fi
+              if [ "$object_type" != "tag" ]; then
+                return 1
+              fi
+              reference=$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$object_sha" --jq '.object.type + "\t" + .object.sha')
+            done
+            return 1
+          }
+
+          release_id() {
+            gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" --jq '.id'
+          }
+
+          release_is_draft() {
+            gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" --jq '.draft'
+          }
+
+          validate_tag_commit() {
+            local tag_commit
+            if tag_commit=$(resolve_tag_commit 2>/dev/null); then
+              if [ "$tag_commit" != "$GITHUB_SHA" ]; then
+                echo "release tag $RELEASE_TAG resolves to $tag_commit, expected $GITHUB_SHA" >&2
+                exit 1
+              fi
+              return 0
+            fi
+            echo "release tag $RELEASE_TAG is not available yet; validating the draft target instead"
+            local target_commit
+            target_commit=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" --jq '.target_commitish')
+            if [ "$target_commit" != "$GITHUB_SHA" ]; then
+              echo "draft release $RELEASE_TAG targets $target_commit, expected $GITHUB_SHA" >&2
+              exit 1
+            fi
+          }
+
+          existing_release_id=""
+          if existing_release_id=$(release_id 2>/dev/null); then
+            release_draft=$(release_is_draft)
+            validate_tag_commit
+          else
+            create_args=(
+              "$RELEASE_TAG"
+              --repo "$GITHUB_REPOSITORY"
+              --target "$GITHUB_SHA"
+              --title "$RELEASE_TAG"
+              --notes "Deterministic public release for $GITHUB_SHA. Runtime promotion is private-only."
+              --draft
+            )
+            if tag_commit=$(resolve_tag_commit 2>/dev/null); then
+              if [ "$tag_commit" != "$GITHUB_SHA" ]; then
+                echo "existing release tag $RELEASE_TAG resolves to $tag_commit, expected $GITHUB_SHA" >&2
+                exit 1
+              fi
+              create_args+=(--verify-tag)
+            fi
+            if ! gh release create "${create_args[@]}"; then
+              if ! existing_release_id=$(release_id 2>/dev/null); then
+                echo "failed to create draft release $RELEASE_TAG" >&2
+                exit 1
+              fi
+              echo "draft release $RELEASE_TAG already exists; continuing with it"
+            fi
+            release_draft=$(release_is_draft)
+            validate_tag_commit
+          fi
+
+          if [ -z "$existing_release_id" ]; then
+            existing_release_id=$(release_id)
+          fi
+
+          if [ "$release_draft" != "true" ] && [ "$release_draft" != "false" ]; then
+            echo "release $RELEASE_TAG returned an invalid draft state: $release_draft" >&2
+            exit 1
+          fi
+
+          if tag_commit=$(resolve_tag_commit 2>/dev/null); then
+            if [ "$tag_commit" != "$GITHUB_SHA" ]; then
+              echo "release tag $RELEASE_TAG resolves to $tag_commit, expected $GITHUB_SHA" >&2
+              exit 1
+            fi
+          fi
+
+          upload_immutable() {
+            local asset_path="$1"
+            local asset_name expected actual verify_dir downloaded
+            asset_name=$(basename "$asset_path")
+            downloaded=$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq ".assets[] | select(.name == \"$asset_name\") | .name")
+            expected=$(sha256sum "$asset_path" | awk '{print $1}')
+            if [ -n "$downloaded" ]; then
+              verify_dir=$(mktemp -d "$RUNNER_TEMP/0000-release-verify.XXXXXX")
+              gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --pattern "$asset_name" --dir "$verify_dir"
+              actual=$(sha256sum "$verify_dir/$asset_name" | awk '{print $1}')
+              if [ "$actual" != "$expected" ]; then
+                echo "existing release asset $asset_name has digest $actual, expected $expected" >&2
+                exit 1
+              fi
+              echo "verified immutable release asset $asset_name"
+            elif [ "$release_draft" = "true" ]; then
+              gh release upload "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" "$asset_path"
+            else
+              echo "published immutable release $RELEASE_TAG is missing expected asset $asset_name" >&2
+              exit 1
+            fi
+          }
+
+          assets=("$RELEASE_RECORD" "$RELEASE_EVENT")
+          for metadata in "$ARTIFACT_DIR"/*.artifact.json; do
+            if [ -f "$metadata" ]; then assets+=("$metadata"); fi
+          done
+          for artifact in "$ARTIFACT_DIR"/*.tar.gz; do
+            if [ -f "$artifact" ]; then assets+=("$artifact"); fi
+          done
+          for asset in "${assets[@]}"; do
+            upload_immutable "$asset"
+          done
+
+          if [ "$release_draft" = "true" ]; then
+            gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft=false
+          fi
+
+          release_draft=$(release_is_draft)
+          if [ "$release_draft" != "false" ]; then
+            echo "release $RELEASE_TAG was not published" >&2
+            exit 1
+          fi
+          release_immutable=$(gh api "repos/$GITHUB_REPOSITORY/releases/$existing_release_id" --jq '.immutable')
+          if [ "$release_immutable" != "true" ]; then
+            echo "release $RELEASE_TAG is published but not immutable" >&2
+            exit 1
+          fi
+          tag_commit=$(resolve_tag_commit)
+          if [ "$tag_commit" != "$GITHUB_SHA" ]; then
+            echo "published release tag $RELEASE_TAG resolves to $tag_commit, expected $GITHUB_SHA" >&2
+            exit 1
+          fi
+      - name: Notify private Cloud staging
+        # No runtime artifact means no Cloud dispatch. Activation and docs-only
+        # merges therefore publish a release record but remain Cloud-silent. The
+        # repository variable is deliberately opt-in while Cloud credentials
+        # and the staging consumer are being provisioned.
+        if: steps.plan.outputs.runtime_redeployment == 'true' && vars.CLOUD_RELEASE_DISPATCH_ENABLED == 'true'
+        env:
+          CLOUD_RELEASE_REPOSITORY: ${{ vars.CLOUD_RELEASE_REPOSITORY }}
+          GH_TOKEN: ${{ steps.cloud-dispatch-token.outputs.token }}
+          RELEASE_EVENT: ${{ runner.temp }}/0000-release-event.json
+        run: |
+          set -euo pipefail
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "the ephemeral Cloud Actions:write token is required to start private staging." >&2
+            exit 1
+          fi
+          release_event=$(tr -d '\n' < "$RELEASE_EVENT")
+          gh api --method POST \
+            "repos/$CLOUD_RELEASE_REPOSITORY/actions/workflows/staging.yml/dispatches" \
+            --raw-field ref=main \
+            --raw-field "inputs[release_event]=$release_event"

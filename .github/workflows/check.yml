@@ -28,6 +28,7 @@ jobs:
           node-version: 24
       - run: bun install --frozen-lockfile
       - run: bun run check
+      - run: bun run test:release
       - name: Check license topology
         run: bun run check:licenses
       - run: bun run check:turbo
