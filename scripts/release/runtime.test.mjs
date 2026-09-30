@@ -31,6 +31,37 @@ function makeReadableTree(root) {
   }
 }
 
+function baseCommitForPlan(sourceCommit, gitRunner = run) {
+  let parentError;
+  try {
+    return gitRunner("git", ["rev-parse", `${sourceCommit}^`]).trim();
+  } catch (error) {
+    parentError = error;
+  }
+  if (gitRunner("git", ["rev-parse", "--is-shallow-repository"]).trim() !== "true") throw parentError;
+  // This test constructs a synthetic runtime plan from the checked-out tree.
+  // A shallow checkout has no historical parent to use as its comparison base;
+  // using the exact source commit keeps the artifact identity unchanged while
+  // making the append-only migration check compare the tree with itself.
+  return sourceCommit;
+}
+
+test("shallow source checkouts use the exact source commit as the synthetic base", () => {
+  const calls = [];
+  const shallowGit = (command, args) => {
+    calls.push([command, ...args]);
+    if (args[1] === "source-commit^") throw new Error("shallow checkout has no parent");
+    if (args[1] === "--is-shallow-repository") return "true\n";
+    throw new Error(`unexpected git probe: ${args.join(" ")}`);
+  };
+
+  assert.equal(baseCommitForPlan("source-commit", shallowGit), "source-commit");
+  assert.deepEqual(calls, [
+    ["git", "rev-parse", "source-commit^"],
+    ["git", "rev-parse", "--is-shallow-repository"],
+  ]);
+});
+
 function buildAndExtractMsgArtifact() {
   const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "0000-msg-runtime-"));
   const buildOutput = path.join(temporaryRoot, "artifacts");
@@ -41,7 +72,7 @@ function buildAndExtractMsgArtifact() {
   fs.mkdirSync(configHome);
 
   const sourceCommit = run("git", ["rev-parse", "HEAD"]).trim();
-  const baseCommit = run("git", ["rev-parse", `${sourceCommit}^`]).trim();
+  const baseCommit = baseCommitForPlan(sourceCommit);
   const plan = makePlan({
     config: releaseConfig,
     base: baseCommit,
