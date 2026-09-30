@@ -676,12 +676,43 @@ export function unitAffectsFile(unit, file) {
   return matchesAny(file, unit.runtime_paths);
 }
 
-const GLOBAL_RUNTIME_INPUTS = new Set(["package.json", "bun.lock", "turbo.json", "release-units.json"]);
+const GLOBAL_RUNTIME_INPUTS = new Set(["package.json", "bun.lock", "turbo.json"]);
 
-export function affectedUnits(config, changedFiles) {
+function additiveUnitRegistrations(config, previousConfig) {
+  if (!Array.isArray(previousConfig?.units)) return null;
+
+  const { units: currentUnits, ...currentMetadata } = config;
+  const { units: previousUnitsList, ...previousMetadata } = previousConfig;
+  if (stableJson(currentMetadata) !== stableJson(previousMetadata)) return null;
+
+  const previousUnits = new Map(previousUnitsList.map((unit) => [unit.name, unit]));
+  const currentUnitsByName = new Map(currentUnits.map((unit) => [unit.name, unit]));
+  const added = config.units.filter((unit) => !previousUnits.has(unit.name));
+  const removed = [...previousUnits.keys()].some((name) => !currentUnitsByName.has(name));
+  const changedExisting = [...previousUnits.entries()].some(([name, unit]) => {
+    const current = currentUnitsByName.get(name);
+    return current && stableJson(current) !== stableJson(unit);
+  });
+
+  if (added.length === 0 || removed || changedExisting) return null;
+  return added;
+}
+
+export function affectedUnits(config, changedFiles, previousConfig = undefined) {
   const files = [...new Set(changedFiles.map(normalisePath))].sort();
   if (files.some((file) => GLOBAL_RUNTIME_INPUTS.has(file))) return [...config.units].sort(byName);
-  return config.units.filter((unit) => files.some((file) => unitAffectsFile(unit, file))).sort(byName);
+
+  const releaseUnitsChanged = files.includes("release-units.json");
+  const otherFiles = releaseUnitsChanged ? files.filter((file) => file !== "release-units.json") : files;
+  const directlyAffected = config.units.filter((unit) => otherFiles.some((file) => unitAffectsFile(unit, file)));
+
+  if (!releaseUnitsChanged) return directlyAffected.sort(byName);
+
+  const addedUnits = additiveUnitRegistrations(config, previousConfig);
+  if (!addedUnits) return [...config.units].sort(byName);
+
+  const affectedNames = new Set([...addedUnits, ...directlyAffected].map((unit) => unit.name));
+  return config.units.filter((unit) => affectedNames.has(unit.name)).sort(byName);
 }
 
 export function isDocumentationPath(file) {
@@ -788,10 +819,10 @@ export function releaseVersion(commit) {
   return `v0.0.0-${commit}`;
 }
 
-export function makePlan({ config, base, head, changedFiles }) {
+export function makePlan({ config, base, head, changedFiles, previousConfig }) {
   assertReleaseConfig(config);
   const files = [...new Set(changedFiles.map(normalisePath))].sort();
-  const units = affectedUnits(config, files);
+  const units = affectedUnits(config, files, previousConfig);
   const changeClass = classifyChanges(files, units);
   return {
     $schema: publicReleaseRecordSchema,

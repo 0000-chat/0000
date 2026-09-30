@@ -1,36 +1,37 @@
 # Public release activation
 
-This document records the activation boundary for the public release
-scaffold and workflow. The Msg activation is intended to land in one reviewed
-`main` merge: the public workflow runs for every subsequent push to `main` and
-publishes an immutable release record. It dispatches private Cloud only when
-the release plan contains the Msg runtime artifact and the repository variable
-`CLOUD_RELEASE_DISPATCH_ENABLED` is explicitly set to `true`.
+This document records the public release workflow boundary. Every push to
+`main` publishes an immutable release record. The active release map contains
+the Gateway and Msg Worker bundles; Streams and Communicator remain outside
+this activation.
 
-The combined release-setup merge changes `release-units.json`, which is a
-global runtime input. Its first-main-merge plan therefore selects exactly one
-unit, `msg-worker`, and produces one prebuilt Worker bundle containing the
-generated Worker, its emitted runtime modules, static assets, and ordered D1
-migrations. This is a release artifact and private staging dispatch, not a
-public production deployment.
+The release planner compares the unit map at the push base with the current
+map. An additive registration selects only the newly registered unit for its
+first artifact. Changes to an existing unit definition or release compatibility
+contract remain conservative and select all configured units. Shared package
+manifests and lockfiles also select all configured units. A later Gateway or
+Msg runtime-path change selects its own unit; a Msg release-workflow change
+selects Msg.
 
-The workflow and tests prove the following sequence for later merges:
+The combined release setup changes `release-units.json`, which is a global
+runtime input. The Msg Worker bundle contains the generated Worker, its emitted
+runtime modules, static assets, and ordered D1 migrations. These are release
+artifacts and private staging inputs, not public production deployments.
+
+The workflow and tests prove this sequence:
 
 1. A docs-only merge plans zero affected runtime units and produces an empty
    artifact list.
-2. A release workflow change is a Msg runtime input and selects exactly one
-   unit, `msg-worker`, so the publication protocol change receives a fresh
-   tested bundle.
-3. A later Msg Worker source or build-input change selects exactly one unit,
-   `msg-worker`, and produces exactly one deterministic prebuilt Worker
-   bundle.
-4. Gateway, Streams, and Communicator remain outside this activation until
-   their own release units and staging consumers are reviewed.
+2. Registering Gateway alongside Msg produces the first Gateway artifact
+   without rebuilding the unchanged Msg Worker.
+3. A Gateway source or build-input change selects only `gateway`; a Msg Worker
+   source or build-input change selects only `msg-worker`.
+4. A shared runtime input selects both configured units.
 
-Activation must retain immutable release provenance. Automatic private Cloud
-staging is an explicit opt-in while the private consumer and its credentials
-are being provisioned; an owner can promote the same attested immutable
-artifact through the private Cloud workflow when that variable is disabled.
-The public workflow must not deploy public production on a `main` push, and it
-must not add public credentials or managed environment configuration to this
-repository.
+Each runtime artifact is built in public CI, accompanied by an immutable
+release record and artifact attestation, and consumed by private Cloud through
+the exact release event and digest. Automatic private Cloud staging remains
+opt-in through `CLOUD_RELEASE_DISPATCH_ENABLED`; keep it disabled until the
+staging credentials and consumer are ready. The public workflow does not
+deploy public production or add public Cloudflare credentials or managed
+environment values.

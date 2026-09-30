@@ -63,10 +63,10 @@ Public release planning and artifact rules are documented in
 [`docs/release-artifacts.md`](docs/release-artifacts.md). Run
 `bun run test:release` for the deterministic affected-unit and release-record
 tests. The public release workflow runs for every merge pushed to `main` and
-publishes an immutable release record. This activation configures exactly one
-runtime artifact, the Msg Worker bundle; non-runtime changes remain
-Cloud-silent, while the combined release-setup merge selects Msg because the
-release-unit map is a global runtime input.
+publishes an immutable release record. The release map registers the Gateway
+and Msg Worker bundles. Adding a unit publishes its first artifact without
+redeploying existing units; shared runtime inputs still select every
+configured unit. Non-runtime changes remain Cloud-silent.
 
 The import procedure and preservation records are documented in
 [`services/brain/docs/migration/2026-09-17-monorepo-import.md`](services/brain/docs/migration/2026-09-17-monorepo-import.md),
