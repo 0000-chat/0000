@@ -1,4 +1,4 @@
-const PUBLIC_WRANGLER_KEYS = ["durable_objects", "migrations", "secrets", "observability"];
+const PUBLIC_WRANGLER_KEYS = ["rules", "durable_objects", "migrations", "secrets", "observability"];
 
 export function neutralWranglerConfig(unit) {
   const build = unit.build;
@@ -51,6 +51,7 @@ export function workerArtifactManifest(unit, plan, extra = {}) {
   if (unit.name === "msg-worker") {
     const build = unit.build;
     const wrangler = build.wrangler ?? {};
+    if (wrangler.rules) manifest.rules = wrangler.rules;
     if (build.assets) {
       manifest.assets = {
         binding: build.assets.binding,
@@ -63,6 +64,7 @@ export function workerArtifactManifest(unit, plan, extra = {}) {
     if (wrangler.d1_databases) manifest.d1_databases = wrangler.d1_databases;
     if (wrangler.secrets) manifest.required_secrets = wrangler.secrets.required;
     if (wrangler.observability) manifest.observability = wrangler.observability;
+    manifest.modules = extra.modules ?? [];
     if (build.runtime?.rate_limits) manifest.rate_limits = build.runtime.rate_limits;
     if (build.runtime?.triggers) manifest.triggers = build.runtime.triggers;
   }

@@ -44,6 +44,7 @@ Worker bundle. Its root-level files and directories are:
 worker.js
 wrangler.json
 artifact-manifest.json
+<generated Wrangler module files, such as hashed SVG text modules>
 assets/_msg/asset/mermaid-11.17.2.min.js
 migrations/0001_operations.sql
 migrations/0002_operations_retention.sql
@@ -55,6 +56,13 @@ The public build runs the pinned Mermaid asset generator before copying
 service-local pinned Wrangler binary. The archive uses fixed tar ownership,
 mtime, ordering, and gzip settings; Wrangler's generated README and absolute
 source map are not included.
+
+Wrangler's generated relative runtime modules are copied with their emitted
+filenames unchanged. The neutral config and embedded manifest carry the
+reviewed `Text` rule for `**/*.svg`; the manifest also records each generated
+module's path, rule type, and SHA-256 digest. Only modules reachable from the
+generated Worker entrypoint are included, and unexpected Wrangler output is
+rejected before attestation.
 
 The route-free `wrangler.json` contains the Worker entrypoint and
 compatibility settings, the public `ASSETS` static asset binding, the

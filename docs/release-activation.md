@@ -13,6 +13,11 @@ manifests and lockfiles also select all configured units. A later Gateway or
 Msg runtime-path change selects its own unit; a Msg release-workflow change
 selects Msg.
 
+The combined release setup changes `release-units.json`, which is a global
+runtime input. The Msg Worker bundle contains the generated Worker, its emitted
+runtime modules, static assets, and ordered D1 migrations. These are release
+artifacts and private staging inputs, not public production deployments.
+
 The workflow and tests prove this sequence:
 
 1. A docs-only merge plans zero affected runtime units and produces an empty

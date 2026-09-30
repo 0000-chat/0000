@@ -48,6 +48,13 @@
           "directory": "migrations"
         },
         "wrangler": {
+          "rules": [
+            {
+              "type": "Text",
+              "globs": ["**/*.svg"],
+              "fallthrough": true
+            }
+          ],
           "durable_objects": {
             "bindings": [
               { "name": "ConversationRoom", "class_name": "ConversationRoom" }
