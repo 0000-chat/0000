@@ -13,6 +13,7 @@
       "name": "msg-worker",
       "kind": "cloudflare-worker-bundle",
       "runtime_paths": [
+        ".github/workflows/release.yml",
         "services/msg/worker/**",
         "services/msg/package.json",
         "services/msg/wrangler.jsonc",

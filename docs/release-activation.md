@@ -15,12 +15,15 @@ artifact and private staging dispatch, not a public production deployment.
 
 The workflow and tests prove the following sequence for later merges:
 
-1. A docs-only or activation-workflow-only merge plans zero affected runtime
-   units and produces an empty artifact list.
-2. A later Msg Worker source or build-input change selects exactly one unit,
+1. A docs-only merge plans zero affected runtime units and produces an empty
+   artifact list.
+2. A release workflow change is a Msg runtime input and selects exactly one
+   unit, `msg-worker`, so the publication protocol change receives a fresh
+   tested bundle.
+3. A later Msg Worker source or build-input change selects exactly one unit,
    `msg-worker`, and produces exactly one deterministic prebuilt Worker
    bundle.
-3. Gateway, Streams, and Communicator remain outside this activation until
+4. Gateway, Streams, and Communicator remain outside this activation until
    their own release units and staging consumers are reviewed.
 
 Activation must retain immutable release provenance. Automatic private Cloud

@@ -266,25 +266,41 @@ jobs:
             return 1
           }
 
+          release_lookup_diagnostic() {
+            local matches="$1" count="$2" ids permissions
+            ids=${matches//$'\n'/,}
+            if [ -z "$ids" ]; then ids="none"; fi
+            permissions=$(gh api "repos/$GITHUB_REPOSITORY" --jq '{admin: (.permissions.admin // false), maintain: (.permissions.maintain // false), push: (.permissions.push // false), triage: (.permissions.triage // false), pull: (.permissions.pull // false)}' 2>/dev/null || printf '%s' "unavailable")
+            echo "release lookup failed: tag=$RELEASE_TAG matched_ids=$ids count=$count request_permissions=$permissions" >&2
+          }
+
           release_id() {
-            local matches candidate count match
-            if ! matches=$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" --jq ".[] | select(.tag_name == \"$RELEASE_TAG\") | .id"); then
-              return 1
-            fi
-            count=0
-            match=""
-            while IFS= read -r candidate; do
-              if [ -z "$candidate" ]; then continue; fi
-              count=$((count + 1))
-              match="$candidate"
-            done <<< "$matches"
-            if [ "$count" -ne 1 ]; then
+            local attempts="${1:-1}" attempt matches candidate count match
+            for ((attempt = 1; attempt <= attempts; attempt++)); do
+              if ! matches=$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" --jq ".[] | select(.tag_name == \"$RELEASE_TAG\") | .id"); then
+                if [ "$attempt" -lt "$attempts" ]; then sleep 2; continue; fi
+                release_lookup_diagnostic "" "api-error"
+                return 1
+              fi
+              count=0
+              match=""
+              while IFS= read -r candidate; do
+                if [ -z "$candidate" ]; then continue; fi
+                count=$((count + 1))
+                match="$candidate"
+              done <<< "$matches"
               if [ "$count" -gt 1 ]; then
                 echo "multiple GitHub releases use tag $RELEASE_TAG" >&2
+                return 1
               fi
-              return 1
-            fi
-            printf '%s\n' "$match"
+              if [ "$count" -eq 1 ]; then
+                printf '%s\n' "$match"
+                return 0
+              fi
+              if [ "$attempt" -lt "$attempts" ]; then sleep 2; fi
+            done
+            release_lookup_diagnostic "$matches" "$count"
+            return 1
           }
 
           release_is_draft() {
@@ -332,14 +348,14 @@ jobs:
               create_args+=(--verify-tag)
             fi
             if ! gh release create "${create_args[@]}"; then
-              if ! existing_release_id=$(release_id 2>/dev/null); then
+              if ! existing_release_id=$(release_id 8); then
                 echo "failed to create draft release $RELEASE_TAG" >&2
                 exit 1
               fi
               echo "draft release $RELEASE_TAG already exists; continuing with it"
             fi
             if [ -z "$existing_release_id" ]; then
-              existing_release_id=$(release_id)
+              existing_release_id=$(release_id 8)
             fi
             release_draft=$(release_is_draft "$existing_release_id")
             validate_tag_commit "$existing_release_id"
