@@ -6,26 +6,29 @@ point at another source revision. The record carries the exact source commit,
 affected runtime units, artifact digests, and the `api/config` compatibility
 pair consumed by private Cloud promotion.
 
-This activation publishes one runtime unit:
+This activation publishes two runtime units:
 
+- `gateway`, a deterministic, prebuilt Cloudflare Worker bundle.
 - `msg-worker`, a deterministic, prebuilt Cloudflare Worker bundle.
 
-Gateway, Streams, and Communicator remain outside this activation. Platform,
-Database, and Brain remain validation-only until their own runtime artifacts
-and staging consumers are reviewed. The SDK placeholder and the
-`@0000chat/msg` CLI remain checks-only and are never release artifacts.
-Private Cloud content is never included.
+Streams and Communicator remain outside this activation. Platform, Database,
+and Brain remain validation-only until their own runtime artifacts and
+staging consumers are reviewed. The SDK placeholder and the `@0000chat/msg`
+CLI remain checks-only and are never release artifacts. Private Cloud content
+is never included.
 
-The planner selects `msg-worker` from its runtime paths. The public release
-workflow is also a Msg runtime input, so changes to the publication protocol
-receive a fresh tested bundle. Root manifests and lockfiles are global runtime
-inputs and therefore conservatively select every configured unit; with this
-activation that still means only `msg-worker`.
-Documentation-only and other non-runtime changes publish a release record with
-zero artifacts and no runtime redeployment. The public workflow dispatches
-private Cloud staging only when the plan contains the Msg artifact and the
-opt-in repository variable `CLOUD_RELEASE_DISPATCH_ENABLED` is `true`, so
-those changes remain Cloud-silent and a missing variable fails closed.
+The planner selects each Worker from its runtime paths. The public release
+workflow is a Msg runtime input, so changes to the publication protocol
+select `msg-worker`. Adding a new entry to `release-units.json` selects that
+new unit for its first artifact without rebuilding unchanged units. Changes to
+existing unit definitions or the release compatibility contract remain
+conservative and select all configured units. Root manifests and lockfiles
+also select every configured unit. Documentation-only and other non-runtime
+changes publish a release record with zero artifacts and no runtime
+redeployment. The public workflow
+dispatches private Cloud staging only when the plan contains a runtime
+artifact and the opt-in repository variable `CLOUD_RELEASE_DISPATCH_ENABLED`
+is `true`; a missing variable fails closed.
 
 Any other changed path under the validation-only service roots or under
 `apps/` is treated as a possible runtime change and fails release planning
@@ -76,19 +79,42 @@ migrations in numeric order, then deploys the prebuilt Worker with
 `--no-bundle`. It owns staging, canary, production, and rollback promotion;
 this repository does not deploy or claim live staging health.
 
+## Gateway Worker bundle
+
+`gateway-<version>.tar.gz` is an `application/gzip` prebuilt Cloudflare Worker
+bundle containing:
+
+```text
+worker.js
+wrangler.json
+artifact-manifest.json
+```
+
+The embedded manifest records the exact release version, source commit,
+compatibility contract, and Worker entrypoint. The matching
+`gateway.artifact.json` release asset carries the archive and entrypoint
+digests plus the prebuilt deployment contract. The generated `wrangler.json`
+contains compatibility settings only; it excludes the public Worker name and
+route. Cloud supplies the environment-owned deployment name, route, bindings,
+and credentials.
+
+Cloud must verify the Gateway archive, metadata, release event, and
+attestation from the same immutable release before staging. Public CI builds
+and publishes the artifact but does not deploy it or claim live staging health.
+
 ## Release provenance and staging boundary
 
 After publishing the release record and provenance evidence, public CI can
 start the private Cloud `staging.yml` workflow through the GitHub Actions
 `workflow_dispatch` endpoint when `CLOUD_RELEASE_DISPATCH_ENABLED` is `true`.
 Its `release_event` input contains the immutable release version and commit,
-changed paths, the selected Msg artifact digest and compatibility, and
-workflow provenance. Runtime events carry the attestation URL emitted by the
-provenance action; documentation-only events have no artifact subject to
+changed paths, the selected Gateway or Msg artifact digest and compatibility,
+and workflow provenance. Runtime events carry the attestation URL emitted by
+the provenance action; documentation-only events have no artifact subject to
 attestation. The exact event is uploaded as release evidence. When automatic
 dispatch is disabled, the public workflow still publishes the same immutable
-release assets; an owner can promote that attested artifact through the
-private Cloud workflow. The public workflow never deploys public production.
+release assets; an owner can promote an attested artifact through the private
+Cloud workflow. The public workflow never deploys public production.
 
 Before enabling the trusted public-main workflow, immutable releases must be
 enabled for the repository. The workflow checks that setting, creates a
