@@ -253,6 +253,14 @@ test("Msg wrapper source config is normalized and checked against the release co
     writeSource();
     assert.doesNotThrow(() => assertWorkerBuildConfigMatchesSource(unit, build, temporaryRoot));
 
+    source.assets.html_handling = "auto-trailing-slash";
+    writeSource();
+    assert.throws(
+      () => assertWorkerBuildConfigMatchesSource(unit, build, temporaryRoot),
+      /assets contains unsupported keys/
+    );
+    delete source.assets.html_handling;
+
     source.compatibility_date = "2026-08-10";
     writeSource();
     assert.throws(

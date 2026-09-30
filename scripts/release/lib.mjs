@@ -400,6 +400,14 @@ function normalisedSourceAssets(unit, build, source) {
   if (!expected || !actual || typeof actual !== "object" || Array.isArray(actual)) {
     throw new Error(`release unit ${unit.name} assets do not match ${build.config_path}`);
   }
+  const unsupported = Object.keys(actual).filter(
+    (key) => !["binding", "directory", "run_worker_first"].includes(key)
+  );
+  if (unsupported.length > 0) {
+    throw new Error(
+      `release unit assets contains unsupported keys for ${unit.name}: ${unsupported.join(", ")}`
+    );
+  }
   const expectedSourceDirectory = sourceRelativePath(build, expected.source, `${unit.name} assets source`);
   const actualDirectory = normaliseConfigPath(actual.directory, `${unit.name} source assets directory`);
   if (actualDirectory !== expectedSourceDirectory) {
