@@ -5,6 +5,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import {
+  assertReleaseConfig,
   makePlan,
   readReleaseConfig,
   repositoryRoot,
@@ -31,6 +32,16 @@ export function changedFiles(base, head, gitRunner = git) {
     .filter(Boolean);
 }
 
+export function readBaseReleaseConfig(base, gitRunner = git) {
+  if (!base || /^0+$/.test(base)) return undefined;
+  if (!/^[0-9a-f]{40}$/.test(base)) return undefined;
+  try {
+    return assertReleaseConfig(JSON.parse(gitRunner("show", `${base}:release-units.json`)));
+  } catch {
+    return undefined;
+  }
+}
+
 function writeGithubOutput(file, plan) {
   if (!file) return;
   fs.appendFileSync(
@@ -54,7 +65,8 @@ function main() {
     : changedFiles(base, head);
   if (!Array.isArray(changed)) throw new Error("--files must contain a JSON array");
 
-  const plan = makePlan({ config: readReleaseConfig(), base, head, changedFiles: changed });
+  const previousConfig = changed.includes("release-units.json") ? readBaseReleaseConfig(base) : undefined;
+  const plan = makePlan({ config: readReleaseConfig(), previousConfig, base, head, changedFiles: changed });
   const output = argument("--output");
   if (output) fs.writeFileSync(output, stableJson(plan), "utf8");
   writeGithubOutput(argument("--github-output"), plan);

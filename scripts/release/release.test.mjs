@@ -15,7 +15,7 @@ import {
   readJsonc,
   releaseVersion
 } from "./lib.mjs";
-import { changedFiles } from "./plan.mjs";
+import { changedFiles, readBaseReleaseConfig } from "./plan.mjs";
 import { createReleaseEvent } from "./event.mjs";
 import { createReleaseRecord } from "./record.mjs";
 import { neutralWranglerConfig, workerArtifactManifest } from "./worker.mjs";
@@ -27,9 +27,9 @@ const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url))
 const releaseWorkflow = fs.readFileSync(path.join(repositoryRoot, ".github/workflows/release.yml"), "utf8");
 const legacyGatewayWorkflow = fs.readFileSync(path.join(repositoryRoot, ".github/workflows/deploy-gateway.yml"), "utf8");
 
-test("release configuration activates only the Msg Worker", () => {
+test("release configuration activates the Msg and Gateway Workers", () => {
   assert.doesNotThrow(() => assertReleaseConfig(config));
-  assert.deepEqual(config.units.map((unit) => unit.name), ["msg-worker"]);
+  assert.deepEqual(config.units.map((unit) => unit.name), ["msg-worker", "gateway"]);
 
   const msg = config.units[0];
   assert.equal(msg.kind, "cloudflare-worker-bundle");
@@ -87,6 +87,32 @@ test("release configuration activates only the Msg Worker", () => {
     }
   });
   assert.equal(msg.archive_paths.some((entry) => /cli|sdk|cloud/i.test(entry)), false);
+
+  const gateway = config.units.find((unit) => unit.name === "gateway");
+  assert.equal(gateway.kind, "cloudflare-worker-bundle");
+  assert.deepEqual(gateway.runtime_paths, [
+    "services/gateway/src/**",
+    "services/gateway/package.json",
+    "services/gateway/tsconfig.json",
+    "services/gateway/tooling/pnpm-lock.yaml",
+    "services/gateway/wrangler.jsonc"
+  ]);
+  assert.deepEqual(gateway.archive_paths, [
+    "services/gateway/src",
+    "services/gateway/package.json",
+    "services/gateway/tsconfig.json",
+    "services/gateway/wrangler.jsonc"
+  ]);
+  assert.deepEqual(gateway.build, {
+    type: "cloudflare-worker",
+    config_path: "services/gateway/wrangler.jsonc",
+    entrypoint: "worker.js",
+    config: "wrangler.json",
+    files: ["worker.js", "wrangler.json", "artifact-manifest.json"],
+    compatibility_date: "2026-08-06",
+    compatibility_flags: ["nodejs_compat"]
+  });
+  assert.doesNotThrow(() => assertWorkerBuildConfigMatchesSource(gateway, gateway.build, repositoryRoot));
 });
 
 test("Msg bundle manifest carries only public deployment metadata", () => {
@@ -128,6 +154,32 @@ test("Msg bundle manifest carries only public deployment metadata", () => {
       { name: "MSG_RATE_LIMIT_LIVE", simple: { limit: 10, period: 60 } }
     ],
     triggers: { crons: ["17 3 * * *"] }
+  });
+});
+
+test("Gateway bundle manifest and Wrangler config leave route ownership to Cloud", () => {
+  const gateway = config.units.find((unit) => unit.name === "gateway");
+  const plan = makePlan({ config, base: head, head, changedFiles: ["services/gateway/src/worker.ts"] });
+
+  assert.deepEqual(workerArtifactManifest(gateway, plan), {
+    schema_version: 1,
+    product: "0000",
+    name: "gateway",
+    version: plan.release_version,
+    kind: "cloudflare-worker-bundle",
+    media_type: "application/gzip",
+    source_commit: head,
+    compatibility: { api: "v1", config: "v1" },
+    entrypoint: "worker.js",
+    compatibility_date: "2026-08-06",
+    compatibility_flags: ["nodejs_compat"]
+  });
+  assert.deepEqual(neutralWranglerConfig(gateway), {
+    $schema: "https://developers.cloudflare.com/workers/wrangler/config-schema.json",
+    main: "worker.js",
+    compatibility_date: "2026-08-06",
+    compatibility_flags: ["nodejs_compat"],
+    workers_dev: false
   });
 });
 
@@ -280,16 +332,70 @@ test("Msg wrapper source config is normalized and checked against the release co
   }
 });
 
-test("Msg and root changes select only the Msg release unit", () => {
+test("Worker changes select their configured release units", () => {
   assert.deepEqual(
     affectedUnits(config, ["services/msg/worker/src/worker.ts", "services/msg/worker/test/health.test.ts"])
       .map((unit) => unit.name),
     ["msg-worker"]
   );
   assert.deepEqual(affectedUnits(config, ["services/msg/cli/src/cli.ts"]), []);
-  assert.deepEqual(affectedUnits(config, ["services/gateway/src/worker.ts"]), []);
-  assert.deepEqual(affectedUnits(config, ["bun.lock"]).map((unit) => unit.name), ["msg-worker"]);
+  assert.deepEqual(affectedUnits(config, ["services/gateway/src/worker.ts"]).map((unit) => unit.name), ["gateway"]);
+  assert.deepEqual(affectedUnits(config, ["bun.lock"]).map((unit) => unit.name), ["gateway", "msg-worker"]);
   assert.deepEqual(affectedUnits(config, [".github/workflows/release.yml"]).map((unit) => unit.name), ["msg-worker"]);
+});
+
+test("an additive release-unit registration publishes only its first artifact", () => {
+  const previousConfig = { ...config, units: config.units.filter((unit) => unit.name === "msg-worker") };
+  const plan = makePlan({
+    config,
+    previousConfig,
+    base: head,
+    head,
+    changedFiles: ["release-units.json"]
+  });
+
+  assert.equal(plan.change_class, "runtime");
+  assert.equal(plan.runtime_redeployment, true);
+  assert.deepEqual(plan.affected_units, ["gateway"]);
+  assert.deepEqual(plan.artifacts.map((artifact) => artifact.name), ["gateway"]);
+});
+
+test("unit registration retains simultaneous runtime and global inputs", () => {
+  const previousConfig = { ...config, units: config.units.filter((unit) => unit.name === "msg-worker") };
+  assert.deepEqual(
+    affectedUnits(config, ["release-units.json", "services/msg/worker/src/worker.ts"], previousConfig)
+      .map((unit) => unit.name),
+    ["gateway", "msg-worker"]
+  );
+  assert.deepEqual(
+    affectedUnits(config, ["release-units.json", "bun.lock"], previousConfig).map((unit) => unit.name),
+    ["gateway", "msg-worker"]
+  );
+});
+
+test("changes to existing unit definitions remain conservative", () => {
+  const previousConfig = {
+    ...config,
+    units: config.units.map((unit) => unit.name === "msg-worker"
+      ? { ...unit, build: { ...unit.build, compatibility_date: "2026-08-08" } }
+      : unit)
+  };
+  assert.deepEqual(
+    affectedUnits(config, ["release-units.json"], previousConfig).map((unit) => unit.name),
+    ["gateway", "msg-worker"]
+  );
+});
+
+test("a release contract change alongside a new unit remains conservative", () => {
+  const previousConfig = {
+    ...config,
+    release: { ...config.release, compatibility: { api: "v0", config: "v1" } },
+    units: config.units.filter((unit) => unit.name === "msg-worker")
+  };
+  assert.deepEqual(
+    affectedUnits(config, ["release-units.json"], previousConfig).map((unit) => unit.name),
+    ["gateway", "msg-worker"]
+  );
 });
 
 test("deletion-only Msg source changes still trigger a runtime artifact", () => {
@@ -315,6 +421,27 @@ test("Git changed path discovery includes deletions", () => {
 
   assert.deepEqual(files, ["services/msg/worker/src/removed-route.ts"]);
   assert.deepEqual(received, ["diff", "--no-renames", "--name-only", "--diff-filter=ACDMRTUXB", "base", "head"]);
+});
+
+test("release planner reads the unit map from the push base commit", () => {
+  let received;
+  const previousConfig = { ...config, units: config.units.filter((unit) => unit.name === "msg-worker") };
+  const result = readBaseReleaseConfig(head, (...args) => {
+    received = args;
+    return JSON.stringify(previousConfig);
+  });
+
+  assert.deepEqual(result, previousConfig);
+  assert.deepEqual(received, ["show", `${head}:release-units.json`]);
+  assert.equal(readBaseReleaseConfig("0".repeat(40), () => assert.fail("zero base should not be read")), undefined);
+  assert.equal(readBaseReleaseConfig("main", () => "{}"), undefined);
+  assert.equal(readBaseReleaseConfig(head, () => "not json"), undefined);
+  assert.equal(readBaseReleaseConfig(head, () => { throw new Error("missing base config"); }), undefined);
+  assert.deepEqual(
+    affectedUnits(config, ["release-units.json"], readBaseReleaseConfig(head, () => "not json"))
+      .map((unit) => unit.name),
+    ["gateway", "msg-worker"]
+  );
 });
 
 test("moving a Msg asset into docs still releases Msg for the source deletion", () => {
