@@ -59,6 +59,15 @@ From `services/streams`, `bun run check` validates its workspace wrapper and
 `bun run check:application` runs the imported scaffold and tooling checks; see
 [`services/streams/README.md`](services/streams/README.md).
 
+Public release planning and artifact rules are documented in
+[`docs/release-artifacts.md`](docs/release-artifacts.md). Run
+`bun run test:release` for the deterministic affected-unit and release-record
+tests. The public release workflow runs for every merge pushed to `main` and
+publishes an immutable release record. This activation configures exactly one
+runtime artifact, the Msg Worker bundle; non-runtime changes remain
+Cloud-silent, while the combined release-setup merge selects Msg because the
+release-unit map is a global runtime input.
+
 The import procedure and preservation records are documented in
 [`services/brain/docs/migration/2026-09-17-monorepo-import.md`](services/brain/docs/migration/2026-09-17-monorepo-import.md),
 [`services/communicator/docs/migration/2026-09-15-monorepo-import.md`](services/communicator/docs/migration/2026-09-15-monorepo-import.md),

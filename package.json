@@ -8,11 +8,13 @@
     "packages/*"
   ],
   "scripts": {
-    "check": "bun scripts/check-workspace.mjs && bun scripts/check-topology.mjs && bun scripts/check-deploy-gateway-workflow.mjs && bun run check:licenses",
+    "check": "bun scripts/check-workspace.mjs && bun scripts/check-topology.mjs && bun scripts/check-deploy-gateway-workflow.mjs && bun run check:licenses && node scripts/release/check-config.mjs",
     "check:topology": "bun scripts/check-topology.mjs && bun scripts/check-topology-fixtures.mjs",
     "check:licenses": "bun scripts/check-licenses.mjs",
     "check:turbo": "turbo run check",
-    "check:turbo:dry": "turbo run check --dry=json"
+    "check:turbo:dry": "turbo run check --dry=json",
+    "test:release": "node --test scripts/release/release.test.mjs",
+    "release:event": "node scripts/release/event.mjs"
   },
   "devDependencies": {
     "turbo": "2.10.13"
