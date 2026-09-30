@@ -21,8 +21,9 @@ lockfiles are global runtime inputs and therefore conservatively select every
 configured unit; with this activation that still means only `msg-worker`.
 Documentation-only and other non-runtime changes publish a release record with
 zero artifacts and no runtime redeployment. The public workflow dispatches
-private Cloud staging only when the plan contains the Msg artifact, so those
-changes remain Cloud-silent.
+private Cloud staging only when the plan contains the Msg artifact and the
+opt-in repository variable `CLOUD_RELEASE_DISPATCH_ENABLED` is `true`, so
+those changes remain Cloud-silent and a missing variable fails closed.
 
 Any other changed path under the validation-only service roots or under
 `apps/` is treated as a possible runtime change and fails release planning
@@ -75,14 +76,17 @@ this repository does not deploy or claim live staging health.
 
 ## Release provenance and staging boundary
 
-After publishing the release record and provenance evidence, public CI starts
-the private Cloud `staging.yml` workflow through the GitHub Actions
-`workflow_dispatch` endpoint. Its `release_event` input contains the
-immutable release version and commit, changed paths, the selected Msg artifact
-digest and compatibility, and workflow provenance. Runtime events carry the
-attestation URL emitted by the provenance action; documentation-only events
-have no artifact subject to attestation. The exact event is uploaded as
-release evidence. The public workflow never deploys public production.
+After publishing the release record and provenance evidence, public CI can
+start the private Cloud `staging.yml` workflow through the GitHub Actions
+`workflow_dispatch` endpoint when `CLOUD_RELEASE_DISPATCH_ENABLED` is `true`.
+Its `release_event` input contains the immutable release version and commit,
+changed paths, the selected Msg artifact digest and compatibility, and
+workflow provenance. Runtime events carry the attestation URL emitted by the
+provenance action; documentation-only events have no artifact subject to
+attestation. The exact event is uploaded as release evidence. When automatic
+dispatch is disabled, the public workflow still publishes the same immutable
+release assets; an owner can promote that attested artifact through the
+private Cloud workflow. The public workflow never deploys public production.
 
 Before enabling the trusted public-main workflow, immutable releases must be
 enabled for the repository. The workflow checks that setting, creates a

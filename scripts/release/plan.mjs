@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 
 import fs from "node:fs";
+import path from "node:path";
 import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import {
   makePlan,
   readReleaseConfig,
@@ -20,11 +22,11 @@ function git(...args) {
   return result.stdout.trim();
 }
 
-function changedFiles(base, head) {
+export function changedFiles(base, head, gitRunner = git) {
   if (base && !/^0+$/.test(base)) {
-    return git("diff", "--name-only", "--diff-filter=ACMRTUXB", base, head).split("\n").filter(Boolean);
+    return gitRunner("diff", "--name-only", "--diff-filter=ACDMRTUXB", base, head).split("\n").filter(Boolean);
   }
-  return git("diff-tree", "--root", "--no-commit-id", "--name-only", "-r", "--diff-filter=ACMRTUXB", head)
+  return gitRunner("diff-tree", "--root", "--no-commit-id", "--name-only", "-r", "--diff-filter=ACDMRTUXB", head)
     .split("\n")
     .filter(Boolean);
 }
@@ -43,16 +45,20 @@ function writeGithubOutput(file, plan) {
   );
 }
 
-const head = argument("--head", git("rev-parse", "HEAD"));
-const base = argument("--base");
-const filesArgument = argument("--files");
-const changed = filesArgument
-  ? JSON.parse(fs.readFileSync(filesArgument, "utf8"))
-  : changedFiles(base, head);
-if (!Array.isArray(changed)) throw new Error("--files must contain a JSON array");
+function main() {
+  const head = argument("--head", git("rev-parse", "HEAD"));
+  const base = argument("--base");
+  const filesArgument = argument("--files");
+  const changed = filesArgument
+    ? JSON.parse(fs.readFileSync(filesArgument, "utf8"))
+    : changedFiles(base, head);
+  if (!Array.isArray(changed)) throw new Error("--files must contain a JSON array");
 
-const plan = makePlan({ config: readReleaseConfig(), base, head, changedFiles: changed });
-const output = argument("--output");
-if (output) fs.writeFileSync(output, stableJson(plan), "utf8");
-writeGithubOutput(argument("--github-output"), plan);
-process.stdout.write(stableJson(plan));
+  const plan = makePlan({ config: readReleaseConfig(), base, head, changedFiles: changed });
+  const output = argument("--output");
+  if (output) fs.writeFileSync(output, stableJson(plan), "utf8");
+  writeGithubOutput(argument("--github-output"), plan);
+  process.stdout.write(stableJson(plan));
+}
+
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) main();

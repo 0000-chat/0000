@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import test from "node:test";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -9,12 +11,14 @@ import {
   classifyChanges,
   makePlan,
   readReleaseConfig,
+  readJsonc,
   releaseVersion
 } from "./lib.mjs";
+import { changedFiles } from "./plan.mjs";
 import { createReleaseEvent } from "./event.mjs";
 import { createReleaseRecord } from "./record.mjs";
 import { neutralWranglerConfig, workerArtifactManifest } from "./worker.mjs";
-import { migrationMetadata } from "./migrations.mjs";
+import { assertAppendOnlyD1Migrations, migrationMetadata } from "./migrations.mjs";
 
 const config = readReleaseConfig();
 const head = "0123456789abcdef0123456789abcdef01234567";
@@ -144,6 +148,36 @@ test("Msg D1 migration metadata is ordered and content-addressed", () => {
   ]);
 });
 
+test("deleting a migration already present at the base fails the append-only guard", () => {
+  const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "0000-release-migration-test-"));
+  const migrationPath = path.join(temporaryRoot, "services/msg/worker/migrations/0001_initial.sql");
+  try {
+    fs.mkdirSync(path.dirname(migrationPath), { recursive: true });
+    fs.writeFileSync(migrationPath, "CREATE TABLE messages (id TEXT PRIMARY KEY);\n", "utf8");
+    for (const args of [
+      ["init", "-q"],
+      ["config", "user.name", "Release Test"],
+      ["config", "user.email", "release-test@example.invalid"],
+      ["add", "."],
+      ["commit", "-qm", "initial migration"]
+    ]) {
+      execFileSync("git", args, { cwd: temporaryRoot, stdio: "ignore" });
+    }
+    fs.rmSync(migrationPath);
+
+    assert.throws(
+      () => assertAppendOnlyD1Migrations({
+        repositoryRoot: temporaryRoot,
+        source: "services/msg/worker/migrations",
+        baseCommit: "HEAD"
+      }),
+      /D1 migration history is not append-only: removed services\/msg\/worker\/migrations\/0001_initial\.sql/
+    );
+  } finally {
+    fs.rmSync(temporaryRoot, { force: true, recursive: true });
+  }
+});
+
 test("neutral Wrangler config excludes environment-owned values", () => {
   const neutral = neutralWranglerConfig(config.units[0]);
 
@@ -180,6 +214,22 @@ test("neutral Wrangler config excludes environment-owned values", () => {
   assert.equal("vars" in neutral, false);
 });
 
+test("packaged Wrangler config and manifest share the release public contract", () => {
+  const msg = config.units[0];
+  const plan = makePlan({ config, base: head, head, changedFiles: ["services/msg/worker/src/worker.ts"] });
+  const source = readJsonc(path.join(repositoryRoot, "services/msg/wrangler.jsonc"));
+  const neutral = neutralWranglerConfig(msg, source);
+  const manifest = workerArtifactManifest(msg, plan);
+
+  assert.deepEqual(neutral.durable_objects, manifest.durable_objects);
+  assert.deepEqual(neutral.migrations, manifest.migrations);
+  assert.deepEqual(neutral.d1_databases, manifest.d1_databases);
+  assert.deepEqual(neutral.secrets?.required, manifest.required_secrets);
+  assert.deepEqual(neutral.observability, manifest.observability);
+  assert.deepEqual(neutral.assets, manifest.assets);
+  assert.deepEqual(neutral.triggers, manifest.triggers);
+});
+
 test("Msg and root changes select only the Msg release unit", () => {
   assert.deepEqual(
     affectedUnits(config, ["services/msg/worker/src/worker.ts", "services/msg/worker/test/health.test.ts"])
@@ -189,6 +239,31 @@ test("Msg and root changes select only the Msg release unit", () => {
   assert.deepEqual(affectedUnits(config, ["services/msg/cli/src/cli.ts"]), []);
   assert.deepEqual(affectedUnits(config, ["services/gateway/src/worker.ts"]), []);
   assert.deepEqual(affectedUnits(config, ["bun.lock"]).map((unit) => unit.name), ["msg-worker"]);
+});
+
+test("deletion-only Msg source changes still trigger a runtime artifact", () => {
+  const plan = makePlan({
+    config,
+    base: head,
+    head,
+    changedFiles: ["services/msg/worker/src/removed-route.ts"]
+  });
+
+  assert.equal(plan.change_class, "runtime");
+  assert.equal(plan.runtime_redeployment, true);
+  assert.deepEqual(plan.affected_units, ["msg-worker"]);
+  assert.deepEqual(plan.artifacts.map((artifact) => artifact.name), ["msg-worker"]);
+});
+
+test("Git changed path discovery includes deletions", () => {
+  let received;
+  const files = changedFiles("base", "head", (...args) => {
+    received = args;
+    return "services/msg/worker/src/removed-route.ts\n";
+  });
+
+  assert.deepEqual(files, ["services/msg/worker/src/removed-route.ts"]);
+  assert.deepEqual(received, ["diff", "--name-only", "--diff-filter=ACDMRTUXB", "base", "head"]);
 });
 
 test("documentation-only changes create no artifact or runtime redeployment", () => {
@@ -247,7 +322,15 @@ test("release workflow uses scoped App credentials and dispatches only runtime p
   assert.match(releaseWorkflow, /retry-provenance/);
   assert.match(releaseWorkflow, /github\.run_attempt/);
   assert.match(releaseWorkflow, /immutable releases must be enabled/);
-  assert.match(releaseWorkflow, /if: steps\.plan\.outputs\.runtime_redeployment == 'true'/);
+  const cloudDispatchGate = "steps.plan.outputs.runtime_redeployment == 'true' && vars.CLOUD_RELEASE_DISPATCH_ENABLED == 'true'";
+  assert.equal(releaseWorkflow.split(cloudDispatchGate).length - 1, 3);
+  assert.match(releaseWorkflow, /CLOUD_RELEASE_DISPATCH_ENABLED/);
+  const publishStart = releaseWorkflow.indexOf("      - name: Create, populate, and publish immutable GitHub release");
+  const notifyStart = releaseWorkflow.indexOf("      - name: Notify private Cloud staging", publishStart);
+  assert.ok(publishStart >= 0 && notifyStart > publishStart);
+  const publishBlock = releaseWorkflow.slice(publishStart, notifyStart);
+  assert.doesNotMatch(publishBlock, /^        if:/m);
+  assert.match(publishBlock, /gh release upload/);
 });
 
 test("legacy Gateway production fallback remains manual and owner-confirmed", () => {

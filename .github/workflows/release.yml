@@ -196,7 +196,7 @@ jobs:
             ${{ runner.temp }}/0000-release-artifacts/
           if-no-files-found: error
       - name: Validate private Cloud dispatch target
-        if: steps.plan.outputs.runtime_redeployment == 'true'
+        if: steps.plan.outputs.runtime_redeployment == 'true' && vars.CLOUD_RELEASE_DISPATCH_ENABLED == 'true'
         id: cloud-target
         env:
           CLOUD_RELEASE_REPOSITORY: ${{ vars.CLOUD_RELEASE_REPOSITORY }}
@@ -223,7 +223,7 @@ jobs:
           fi
           echo "repository=${CLOUD_RELEASE_REPOSITORY#*/}" >> "$GITHUB_OUTPUT"
       - name: Mint ephemeral Cloud dispatch GitHub App token
-        if: steps.plan.outputs.runtime_redeployment == 'true'
+        if: steps.plan.outputs.runtime_redeployment == 'true' && vars.CLOUD_RELEASE_DISPATCH_ENABLED == 'true'
         id: cloud-dispatch-token
         uses: actions/create-github-app-token@1b10c78c7865c340bc4f6099eb2f838309f1e8c3 # v3.1.1
         with:
@@ -394,8 +394,10 @@ jobs:
           fi
       - name: Notify private Cloud staging
         # No runtime artifact means no Cloud dispatch. Activation and docs-only
-        # merges therefore publish a release record but remain Cloud-silent.
-        if: steps.plan.outputs.runtime_redeployment == 'true'
+        # merges therefore publish a release record but remain Cloud-silent. The
+        # repository variable is deliberately opt-in while Cloud credentials
+        # and the staging consumer are being provisioned.
+        if: steps.plan.outputs.runtime_redeployment == 'true' && vars.CLOUD_RELEASE_DISPATCH_ENABLED == 'true'
         env:
           CLOUD_RELEASE_REPOSITORY: ${{ vars.CLOUD_RELEASE_REPOSITORY }}
           GH_TOKEN: ${{ steps.cloud-dispatch-token.outputs.token }}

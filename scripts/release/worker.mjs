@@ -1,19 +1,17 @@
 const PUBLIC_WRANGLER_KEYS = ["durable_objects", "migrations", "secrets", "observability"];
 
-export function neutralWranglerConfig(unit, sourceConfig = undefined) {
+export function neutralWranglerConfig(unit) {
   const build = unit.build;
-  const publicContract = sourceConfig
-    ? Object.fromEntries(
-        PUBLIC_WRANGLER_KEYS
-          .filter((key) => Object.prototype.hasOwnProperty.call(sourceConfig, key))
-          .map((key) => [key, sourceConfig[key]]),
-      )
-    : (build.wrangler ?? {});
+  const publicContract = Object.fromEntries(
+    PUBLIC_WRANGLER_KEYS
+      .filter((key) => Object.prototype.hasOwnProperty.call(build.wrangler ?? {}, key))
+      .map((key) => [key, build.wrangler[key]]),
+  );
   const config = {
     $schema: "https://developers.cloudflare.com/workers/wrangler/config-schema.json",
     main: build.entrypoint,
-    compatibility_date: sourceConfig?.compatibility_date ?? build.compatibility_date,
-    compatibility_flags: sourceConfig?.compatibility_flags ?? build.compatibility_flags,
+    compatibility_date: build.compatibility_date,
+    compatibility_flags: build.compatibility_flags,
     workers_dev: false,
     ...publicContract
   };

@@ -2,9 +2,10 @@
 
 This document records the activation boundary for the public release
 scaffold and workflow. The Msg activation is intended to land in one reviewed
-`main` merge: the public workflow runs for every subsequent push to `main`,
-publishes an immutable release record, and dispatches private Cloud only when
-the release plan contains the Msg runtime artifact.
+`main` merge: the public workflow runs for every subsequent push to `main` and
+publishes an immutable release record. It dispatches private Cloud only when
+the release plan contains the Msg runtime artifact and the repository variable
+`CLOUD_RELEASE_DISPATCH_ENABLED` is explicitly set to `true`.
 
 The combined release-setup merge changes `release-units.json`, which is a
 global runtime input. Its first-main-merge plan therefore selects exactly one
@@ -22,7 +23,10 @@ The workflow and tests prove the following sequence for later merges:
 3. Gateway, Streams, and Communicator remain outside this activation until
    their own release units and staging consumers are reviewed.
 
-Activation must retain immutable release provenance and dispatch private Cloud
-only for a runtime plan containing the Msg artifact. It must not deploy public
-production on a `main` push, and it must not add public credentials or
-managed environment configuration to this repository.
+Activation must retain immutable release provenance. Automatic private Cloud
+staging is an explicit opt-in while the private consumer and its credentials
+are being provisioned; an owner can promote the same attested immutable
+artifact through the private Cloud workflow when that variable is disabled.
+The public workflow must not deploy public production on a `main` push, and it
+must not add public credentials or managed environment configuration to this
+repository.
