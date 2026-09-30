@@ -42,6 +42,38 @@
       "minItems": 1,
       "items": { "const": "nodejs_compat" }
     },
+    "rules": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["type", "globs", "fallthrough"],
+        "properties": {
+          "type": { "type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_-]*$" },
+          "globs": {
+            "type": "array",
+            "minItems": 1,
+            "items": { "type": "string", "pattern": "^[A-Za-z0-9._*?/-]+$" }
+          },
+          "fallthrough": { "type": "boolean" }
+        }
+      }
+    },
+    "modules": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "type", "digest"],
+        "properties": {
+          "name": { "type": "string", "pattern": "^[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*$" },
+          "type": { "type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_-]*$" },
+          "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
+        }
+      }
+    },
     "assets": {
       "type": "object",
       "additionalProperties": false,

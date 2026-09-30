@@ -16,6 +16,7 @@ import {
 } from "./lib.mjs";
 import { neutralWranglerConfig, workerArtifactManifest } from "./worker.mjs";
 import { assertAppendOnlyD1Migrations, migrationMetadata } from "./migrations.mjs";
+import { copyGeneratedModules } from "./modules.mjs";
 
 function argument(name, fallback = undefined) {
   const index = process.argv.indexOf(name);
@@ -154,11 +155,20 @@ function buildWorkerUnit(unit, plan) {
 
     const assets = buildDirectory(unit, unit.build.assets, artifactRoot);
     const migrations = buildDirectory(unit, unit.build.migrations, artifactRoot);
+    const modules = copyGeneratedModules({
+      outputDirectory: wranglerOutput,
+      generatedEntrypoint: generatedWorker,
+      artifactRoot,
+      rules: unit.build.wrangler?.rules ?? []
+    });
     const migrationFiles = migrationMetadata(
       migrations.target ? path.join(artifactRoot, migrations.target) : undefined,
       migrations.files
     );
-    const manifest = workerArtifactManifest(unit, plan, migrationFiles.length > 0 ? { migration_files: migrationFiles } : {});
+    const manifest = workerArtifactManifest(unit, plan, {
+      ...(migrationFiles.length > 0 ? { migration_files: migrationFiles } : {}),
+      ...(modules.length > 0 ? { modules } : {})
+    });
     fs.writeFileSync(path.join(artifactRoot, "artifact-manifest.json"), stableJson(manifest), "utf8");
 
     const missing = unit.build.files.filter((file) => !fs.existsSync(path.join(artifactRoot, file)));
@@ -167,7 +177,7 @@ function buildWorkerUnit(unit, plan) {
     }
 
     const directories = [assets.target, migrations.target].filter(Boolean);
-    const archivePaths = [...unit.build.files, ...directories];
+    const archivePaths = [...unit.build.files, ...modules.map((module) => module.name), ...directories];
     const tar = run(
       "tar",
       [
@@ -197,6 +207,7 @@ function buildWorkerUnit(unit, plan) {
         files: unit.build.files,
         directories,
         migration_files: migrationFiles,
+        modules,
         entrypoint_digest: `sha256:${sha256(workerBytes)}`,
         deployment: {
           tool: "wrangler",

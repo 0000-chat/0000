@@ -32,6 +32,7 @@ export function createReleaseRecord(plan, metadata) {
         "files",
         "directories",
         "migration_files",
+        "modules",
         "entrypoint_digest",
         "deployment"
       ]) {

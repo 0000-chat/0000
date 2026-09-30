@@ -109,6 +109,20 @@
             }
           }
         },
+        "modules": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name", "type", "digest"],
+            "properties": {
+              "name": { "type": "string", "pattern": "^[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*$" },
+              "type": { "type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_-]*$" },
+              "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
+            }
+          }
+        },
         "entrypoint_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
         "deployment": {
           "type": "object",

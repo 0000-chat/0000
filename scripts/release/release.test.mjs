@@ -13,13 +13,15 @@ import {
   makePlan,
   readReleaseConfig,
   readJsonc,
-  releaseVersion
+  releaseVersion,
+  sha256
 } from "./lib.mjs";
 import { changedFiles } from "./plan.mjs";
 import { createReleaseEvent } from "./event.mjs";
 import { createReleaseRecord } from "./record.mjs";
 import { neutralWranglerConfig, workerArtifactManifest } from "./worker.mjs";
 import { assertAppendOnlyD1Migrations, migrationMetadata } from "./migrations.mjs";
+import { copyGeneratedModules } from "./modules.mjs";
 
 const config = readReleaseConfig();
 const head = "0123456789abcdef0123456789abcdef01234567";
@@ -54,6 +56,9 @@ test("release configuration activates only the Msg Worker", () => {
       directory: "migrations"
     },
     wrangler: {
+      rules: [
+        { type: "Text", globs: ["**/*.svg"], fallthrough: true }
+      ],
       durable_objects: {
         bindings: [{ name: "ConversationRoom", class_name: "ConversationRoom" }]
       },
@@ -105,6 +110,9 @@ test("Msg bundle manifest carries only public deployment metadata", () => {
     entrypoint: "worker.js",
     compatibility_date: "2026-08-09",
     compatibility_flags: ["nodejs_compat"],
+    rules: [
+      { type: "Text", globs: ["**/*.svg"], fallthrough: true }
+    ],
     assets: { binding: "ASSETS", directory: "assets", run_worker_first: true },
     durable_objects: {
       bindings: [{ name: "ConversationRoom", class_name: "ConversationRoom" }]
@@ -121,6 +129,7 @@ test("Msg bundle manifest carries only public deployment metadata", () => {
       "MSG_VAPID_SUBJECT"
     ],
     observability: { enabled: true, head_sampling_rate: 1 },
+    modules: [],
     rate_limits: [
       { name: "MSG_RATE_LIMIT_CREATION", simple: { limit: 6, period: 60 } },
       { name: "MSG_RATE_LIMIT_READS", simple: { limit: 60, period: 60 } },
@@ -187,6 +196,9 @@ test("neutral Wrangler config excludes environment-owned values", () => {
     main: "worker.js",
     compatibility_date: "2026-08-09",
     compatibility_flags: ["nodejs_compat"],
+    rules: [
+      { type: "Text", globs: ["**/*.svg"], fallthrough: true }
+    ],
     workers_dev: false,
     durable_objects: {
       bindings: [{ name: "ConversationRoom", class_name: "ConversationRoom" }]
@@ -230,6 +242,64 @@ test("packaged Wrangler config and manifest share the release public contract", 
   assert.deepEqual(neutral.observability, manifest.observability);
   assert.deepEqual(neutral.assets, manifest.assets);
   assert.deepEqual(neutral.triggers, manifest.triggers);
+  assert.deepEqual(neutral.rules, manifest.rules);
+});
+
+test("generated Wrangler modules are copied with exact paths and digests", () => {
+  const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "0000-generated-modules-test-"));
+  const outputDirectory = path.join(temporaryRoot, "wrangler-output");
+  const artifactRoot = path.join(temporaryRoot, "artifact");
+  try {
+    fs.mkdirSync(path.join(outputDirectory, "nested"), { recursive: true });
+    fs.mkdirSync(artifactRoot, { recursive: true });
+    fs.writeFileSync(
+      path.join(outputDirectory, "worker-entry.js"),
+      'import rootIcon from "./root.svg"; import nestedIcon from "./nested/icon.svg"; export default { fetch() { return new Response(rootIcon + nestedIcon); } };\n',
+      "utf8"
+    );
+    fs.writeFileSync(path.join(outputDirectory, "root.svg"), "<svg>root</svg>\n", "utf8");
+    fs.writeFileSync(path.join(outputDirectory, "nested/icon.svg"), '<svg><text>from "./license"</text></svg>\n', "utf8");
+    fs.writeFileSync(path.join(outputDirectory, "worker-entry.js.map"), "timestamped source map\n", "utf8");
+    fs.writeFileSync(path.join(outputDirectory, "README.md"), "timestamped README\n", "utf8");
+
+    const modules = copyGeneratedModules({
+      outputDirectory,
+      generatedEntrypoint: path.join(outputDirectory, "worker-entry.js"),
+      artifactRoot,
+      rules: [{ type: "Text", globs: ["**/*.svg"], fallthrough: true }]
+    });
+    assert.deepEqual(modules, [
+      { name: "nested/icon.svg", type: "Text", digest: `sha256:${sha256(Buffer.from('<svg><text>from "./license"</text></svg>\n'))}` },
+      { name: "root.svg", type: "Text", digest: `sha256:${sha256(Buffer.from("<svg>root</svg>\n"))}` }
+    ]);
+    assert.equal(fs.readFileSync(path.join(artifactRoot, "nested/icon.svg"), "utf8"), '<svg><text>from "./license"</text></svg>\n');
+    assert.equal(fs.readFileSync(path.join(artifactRoot, "root.svg"), "utf8"), "<svg>root</svg>\n");
+
+    fs.rmSync(path.join(outputDirectory, "root.svg"));
+    assert.throws(
+      () => copyGeneratedModules({
+        outputDirectory,
+        generatedEntrypoint: path.join(outputDirectory, "worker-entry.js"),
+        artifactRoot: path.join(temporaryRoot, "missing-artifact"),
+        rules: [{ type: "Text", globs: ["**/*.svg"], fallthrough: true }]
+      }),
+      /missing from Wrangler output: root\.svg/
+    );
+    fs.writeFileSync(path.join(outputDirectory, "root.svg"), "<svg>root</svg>\n", "utf8");
+
+    fs.writeFileSync(path.join(outputDirectory, "unexpected.bin"), "runtime?\n", "utf8");
+    assert.throws(
+      () => copyGeneratedModules({
+        outputDirectory,
+        generatedEntrypoint: path.join(outputDirectory, "worker-entry.js"),
+        artifactRoot: path.join(temporaryRoot, "second-artifact"),
+        rules: [{ type: "Text", globs: ["**/*.svg"], fallthrough: true }]
+      }),
+      /unsupported file: unexpected\.bin/
+    );
+  } finally {
+    fs.rmSync(temporaryRoot, { force: true, recursive: true });
+  }
 });
 
 test("Msg wrapper source config is normalized and checked against the release contract", () => {
@@ -247,6 +317,14 @@ test("Msg wrapper source config is normalized and checked against the release co
   try {
     writeSource();
     assert.doesNotThrow(() => assertWorkerBuildConfigMatchesSource(unit, build, temporaryRoot));
+
+    source.rules[0].globs = ["**/*.png"];
+    writeSource();
+    assert.throws(
+      () => assertWorkerBuildConfigMatchesSource(unit, build, temporaryRoot),
+      /rules does not match/
+    );
+    source.rules[0].globs = ["**/*.svg"];
 
     source.d1_databases[0].database_id = "11111111-2222-4333-8444-555555555555";
     source.ratelimits[0].namespace_id = "9999999999";
@@ -594,6 +672,9 @@ test("release records retain exact Msg artifact and Cloud selection", () => {
     migration_files: [
       { name: "migrations/0001_operations.sql", digest: `sha256:${"a".repeat(64)}` }
     ],
+    modules: [
+      { name: "hashed-icon.svg", type: "Text", digest: `sha256:${"m".repeat(64)}` }
+    ],
     entrypoint_digest: `sha256:${"e".repeat(64)}`,
     deployment: {
       tool: "wrangler",
@@ -624,6 +705,9 @@ test("release records retain exact Msg artifact and Cloud selection", () => {
   }]);
   assert.deepEqual(record.artifacts[0].migration_files, [
     { name: "migrations/0001_operations.sql", digest: `sha256:${"a".repeat(64)}` }
+  ]);
+  assert.deepEqual(record.artifacts[0].modules, [
+    { name: "hashed-icon.svg", type: "Text", digest: `sha256:${"m".repeat(64)}` }
   ]);
   assert.equal(record.publication_policy.production_deployment, false);
 });

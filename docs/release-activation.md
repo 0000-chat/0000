@@ -10,8 +10,9 @@ the release plan contains the Msg runtime artifact and the repository variable
 The combined release-setup merge changes `release-units.json`, which is a
 global runtime input. Its first-main-merge plan therefore selects exactly one
 unit, `msg-worker`, and produces one prebuilt Worker bundle containing the
-generated Worker, static assets, and ordered D1 migrations. This is a release
-artifact and private staging dispatch, not a public production deployment.
+generated Worker, its emitted runtime modules, static assets, and ordered D1
+migrations. This is a release artifact and private staging dispatch, not a
+public production deployment.
 
 The workflow and tests prove the following sequence for later merges:
 

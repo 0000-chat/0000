@@ -267,7 +267,7 @@ function assertWorkerBuildConfig(unit, build) {
     if (!build.wrangler || typeof build.wrangler !== "object" || Array.isArray(build.wrangler)) {
       throw new Error(`release unit build.wrangler must be an object: ${unit.name}`);
     }
-    const allowed = new Set(["durable_objects", "migrations", "d1_databases", "secrets", "observability"]);
+    const allowed = new Set(["rules", "durable_objects", "migrations", "d1_databases", "secrets", "observability"]);
     const unsupported = Object.keys(build.wrangler).filter((key) => !allowed.has(key));
     if (unsupported.length > 0) {
       throw new Error(`release unit build.wrangler contains environment-specific keys: ${unit.name}: ${unsupported.join(", ")}`);
@@ -292,6 +292,36 @@ function assertWorkerBuildConfig(unit, build) {
         )
       ) {
         throw new Error(`release unit build.wrangler.durable_objects.bindings is invalid: ${unit.name}`);
+      }
+    }
+    if (build.wrangler.rules !== undefined) {
+      if (!Array.isArray(build.wrangler.rules) || build.wrangler.rules.length === 0) {
+        throw new Error(`release unit build.wrangler.rules must be non-empty: ${unit.name}`);
+      }
+      for (const rule of build.wrangler.rules) {
+        const unsupported = rule && typeof rule === "object" && !Array.isArray(rule)
+          ? Object.keys(rule).filter((key) => !["type", "globs", "fallthrough"].includes(key))
+          : [];
+        if (
+          !rule ||
+          typeof rule !== "object" ||
+          Array.isArray(rule) ||
+          unsupported.length > 0 ||
+          typeof rule.type !== "string" ||
+          !/^[A-Za-z][A-Za-z0-9_-]*$/.test(rule.type) ||
+          !Array.isArray(rule.globs) ||
+          rule.globs.length === 0 ||
+          !rule.globs.every((glob) => {
+            try {
+              return typeof glob === "string" && glob.length > 0 && normalisePath(glob) === glob;
+            } catch {
+              return false;
+            }
+          }) ||
+          typeof rule.fallthrough !== "boolean"
+        ) {
+          throw new Error(`release unit build.wrangler.rules are invalid: ${unit.name}`);
+        }
       }
     }
     if (build.wrangler.migrations !== undefined) {
@@ -478,6 +508,37 @@ function normalisedSourceRateLimits(unit, build, source) {
   });
 }
 
+function normalisedSourceRules(unit, build, source) {
+  const expected = build.wrangler?.rules;
+  const actual = source.rules;
+  if (expected === undefined && actual === undefined) return undefined;
+  if (!Array.isArray(expected) || !Array.isArray(actual) || expected.length !== actual.length) {
+    throw new Error(`release unit rules do not match ${build.config_path}: ${unit.name}`);
+  }
+  return actual.map((rule) => {
+    if (!rule || typeof rule !== "object" || Array.isArray(rule)) {
+      throw new Error(`release unit rules do not match ${build.config_path}: ${unit.name}`);
+    }
+    const unsupported = Object.keys(rule).filter((key) => !["type", "globs", "fallthrough"].includes(key));
+    if (unsupported.length > 0) {
+      throw new Error(`release unit rules contains unsupported keys for ${unit.name}: ${unsupported.join(", ")}`);
+    }
+    if (
+      typeof rule.type !== "string" ||
+      !Array.isArray(rule.globs) ||
+      !rule.globs.every((glob) => typeof glob === "string" && normaliseConfigPath(glob, `${unit.name} source rule glob`)) ||
+      typeof rule.fallthrough !== "boolean"
+    ) {
+      throw new Error(`release unit rules do not match ${build.config_path}: ${unit.name}`);
+    }
+    return {
+      type: rule.type,
+      globs: rule.globs,
+      fallthrough: rule.fallthrough
+    };
+  });
+}
+
 export function assertWorkerBuildConfigMatchesSource(unit, build, root = repositoryRoot) {
   const sourcePath = path.join(root, build.config_path);
   let source;
@@ -494,6 +555,7 @@ export function assertWorkerBuildConfigMatchesSource(unit, build, root = reposit
 
   const releaseContract = build.wrangler ?? {};
   const sourceContract = {
+    rules: normalisedSourceRules(unit, build, source),
     durable_objects: source.durable_objects,
     migrations: source.migrations,
     d1_databases: normalisedSourceD1Databases(unit, build, source),
@@ -504,6 +566,7 @@ export function assertWorkerBuildConfigMatchesSource(unit, build, root = reposit
     triggers: source.triggers
   };
   const expectedContract = {
+    rules: releaseContract.rules,
     durable_objects: releaseContract.durable_objects,
     migrations: releaseContract.migrations,
     d1_databases: releaseContract.d1_databases,
@@ -520,6 +583,7 @@ export function assertWorkerBuildConfigMatchesSource(unit, build, root = reposit
     triggers: build.runtime?.triggers
   };
   for (const key of [
+    "rules",
     "durable_objects",
     "migrations",
     "d1_databases",
