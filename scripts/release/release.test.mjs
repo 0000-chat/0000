@@ -417,6 +417,12 @@ test("release workflow uses scoped App credentials and dispatches only runtime p
   const publishBlock = releaseWorkflow.slice(publishStart, notifyStart);
   assert.doesNotMatch(publishBlock, /^        if:/m);
   assert.match(publishBlock, /gh release upload/);
+  assert.match(publishBlock, /releases\?per_page=100/);
+  assert.ok(publishBlock.includes('select(.tag_name == \\"$RELEASE_TAG\\")'));
+  assert.match(publishBlock, /multiple GitHub releases use tag/);
+  assert.match(publishBlock, /releases\/\$release_id/);
+  assert.doesNotMatch(publishBlock, /releases\/tags\/\$RELEASE_TAG/);
+  assert.match(publishBlock, /gh release view "\$RELEASE_TAG" --repo "\$GITHUB_REPOSITORY" --json assets/);
 });
 
 test("legacy Gateway production fallback remains manual and owner-confirmed", () => {
