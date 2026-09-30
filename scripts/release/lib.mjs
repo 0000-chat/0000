@@ -11,8 +11,6 @@ export const publicReleaseRecordSchema = "docs/schemas/public-release-record.sch
 const SHA_RE = /^[0-9a-f]{40}$/;
 const NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
-const WRANGLER_CONTRACT_KEYS = ["durable_objects", "migrations", "secrets", "observability"];
-
 export function readJson(filePath) {
   return JSON.parse(fs.readFileSync(filePath, "utf8"));
 }
@@ -355,7 +353,7 @@ function assertWorkerBuildConfig(unit, build) {
       }
     }
   }
-  if (!build.wrapper) assertWorkerBuildConfigMatchesSource(unit, build);
+  assertWorkerBuildConfigMatchesSource(unit, build);
 }
 
 function canonicalJson(value) {
@@ -373,8 +371,107 @@ function jsonValuesEqual(left, right) {
   return canonicalJson(left) === canonicalJson(right);
 }
 
-export function assertWorkerBuildConfigMatchesSource(unit, build) {
-  const sourcePath = path.join(repositoryRoot, build.config_path);
+function normaliseConfigPath(value, label) {
+  if (typeof value !== "string" || value.length === 0 || value.includes("\\")) {
+    throw new Error(`${label} must be a non-empty relative POSIX path`);
+  }
+  const normalised = path.posix.normalize(value);
+  if (normalised === "." || normalised.startsWith("/") || normalised === ".." || normalised.startsWith("../")) {
+    throw new Error(`${label} must be a repository-relative POSIX path`);
+  }
+  return normalised;
+}
+
+function sourceRelativePath(build, sourcePath, label) {
+  const configDirectory = path.posix.dirname(build.config_path);
+  return normaliseConfigPath(path.posix.relative(configDirectory, sourcePath), label);
+}
+
+function assertSourceContract(unit, build, label, actual, expected) {
+  if (!jsonValuesEqual(actual, expected)) {
+    throw new Error(`release unit ${unit.name} ${label} does not match ${build.config_path}`);
+  }
+}
+
+function normalisedSourceAssets(unit, build, source) {
+  const expected = build.assets;
+  const actual = source.assets;
+  if (expected === undefined && actual === undefined) return undefined;
+  if (!expected || !actual || typeof actual !== "object" || Array.isArray(actual)) {
+    throw new Error(`release unit ${unit.name} assets do not match ${build.config_path}`);
+  }
+  const expectedSourceDirectory = sourceRelativePath(build, expected.source, `${unit.name} assets source`);
+  const actualDirectory = normaliseConfigPath(actual.directory, `${unit.name} source assets directory`);
+  if (actualDirectory !== expectedSourceDirectory) {
+    throw new Error(`release unit ${unit.name} assets directory does not match ${build.config_path}`);
+  }
+  return {
+    binding: actual.binding,
+    directory: expected.directory,
+    run_worker_first: actual.run_worker_first
+  };
+}
+
+function normalisedSourceD1Databases(unit, build, source) {
+  const expected = build.wrangler?.d1_databases;
+  const actual = source.d1_databases;
+  if (expected === undefined && actual === undefined) return undefined;
+  if (!Array.isArray(expected) || !Array.isArray(actual) || expected.length !== actual.length) {
+    throw new Error(`release unit d1_databases does not match ${build.config_path}: ${unit.name}`);
+  }
+  const expectedSourceDirectory = build.migrations
+    ? sourceRelativePath(build, build.migrations.source, `${unit.name} migrations source`)
+    : undefined;
+  return actual.map((database, index) => {
+    const expectedDatabase = expected[index];
+    if (!database || typeof database !== "object" || Array.isArray(database)) {
+      throw new Error(`release unit d1_databases does not match ${build.config_path}: ${unit.name}`);
+    }
+    const unsupported = Object.keys(database).filter(
+      (key) => !["binding", "database_name", "database_id", "migrations_dir"].includes(key),
+    );
+    if (unsupported.length > 0) {
+      throw new Error(`release unit d1_databases contains unsupported keys for ${unit.name}: ${unsupported.join(", ")}`);
+    }
+    const sourceDirectory = normaliseConfigPath(
+      database.migrations_dir,
+      `${unit.name} source d1_databases.migrations_dir`,
+    );
+    if (expectedSourceDirectory !== undefined && sourceDirectory !== expectedSourceDirectory) {
+      throw new Error(`release unit d1_databases migrations_dir does not match ${build.config_path}: ${unit.name}`);
+    }
+    assertSourceContract(unit, build, "d1_databases", {
+      binding: database.binding,
+      database_name: database.database_name
+    }, {
+      binding: expectedDatabase.binding,
+      database_name: expectedDatabase.database_name
+    });
+    return expectedDatabase;
+  });
+}
+
+function normalisedSourceRateLimits(unit, build, source) {
+  const expected = build.runtime?.rate_limits;
+  const actual = source.ratelimits;
+  if (expected === undefined && actual === undefined) return undefined;
+  if (!Array.isArray(expected) || !Array.isArray(actual) || expected.length !== actual.length) {
+    throw new Error(`release unit rate_limits do not match ${build.config_path}: ${unit.name}`);
+  }
+  return actual.map((rateLimit) => {
+    if (!rateLimit || typeof rateLimit !== "object" || Array.isArray(rateLimit)) {
+      throw new Error(`release unit rate_limits do not match ${build.config_path}: ${unit.name}`);
+    }
+    const unsupported = Object.keys(rateLimit).filter((key) => !["name", "namespace_id", "simple"].includes(key));
+    if (unsupported.length > 0) {
+      throw new Error(`release unit rate_limits contains unsupported keys for ${unit.name}: ${unsupported.join(", ")}`);
+    }
+    return { name: rateLimit.name, simple: rateLimit.simple };
+  });
+}
+
+export function assertWorkerBuildConfigMatchesSource(unit, build, root = repositoryRoot) {
+  const sourcePath = path.join(root, build.config_path);
   let source;
   try {
     source = readJsonc(sourcePath);
@@ -384,18 +481,47 @@ export function assertWorkerBuildConfigMatchesSource(unit, build) {
   if (!source || typeof source !== "object" || Array.isArray(source)) {
     throw new Error(`Wrangler config must contain an object: ${unit.name}`);
   }
-  if (source.compatibility_date !== build.compatibility_date) {
-    throw new Error(`release unit ${unit.name} compatibility_date does not match ${build.config_path}`);
-  }
-  if (!jsonValuesEqual(source.compatibility_flags, build.compatibility_flags)) {
-    throw new Error(`release unit ${unit.name} compatibility_flags do not match ${build.config_path}`);
-  }
+  assertSourceContract(unit, build, "compatibility_date", source.compatibility_date, build.compatibility_date);
+  assertSourceContract(unit, build, "compatibility_flags", source.compatibility_flags, build.compatibility_flags);
 
   const releaseContract = build.wrangler ?? {};
-  for (const key of WRANGLER_CONTRACT_KEYS) {
-    if (!jsonValuesEqual(source[key], releaseContract[key])) {
-      throw new Error(`release unit ${unit.name} build.wrangler.${key} does not match ${build.config_path}`);
-    }
+  const sourceContract = {
+    durable_objects: source.durable_objects,
+    migrations: source.migrations,
+    d1_databases: normalisedSourceD1Databases(unit, build, source),
+    secrets: source.secrets,
+    observability: source.observability,
+    assets: normalisedSourceAssets(unit, build, source),
+    rate_limits: normalisedSourceRateLimits(unit, build, source),
+    triggers: source.triggers
+  };
+  const expectedContract = {
+    durable_objects: releaseContract.durable_objects,
+    migrations: releaseContract.migrations,
+    d1_databases: releaseContract.d1_databases,
+    secrets: releaseContract.secrets,
+    observability: releaseContract.observability,
+    assets: build.assets
+      ? {
+          binding: build.assets.binding,
+          directory: build.assets.directory,
+          run_worker_first: build.assets.run_worker_first
+        }
+      : undefined,
+    rate_limits: build.runtime?.rate_limits,
+    triggers: build.runtime?.triggers
+  };
+  for (const key of [
+    "durable_objects",
+    "migrations",
+    "d1_databases",
+    "secrets",
+    "observability",
+    "assets",
+    "rate_limits",
+    "triggers"
+  ]) {
+    assertSourceContract(unit, build, key, sourceContract[key], expectedContract[key]);
   }
 }
 

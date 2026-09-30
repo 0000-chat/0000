@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import test from "node:test";
@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import {
   affectedUnits,
   assertReleaseConfig,
+  assertWorkerBuildConfigMatchesSource,
   classifyChanges,
   makePlan,
   readReleaseConfig,
@@ -217,10 +218,11 @@ test("neutral Wrangler config excludes environment-owned values", () => {
 test("packaged Wrangler config and manifest share the release public contract", () => {
   const msg = config.units[0];
   const plan = makePlan({ config, base: head, head, changedFiles: ["services/msg/worker/src/worker.ts"] });
-  const source = readJsonc(path.join(repositoryRoot, "services/msg/wrangler.jsonc"));
-  const neutral = neutralWranglerConfig(msg, source);
+  const neutral = neutralWranglerConfig(msg);
   const manifest = workerArtifactManifest(msg, plan);
 
+  assert.equal(neutral.compatibility_date, manifest.compatibility_date);
+  assert.deepEqual(neutral.compatibility_flags, manifest.compatibility_flags);
   assert.deepEqual(neutral.durable_objects, manifest.durable_objects);
   assert.deepEqual(neutral.migrations, manifest.migrations);
   assert.deepEqual(neutral.d1_databases, manifest.d1_databases);
@@ -228,6 +230,46 @@ test("packaged Wrangler config and manifest share the release public contract", 
   assert.deepEqual(neutral.observability, manifest.observability);
   assert.deepEqual(neutral.assets, manifest.assets);
   assert.deepEqual(neutral.triggers, manifest.triggers);
+});
+
+test("Msg wrapper source config is normalized and checked against the release contract", () => {
+  const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "0000-release-config-test-"));
+  const temporaryConfig = path.join(temporaryRoot, "services/msg/wrangler.jsonc");
+  const msg = config.units[0];
+  const build = { ...msg.build, config_path: "services/msg/wrangler.jsonc" };
+  const unit = { ...msg, build };
+  const source = readJsonc(path.join(repositoryRoot, "services/msg/wrangler.jsonc"));
+  const writeSource = () => {
+    fs.mkdirSync(path.dirname(temporaryConfig), { recursive: true });
+    fs.writeFileSync(temporaryConfig, JSON.stringify(source, null, 2), "utf8");
+  };
+
+  try {
+    writeSource();
+    assert.doesNotThrow(() => assertWorkerBuildConfigMatchesSource(unit, build, temporaryRoot));
+
+    source.d1_databases[0].database_id = "11111111-2222-4333-8444-555555555555";
+    source.ratelimits[0].namespace_id = "9999999999";
+    writeSource();
+    assert.doesNotThrow(() => assertWorkerBuildConfigMatchesSource(unit, build, temporaryRoot));
+
+    source.compatibility_date = "2026-08-10";
+    writeSource();
+    assert.throws(
+      () => assertWorkerBuildConfigMatchesSource(unit, build, temporaryRoot),
+      /compatibility_date does not match/
+    );
+
+    source.compatibility_date = "2026-08-09";
+    source.observability.enabled = false;
+    writeSource();
+    assert.throws(
+      () => assertWorkerBuildConfigMatchesSource(unit, build, temporaryRoot),
+      /observability does not match/
+    );
+  } finally {
+    fs.rmSync(temporaryRoot, { force: true, recursive: true });
+  }
 });
 
 test("Msg and root changes select only the Msg release unit", () => {
@@ -263,7 +305,43 @@ test("Git changed path discovery includes deletions", () => {
   });
 
   assert.deepEqual(files, ["services/msg/worker/src/removed-route.ts"]);
-  assert.deepEqual(received, ["diff", "--name-only", "--diff-filter=ACDMRTUXB", "base", "head"]);
+  assert.deepEqual(received, ["diff", "--no-renames", "--name-only", "--diff-filter=ACDMRTUXB", "base", "head"]);
+});
+
+test("moving a Msg asset into docs still releases Msg for the source deletion", () => {
+  const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "0000-release-rename-test-"));
+  const sourcePath = path.join(temporaryRoot, "services/msg/worker/public/removed-asset.js");
+  const destinationPath = path.join(temporaryRoot, "docs/removed-asset.md");
+  const runGit = (args) => {
+    const result = spawnSync("git", args, { cwd: temporaryRoot, encoding: "utf8" });
+    if (result.status !== 0) throw new Error(result.stderr || `git ${args[0]} failed`);
+    return result.stdout;
+  };
+  try {
+    fs.mkdirSync(path.dirname(sourcePath), { recursive: true });
+    fs.writeFileSync(sourcePath, "export const removed = true;\n", "utf8");
+    for (const args of [
+      ["init", "-q"],
+      ["config", "user.name", "Release Test"],
+      ["config", "user.email", "release-test@example.invalid"],
+      ["add", "."],
+      ["commit", "-qm", "initial Msg asset"]
+    ]) runGit(args);
+    const base = runGit(["rev-parse", "HEAD"]).trim();
+
+    fs.mkdirSync(path.dirname(destinationPath), { recursive: true });
+    fs.renameSync(sourcePath, destinationPath);
+    for (const args of [["add", "-A"], ["commit", "-qm", "move Msg asset to docs"]]) runGit(args);
+    const next = runGit(["rev-parse", "HEAD"]).trim();
+    const changed = changedFiles(base, next, (...args) => runGit(args));
+
+    assert.deepEqual(changed.sort(), ["docs/removed-asset.md", "services/msg/worker/public/removed-asset.js"]);
+    const plan = makePlan({ config, base, head: next, changedFiles: changed });
+    assert.deepEqual(plan.affected_units, ["msg-worker"]);
+    assert.equal(plan.runtime_redeployment, true);
+  } finally {
+    fs.rmSync(temporaryRoot, { force: true, recursive: true });
+  }
 });
 
 test("documentation-only changes create no artifact or runtime redeployment", () => {

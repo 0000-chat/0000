@@ -24,9 +24,9 @@ function git(...args) {
 
 export function changedFiles(base, head, gitRunner = git) {
   if (base && !/^0+$/.test(base)) {
-    return gitRunner("diff", "--name-only", "--diff-filter=ACDMRTUXB", base, head).split("\n").filter(Boolean);
+    return gitRunner("diff", "--no-renames", "--name-only", "--diff-filter=ACDMRTUXB", base, head).split("\n").filter(Boolean);
   }
-  return gitRunner("diff-tree", "--root", "--no-commit-id", "--name-only", "-r", "--diff-filter=ACDMRTUXB", head)
+  return gitRunner("diff-tree", "--no-renames", "--root", "--no-commit-id", "--name-only", "-r", "--diff-filter=ACDMRTUXB", head)
     .split("\n")
     .filter(Boolean);
 }
