@@ -562,16 +562,19 @@ export function assertReleaseConfig(config) {
       throw new Error(`release unit has no archive paths: ${unit.name}`);
     }
     if (unit.build !== undefined) assertWorkerBuildConfig(unit, unit.build);
-    for (const value of [...unit.runtime_paths, ...unit.archive_paths]) {
-      const normalised = normalisePath(value.replace(/\*+$/, ""));
-      if (!normalised.startsWith("services/")) {
-        throw new Error(`release unit path must be under services/: ${unit.name}: ${value}`);
-      }
-      if (normalised.includes("services/cloud") || normalised.includes("/cloud/")) {
-        throw new Error(`private Cloud content cannot be a public release unit: ${unit.name}`);
-      }
-      if (normalised.includes("/cli") || normalised.includes("/sdk")) {
-        throw new Error(`SDK and CLI content cannot be a public release unit: ${unit.name}`);
+    for (const [pathKind, paths] of [["runtime", unit.runtime_paths], ["archive", unit.archive_paths]]) {
+      for (const value of paths) {
+        const normalised = normalisePath(value.replace(/\*+$/, ""));
+        const isReleaseWorkflow = pathKind === "runtime" && normalised === ".github/workflows/release.yml";
+        if (!normalised.startsWith("services/") && !isReleaseWorkflow) {
+          throw new Error(`release unit path must be under services/ or the public release workflow: ${unit.name}: ${value}`);
+        }
+        if (normalised.includes("services/cloud") || normalised.includes("/cloud/")) {
+          throw new Error(`private Cloud content cannot be a public release unit: ${unit.name}`);
+        }
+        if (normalised.includes("/cli") || normalised.includes("/sdk")) {
+          throw new Error(`SDK and CLI content cannot be a public release unit: ${unit.name}`);
+        }
       }
     }
   }

@@ -289,6 +289,7 @@ test("Msg and root changes select only the Msg release unit", () => {
   assert.deepEqual(affectedUnits(config, ["services/msg/cli/src/cli.ts"]), []);
   assert.deepEqual(affectedUnits(config, ["services/gateway/src/worker.ts"]), []);
   assert.deepEqual(affectedUnits(config, ["bun.lock"]).map((unit) => unit.name), ["msg-worker"]);
+  assert.deepEqual(affectedUnits(config, [".github/workflows/release.yml"]).map((unit) => unit.name), ["msg-worker"]);
 });
 
 test("deletion-only Msg source changes still trigger a runtime artifact", () => {
@@ -423,6 +424,137 @@ test("release workflow uses scoped App credentials and dispatches only runtime p
   assert.match(publishBlock, /releases\/\$release_id/);
   assert.doesNotMatch(publishBlock, /releases\/tags\/\$RELEASE_TAG/);
   assert.match(publishBlock, /gh release view "\$RELEASE_TAG" --repo "\$GITHUB_REPOSITORY" --json assets/);
+});
+
+test("draft release publication retries delayed list visibility and validates numeric metadata", () => {
+  const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "0000-release-publish-test-"));
+  const binDirectory = path.join(temporaryRoot, "bin");
+  const artifactDirectory = path.join(temporaryRoot, "artifacts");
+  const statePath = path.join(temporaryRoot, "gh-state");
+  const logPath = path.join(temporaryRoot, "gh.log");
+  const publishScriptPath = path.join(temporaryRoot, "publish.sh");
+  const mockGhPath = path.join(binDirectory, "gh");
+  const mockSleepPath = path.join(binDirectory, "sleep");
+  const publishStart = releaseWorkflow.indexOf("      - name: Create, populate, and publish immutable GitHub release");
+  const scriptStart = releaseWorkflow.indexOf("          set -euo pipefail", publishStart);
+  const scriptEnd = releaseWorkflow.indexOf("\n      - name: Notify private Cloud staging", scriptStart);
+  const publishScript = releaseWorkflow
+    .slice(scriptStart, scriptEnd)
+    .split("\n")
+    .map((line) => (line.startsWith("          ") ? line.slice(10) : line))
+    .join("\n");
+  const mockGh = `#!/usr/bin/env bash
+set -euo pipefail
+state="$MOCK_GH_STATE"
+log="$MOCK_GH_LOG"
+printf '%s\\n' "$*" >> "$log"
+
+if [ "$1" = "api" ]; then
+  request="$*"
+  if [[ "$request" == *"immutable-releases"* ]]; then
+    printf 'true\\n'
+    exit 0
+  fi
+  if [[ "$request" == *"git/ref/tags/"* ]]; then
+    if [ -f "$state.published" ]; then
+      printf 'commit\\t%s\\n' "$GITHUB_SHA"
+      exit 0
+    fi
+    exit 1
+  fi
+  if [[ "$request" == *"releases?per_page=100"* ]]; then
+    count=0
+    if [ -f "$state.list_count" ]; then count=$(cat "$state.list_count"); fi
+    count=$((count + 1))
+    printf '%s\\n' "$count" > "$state.list_count"
+    if [ "$count" -ge 3 ]; then printf '399750313\\n'; fi
+    exit 0
+  fi
+  if [[ "$request" == *"releases/399750313"* ]]; then
+    if [[ "$request" == *".draft"* ]]; then
+      if [ -f "$state.published" ]; then printf 'false\\n'; else printf 'true\\n'; fi
+      exit 0
+    fi
+    if [[ "$request" == *".target_commitish"* ]]; then
+      printf '%s\\n' "$GITHUB_SHA"
+      exit 0
+    fi
+    if [[ "$request" == *".immutable"* ]]; then
+      printf 'true\\n'
+      exit 0
+    fi
+  fi
+  printf 'unexpected gh api request: %s\\n' "$request" >&2
+  exit 2
+fi
+
+if [ "$1" = "release" ]; then
+  case "$2" in
+    create) touch "$state.created" ;;
+    view) exit 0 ;;
+    upload) printf '%s\\n' "$*" >> "$state.uploads" ;;
+    edit) touch "$state.published" ;;
+    *) printf 'unexpected gh release request: %s\\n' "$*" >&2; exit 2 ;;
+  esac
+  exit 0
+fi
+
+printf 'unexpected gh request: %s\\n' "$*" >&2
+exit 2
+`;
+  const mockSleep = `#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\\n' "$*" >> "$MOCK_GH_SLEEP_LOG"
+`;
+
+  try {
+    fs.mkdirSync(binDirectory, { recursive: true });
+    fs.mkdirSync(artifactDirectory, { recursive: true });
+    fs.writeFileSync(mockGhPath, mockGh, "utf8");
+    fs.writeFileSync(mockSleepPath, mockSleep, "utf8");
+    fs.chmodSync(mockGhPath, 0o755);
+    fs.chmodSync(mockSleepPath, 0o755);
+    fs.writeFileSync(publishScriptPath, publishScript, "utf8");
+    fs.chmodSync(publishScriptPath, 0o755);
+    fs.writeFileSync(path.join(temporaryRoot, "0000-release-record.json"), "record\\n", "utf8");
+    fs.writeFileSync(path.join(temporaryRoot, "0000-release-event.json"), "event\\n", "utf8");
+    fs.writeFileSync(path.join(artifactDirectory, "msg-worker.artifact.json"), "metadata\\n", "utf8");
+    fs.writeFileSync(path.join(artifactDirectory, "msg-worker.tar.gz"), "bundle\\n", "utf8");
+
+    const releaseTag = `v0.0.0-${head}`;
+    const result = spawnSync("bash", [publishScriptPath], {
+      encoding: "utf8",
+      timeout: 30_000,
+      env: {
+        ...process.env,
+        PATH: `${binDirectory}:${process.env.PATH}`,
+        ARTIFACT_DIR: artifactDirectory,
+        GITHUB_REPOSITORY: "0000-chat/0000",
+        GITHUB_SHA: head,
+        MOCK_GH_LOG: logPath,
+        MOCK_GH_SLEEP_LOG: path.join(temporaryRoot, "sleep.log"),
+        MOCK_GH_STATE: statePath,
+        RELEASE_EVENT: path.join(temporaryRoot, "0000-release-event.json"),
+        RELEASE_RECORD: path.join(temporaryRoot, "0000-release-record.json"),
+        RELEASE_TAG: releaseTag,
+        RUNNER_TEMP: temporaryRoot
+      }
+    });
+
+    assert.equal(result.status, 0, `${result.stderr}\n${result.stdout}`);
+    assert.equal(fs.readFileSync(`${statePath}.list_count`, "utf8").trim(), "3");
+    assert.equal(fs.readFileSync(`${statePath}.uploads`, "utf8").trim().split("\n").length, 4);
+    assert.equal(fs.existsSync(`${statePath}.published`), true);
+    assert.match(result.stdout, /validating the draft target/);
+    const log = fs.readFileSync(logPath, "utf8");
+    assert.ok(log.includes("releases?per_page=100"));
+    assert.ok(log.includes("releases/399750313"));
+    assert.match(log, /target_commitish/);
+    assert.match(log, /\.immutable/);
+    assert.match(log, /release view .* --json assets/);
+  } finally {
+    fs.rmSync(temporaryRoot, { force: true, recursive: true });
+  }
 });
 
 test("legacy Gateway production fallback remains manual and owner-confirmed", () => {

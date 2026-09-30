@@ -16,9 +16,11 @@ and staging consumers are reviewed. The SDK placeholder and the
 `@0000chat/msg` CLI remain checks-only and are never release artifacts.
 Private Cloud content is never included.
 
-The planner selects `msg-worker` from its runtime paths. Root manifests and
-lockfiles are global runtime inputs and therefore conservatively select every
-configured unit; with this activation that still means only `msg-worker`.
+The planner selects `msg-worker` from its runtime paths. The public release
+workflow is also a Msg runtime input, so changes to the publication protocol
+receive a fresh tested bundle. Root manifests and lockfiles are global runtime
+inputs and therefore conservatively select every configured unit; with this
+activation that still means only `msg-worker`.
 Documentation-only and other non-runtime changes publish a release record with
 zero artifacts and no runtime redeployment. The public workflow dispatches
 private Cloud staging only when the plan contains the Msg artifact and the
