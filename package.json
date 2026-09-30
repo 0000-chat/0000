@@ -13,7 +13,7 @@
     "check:licenses": "bun scripts/check-licenses.mjs",
     "check:turbo": "turbo run check",
     "check:turbo:dry": "turbo run check --dry=json",
-    "test:release": "node --test scripts/release/release.test.mjs",
+    "test:release": "node --test scripts/release/release.test.mjs scripts/release/runtime.test.mjs",
     "release:event": "node scripts/release/event.mjs"
   },
   "devDependencies": {
