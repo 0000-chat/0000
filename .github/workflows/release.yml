@@ -267,14 +267,33 @@ jobs:
           }
 
           release_id() {
-            gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" --jq '.id'
+            local matches candidate count match
+            if ! matches=$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" --jq ".[] | select(.tag_name == \"$RELEASE_TAG\") | .id"); then
+              return 1
+            fi
+            count=0
+            match=""
+            while IFS= read -r candidate; do
+              if [ -z "$candidate" ]; then continue; fi
+              count=$((count + 1))
+              match="$candidate"
+            done <<< "$matches"
+            if [ "$count" -ne 1 ]; then
+              if [ "$count" -gt 1 ]; then
+                echo "multiple GitHub releases use tag $RELEASE_TAG" >&2
+              fi
+              return 1
+            fi
+            printf '%s\n' "$match"
           }
 
           release_is_draft() {
-            gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" --jq '.draft'
+            local release_id="$1"
+            gh api "repos/$GITHUB_REPOSITORY/releases/$release_id" --jq '.draft'
           }
 
           validate_tag_commit() {
+            local release_id="$1"
             local tag_commit
             if tag_commit=$(resolve_tag_commit 2>/dev/null); then
               if [ "$tag_commit" != "$GITHUB_SHA" ]; then
@@ -285,7 +304,7 @@ jobs:
             fi
             echo "release tag $RELEASE_TAG is not available yet; validating the draft target instead"
             local target_commit
-            target_commit=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" --jq '.target_commitish')
+            target_commit=$(gh api "repos/$GITHUB_REPOSITORY/releases/$release_id" --jq '.target_commitish')
             if [ "$target_commit" != "$GITHUB_SHA" ]; then
               echo "draft release $RELEASE_TAG targets $target_commit, expected $GITHUB_SHA" >&2
               exit 1
@@ -294,8 +313,8 @@ jobs:
 
           existing_release_id=""
           if existing_release_id=$(release_id 2>/dev/null); then
-            release_draft=$(release_is_draft)
-            validate_tag_commit
+            release_draft=$(release_is_draft "$existing_release_id")
+            validate_tag_commit "$existing_release_id"
           else
             create_args=(
               "$RELEASE_TAG"
@@ -319,8 +338,11 @@ jobs:
               fi
               echo "draft release $RELEASE_TAG already exists; continuing with it"
             fi
-            release_draft=$(release_is_draft)
-            validate_tag_commit
+            if [ -z "$existing_release_id" ]; then
+              existing_release_id=$(release_id)
+            fi
+            release_draft=$(release_is_draft "$existing_release_id")
+            validate_tag_commit "$existing_release_id"
           fi
 
           if [ -z "$existing_release_id" ]; then
@@ -377,7 +399,7 @@ jobs:
             gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft=false
           fi
 
-          release_draft=$(release_is_draft)
+          release_draft=$(release_is_draft "$existing_release_id")
           if [ "$release_draft" != "false" ]; then
             echo "release $RELEASE_TAG was not published" >&2
             exit 1
