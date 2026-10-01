@@ -116,6 +116,8 @@ function runtimeOptions(extracted, manifest, wrangler, omittedModule) {
       MSG_CREATE_DISABLED: "0",
       MSG_POST_DISABLED: "0",
       MSG_PUBLIC_ORIGIN: "https://msg.0000.chat",
+      MSG_TEST_MODE: "1",
+      MSG_TEST_ROOM_LIMITS: "{}",
     },
     compatibilityDate: wrangler.compatibility_date,
     compatibilityFlags: wrangler.compatibility_flags,
@@ -130,6 +132,10 @@ function runtimeOptions(extracted, manifest, wrangler, omittedModule) {
       include: rule.globs,
       ...(rule.fallthrough === undefined ? {} : { fallthrough: rule.fallthrough }),
     })),
+    ratelimits: Object.fromEntries((manifest.rate_limits ?? []).map(({ name, simple }, index) => [
+      name,
+      { namespace_id: String(9000 + index), simple },
+    ])),
     scriptPath: workerPath,
   };
 }
@@ -176,7 +182,9 @@ test("an extracted Msg archive boots with its Text modules and fails when one is
         headers: { "content-type": "application/json" },
         method: "POST",
       });
-      assert.equal(create.status, 201);
+      if (create.status !== 201) {
+        throw new Error(`Extracted Msg worker create returned ${create.status}: ${await create.text()}`);
+      }
       const created = await create.json();
       assert.equal(typeof created.conversation_url, "string");
 

@@ -73,7 +73,8 @@ test("release configuration activates the Msg and Gateway Workers", () => {
       secrets: {
         required: [
           "MSG_DATA_ENCRYPTION_KEY_V1",
-          "MSG_OPERATOR_TOKEN",
+          "MSG_PLATFORM_SERVICE_VERIFIER",
+          "MSG_PLATFORM_GUEST_GRANT_ISSUER",
           "MSG_VAPID_PUBLIC_KEY",
           "MSG_VAPID_PRIVATE_KEY",
           "MSG_VAPID_SUBJECT"
@@ -149,7 +150,8 @@ test("Msg bundle manifest carries only public deployment metadata", () => {
     ],
     required_secrets: [
       "MSG_DATA_ENCRYPTION_KEY_V1",
-      "MSG_OPERATOR_TOKEN",
+      "MSG_PLATFORM_SERVICE_VERIFIER",
+          "MSG_PLATFORM_GUEST_GRANT_ISSUER",
       "MSG_VAPID_PUBLIC_KEY",
       "MSG_VAPID_PRIVATE_KEY",
       "MSG_VAPID_SUBJECT"
@@ -259,7 +261,8 @@ test("neutral Wrangler config excludes environment-owned values", () => {
     secrets: {
       required: [
         "MSG_DATA_ENCRYPTION_KEY_V1",
-        "MSG_OPERATOR_TOKEN",
+        "MSG_PLATFORM_SERVICE_VERIFIER",
+        "MSG_PLATFORM_GUEST_GRANT_ISSUER",
         "MSG_VAPID_PUBLIC_KEY",
         "MSG_VAPID_PRIVATE_KEY",
         "MSG_VAPID_SUBJECT"
