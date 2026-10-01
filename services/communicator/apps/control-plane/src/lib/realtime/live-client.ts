@@ -13,7 +13,7 @@ import {
   type RealtimeServerFrame,
   type RealtimeTicketRequest,
 } from "@communicator/contracts";
-import { apiClient, type ApiClient } from "@/lib/api/client";
+import { ApiError, apiClient, type ApiClient } from "@/lib/api/client";
 import type {
   RealtimeClient,
   RealtimeConnectOptions,
@@ -151,6 +151,7 @@ export class LiveRealtimeClient implements RealtimeClient {
   private pendingConnect: Promise<void> | undefined;
   private resolvePendingConnect: (() => void) | undefined;
   private rejectPendingConnectPromise: ((reason: unknown) => void) | undefined;
+  private authPaused = false;
 
   constructor(options: LiveRealtimeClientOptions = {}) {
     this.ticketApi = options.apiClient ?? apiClient;
@@ -192,6 +193,7 @@ export class LiveRealtimeClient implements RealtimeClient {
     }
 
     this.closed = false;
+    this.authPaused = false;
     if (this.statusValue === "connected" && !scopeChanged)
       return Promise.resolve();
     if (this.pendingConnect) return this.pendingConnect;
@@ -220,6 +222,7 @@ export class LiveRealtimeClient implements RealtimeClient {
 
   close() {
     this.closed = true;
+    this.authPaused = false;
     this.desiredOptions = undefined;
     this.hasConnected = false;
     this.reconnectDelayIndex = 0;
@@ -262,7 +265,7 @@ export class LiveRealtimeClient implements RealtimeClient {
 
   private startAttempt() {
     const desiredOptions = this.desiredOptions;
-    if (this.closed || !desiredOptions) return;
+    if (this.closed || this.authPaused || !desiredOptions) return;
     const attemptToken = ++this.connectionToken;
     const request = this.ticketRequest(desiredOptions);
     void this.ticketApi
@@ -300,13 +303,22 @@ export class LiveRealtimeClient implements RealtimeClient {
         socket.onclose = (event) =>
           this.handleClose(socket, socketToken, event);
       })
-      .catch(() => {
+      .catch((error: unknown) => {
         if (
           this.closed ||
           attemptToken !== this.connectionToken ||
           this.desiredOptions !== desiredOptions
         )
           return;
+        if (error instanceof ApiError && error.status === 401) {
+          this.authPaused = true;
+          this.setStatus("unauthorized");
+          this.rejectPendingConnect(error);
+          return;
+        }
+        if (error instanceof ApiError && error.status === 503) {
+          this.setStatus("unavailable");
+        }
         this.scheduleReconnect();
       });
   }
@@ -477,6 +489,7 @@ export class LiveRealtimeClient implements RealtimeClient {
   private scheduleReconnect(delayOverride?: number) {
     if (
       this.closed ||
+      this.authPaused ||
       !this.desiredOptions ||
       this.reconnectTimer !== undefined
     )

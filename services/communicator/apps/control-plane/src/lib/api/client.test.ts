@@ -44,6 +44,34 @@ const session: SessionResponse = {
 };
 
 describe("Communicator API client", () => {
+  it("publishes authentication failures so the workspace can pause immediately", async () => {
+    const statuses: number[] = [];
+    const client = new ApiClient(
+      async () =>
+        new Response(
+          JSON.stringify({
+            error: { code: "unauthenticated", message: "Session expired" },
+          }),
+          {
+            status: 401,
+            headers: { "Content-Type": "application/json" },
+          },
+        ),
+      "https://communicator.test",
+    );
+    const unsubscribe = client.subscribeAuthFailures(({ status }) => {
+      statuses.push(status);
+    });
+
+    await expect(client.getChannels("identity_human")).rejects.toMatchObject({
+      status: 401,
+      message: "Session expired",
+    });
+    unsubscribe();
+
+    expect(statuses).toEqual([401]);
+  });
+
   it("encodes identity and channel IDs in scoped channel queries", async () => {
     const urls: string[] = [];
     const client = new ApiClient(async (input) => {
@@ -271,6 +299,7 @@ describe("Communicator API client", () => {
       {
         url: "https://communicator.test/api/v1/realtime/tickets",
         init: {
+          credentials: "include",
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -383,6 +412,7 @@ describe("Communicator API client", () => {
       {
         url: "https://communicator.test/api/v1/conversations/conversation_one/receipts/read",
         init: {
+          credentials: "include",
           method: "POST",
           headers: {
             "Content-Type": "application/json",
@@ -399,7 +429,7 @@ describe("Communicator API client", () => {
       },
       {
         url: "https://communicator.test/api/v1/receipts?account_id=account%2Fhuman&cursor=cursor+%2F%3F&limit=2",
-        init: undefined,
+        init: { credentials: "include" },
       },
     ]);
   });

@@ -18,9 +18,10 @@ Before the first deploy, an operator must do these tasks.
 3. Supply these runtime inputs through an operator-owned protected secret store. Do not print their values.
    - `MSG_D1_DATABASE_ID`
    - `MSG_DATA_ENCRYPTION_KEY_V1` — one 32-byte base64url key.
-   - `MSG_OPERATOR_TOKEN` — a high-entropy bearer token.
-4. Supply scoped Cloudflare deployment credentials through the operator-owned deployment environment.
-5. Review the public policy text before launch. It must state that this anonymous relay does not provide a public email support address.
+   - `MSG_PLATFORM_OPERATOR_CREDENTIAL` — an issued Platform operator bearer.
+4. Confirm the existing Phase keys at `/shared/providers`: `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID`.
+5. Supply scoped Cloudflare deployment credentials through the operator-owned deployment environment.
+6. Review the public policy text before launch. It must state that this anonymous relay does not provide a public email support address.
 
 The Worker uses one SQLite Durable Object class, `ConversationRoom`, and one D1 binding, `MSG_DB`. The retention Cron runs at 03:17 UTC each day. It performs at most ten small purge passes per trigger.
 
@@ -106,7 +107,7 @@ These are Worker configuration values. To change them, make a reviewed `main` co
 
 ## Operator reports and forced deletion
 
-Configure the operator command for the intended self-hosted Msg endpoint. Load `MSG_OPERATOR_TOKEN` from the operator-owned secret store into a protected temporary environment. Do not echo it.
+The repository operator command sends requests only to `https://msg.0000.chat`. Load `MSG_PLATFORM_OPERATOR_CREDENTIAL` from the protected operator environment. Do not echo it. Self-hosted deployments must use the corresponding Platform-issued operator bearer for their own origin.
 
 ```sh
 bun run msg:operator status
@@ -120,7 +121,7 @@ Use forced deletion only for an approved incident or abuse action. Treat room ID
 
 ## Key rotation
 
-`MSG_OPERATOR_TOKEN` can rotate through a reviewed deploy. Update the protected secret value, deploy, then update every approved operator environment.
+For a self-hosted deployment, rotate the Platform operator credential through the Platform credential lifecycle and update the protected operator environment after issuing or revoking the approved credential.
 
 Do not replace `MSG_DATA_ENCRYPTION_KEY_V1` without a migration plan. It encrypts retained D1 creation records and abuse reports. The current Worker cannot read old records with a replacement key. First add and deploy a versioned key migration with read support for both keys, re-encrypt retained records, and prove operator reads. A simpler retirement path is to stop writes, wait until the 90-day operator-audit retention window has ended and the scheduled purge has completed, verify D1 is empty of old encrypted records, then deploy the new key. Keep the old key available until this proof is complete.
 

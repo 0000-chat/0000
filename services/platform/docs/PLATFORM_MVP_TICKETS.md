@@ -1,18 +1,30 @@
 ---
 repo: 0000-chat/0000
-status: current
+status: archived
 ---
 
 # Platform MVP ticket proposal
 
-**Status:** Published as issues #55–#69. No implementation has begun. The accepted scope is [issue #54](https://github.com/0000-chat/0000/issues/54).
+This is the historical breakdown as published. Current scope and acceptance
+live in [AUTH_FIRST_SPEC.md](../AUTH_FIRST_SPEC.md) and the linked GitHub
+issues; the labels and implementation checkpoints below are snapshots, not
+current task status. Gateway's later connected-tool and Access Profile design
+is separate from this Platform MVP breakdown. Each first-party MCP surface
+uses its service-owned `/mcp` path; Gateway's target addresses are
+`https://0000.chat/mcp` and `https://gateway.0000.chat/mcp`. A standalone
+service can expose its own MCP tools or be reached through Gateway while using
+the same Platform identity authority. This proposal did not add Gateway
+integration to T01–T15. See the [MCP topology contract](../../../docs/architecture/mcp-topology.md)
+for the maintained public address and maturity terminology.
+
+**Status:** Published as issues #55–#69. T01 is reviewed, integrated and verified on `codex/platform-mvp` at `fa17ad4`; T02 is reviewed, integrated and independently verified at `7152bcd`. The full MVP remains incomplete. The accepted scope is [issue #54](https://github.com/0000-chat/0000/issues/54).
 
 | Slice | Published issue | Title | Label |
 | --- | --- | --- | --- |
 | T01 | [#55](https://github.com/0000-chat/0000/issues/55) | Trace runtime and resolve the first auth contracts | ready-for-agent |
-| T02 | [#56](https://github.com/0000-chat/0000/issues/56) | Deliver social sign-in, default organization, profile and logout | needs-info |
+| T02 | [#56](https://github.com/0000-chat/0000/issues/56) | Deliver social sign-in, default organization, profile and logout | ready-for-agent |
 | T03 | [#57](https://github.com/0000-chat/0000/issues/57) | Administer organizations and memberships | ready-for-agent |
-| T04 | [#58](https://github.com/0000-chat/0000/issues/58) | Register a consumer and use a scoped human API credential | needs-info |
+| T04 | [#58](https://github.com/0000-chat/0000/issues/58) | Register a consumer and use a scoped human API credential | ready-for-agent |
 | T05 | [#59](https://github.com/0000-chat/0000/issues/59) | Add organization-owned agents across service audiences | ready-for-agent |
 | T06 | [#60](https://github.com/0000-chat/0000/issues/60) | Authorize a personal harness with OAuth consent | needs-info |
 | T07 | [#61](https://github.com/0000-chat/0000/issues/61) | Rotate and revoke OAuth installations | needs-info |
@@ -25,7 +37,7 @@ status: current
 | T14 | [#68](https://github.com/0000-chat/0000/issues/68) | Prove reconnect authorization without building offline sync | ready-for-agent |
 | T15 | [#69](https://github.com/0000-chat/0000/issues/69) | Make self-hosted and managed deployment setup reproducible | ready-for-agent |
 
-T01 is the only current dispatch frontier. The ready-for-agent label means the ticket is reviewable for dispatch; it does not mean its dependencies are complete. The needs-info labels track tickets that need specific T01 findings before their contract-dependent work can proceed.
+T01 through T05 are reviewed and verified on the aggregate, including T02's recovery follow-up at `54fc212`; T14's focused reconnect proof is accepted at `166e54d`. T08's guest lifecycle contract is resolved and implementation dispatched from `10d31c8`. T06's isolated consent probe passes at `41cd96f`; production preparation must address the review findings before dispatch. Slice reports record exact evidence and limits. The ready-for-agent label does not assert completed dependencies or production adoption.
 
 ## Existing issue disposition
 
@@ -41,35 +53,35 @@ T01 is the only current dispatch frontier. The ready-for-agent label means the t
 
 ### T01. Trace runtime and resolve the first auth contracts
 
-**Readiness:** First-slice candidate after approval of this breakdown.
+**Readiness:** T01 investigation accepted after independent review and aggregate verification at `fa17ad4`. It is not the complete auth MVP or production acceptance.
 
 **Blocked by (contract):** None; investigation scope is bounded by the accepted MVP.
 
-**Change:** Build one runnable Worker/D1 trace from human sign-in and retry-safe default organization through a candidate shared verifier to a protected resource fixture. Add narrow executable feasibility probes for OAuth lifecycle support and guest-bootstrap-to-resource-grant exchange. Record evidence and candidate decisions; do not claim a production integration or freeze downstream public contracts.
+**Change:** Implemented one runnable Worker/D1 trace from human sign-in and retry-safe default organization through a candidate shared verifier to a protected resource fixture. Added a Miniflare D1 restart probe and narrow OAuth lifecycle and guest-bootstrap-to-resource-grant probes. [T01_RUNTIME_REPORT.md](../T01_RUNTIME_REPORT.md) records the evidence, candidate decisions and unresolved production blockers; this does not claim production integration or freeze downstream public contracts.
 
-**Existing pattern:** Worker/D1 runtime conventions, Communicator's human/install separation and msg's observable HTTP behavior. Platform itself has no working auth path.
+**Existing pattern:** Worker/D1 runtime conventions, Communicator's human/install separation and msg's observable HTTP behavior. Platform now has an experimental test path, but no deployed identity service or production consumer path.
 
 **Open decisions:** None for the investigation scope. Capture pinned runtime/component versions, principal/error/verifier/bootstrap/OAuth/guest grant-proof findings for parent review; no new user policy vote.
 
-**Verification:** Run on Workers/D1. Demonstrate one protected request, retry/restart behavior and current-state denial; report which technical findings are proven and which remain unresolved. T02–T15 stay non-ready until that record is reviewed.
+**Verification:** Parent aggregate checks passed for local Worker/D1 protected requests, membership/lifecycle/revocation denial, receipt-based organization retries, a persistent Miniflare runtime restart, sequential OAuth refresh reuse and stored-owner guest attestation. The report distinguishes proven behavior from unresolved concurrency, installation-binding and deployment work. T02's runtime gate is resolved; other tickets retain their specific dependency and contract gates.
 
 ### T02. Deliver social sign-in, default organization, profile and logout
 
-**Readiness:** Not ready until T01's runtime/provider findings are reviewed.
+**Readiness:** Initial T02 is reviewed and verified at `7152bcd`; interrupted-signup recovery implementation/fixes are integrated as `b9d1e63`, `382acf9`, `7209b4a`, `08cbfc2`. Parent combined checks at `54fc212` pass eight Worker/D1 files/twenty tests, guest/resource and human restart, format/typecheck and root manifests. Independent native and external review completed. The issue stays open; full MVP is not accepted.
 
 **Blocked by (contract):** T01's accepted human principal, session and D1 behavior.
 
-**Change:** Implement Google/GitHub login, proof-based provider linking, Platform browser session, profile controls, retry-safe default organization with owner membership, managed open signup and configurable self-hosted open/invite-only signup. Logout revokes the browser session only.
+**Change:** Implemented Google/GitHub login, proof-based provider linking, Platform browser session, profile controls, retry-safe default organization with owner membership, managed open signup and configurable self-hosted open/invite-only signup. Logout revokes the browser session only. Better Auth's direct unlink endpoint is disabled; the Worker uses an atomic D1 conditional delete to preserve the last provider under concurrency. Explicit OAuth client/resource administration routes are denied until a later approved operator flow.
 
 **Existing pattern:** Better Auth is selected; magic links are superseded and there are no Platform users to import.
 
-**Open decisions:** T01's Better Auth/provider compatibility results only.
+**Open decisions:** None for T02; provider and callback authority behavior is implemented and verified.
 
-**Verification:** Stub providers at their boundary; observe login, both-account linking proof, owner membership after retry, origin/CSRF rejection and browser logout through the Worker/D1 path.
+**Verification:** [T02_ACCOUNT_REPORT.md](../T02_ACCOUNT_REPORT.md) records the exact boundary and evidence. The Worker/D1 tests exercise login/callback/session persistence, explicit linking, same-email non-linking, default-organization retries, signup gates, safe profile editing, stale/cross-origin/concurrent unlink, callback denial after logout/disablement or a different user's session, OAuth admin denial, logout and guest/human credential survival. Parent aggregate Platform checks and a separate Chromium login smoke pass at `7152bcd`. The passing root check validates workspace manifests, not auth integration. Provider HTTP remains simulated.
 
 ### T03. Administer organizations and memberships
 
-**Readiness:** Not ready; depends on T02.
+**Readiness:** Reviewed, integrated and independently verified at aggregate `c51d285`, with acceptance checkpoint `b2e5802`. The organization authority boundary is available for dependent work; this does not close later recovery, OAuth or consumer gates.
 
 **Blocked by (contract):** T02's signed-in human and organization-owner semantics.
 
@@ -83,21 +95,21 @@ T01 is the only current dispatch frontier. The ready-for-agent label means the t
 
 ### T04. Register a consumer and use a scoped human API credential
 
-**Readiness:** Not ready until T01's shared contract decisions are reviewed.
+**Readiness:** Reviewed, integrated and independently verified at aggregate `dc30cd4`. T04 supplies the scoped credential and registered verifier boundary for dependent preparation; this does not claim production consumer adoption.
 
 **Blocked by (contract):** T01 principal, authority, audience, error and service-verifier contract; T02 supplies the human. This ticket defines the bearer source: a human issues a scoped opaque API credential in the Platform account UI.
 
-**Change:** Register one resource fixture and a narrowly scoped service verifier; use shared client/middleware for a live protected request. Include API credential one-time display, 90-day default/configurable expiry, rotation and revocation.
+**Change:** Register resource fixtures and narrowly scoped service verifiers with trusted local tooling; use the shared client/middleware for live protected requests across two exact audiences. Include API credential one-time display, 90-day default/configurable expiry, rotation, revocation and current catalog checks.
 
 **Existing pattern:** Preserve Communicator's strict human/delegated separation; fixture is not production adoption.
 
-**Open decisions:** T01 wire/transport and D1 credential-verification findings.
+**Open decisions:** Resolved from integrated evidence: opaque audience-specific credentials, current membership, verifier-bound shared-client transport and strict failure categories. Remote deployment, consumer migration and production operator ownership remain later adoption work.
 
-**Verification:** The issued human credential accesses only its fixture audience/actions; wrong audience, expired or revoked credentials deny at the next check. Verifier credentials cannot issue user credentials or enumerate organizations; outage returns 503.
+**Verification:** [T04_CREDENTIAL_REPORT.md](../T04_CREDENTIAL_REPORT.md) records actual Worker/D1 issue/list/rotate/revoke, two-audience shared-client/resource requests, bounded lifetime, one-time secret display, live catalog narrowing/expansion, verifier rotation/disablement, concurrent rotation and rollback failure probes, Chromium UI evidence and local CLI register/update/rotate/disable/conflict checks. Wrong audience, expired, revoked, removed-membership and suspended/disabled authority deny at the next check; verifier credentials cannot issue user credentials or enumerate organizations; authority outage returns 503.
 
 ### T05. Add organization-owned agents across service audiences
 
-**Readiness:** Not ready; depends on T03 and T04.
+**Readiness:** Reviewed implementation and fixes `0ed62d2`, `500db9b`, `6b88e21`, `034e853` integrated as `4e602f2`, `190ac68`, `14fe44f`, `10d31c8`. Parent aggregate checks pass seven Worker/D1 files/ten tests, restart, format/typecheck and root manifests; combined browser controls pass. Narrowing, coherent verification snapshots and exact replacement-INSERT rollback proofs are confirmed. Consumer adoption and remaining MVP gates are separate.
 
 **Blocked by (contract):** T03 supplies current administrator/membership controls; T04 supplies credential and verifier flows; T01's agreed machine-principal/grant contract is prerequisite.
 
@@ -111,7 +123,7 @@ T01 is the only current dispatch frontier. The ready-for-agent label means the t
 
 ### T06. Authorize a personal harness with OAuth consent
 
-**Readiness:** Not ready until T01's OAuth component findings are reviewed.
+**Readiness:** Isolated probe `41cd96f` proves per-request auth construction, public PKCE consent/reference binding and separate concurrent browser flows; the parent rerun passes one Worker/D1 file with three tests. Independent review confirms the supported integration path but requires conditional current-authority activation, exact selection-race outcomes and rejection of malformed/unbound token responses. Production implementation remains undispatched, pending its complete brief and serialization after T08. The probe is not integrated or accepted as production auth.
 
 **Blocked by (contract):** T01 OAuth feasibility/resource-binding result; T03 current membership; T04 live consumer verification.
 
@@ -139,7 +151,7 @@ T01 is the only current dispatch frontier. The ready-for-agent label means the t
 
 ### T08. Create and renew per-client guest access through the verifier
 
-**Readiness:** Not ready until T01's guest grant-proof contract is reviewed.
+**Readiness:** Reviewed and integrated as `556827d`, `06359cb` and `1d221bb`. Parent aggregate checks pass nine Worker/D1 files/twenty-two tests, format/typecheck and guest/resource restart. Independent Standards and Spec reviews accepted the final correction; an Astra high adversarial fallback found no additional authority defect. Grok was unauthenticated, so external model diversity was unavailable. The shared guest boundary is ready for msg adoption in T09; this fixture does not establish that adoption.
 
 **Blocked by (contract):** T01 guest principal, bootstrap purpose/audience and resource-grant exchange; T04 shared verifier.
 
@@ -147,7 +159,7 @@ T01 is the only current dispatch frontier. The ready-for-agent label means the t
 
 **Existing pattern:** Use the fixture's resource-owner behavior; msg is the real guest consumer in T09.
 
-**Open decisions:** T01's guest exchange result only. The API-key 90-day default must not become an arbitrary guest expiry that strands valid resources or revoke unrelated grants.
+**Open decisions:** None. Guest control can recover a lost renewal response, revoked grant IDs cannot revive, and service ACLs remain final. The API-key 90-day default does not apply to guests or unrelated grants.
 
 **Verification:** The same client resumes access to a still-valid resource after renewal; a different client is not linked; invalid guest proof cannot access the resource. Invalidating one resource grant leaves unrelated guest resources usable.
 
@@ -223,7 +235,7 @@ T01 is the only current dispatch frontier. The ready-for-agent label means the t
 
 ### T14. Prove reconnect authorization without building offline sync
 
-**Readiness:** Not ready; depends on T02 and T04.
+**Readiness:** Reviewed, integrated and independently verified at aggregate `166e54d` (worker `1b4d5ed`/`c4491b8`, aggregate `6ae1d24`/`166e54d`). Platform checks pass six Worker/D1 files/eight tests plus persistent restart; root manifest checks pass. This accepts the focused reconnect fixture, not product offline sync.
 
 **Blocked by (contract):** T02 supplies human session and reauthentication; T04 verifies current state. This slice implements or proves Platform renewal where needed.
 
@@ -251,4 +263,4 @@ T01 is the only current dispatch frontier. The ready-for-agent label means the t
 
 ## Publication and execution
 
-The breakdown is published; implementation has not begun. T01 findings are implementation evidence for parent review, not a new policy interview. Dispatch T01 first. Dispatch any later ticket only when its listed dependencies and specific unresolved contracts are satisfied; ready-for-agent labels do not assert dependency completion. #35/#36 remain external acceptance work and #48 remains the Database pilot; neither is replaced by this plan.
+The breakdown is published. T01 is integrated and accepted at `fa17ad4`; T02 is integrated, reviewed and independently verified at `7152bcd`. Platform checks pass; the root command only checks workspace manifests. Dispatch any later ticket only when its listed dependencies and specific unresolved contracts are satisfied; ready-for-agent labels do not assert dependency completion. #35/#36 remain external acceptance work and #48 remains the Database pilot; neither is replaced by this plan.

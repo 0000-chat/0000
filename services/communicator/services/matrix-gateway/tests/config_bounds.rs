@@ -14,13 +14,10 @@ fn valid_config() -> serde_json::Value {
         "matrix_store_dir": "/var/lib/communicator/matrix",
         "state_db_path": "/var/lib/communicator/state.sqlite3",
         "ingestion_base_url": "https://ingest.example.org",
-        "oauth_token_url": "https://auth.example.org/oauth/token",
-        "oauth_client_id": "communicator-gateway",
-        "oauth_client_auth_method": "client_secret_basic",
+        "ingestion_service_credential_file": "/run/secrets/ingestion-service-credential",
         "matrix_password_file": "/run/secrets/matrix-password",
         "matrix_store_passphrase_file": "/run/secrets/matrix-store-passphrase",
         "state_key_file": "/run/secrets/state-key",
-        "oauth_client_secret_file": "/run/secrets/oauth-client-secret",
         "request_timeout_secs": 10,
         "sync_timeout_secs": 30
     })
@@ -49,13 +46,10 @@ fn rejects_overlong_value_in_every_textual_or_path_field() {
         "matrix_store_dir",
         "state_db_path",
         "ingestion_base_url",
-        "oauth_token_url",
-        "oauth_client_id",
-        "oauth_client_auth_method",
+        "ingestion_service_credential_file",
         "matrix_password_file",
         "matrix_store_passphrase_file",
         "state_key_file",
-        "oauth_client_secret_file",
     ] {
         let mut value = valid_config();
         value[field] = serde_json::Value::String("a".repeat(OVERLONG_CONFIG_FIELD_BYTES));

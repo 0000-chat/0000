@@ -19,6 +19,7 @@
       "!**/.agents/**",
       "!**/.cache/**",
       "!**/node_modules/**",
+      "!**/worker-configuration.d.ts",
       "!**/dist/**",
       "!**/build/**",
       "!**/coverage/**",

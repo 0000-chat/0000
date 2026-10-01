@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import WebSocketClient from "ws";
 
 import { PUSH_DELIVERY_LEASE_MS, PUSH_INITIAL_DELAY_MS, PUSH_RETRY_INITIAL_DELAY_MS, PUSH_RETRY_WINDOW_MS } from "./push-policy";
-import { createMsgMiniflareTempDirectory, SHORT_LIVED_TEST_ROOM_LIMITS, startMsgMiniflare, TEST_ROOM_LIMITS, TEST_VAPID_PUBLIC_KEY, TEST_VAPID_SUBJECT } from "../test-fixtures/msg-worker.miniflare-fixture";
+import { createMsgMiniflareTempDirectory, SHORT_LIVED_TEST_ROOM_LIMITS, startMsgMiniflare, TEST_MSG_RATE_LIMIT_POLICY, TEST_ROOM_LIMITS, TEST_VAPID_PUBLIC_KEY, TEST_VAPID_SUBJECT } from "../test-fixtures/msg-worker.miniflare-fixture";
 
 const jsonHeaders = { accept: "application/json", "content-type": "application/json" };
 const fixtureTemporaryDirectory = fileURLToPath(new URL("../.miniflare-tests/", import.meta.url));
@@ -67,6 +67,7 @@ async function withRuntime(
   limits?: typeof TEST_ROOM_LIMITS,
   nowMs?: number,
   testMode = true,
+  rateLimitPolicy = TEST_MSG_RATE_LIMIT_POLICY,
 ) {
   // A Miniflare runtime owns the process-wide workerd test slot. The shared
   // default runtime must close before a test starts with different limits.
@@ -76,7 +77,7 @@ async function withRuntime(
   let failed = false;
   let failure: unknown;
   try {
-    fixture = await startMsgMiniflare(persistenceDirectory, limits, { ...(nowMs === undefined ? {} : { nowMs }), testMode });
+    fixture = await startMsgMiniflare(persistenceDirectory, limits, { ...(nowMs === undefined ? {} : { nowMs }), testMode }, true, false, rateLimitPolicy);
     await run(fixture.miniflare);
   } catch (error) {
     failed = true;
@@ -1687,7 +1688,7 @@ test.serial("streams a captured complete export over the public HTTP route", { t
     expect(value.messages).toHaveLength(106);
     expect(value.messages.at(-1)).toMatchObject({ sequence: 106, content: "message-104" });
     expect(value.messages.some((message) => message.content === "arrives-after-capture")).toBe(false);
-  }, { ...TEST_ROOM_LIMITS, maxMessages: 200 });
+  }, { ...TEST_ROOM_LIMITS, maxMessages: 200 }, undefined, true, { ...TEST_MSG_RATE_LIMIT_POLICY, posts: { ...TEST_MSG_RATE_LIMIT_POLICY.posts, limit: 200 } });
 });
 
 test.serial("returns gone after management deletion and enforces the test quota", { timeout: MINIFLARE_TEST_TIMEOUT_MS }, async () => {
@@ -1724,15 +1725,15 @@ test.serial("uses workerd alarms to tombstone then purge expired rooms", { timeo
   await withRuntime(async (miniflare) => {
     const { room } = await createRoom(miniflare);
     const live = await openSocket(socketUrl(await miniflare.ready, room.id));
-    await nextSocketMessage(live);
-    const expired = await nextSocketMessage(live);
+    await nextSocketMessage(live, 5_000);
+    const expired = await nextSocketMessage(live, 5_000);
     expect(JSON.parse(expired)).toMatchObject({ type: "conversation.expired" });
     // workerd v1.20260515.1 closes hibernating sockets with 1000 after the
     // Durable Object sends 1001; the expiry frame proves the alarm path ran.
-    expect(await nextSocketClose(live)).toBe(1000);
+    expect(await nextSocketClose(live, 5_000)).toBe(1000);
     expect((await miniflare.dispatchFetch(`https://msg.0000.chat/${room.id}`, { headers: { accept: "application/json" } })).status).toBe(410);
-    expect((await waitForStatus(miniflare, `/${room.id}`, 404)).status).toBe(404);
-  }, SHORT_LIVED_TEST_ROOM_LIMITS);
+    expect((await waitForStatus(miniflare, `/${room.id}`, 404, 5_000)).status).toBe(404);
+  }, { ...SHORT_LIVED_TEST_ROOM_LIMITS, inactivityTtlMs: 2_000, tombstoneTtlMs: 2_000 });
 });
 
 

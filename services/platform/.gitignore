@@ -5,6 +5,7 @@ __pycache__/
 .coverage
 .env
 .env.*
+.dev.vars
 .DS_Store
 .agents/
 .cache/
