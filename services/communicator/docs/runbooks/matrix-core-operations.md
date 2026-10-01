@@ -1,4 +1,12 @@
+---
+repo: 0000-chat/0000
+status: current
+---
+
 # Matrix Core Operations
+
+Examples use the SSH alias `matrix-host` and runtime `/srv/communicator`.
+Substitute the verified host and runtime configured for your deployment.
 
 ## Simple explanation
 
@@ -8,9 +16,9 @@ Run preflight, initialize the runtime, deploy the core, and validate it. Do not 
 
 1. Build a release only from a clean local commit with `git archive`.
 2. Record the commit and archive SHA-256 in the private operator log.
-3. Transfer the archive to `contabo-eu` and verify its checksum before extraction under `/opt/communicator/releases/<commit>`.
+3. Transfer the archive to `matrix-host` and verify its checksum before extraction under `/opt/communicator/releases/<commit>`.
 4. Run the supported-host preflight remotely and stop on any failure.
-5. Obtain deployment approval tied to the exact commit, checksum, host key, DNS evidence, and completed provider snapshot.
+5. Record the deployment decision against the exact release and verified host.
 6. Run `deploy-core.sh` only inside the verified remote release with `COMMUNICATOR_RUNTIME_DIR=/srv/communicator` and `COMPOSE_PROJECT_NAME=communicator`.
 7. Require Compose `--wait` to report every service healthy.
 8. Run `validate-core.sh` on the VPS and public HTTP/TLS checks from the local development host.
@@ -20,12 +28,10 @@ Run preflight, initialize the runtime, deploy the core, and validate it. Do not 
 
 ## Messenger bridge release
 
-1. Verify `codex/messenger-bridge` is clean and record the exact commit and
-   archive SHA-256. The pinned Messenger image digest must match the approved
+1. Verify the release checkout is clean and record its commit and archive SHA-256. The pinned Messenger image digest must match the approved
    plan.
-2. Verify `contabo-eu` is hostname `vmi3501337`, `eth0` owns `169.58.160.23`,
-   the active release is the intended clean release, and the provider snapshot
-   and encrypted restic prerequisites are current.
+2. Verify the intended SSH host identity, network address, active release,
+   recovery snapshot, and encrypted backup prerequisites.
 3. Transfer only the verified archive to a fresh remote temporary path and
    compare its checksum before extraction under
    `/opt/communicator/releases/<commit>`.
@@ -42,10 +48,9 @@ Run preflight, initialize the runtime, deploy the core, and validate it. Do not 
    Require no host listener on 29319 and keep public registration and
    federation/key endpoints disabled/404.
 7. Before the Human Messenger login, require a fresh encrypted backup and a
-   clean isolated restore. The Human account is paired only from its private
-   encrypted bridge-bot room and only through the user checkpoint. Agent
-   onboarding is deferred by user; preserve its configuration without creating
-   an Agent session.
+   clean isolated restore. Each selected account is paired only from its private encrypted bridge-bot
+   room by its account owner. Unconfigured accounts remain untested; onboarding
+   another identity requires separate acceptance.
 8. For pre-login rollback, activate the previous verified release and restore
    only the protected pre-change Synapse configuration. After Human login,
    preserve Messenger database/runtime, registrations, encryption/session
@@ -53,8 +58,8 @@ Run preflight, initialize the runtime, deploy the core, and validate it. Do not 
 
 ## Personal WhatsApp bridge release
 
-1. Verify `feat/matrix-core` is clean and record the exact release commit and archive SHA-256.
-2. Verify `contabo-eu` resolves to hostname `vmi3501337`, `eth0` owns `169.58.160.23`, and the provider snapshot evidence is current.
+1. Verify the selected release checkout is clean and record the exact release commit and archive SHA-256.
+2. Verify the target SSH host key, hostname, network address, and recovery snapshot against the operator record.
 3. Transfer only the `git archive` tarball to a fresh remote temporary path. Compare the remote checksum before extraction under `/opt/communicator/releases/<commit>`.
 4. Preserve the current Synapse configuration and checksum in a root-only timestamped rollback file. Never copy its contents into operator output.
 5. Activate the verified release and run `sudo env COMMUNICATOR_RUNTIME_DIR=/srv/communicator COMPOSE_PROJECT_NAME=communicator ./scripts/deploy-core.sh`.
@@ -66,8 +71,7 @@ Run preflight, initialize the runtime, deploy the core, and validate it. Do not 
 
 ## Telegram bridge release
 
-1. Confirm Messenger is accepted on origin/main before the Telegram
-   integration gate closes. Record the release commit, archive checksum,
+1. Confirm the existing bridge validators pass. Record the release commit, archive checksum,
    pinned Telegram image digest, provider snapshot evidence, and a fresh
    encrypted backup.
 2. Activate the verified release with
@@ -78,8 +82,9 @@ Run preflight, initialize the runtime, deploy the core, and validate it. Do not 
 3. Require the Telegram pre-login gate before any QR or phone login. The
    service remains on the private Compose network with no published port, no
    Caddy route, no Matrix federation, and no public bridge endpoint.
-4. Pair only @human:communicator.0000.gold from the Human's encrypted private
-   room. The QR scan, phone number, six-digit code, 2FA, account recovery,
+4. Pair only an explicitly permitted Matrix identity from its encrypted private
+   room. Example identities such as `@human:example.com` must be configured for
+   your homeserver. The QR scan, phone number, six-digit code, 2FA, account recovery,
    logout, and device removal are user-only actions.
 5. After pairing, prove Human E2EE, symmetric portal isolation, Platform Admin
    non-membership, non-admin command rejection, Telegram message behavior,

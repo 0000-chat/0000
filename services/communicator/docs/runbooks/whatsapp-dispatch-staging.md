@@ -1,3 +1,8 @@
+---
+repo: 0000-chat/0000
+status: current
+---
+
 # WhatsApp text dispatch staging proof
 
 This runbook has two separate proof paths. The controlled fixture path proves

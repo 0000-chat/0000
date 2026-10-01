@@ -1,13 +1,23 @@
+---
+repo: 0000-chat/0000
+status: archived
+---
+
 # Communicator Messaging Prototype Design
+
+> Archived design history. Paths, hosts, and identities below are examples.
+> This document records a previous design and is not a current execution
+> instruction or evidence of a live deployment. Use current service docs and
+> runbooks to plan changes.
 
 ## Status
 
-Approved design for the first Communicator prototype.
+Historical design for the first Communicator prototype.
 
 - Date: 2026-08-23
 - Audience: Communicator developer and system administrator
-- Source architecture: `docs/PROPOSAL.md`
-- Deployment host: `contabo-eu` (`169.58.160.23`)
+- The original feasibility proposal was withdrawn from the public tree.
+  Current public product direction: [product alignment](../../product-alignment.md).
 
 ## Simple explanation
 
@@ -56,24 +66,23 @@ The prototype excludes:
 
 The prototype uses a dedicated Matrix identity domain:
 
-- Matrix `server_name`: `communicator.0000.gold`
-- Synapse endpoint: `matrix.communicator.0000.gold`
-- User IDs: `@<localpart>:communicator.0000.gold`
+- Matrix `server_name`: `example.com`
+- Synapse endpoint: `matrix.example.com`
+- User IDs: `@<localpart>:example.com`
 
-DNS delegation will allow Matrix identities to use `communicator.0000.gold` while clients connect to `matrix.communicator.0000.gold`.
+DNS delegation will allow Matrix identities to use `example.com` while clients connect to `matrix.example.com`.
 
 The prototype identity domain is permanent. Prototype identities are disposable and will not be renamed or migrated into production.
 
-A future production deployment will use:
-
-- Matrix `server_name`: `0000.chat`
-- Synapse endpoint: `matrix.0000.chat`
+For another environment, choose its Matrix identity domain and Synapse
+endpoint before account creation. Example names do not designate a live service.
 
 Application tenant and principal identifiers do not depend on the Matrix domain. This permits controlled replay or migration into a separate production environment.
 
 ## Host readiness
 
-The prototype runs on the dedicated `contabo-eu` host. It was reinstalled from a known-clean Contabo image and has 6 vCPU, 12 GB RAM, and a 200 GB SSD.
+The design requires a dedicated clean host with capacity selected for the
+configured bridges, expected traffic, retention, and recovery workload.
 
 Installation may begin only after all of these checks pass:
 
@@ -88,7 +97,8 @@ Installation may begin only after all of these checks pass:
 
 Official lifecycle reference: <https://ubuntu.com/about/release-cycle>
 
-The previous compromised installation was erased. No Docker volume, database, executable, secret, or system configuration from that installation may be restored.
+Do not restore untrusted volumes, databases, executables, secrets, or system
+configuration into a clean deployment.
 
 ## Deployment architecture
 
@@ -314,11 +324,11 @@ Messages and media remain available during the prototype unless the operator exp
 
 ## Repository and runtime boundary
 
-`/home/ubuntu/communicator` becomes a Git repository with `main` as the default branch.
+`/path/to/0000/services/communicator` becomes a Git repository with `main` as the default branch.
 
 The first commit contains:
 
-- `docs/PROPOSAL.md`.
+- `docs/product-alignment.md`.
 - This approved design.
 - A defensive `.gitignore`.
 
@@ -340,7 +350,7 @@ The repository is published as the private GitHub repository `0000-chat/communic
 
 The prototype is accepted when all conditions are true:
 
-- HTTPS and Matrix discovery work for `communicator.0000.gold`.
+- HTTPS and Matrix discovery work for `example.com`.
 - Public registration and federation are disabled.
 - The human and AI-agent Matrix identities are separate.
 - The human identity can exchange messages through personal Telegram, WhatsApp, and Messenger accounts.

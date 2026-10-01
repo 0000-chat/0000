@@ -1,3 +1,8 @@
+---
+repo: 0000-chat/0000
+status: current
+---
+
 # Streams documentation
 
 Future event and stream design belongs here after the database boundary and

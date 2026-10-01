@@ -1,4 +1,14 @@
+---
+repo: 0000-chat/0000
+status: archived
+---
+
 # Authenticated Matrix Ingestion and Queue Projection Implementation Plan
+
+> Archived design history. Paths, hosts, and identities below are examples.
+> This document records a previous design and is not a current execution
+> instruction or evidence of a live deployment. Use current service docs and
+> runbooks to plan changes.
 
 > **Execution requirement:** Implement this plan sequentially in the dedicated
 > `codex/matrix-queue-ingestion` worktree. Every implementation task must be
@@ -9,7 +19,7 @@
 
 **Goal:** Add the authenticated Cloudflare ingestion boundary and Queue
 consumer that connect already-normalized Matrix events to the existing R2
-archive and `TenantProjectionDO`, without yet implementing the Contabo Matrix
+archive and `TenantProjectionDO`, without yet implementing the deployment Matrix
 Gateway itself.
 
 **Architecture:** The private Matrix Gateway will submit one-tenant,
@@ -65,7 +75,7 @@ The next milestones remain:
 
 - versioned live read API;
 - hibernatable WebSocket subscriptions;
-- the Contabo Matrix Gateway event consumer and encrypted local outbox; and
+- the deployment Matrix Gateway event consumer and encrypted local outbox; and
 - outbound command coordination.
 
 ---
@@ -124,7 +134,7 @@ The next milestones remain:
     freezes that boundary but does not add a Synapse client or alter bridge
     code.
 18. **No live production event ingestion is enabled merely by merging.** Live
-    Cloudflare resources and the Contabo Gateway require the later deployment
+    Cloudflare resources and the deployment Gateway require the later deployment
     gate and protected credentials.
 19. **Empty Cloudflare resources may be provisioned during configuration.** If
     staging/production D1, Queue, or R2 resources do not exist, the primary
@@ -196,7 +206,7 @@ Do not reduce those limits merely to fit event bodies into a Queue message.
 ## End-to-end protocol
 
 ```text
-future verified Matrix Gateway on Contabo
+future verified Matrix Gateway on deployment
   |
   | POST /internal/v1/ingestion/batches
   | Authorization: Bearer <service JWT with required iat/exp and <=5 minute TTL>
@@ -930,7 +940,7 @@ README.md
 Expected modified files:
 
 ```text
-docs/PROPOSAL.md
+docs/product-alignment.md
 docs/superpowers/specs/2026-08-27-communicator-cloudflare-data-plane-design.md
 packages/contracts/src/index.ts
 packages/test-fixtures/src/pilot-scenario.ts
@@ -984,7 +994,7 @@ For each task below, the orchestrator must use this exact lifecycle:
    it to prove red, implement the narrow behavior, rerun to green, and run all
    affected regression suites.
 4. The worker does not commit, push, deploy, edit live Cloudflare resources, or
-   access the Contabo host.
+   access the deployment host.
 5. Spawn a fresh independent Luna/max specification reviewer with no inherited
    turns. It checks the task diff against this plan and reports findings only.
 6. Send every valid finding back to the same implementation worker for fixes.
@@ -1009,7 +1019,6 @@ the current worktree and tests directly.
 - Create: `packages/contracts/src/ingestion.ts`
 - Create: `packages/contracts/test/ingestion.test.ts`
 - Modify: `packages/contracts/src/index.ts`
-- Modify: `docs/PROPOSAL.md`
 - Modify:
   `docs/superpowers/specs/2026-08-27-communicator-cloudflare-data-plane-design.md`
 
@@ -1701,7 +1710,7 @@ sequence based on current dependencies:
 1. build the versioned live read API over `TenantProjectionDO` so the
    back-office UI can replace simulated conversation data;
 2. add hibernatable WebSocket tickets and change subscriptions; then
-3. implement the Contabo Matrix Gateway using the frozen authenticated ingress
+3. implement the deployment Matrix Gateway using the frozen authenticated ingress
    contract, verified E2EE devices, deterministic normalization, and protected
    local SQLite outbox.
 

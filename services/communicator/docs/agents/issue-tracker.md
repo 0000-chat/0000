@@ -1,3 +1,8 @@
+---
+repo: 0000-chat/0000
+status: current
+---
+
 # Issue tracker: GitHub
 
 Issues and specs for this service live as GitHub issues in

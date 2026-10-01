@@ -1,3 +1,8 @@
+---
+repo: 0000-chat/0000
+status: archived
+---
+
 # Publish the msg CLI
 
 The public package is `@0000chat/msg`. npm package versions are immutable. Do not move, reuse, or republish a version. The CLI build reads its version from `packages/msg-cli/package.json`, so that manifest is the only version source.

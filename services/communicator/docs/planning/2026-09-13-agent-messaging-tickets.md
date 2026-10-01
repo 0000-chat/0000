@@ -1,3 +1,8 @@
+---
+repo: 0000-chat/0000
+status: current
+---
+
 # Agent messaging tickets
 
 Parent: GitHub issue [#11, "Spec: WhatsApp-first agent messaging through shared API and MCP"](https://github.com/0000-chat/0000/issues/11)

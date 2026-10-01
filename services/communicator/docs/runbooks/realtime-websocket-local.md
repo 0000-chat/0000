@@ -1,3 +1,8 @@
+---
+repo: 0000-chat/0000
+status: current
+---
+
 # Local realtime WebSocket runbook
 
 This runbook covers local verification of the authenticated realtime ticket

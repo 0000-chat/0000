@@ -1,3 +1,8 @@
+---
+repo: 0000-chat/0000
+status: current
+---
+
 # Matrix gateway package
 
 This directory contains the reviewable systemd package for the receive-only

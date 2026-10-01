@@ -1,27 +1,21 @@
-# Mautrix Messenger Validation
+---
+repo: 0000-chat/0000
+status: current
+---
 
-## Simple explanation
+# Mautrix Messenger validation
 
-This pilot validates one connected Human Messenger account through the
-existing Matrix identity. Agent Messenger onboarding is deferred by user and
-is not part of this acceptance. The existing Agent Matrix identity was
-verified not to access Human Messenger portals, but symmetric two-account
-Messenger isolation is not tested in this phase.
+This procedure is an acceptance template for an operator-owned deployment.
+It records no live account completion. Select test identities and harmless new
+test contacts; keep account names, Matrix room IDs, and live results privately.
+Do not import history or include message content in acceptance evidence.
 
-Validation uses new, harmless test messages only. It does not import history,
-inspect encrypted content, or start a restored Messenger session.
+## Automated pre-login gate
 
-Human text delivery, Human E2EE, Human portal isolation, Human restart
-persistence, WhatsApp preservation, and encrypted backup/restore are hard
-completion gates. Future Agent onboarding requires its own pairing, isolation,
-restart, and backup acceptance. A feature that the pinned upstream bridge does
-not support is recorded as a named limitation with evidence; it is not marked
-as passed and is not fixed by changing upstream code.
-
-## Automated pre-login markers
-
-Run the validators from the activated release on `contabo-eu`. The Messenger
-validator may emit only these success markers:
+Run core and Messenger validators from the verified release. Require the
+configured core and bridge services to be healthy, the pinned image and protected
+registrations to match, and no host listener on port 29319. Expected success
+markers include:
 
 ```text
 messenger_container=running
@@ -35,146 +29,45 @@ messenger_backfill=DISABLED
 messenger_provisioning=DISABLED
 ```
 
-The core validator must report `core_validation=PASS` and require the sorted
-running service set:
+These are expected outputs, not recorded deployment results. Public Matrix
+client and well-known HTTPS checks must pass; federation, signing-key, and
+public registration endpoints remain disabled or return the expected 404.
 
-```text
-caddy
-messenger
-postgres
-synapse
-whatsapp
-```
+## Acceptance for each paired identity
 
-The public Matrix client and well-known HTTPS checks must pass. Federation,
-key, and public registration checks remain disabled or return the expected
-404. No host port 29319 is allowed.
+The account owner verifies its private encrypted portal. For every paired
+identity, verify new inbound and outbound text, E2EE, and persistence after a
+controlled restart. Check portal isolation in both directions: the other test
+identity cannot discover, join, read, or send into this identity's portal.
+Platform administrator permission must not imply room membership.
 
-## Test data rules
+Use only harmless new messages. Test media, replies, reactions, typing, and
+receipts when supported by the pinned bridge. Record unsupported behavior as
+`UPSTREAM_LIMITATION` with the version and observation; service health never
+proves a message or encryption result.
 
-Use only harmless new messages with contacts explicitly selected by the
-operator. Do not use an existing private conversation, import history, or
-paste real message content into evidence. Record only marker names below.
+Any identity that has not been paired remains `NOT_TESTED`. Do not claim
+symmetric two-account isolation or two-account recovery from a single-account
+test. Adding an identity requires separate pairing, E2EE, isolation, restart,
+and backup acceptance. Store the actual results in the operator's private log.
 
-The Human test uses one approved test contact and must receive a new inbound
-text and send a new outbound text. If media, reply, reaction, typing, or
-receipt behavior is tested, use harmless content and record only the named
-success/failure or upstream limitation. Do not enable initial, catch-up,
-manual, or thread backfill.
+## Restart and preservation
 
-## Human acceptance — completed
+After a bounded restart, wait for core and bridge health, reopen each tested
+client profile, decrypt a pre-restart message, and perform a new bidirectional
+text exchange. Verify existing bridges still work. Record client performance
+separately; do not infer client correctness from server health.
 
-From the Human Element client, verify the private encrypted portal with the
-approved test contact. Confirm the message is encrypted and decryptable by
-Human, and that Agent cannot discover, join, or decrypt that portal. The
-completed hard-gate markers are:
+## Encrypted backup and isolated restore
 
-```text
-human_messenger_pairing=PASS
-human_messenger_inbound_text=PASS
-human_messenger_outbound_text=PASS
-human_messenger_e2ee=PASS
-agent_cannot_access_human_messenger=PASS
-```
+Require `backup=PASS` and a clean `restic check`. The payload includes the
+Messenger database, protected config and registrations, database secrets,
+encryption material, persisted sessions, and required media metadata, together
+with existing Synapse and bridge content.
 
-Optional Human feature markers are recorded only when actually observed:
-
-```text
-human_messenger_inbound_media=PASS
-human_messenger_outbound_media=PASS
-human_messenger_reply=PASS
-human_messenger_reaction=PASS
-human_messenger_typing=PASS
-human_messenger_receipt=PASS
-```
-
-Unsupported features remain unpassed and must be described as evidence-based
-upstream limitations accepted by the operator. Do not infer a feature result
-from bridge health.
-
-## Agent scope — deferred by user
-
-Do not pair, authenticate, log in, log out, unlink, or create an Agent
-Messenger session in this phase. Preserve the existing configuration that
-permits a future Agent login. The following are the honest scope markers:
-
-```text
-agent_messenger_pairing=DEFERRED_BY_USER
-agent_messenger_inbound_text=NOT_TESTED
-agent_messenger_outbound_text=NOT_TESTED
-agent_messenger_e2ee=NOT_TESTED
-human_cannot_access_agent_messenger=NOT_TESTED
-```
-The already-tested one-way isolation result remains:
-
-```text
-agent_cannot_access_human_messenger=PASS
-```
-
-Do not claim Human-to-Agent portal isolation, Agent messaging, Agent E2EE,
-Agent session persistence, or two-account Messenger recovery from this pilot.
-
-## Human restart persistence
-
-After Human acceptance, perform the controlled service restart from the
-operations procedure. Wait for PostgreSQL, Synapse, Caddy, WhatsApp, and
-Messenger health. Reopen the persistent Human Element profile and confirm it
-can decrypt its own pre-restart encrypted message and complete a harmless new
-inbound and outbound round trip. Confirm both WhatsApp sessions remain
-working. Record:
-
-```text
-human_messenger_session_preserved=PASS
-whatsapp_sessions_preserved=PASS
-```
-
-Do not infer a client result from server health. If the client is slow, record
-that as a performance observation and measure it separately; do not infer a
-cause without diagnostics.
-
-## Backup and isolated restore
-
-Run the encrypted restic backup after the Human account is paired and require
-`backup=PASS` and a clean `restic check`. The payload must cover the Messenger
-database, protected config, upstream registration, Synapse registration copy,
-database secrets, encryption material, persisted Human session state, and
-required media metadata, while retaining all existing Synapse and WhatsApp
-content. Record:
-
-```text
-post_messenger_pairing_backup=PASS
-```
-
-Run the isolated restore with a distinct Compose project and timestamped
-runtime. Require the Synapse, WhatsApp, and Messenger database table checks,
-protected artifacts, and offline pinned-image Messenger registration
-generation. Start only isolated PostgreSQL and Synapse; never start the
-restored Messenger service or reconnect restored session data to Meta.
-Preserve the timestamped restore evidence for separately approved cleanup,
-then record:
-
-```text
-post_messenger_pairing_restore_test=PASS
-```
-
-## Complete marker set for this Human-only pilot
-
-The final acceptance record may contain only these secret-free markers, plus
-explicit named upstream limitations:
-
-```text
-human_messenger_pairing=PASS
-human_messenger_inbound_text=PASS
-human_messenger_outbound_text=PASS
-human_messenger_e2ee=PASS
-agent_cannot_access_human_messenger=PASS
-human_messenger_session_preserved=PASS
-whatsapp_sessions_preserved=PASS
-post_messenger_pairing_backup=PASS
-post_messenger_pairing_restore_test=PASS
-agent_messenger_pairing=DEFERRED_BY_USER
-agent_messenger_inbound_text=NOT_TESTED
-agent_messenger_outbound_text=NOT_TESTED
-agent_messenger_e2ee=NOT_TESTED
-human_cannot_access_agent_messenger=NOT_TESTED
-```
+Restore into a distinct Compose project and fresh timestamped runtime. Verify
+database table restoration, protected artifacts, and offline registration
+validation using the pinned image with `--network none`. Start only isolated
+PostgreSQL and Synapse. Never start the restored Messenger service or reconnect
+restored sessions to Meta. Require `restore_test=PASS` before recovery acceptance.
+Retain only the minimum protected evidence needed for the recovery decision.

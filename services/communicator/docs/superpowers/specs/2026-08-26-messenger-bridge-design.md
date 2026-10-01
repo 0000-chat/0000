@@ -1,10 +1,20 @@
+---
+repo: 0000-chat/0000
+status: archived
+---
+
 # Human and Agent Messenger Bridge Design
+
+> Archived design history. Paths, hosts, and identities below are examples.
+> This document records a previous design and is not a current execution
+> instruction or evidence of a live deployment. Use current service docs and
+> runbooks to plan changes.
 
 **Date:** 2026-08-26
 
 **Status:** Approved in conversation; awaiting written-spec review
 
-**Target:** Existing private Synapse deployment on the Contabo VPS
+**Target:** Existing private Synapse deployment on the deployment VPS
 
 **Implementation:** Upstream `mautrix-meta`; no upstream source modifications
 
@@ -56,9 +66,9 @@ The first Messenger pilot includes:
 - one protected bridge runtime directory;
 - one appservice registration in Synapse;
 - one Human Messenger login controlled by
-  `@human:communicator.0000.gold`;
+  `@human:example.com`;
 - one Agent Messenger login controlled by
-  `@agent:communicator.0000.gold`;
+  `@agent:example.com`;
 - encrypted, non-federated, per-login Matrix portal rooms;
 - bidirectional text, small media, replies, reactions, typing, and receipts
   where the remote protocol supports them;
@@ -137,9 +147,9 @@ The exact permission map matches the approved WhatsApp model:
 ```yaml
 permissions:
   "*": relay
-  "@human:communicator.0000.gold": user
-  "@agent:communicator.0000.gold": user
-  "@platform-admin:communicator.0000.gold": admin
+  "@human:example.com": user
+  "@agent:example.com": user
+  "@platform-admin:example.com": admin
 ```
 
 Wildcard `relay` grants no usable relay path because relay remains disabled,
@@ -386,7 +396,7 @@ legal and platform-terms review.
 
 Messenger implementation is complete when the committed deployment and
 recovery code passes all local checks, the exact release is safely active on
-Contabo, both operator-approved accounts pass the core acceptance markers,
+deployment, both operator-approved accounts pass the core acceptance markers,
 existing WhatsApp sessions remain operational, and a post-pairing encrypted
 backup passes the isolated restore test.
 

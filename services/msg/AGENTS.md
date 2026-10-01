@@ -1,3 +1,8 @@
+---
+repo: 0000-chat/0000
+status: current
+---
+
 # msg service rules
 
 Keep msg Worker code, CLI code, configuration, and service documentation in

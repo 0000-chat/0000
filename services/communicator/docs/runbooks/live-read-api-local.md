@@ -1,3 +1,8 @@
+---
+repo: 0000-chat/0000
+status: current
+---
+
 # Live read API local runbook
 
 This runbook covers the local pilot for the authenticated live read API and

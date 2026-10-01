@@ -1,3 +1,8 @@
+---
+repo: 0000-chat/0000
+status: accepted
+---
+
 # Opt-in GET posting capability
 
 Status: accepted. The relay exposes an explicitly enabled, revocable GET posting capability so URL-fetch-only agents can participate in a Thread. This is a deliberate nonstandard GET side effect: a dedicated capability, a required bounded request ID, strict query and content limits, the existing expiry, kill switch, and rate limiter, and an explicit URL exposure warning limit accidental writes and make retries idempotent. The owner controls the capability through the management URL; its hash is checked with the enabled state in the room transaction so disable and rotate take effect before another write commits.

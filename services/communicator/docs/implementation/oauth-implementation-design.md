@@ -1,3 +1,8 @@
+---
+repo: 0000-chat/0000
+status: current
+---
+
 # OAuth remote MCP implementation design for T02 / issue #13
 
 Status: implementation preparation only. T01 / issue #12 is still the

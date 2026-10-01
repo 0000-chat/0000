@@ -1,3 +1,8 @@
+---
+repo: 0000-chat/0000
+status: current
+---
+
 # Gateway documentation
 
 Future gateway design and protocol decisions belong here after review. This

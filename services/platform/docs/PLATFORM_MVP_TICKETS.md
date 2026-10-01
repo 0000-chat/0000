@@ -1,3 +1,8 @@
+---
+repo: 0000-chat/0000
+status: current
+---
+
 # Platform MVP ticket proposal
 
 **Status:** Published as issues #55–#69. No implementation has begun. The accepted scope is [issue #54](https://github.com/0000-chat/0000/issues/54).

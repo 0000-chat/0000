@@ -1,6 +1,14 @@
+---
+repo: 0000-chat/0000
+status: archived
+---
+
 # Agent WhatsApp Shared-Bridge Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> Archived design history. Paths, hosts, and identities below are examples.
+> This document records a previous design and is not a current execution
+> instruction or evidence of a live deployment. Use current service docs and
+> runbooks to plan changes.
 
 **Goal:** Authorize the existing Agent Matrix identity as a normal mautrix user, pair the second self-owned WhatsApp account, prove symmetric Human/Agent isolation, and produce a verified encrypted recovery point.
 
@@ -12,9 +20,8 @@
 
 ## Execution boundaries
 
-- Work only in `/home/ubuntu/communicator/.worktrees/implement-matrix-core` on `feat/matrix-core`.
 - Never print or inspect message content, contacts, QR payloads, access tokens, appservice tokens, database passwords, WhatsApp session rows, or encryption keys.
-- Every host-affecting command must first verify hostname `vmi3501337` and IPv4 `169.58.160.23` on `eth0`.
+- Every host-affecting command must first verify hostname `matrix-host` and IPv4 `192.0.2.10` on `eth0`.
 - Do not enable relay mode, history sync, backfill, provisioning, public media, direct media, public Matrix registration, or federation.
 - Do not create another bridge container, PostgreSQL database, appservice registration, or Synapse deployment.
 - Stop at Task 4 for the operator to pair the physical Agent WhatsApp account.
@@ -53,9 +60,9 @@ from scripts import validate_whatsapp_policy
 VALID_CONFIG = '''bridge:
   permissions:
     "*": relay
-    "@human:communicator.0000.gold": user
-    "@agent:communicator.0000.gold": user
-    "@platform-admin:communicator.0000.gold": admin
+    "@human:example.com": user
+    "@agent:example.com": user
+    "@platform-admin:example.com": admin
 
 relay:
   enabled: false
@@ -78,7 +85,7 @@ class WhatsAppPolicyTests(unittest.TestCase):
         self.assertFalse(
             self.validate(
                 VALID_CONFIG.replace(
-                    '    "@agent:communicator.0000.gold": user\n', ""
+                    '    "@agent:example.com": user\n', ""
                 )
             )
         )
@@ -87,8 +94,8 @@ class WhatsAppPolicyTests(unittest.TestCase):
         self.assertFalse(
             self.validate(
                 VALID_CONFIG.replace(
-                    '"@agent:communicator.0000.gold": user',
-                    '"@agent:communicator.0000.gold": admin',
+                    '"@agent:example.com": user',
+                    '"@agent:example.com": admin',
                 )
             )
         )
@@ -98,7 +105,7 @@ class WhatsAppPolicyTests(unittest.TestCase):
             self.validate(
                 VALID_CONFIG.replace(
                     "\n\nrelay:",
-                    '\n    "@unexpected:communicator.0000.gold": user\n\nrelay:',
+                    '\n    "@unexpected:example.com": user\n\nrelay:',
                 )
             )
         )
@@ -116,13 +123,13 @@ if __name__ == "__main__":
 In `tests/test_render_whatsapp_config.py`, immediately after the existing Human assertion, add:
 
 ```python
-            self.assertIn('"@agent:communicator.0000.gold": user', rendered)
+            self.assertIn('"@agent:example.com": user', rendered)
             permission_block = rendered.split("  permissions:\n", 1)[1].split("\n\nrelay:", 1)[0]
             self.assertEqual(
                 '''    "*": relay
-    "@human:communicator.0000.gold": user
-    "@agent:communicator.0000.gold": user
-    "@platform-admin:communicator.0000.gold": admin''',
+    "@human:example.com": user
+    "@agent:example.com": user
+    "@platform-admin:example.com": admin''',
                 permission_block,
             )
 ```
@@ -152,9 +159,9 @@ import sys
 
 EXPECTED_PERMISSIONS = {
     "*": "relay",
-    "@human:communicator.0000.gold": "user",
-    "@agent:communicator.0000.gold": "user",
-    "@platform-admin:communicator.0000.gold": "admin",
+    "@human:example.com": "user",
+    "@agent:example.com": "user",
+    "@platform-admin:example.com": "admin",
 }
 EXPECTED_RELAY = {
     "enabled": "false",
@@ -250,9 +257,9 @@ In `scripts/render-whatsapp-config.py`, make the permission block exactly:
 ```yaml
   permissions:
     "*": relay
-    "@human:communicator.0000.gold": user
-    "@agent:communicator.0000.gold": user
-    "@platform-admin:communicator.0000.gold": admin
+    "@human:example.com": user
+    "@agent:example.com": user
+    "@platform-admin:example.com": admin
 ```
 
 Do not change any other bridge setting.
@@ -391,15 +398,15 @@ printf '%s\n' "$release_commit" | grep -Eq '^[0-9a-f]{40,64}$'
 archive=$(mktemp "/tmp/communicator-${release_commit}.XXXXXX.tar.gz")
 git archive --format=tar.gz --output="$archive" HEAD
 checksum=$(sha256sum "$archive" | awk '{print $1}')
-remote_dir=$(ssh -o BatchMode=yes contabo-eu 'set -eu; test "$(hostname)" = vmi3501337; ip -4 -o addr show dev eth0 | grep -q "169.58.160.23/"; umask 077; mktemp -d /tmp/communicator-release.XXXXXX')
+remote_dir=$(ssh -o BatchMode=yes matrix-host 'set -eu; test "$(hostname)" = matrix-host; ip -4 -o addr show dev eth0 | grep -q "192.0.2.10/"; umask 077; mktemp -d /tmp/communicator-release.XXXXXX')
 case "$remote_dir" in /tmp/communicator-release.*) ;; *) exit 1 ;; esac
-scp -q "$archive" "contabo-eu:${remote_dir}/release.tar.gz"
+scp -q "$archive" "matrix-host:${remote_dir}/release.tar.gz"
 ```
 
 - [ ] **Step 3: Verify, extract, preserve rollback evidence, and activate**
 
 ```bash
-ssh -o BatchMode=yes contabo-eu bash -s -- "$release_commit" "$checksum" "$remote_dir" <<'REMOTE'
+ssh -o BatchMode=yes matrix-host bash -s -- "$release_commit" "$checksum" "$remote_dir" <<'REMOTE'
 set -euo pipefail
 release_commit=$1
 checksum=$2
@@ -407,8 +414,8 @@ remote_dir=$3
 printf '%s\n' "$release_commit" | grep -Eq '^[0-9a-f]{40,64}$'
 printf '%s\n' "$checksum" | grep -Eq '^[0-9a-f]{64}$'
 case "$remote_dir" in /tmp/communicator-release.*) ;; *) exit 1 ;; esac
-test "$(hostname)" = vmi3501337
-ip -4 -o addr show dev eth0 | grep -q '169.58.160.23/'
+test "$(hostname)" = matrix-host
+ip -4 -o addr show dev eth0 | grep -q '192.0.2.10/'
 test "$(stat -c '%U:%G:%a' "$remote_dir")" = admin:admin:700
 printf '%s  %s\n' "$checksum" "$remote_dir/release.tar.gz" | sha256sum -c -
 sudo -n install -d -o root -g root -m 0755 /opt/communicator/releases
@@ -429,13 +436,13 @@ REMOTE
 
 ```bash
 unlink -- "$archive"
-ssh -o BatchMode=yes contabo-eu "test \"\$(hostname)\" = vmi3501337 && sudo -n rm -rf -- '$remote_dir'"
+ssh -o BatchMode=yes matrix-host "test \"\$(hostname)\" = matrix-host && sudo -n rm -rf -- '$remote_dir'"
 ```
 
 - [ ] **Step 5: Run production validators**
 
 ```bash
-ssh -o BatchMode=yes contabo-eu 'set -eu; test "$(hostname)" = vmi3501337; ip -4 -o addr show dev eth0 | grep -q "169.58.160.23/"; cd /opt/communicator/current; sudo -n env COMMUNICATOR_RUNTIME_DIR=/srv/communicator COMPOSE_PROJECT_NAME=communicator ./scripts/validate-whatsapp.sh; sudo -n env COMMUNICATOR_RUNTIME_DIR=/srv/communicator COMPOSE_PROJECT_NAME=communicator ./scripts/validate-core.sh'
+ssh -o BatchMode=yes matrix-host 'set -eu; test "$(hostname)" = matrix-host; ip -4 -o addr show dev eth0 | grep -q "192.0.2.10/"; cd /opt/communicator/current; sudo -n env COMMUNICATOR_RUNTIME_DIR=/srv/communicator COMPOSE_PROJECT_NAME=communicator ./scripts/validate-whatsapp.sh; sudo -n env COMMUNICATOR_RUNTIME_DIR=/srv/communicator COMPOSE_PROJECT_NAME=communicator ./scripts/validate-core.sh'
 ```
 
 Expected safe markers include `whatsapp_permissions=PASS`, `whatsapp_history_sync=DISABLED`, `whatsapp_provisioning=DISABLED`, and `core_validation=PASS`.
@@ -446,7 +453,7 @@ Expected safe markers include `whatsapp_permissions=PASS`, `whatsapp_history_syn
 
 - [ ] **Step 1: Confirm the Human session survived the permission deployment**
 
-In Element as `@human:communicator.0000.gold`, open the existing encrypted WhatsApp portal, read a pre-deployment message, and exchange one harmless new text with the second self-owned account. Record only:
+In Element as `@human:example.com`, open the existing encrypted WhatsApp portal, read a pre-deployment message, and exchange one harmless new text with the second self-owned account. Record only:
 
 ```text
 human_session_preserved=PASS
@@ -454,9 +461,9 @@ human_session_preserved=PASS
 
 - [ ] **Step 2: Pair the Agent interactively**
 
-In a separate Element session signed in as `@agent:communicator.0000.gold`:
+In a separate Element session signed in as `@agent:example.com`:
 
-1. Open an encrypted private chat with `@whatsappbot:communicator.0000.gold`.
+1. Open an encrypted private chat with `@whatsappbot:example.com`.
 2. Send `login qr`.
 3. On the physical phone for the second self-owned WhatsApp account, open **Linked devices**, choose **Link a device**, and scan the QR.
 4. Wait for the bot's authenticated response.
@@ -513,10 +520,10 @@ non_admin_commands_rejected=PASS
 - [ ] **Step 1: Restart Synapse and WhatsApp through the verified release**
 
 ```bash
-ssh -o BatchMode=yes contabo-eu 'bash -s' <<'REMOTE'
+ssh -o BatchMode=yes matrix-host 'bash -s' <<'REMOTE'
 set -euo pipefail
-test "$(hostname)" = vmi3501337
-ip -4 -o addr show dev eth0 | grep -q '169.58.160.23/'
+test "$(hostname)" = matrix-host
+ip -4 -o addr show dev eth0 | grep -q '192.0.2.10/'
 cd /opt/communicator/current
 sudo -n env COMMUNICATOR_RUNTIME_DIR=/srv/communicator COMPOSE_PROJECT_NAME=communicator docker compose --env-file deploy/images.lock.env restart synapse whatsapp
 sudo -n env COMMUNICATOR_RUNTIME_DIR=/srv/communicator COMPOSE_PROJECT_NAME=communicator docker compose --env-file deploy/images.lock.env up -d --wait --wait-timeout 180 synapse whatsapp
@@ -536,10 +543,10 @@ both_sessions_restart_persistence=PASS
 - [ ] **Step 3: Create and integrity-check the encrypted R2 backup**
 
 ```bash
-ssh -o BatchMode=yes contabo-eu 'bash -s' <<'REMOTE'
+ssh -o BatchMode=yes matrix-host 'bash -s' <<'REMOTE'
 set -euo pipefail
-test "$(hostname)" = vmi3501337
-ip -4 -o addr show dev eth0 | grep -q '169.58.160.23/'
+test "$(hostname)" = matrix-host
+ip -4 -o addr show dev eth0 | grep -q '192.0.2.10/'
 cd /opt/communicator/current
 sudo -n bash -c '
   set -euo pipefail
@@ -564,14 +571,14 @@ post_pairing_backup=PASS
 Before execution, require the active restore script to retain the offline guard:
 
 ```bash
-ssh -o BatchMode=yes contabo-eu 'grep -Fq -- "docker run --rm --network none" /opt/communicator/current/scripts/restore-core-test.sh'
+ssh -o BatchMode=yes matrix-host 'grep -Fq -- "docker run --rm --network none" /opt/communicator/current/scripts/restore-core-test.sh'
 ```
 
 ```bash
-ssh -o BatchMode=yes contabo-eu 'bash -s' <<'REMOTE'
+ssh -o BatchMode=yes matrix-host 'bash -s' <<'REMOTE'
 set -euo pipefail
-test "$(hostname)" = vmi3501337
-ip -4 -o addr show dev eth0 | grep -q '169.58.160.23/'
+test "$(hostname)" = matrix-host
+ip -4 -o addr show dev eth0 | grep -q '192.0.2.10/'
 cd /opt/communicator/current
 sudo -n bash -c '
   set -euo pipefail
@@ -597,7 +604,7 @@ Run:
 ```bash
 test -z "$(git status --short)"
 python3 -m unittest discover -s tests -p 'test_*.py' -v
-ssh -o BatchMode=yes contabo-eu 'set -eu; test "$(hostname)" = vmi3501337; ip -4 -o addr show dev eth0 | grep -q "169.58.160.23/"; cd /opt/communicator/current; sudo -n env COMMUNICATOR_RUNTIME_DIR=/srv/communicator COMPOSE_PROJECT_NAME=communicator ./scripts/validate-whatsapp.sh; sudo -n env COMMUNICATOR_RUNTIME_DIR=/srv/communicator COMPOSE_PROJECT_NAME=communicator ./scripts/validate-core.sh'
+ssh -o BatchMode=yes matrix-host 'set -eu; test "$(hostname)" = matrix-host; ip -4 -o addr show dev eth0 | grep -q "192.0.2.10/"; cd /opt/communicator/current; sudo -n env COMMUNICATOR_RUNTIME_DIR=/srv/communicator COMPOSE_PROJECT_NAME=communicator ./scripts/validate-whatsapp.sh; sudo -n env COMMUNICATOR_RUNTIME_DIR=/srv/communicator COMPOSE_PROJECT_NAME=communicator ./scripts/validate-core.sh'
 ```
 
 Report the exact release commit, test count, safe validation markers, backup snapshot short ID, isolated restore path, all operator acceptance markers, and the known deferred read-receipt behavior. Do not include secrets, QR data, room IDs, phone numbers, contacts, or message content.

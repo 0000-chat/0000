@@ -1,3 +1,8 @@
+---
+repo: 0000-chat/0000
+status: current
+---
+
 # 04 Subscribe to browser push for a room
 
 ## What to build

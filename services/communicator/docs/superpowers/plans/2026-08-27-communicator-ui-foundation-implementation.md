@@ -1,6 +1,14 @@
+---
+repo: 0000-chat/0000
+status: archived
+---
+
 # Communicator UI Foundation Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> Archived design history. Paths, hosts, and identities below are examples.
+> This document records a previous design and is not a current execution
+> instruction or evidence of a live deployment. Use current service docs and
+> runbooks to plan changes.
 
 **Goal:** Deliver a Cloudflare-compatible, protected backoffice shell that Don can test immediately with contract-valid simulated Human and Agent data, while establishing the production API, UI, test, and package boundaries used by later Durable Object work.
 
@@ -355,7 +363,7 @@ describe("public schemas", () => {
       display_name: "Human",
     }).success).toBe(true);
     expect(IdentitySchema.safeParse({
-      id: "@human:communicator.0000.gold",
+      id: "@human:example.com",
       tenant_id: "tenant_pilot",
       kind: "human",
       display_name: "Human",
@@ -576,8 +584,8 @@ describe("pilotScenario", () => {
   it("contains no real infrastructure or credential markers", () => {
     const serialized = JSON.stringify(pilotScenario);
     for (const forbidden of [
-      "169.58.160.23",
-      "communicator.0000.gold",
+      "192.0.2.10",
+      "example.com",
       "m.login",
       "access_token",
       "cookie",
@@ -1313,7 +1321,7 @@ lines and asserts:
 base Worker name is communicator-control-plane
 staging Worker name is communicator-control-plane-staging
 production environment has COMMUNICATOR_DATA_MODE=live
-no route contains matrix.communicator.0000.gold
+no route contains matrix.example.com
 no secret, IP address, Matrix user, provider account, or credential appears
 ```
 

@@ -8,9 +8,14 @@
     "packages/*"
   ],
   "scripts": {
-    "check": "bun scripts/check-workspace.mjs && bun scripts/check-topology.mjs && bun scripts/check-deploy-gateway-workflow.mjs && bun run check:licenses && node scripts/release/check-config.mjs",
+    "prepare": "node scripts/install-docs-hooks.mjs",
+    "check": "bun scripts/check-workspace.mjs && bun scripts/check-topology.mjs && bun scripts/check-deploy-gateway-workflow.mjs && bun run check:licenses && node scripts/release/check-config.mjs && bun run check:docs && bun run test:docs && bun run check:docs:artifact",
     "check:topology": "bun scripts/check-topology.mjs && bun scripts/check-topology-fixtures.mjs",
     "check:licenses": "bun scripts/check-licenses.mjs",
+    "check:docs": "node scripts/check-docs.mjs",
+    "check:docs:published": "node scripts/check-docs-published.mjs",
+    "check:docs:artifact": "node packages/documentation-tools/scripts/build-release.mjs --check",
+    "test:docs": "node --test packages/documentation-tools/test/*.test.mjs",
     "check:turbo": "turbo run check",
     "check:turbo:dry": "turbo run check --dry=json",
     "test:release": "node --test scripts/release/release.test.mjs scripts/release/runtime.test.mjs",

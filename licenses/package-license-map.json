@@ -29,6 +29,12 @@
       "classification": "apache-integration",
       "manifest": "packages/contracts/package.json"
     },
+    "packages/documentation-tools": {
+      "name": "@0000/documentation-tools",
+      "license": "Apache-2.0",
+      "classification": "apache-integration",
+      "manifest": "packages/documentation-tools/package.json"
+    },
     "packages/platform-client": {
       "name": "@0000/platform-client",
       "license": "Apache-2.0",

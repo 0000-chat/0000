@@ -1,4 +1,14 @@
+---
+repo: 0000-chat/0000
+status: archived
+---
+
 # Matrix Gateway SQLite ledger completion plan
+
+> Archived design history. Paths, hosts, and identities below are examples.
+> This document records a previous design and is not a current execution
+> instruction or evidence of a live deployment. Use current service docs and
+> runbooks to plan changes.
 
 > **Execution requirement:** The primary session plans, orchestrates, reviews,
 > commits, opens the pull request, and merges. Implementation and test execution
@@ -400,7 +410,7 @@ timestamp normalization, ID validation, protected `Debug`, and error code.
 Run:
 
 ```bash
-CARGO_TARGET_DIR=/home/ubuntu/communicator/.worktrees/matrix-wave1-security-fix/target \
+CARGO_TARGET_DIR=/path/to/0000/services/communicator/.worktrees/matrix-wave1-security-fix/target \
   CARGO_BUILD_JOBS=2 cargo test -p communicator-matrix-gateway \
   --test ledger_contract
 ```
@@ -487,7 +497,7 @@ anchor.
 Run RED and GREEN with:
 
 ```bash
-CARGO_TARGET_DIR=/home/ubuntu/communicator/.worktrees/matrix-wave1-security-fix/target \
+CARGO_TARGET_DIR=/path/to/0000/services/communicator/.worktrees/matrix-wave1-security-fix/target \
   CARGO_BUILD_JOBS=2 cargo test -p communicator-matrix-gateway \
   --test store_live_prepare
 ```
@@ -544,7 +554,7 @@ protected column.
 Run:
 
 ```bash
-CARGO_TARGET_DIR=/home/ubuntu/communicator/.worktrees/matrix-wave1-security-fix/target \
+CARGO_TARGET_DIR=/path/to/0000/services/communicator/.worktrees/matrix-wave1-security-fix/target \
   CARGO_BUILD_JOBS=2 cargo test -p communicator-matrix-gateway \
   --test store_live_delivery
 ```
@@ -610,7 +620,7 @@ key validity, and rollback on tampered protected state.
 Run:
 
 ```bash
-CARGO_TARGET_DIR=/home/ubuntu/communicator/.worktrees/matrix-wave1-security-fix/target \
+CARGO_TARGET_DIR=/path/to/0000/services/communicator/.worktrees/matrix-wave1-security-fix/target \
   CARGO_BUILD_JOBS=2 cargo test -p communicator-matrix-gateway \
   --test store_live_recovery
 ```
@@ -669,7 +679,7 @@ never-checkpointed SQL `NULL` from the encrypted exhaustion sentinel.
 Run:
 
 ```bash
-CARGO_TARGET_DIR=/home/ubuntu/communicator/.worktrees/matrix-wave1-security-fix/target \
+CARGO_TARGET_DIR=/path/to/0000/services/communicator/.worktrees/matrix-wave1-security-fix/target \
   CARGO_BUILD_JOBS=2 cargo test -p communicator-matrix-gateway \
   --test store_backfill_prepare
 ```
@@ -719,7 +729,7 @@ mutation, corruption rollback, and restart recovery.
 Run:
 
 ```bash
-CARGO_TARGET_DIR=/home/ubuntu/communicator/.worktrees/matrix-wave1-security-fix/target \
+CARGO_TARGET_DIR=/path/to/0000/services/communicator/.worktrees/matrix-wave1-security-fix/target \
   CARGO_BUILD_JOBS=2 cargo test -p communicator-matrix-gateway \
   --test store_backfill_delivery
 ```
@@ -737,7 +747,7 @@ Run in `workspace-write` with localhost enabled only if a named test requires
 it:
 
 ```bash
-export CARGO_TARGET_DIR=/home/ubuntu/communicator/.worktrees/matrix-wave1-security-fix/target
+export CARGO_TARGET_DIR=/path/to/0000/services/communicator/.worktrees/matrix-wave1-security-fix/target
 export CARGO_BUILD_JOBS=2
 cargo fmt --all --check
 cargo clippy -p communicator-matrix-gateway --all-targets -- -D warnings
@@ -800,7 +810,7 @@ Do not implement any of the following in this repair phase:
 - outbound sending, typing, reactions, or read receipts;
 - a schema version bump or migration;
 - unsafe force-commit, skip, reset, or delete commands; or
-- deployment to the Contabo VPS.
+- deployment to the deployment VPS.
 
 Those remain in the subsequent Matrix Gateway tasks after this ledger is
 integrated and proven.

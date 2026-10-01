@@ -4,6 +4,8 @@ dist/
 coverage/
 *.log
 *.tgz
+!packages/documentation-tools/release/
+!packages/documentation-tools/release/*.tgz
 .DS_Store
 .env
 .env.*

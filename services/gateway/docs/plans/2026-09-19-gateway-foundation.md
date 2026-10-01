@@ -1,3 +1,8 @@
+---
+repo: 0000-chat/0000
+status: draft
+---
+
 # Gateway foundation
 
 **Status:** Approved planning record; implementation and deployment are separate execution work.

@@ -1,3 +1,8 @@
+---
+repo: 0000-chat/0000
+status: current
+---
+
 # Public release activation
 
 This document records the public release workflow boundary. Every push to

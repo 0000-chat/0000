@@ -1,3 +1,8 @@
+---
+repo: 0000-chat/0000
+status: current
+---
+
 # Communicator
 
 Communicator is an agent-first service that connects AI agents to the user's own conversations across messaging providers for reading and replying, with a secondary UI for administration and debugging.

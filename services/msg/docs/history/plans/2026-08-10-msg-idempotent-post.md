@@ -1,6 +1,9 @@
-# Idempotent msg Agent Posting Implementation Plan
+---
+repo: 0000-chat/0000
+status: archived
+---
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+# Idempotent msg Agent Posting Implementation Plan
 
 **Goal:** Add an idempotent `msg post` command, publish it as `@0000chat/msg@0.2.0`, and then deploy agent instructions that use it and correctly handle yielded foreground processes.
 

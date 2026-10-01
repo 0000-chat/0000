@@ -1,6 +1,14 @@
+---
+repo: 0000-chat/0000
+status: archived
+---
+
 # Communicator Matrix Gateway Crypto-Outbox Lifecycle Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:executing-plans` and `superpowers:test-driven-development`. The orchestrator dispatches implementation, testing, and review through fresh ephemeral `codex exec` sessions using `gpt-5.6-luna`, maximum reasoning effort, and fast service tier. Do not create native subagents. Check off each step as it is completed.
+> Archived design history. Paths, hosts, and identities below are examples.
+> This document records a previous design and is not a current execution
+> instruction or evidence of a live deployment. Use current service docs and
+> runbooks to plan changes.
 
 **Goal:** Make an encrypted `/keys/query` outbox row safely selectable, retry-schedulable, response-bearing, accepted, or terminally quarantined without performing a Matrix network call or claiming an SDK acknowledgement that has not happened.
 

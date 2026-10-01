@@ -6,6 +6,10 @@
       "inputs": [
         "$TURBO_DEFAULT$",
         "$TURBO_ROOT$/scripts/check-workspace.mjs",
+        "$TURBO_ROOT$/.docs-policy.json",
+        "$TURBO_ROOT$/packages/documentation-tools/**",
+        "$TURBO_ROOT$/scripts/check-docs.mjs",
+        "$TURBO_ROOT$/scripts/check-docs-published.mjs",
         "$TURBO_ROOT$/package.json",
         "$TURBO_ROOT$/turbo.json",
         "$TURBO_ROOT$/bun.lock"

@@ -1,10 +1,18 @@
+---
+repo: 0000-chat/0000
+status: archived
+---
+
 # Communicator Matrix Core Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> Archived design history. Paths, hosts, and identities below are examples.
+> This document records a previous design and is not a current execution
+> instruction or evidence of a live deployment. Use current service docs and
+> runbooks to plan changes.
 
-**Goal:** Prepare the dedicated `contabo-eu` VPS and deploy a private, encrypted Synapse core with PostgreSQL, Caddy, validation, backup, and clean-restore evidence.
+**Goal:** Prepare the dedicated `matrix-host` VPS and deploy a private, encrypted Synapse core with PostgreSQL, Caddy, validation, backup, and clean-restore evidence.
 
-**Architecture:** Git development and tests run in the local implementation worktree. An exact committed release is transferred to `contabo-eu`, where a pinned Docker Compose project exposes only Caddy on ports 80 and 443. Runtime data and secrets live only under `/srv/communicator` on the VPS, outside Git.
+**Architecture:** Git development and tests run in the local implementation worktree. An exact committed release is transferred to `matrix-host`, where a pinned Docker Compose project exposes only Caddy on ports 80 and 443. Runtime data and secrets live only under `/srv/communicator` on the VPS, outside Git.
 
 **Tech Stack:** Ubuntu 24.04 LTS, Docker Engine with Compose v2, Caddy 2.11.4, Synapse 1.159.0, PostgreSQL 16.15, Python 3 standard library tests, Bash, restic.
 
@@ -12,9 +20,10 @@
 
 ## Simple explanation
 
-This plan does not build any Cloudflare data-plane components or install any bridges. It first verifies the freshly reinstalled `contabo-eu` host, then installs the Matrix core. Work stops if the operating system, disk, DNS, ports, secrets, backup target, or restore test is not ready.
+This plan does not build any Cloudflare data-plane components or install any bridges. It first verifies the freshly reinstalled `matrix-host` host, then installs the Matrix core. Work stops if the operating system, disk, DNS, ports, secrets, backup target, or restore test is not ready.
 
-The deployment host runs supported Ubuntu 24.04 LTS with 6 vCPU, 12 GB RAM, and a 200 GB SSD. The local OVH machine is development-only.
+The example uses a dedicated supported Ubuntu host, with capacity selected for
+the workload and a separate development checkout.
 
 ## Scope boundary
 
@@ -38,91 +47,13 @@ This plan does not implement:
 - The Matrix event consumer.
 - Queues, Durable Objects, Workers, R2, or any other Cloudflare data-plane component.
 
-## Execution contract for GPT-5.6 Luna at xhigh effort
+## Historical implementation approach
 
-This plan is intentionally executable by an agent that has no prior project context. The executor must follow these rules exactly.
-
-### Required reading and workspace
-
-1. Read `docs/PROPOSAL.md` first.
-2. Read `docs/superpowers/specs/2026-08-23-communicator-prototype-design.md` second.
-3. Read this section and only the current task before starting that task. Do not load or start subsequent tasks early.
-4. Work in an isolated Git worktree on a branch other than `main`. The implementation branch must start from `origin/plan/matrix-core`.
-5. Run every command from the worktree root unless the step gives a different directory.
-6. Before changing a file, run `git status --short`. Stop and ask the user if it shows changes that the current task did not create.
-7. Treat the code blocks in this plan as exact content. Copy them without redesigning, shortening, upgrading, or refactoring them.
-8. Do not replace image versions or digests. A version change requires a separate plan update supported by current official documentation.
-9. Commands without `ssh contabo-eu` are local repository commands. Never interpret a local `sudo`, Docker daemon, public IP, port, `/srv/communicator`, or service result as evidence about the VPS.
-10. Host-affecting commands must start with `ssh contabo-eu` and must verify the remote hostname/IP before using `/srv/communicator` or Docker.
-11. Transfer only files from a clean committed release. Never transfer `.git`, `.env`, ignored files, runtime data, backups, or secrets.
-
-Use this one-time setup from `/home/ubuntu/communicator`:
-
-```bash
-git fetch origin
-if [[ -d .worktrees/implement-matrix-core ]]; then
-  cd .worktrees/implement-matrix-core
-  test "$(git branch --show-current)" = "feat/matrix-core"
-else
-  git worktree add .worktrees/implement-matrix-core -b feat/matrix-core origin/plan/matrix-core
-  cd .worktrees/implement-matrix-core
-fi
-git status --short --branch
-```
-
-Expected: the branch is `feat/matrix-core`, it is based on `origin/plan/matrix-core`, and the worktree has no uncommitted files. If the branch exists but is not attached to this worktree, stop and ask the primary agent to inspect it; do not delete or recreate it.
-
-### One-task execution loop
-
-For each task, use this exact loop:
-
-1. Put only that task into the active session plan.
-2. Confirm that every dependency in the gate table below is complete.
-3. Perform one checkbox step at a time and in the listed order.
-4. After a file-creation step, confirm that each named file exists and is not empty. Do not claim the step passed because the write command returned successfully.
-5. After a test step, run the exact command and compare the result with the stated `Expected:` result.
-6. If an expected failure unexpectedly passes, stop. The test is not proving the intended behavior.
-7. If an expected pass fails, preserve the non-secret error output and use `superpowers:systematic-debugging`. Do not make speculative edits.
-8. After a commit step, run `git status --short` and `git show --stat --oneline --decorate HEAD`. Expected: the worktree is clean and the commit contains only the current task's files.
-9. Stop after the task. Report the commit hash, changed files, checks run, exact pass or fail result, and the next gate. Do not begin the next task in the same subagent turn.
-
-The Markdown checkboxes identify steps. Do not edit this plan merely to mark a checkbox. Track completion in the active session plan and in the final task report so implementation commits contain only implementation artifacts.
-
-### Step completion rules
-
-| Step type | Required evidence before it is complete |
-|---|---|
-| Create or modify a file | The named path exists, is non-empty, and matches the complete code block in this plan. |
-| Expected-failure test | The command exits non-zero for the stated reason, not because of an import, syntax, permission, or environment mistake unless that is the stated reason. |
-| Expected-pass test | The command exits `0` and its output matches the stated result. |
-| Commit | The commit succeeds, the worktree is clean, and the commit contains only the files listed for that task. |
-| Manual validation | The user or operator reports the observed result. The agent must not infer a pass. |
-| External-state validation | Fresh evidence confirms DNS, TLS, service health, backup, or restore state. Cached or planned state is not evidence. |
-
-### Dependency and authority gates
-
-| Task | May start when | Mandatory stop or approval |
-|---|---|---|
-| 1 | The isolated implementation worktree is clean. | None; this task is repository-only and read-only host inspection. |
-| 2 | Task 1 is committed. | Continue only after the remote preflight reports no failure except the explicitly pending DNS records. Require a completed provider snapshot before first deployment. |
-| 3 | Task 2's remote host prerequisites are verified. | This task is repository-only. Do not initialize `/srv/communicator` locally. |
-| 4 | Task 3 is committed. | No substitutions for the pinned image references. |
-| 5 | Task 4 is committed and its repository-contract tests pass. | Do not expose Synapse or PostgreSQL directly on a host port. |
-| 6 | Task 5 is committed and a fresh remote preflight is clean. | Deployment approval is valid only for the shown Git commit, `contabo-eu` host key, release checksum, and DNS evidence. All deployment commands run remotely. |
-| 7 | All three remote core services are healthy. | Manual E2EE checks and break-glass checks require the user's observed results. Never print passwords, access tokens, or recovery keys. |
-| 8 | Task 7 is complete. | The user must provide or confirm the off-server restic destination and remote password-file path. Backup and restore commands run on `contabo-eu`. |
-| 9 | Backup and isolated restoration both pass. | The 24-hour soak uses elapsed real time. Do not simulate it or mark it complete early. |
-
-### Required subagent prompt
-
-When `superpowers:subagent-driven-development` dispatches a fresh Luna worker, use this prompt and replace only `<N>`:
-
-```text
-Implement only Task <N> from docs/superpowers/plans/2026-08-23-matrix-core-implementation-plan.md.
-Use GPT-5.6 Luna with xhigh effort. First read docs/PROPOSAL.md, the approved prototype design, and the plan's "Execution contract for GPT-5.6 Luna at xhigh effort" section. Then read Task <N> only.
-Follow every step in order. Copy specified file content exactly. Run every stated check. Do not start another task. Do not perform a manual or external action without the approval required by the gate table.
-Return only: outcome; files changed; verification commands and results; commit hash; blockers or next gate. Never include secret values.
-```
+The plan separated host readiness, runtime initialization, pinned configuration,
+core validation, account isolation, and backup recovery into independent steps.
+The code sketches below explain the original contracts; current code and
+runbooks govern execution. No former branch, agent model, deployment approval,
+or task schedule is a prerequisite for contributing.
 
 ## File map
 
@@ -254,7 +185,7 @@ import time
 
 GIB = 1024**3
 SUPPORTED_UBUNTU = frozenset({"24.04", "26.04"})
-DOMAINS = ("communicator.0000.gold", "matrix.communicator.0000.gold")
+DOMAINS = ("example.com", "matrix.example.com")
 
 
 @dataclasses.dataclass(frozen=True)
@@ -413,7 +344,7 @@ Expected after Task 2's DNS amendment: all 12 tests pass with `OK`.
 - [ ] **Step 5: Demonstrate the remote host gate fails safely before DNS**
 
 ```bash
-ssh contabo-eu 'python3 - --expected-ip 169.58.160.23' < scripts/preflight.py
+ssh matrix-host 'python3 - --expected-ip 192.0.2.10' < scripts/preflight.py
 ```
 
 Expected before DNS creation: non-zero exit with one failure for each missing Matrix DNS name and no other host failure.
@@ -425,14 +356,14 @@ git add scripts/preflight.py tests/test_preflight.py
 git commit -m "test: add Matrix host preflight gate"
 ```
 
-### Task 2: Verify and bootstrap the dedicated Contabo host
+### Task 2: Verify and bootstrap the dedicated deployment host
 
 **Files:**
 - Create: `docs/runbooks/host-readiness.md`
 
-- [ ] **Step 1: Replace the obsolete OVH remediation runbook**
+- [ ] **Step 1: Replace the obsolete local remediation runbook**
 
-Modify the existing `docs/runbooks/host-readiness.md` so it identifies `contabo-eu` as the only deployment host, distinguishes local repository commands from remote host commands, and contains every requirement listed below.
+Modify the existing `docs/runbooks/host-readiness.md` so it identifies `matrix-host` as the only deployment host, distinguishes local repository commands from remote host commands, and contains every requirement listed below.
 
 Required facts:
 
@@ -441,17 +372,17 @@ Required facts:
 
 ## Simple explanation
 
-Develop and test in the local `feat/matrix-core` worktree. Run host checks and deployment only on the dedicated `contabo-eu` VPS. Never run Communicator services on the local OVH development host.
+Develop and test in the local `feat/matrix-core` worktree. Run host checks and deployment only on the dedicated `matrix-host` VPS. Never run Communicator services on the local development host.
 
 ## Technical procedure
 
-1. Verify key-only SSH to `contabo-eu`.
-2. Require Ubuntu 24.04 LTS, 6 vCPU, at least 10 GiB RAM, a 200 GB disk, and at least 50 GiB free.
+1. Verify key-only SSH to `matrix-host`.
+2. Require a supported operating system and workload-appropriate CPU, RAM, disk, and free space.
 3. Require zero failed systemd units and `eth0` to be `routable (configured)`.
 4. Require compressed zram swap, UFW, Docker Engine, Compose v2, Python 3, curl, OpenSSL, and restic.
 5. Allow only inbound ports 22, 80, and 443.
 6. Require ports 80 and 443 to be free before Caddy is deployed.
-7. Require both Matrix names to resolve only to `169.58.160.23`; do not publish AAAA yet.
+7. Require both Matrix names to resolve only to `192.0.2.10`; do not publish AAAA yet.
 8. Run the committed preflight remotely through standard input.
 9. Require an empty JSON `failures` array.
 10. Require a completed provider snapshot and deployment approval tied to the exact commit and host key.
@@ -470,12 +401,12 @@ Expected: no output.
 - [ ] **Step 3: Verify the bootstrapped VPS without changing DNS**
 
 ```bash
-ssh contabo-eu 'set -eu
+ssh matrix-host 'set -eu
 source /etc/os-release
 test "$VERSION_ID" = 24.04
 test "$(nproc)" -eq 6
-test "$(hostname)" = vmi3501337
-ip -4 -brief address show eth0 | grep -q "169.58.160.23/"
+test "$(hostname)" = matrix-host
+ip -4 -brief address show eth0 | grep -q "192.0.2.10/"
 test "$(awk "/MemTotal:/ {print \$2 * 1024}" /proc/meminfo)" -ge "$((10 * 1024 * 1024 * 1024))"
 root_source=$(findmnt -n -o SOURCE /)
 root_parent=$(lsblk -ndo PKNAME "$root_source")
@@ -504,7 +435,7 @@ Expected: exit `0`.
 - [ ] **Step 4: Run the current preflight code on the remote host**
 
 ```bash
-ssh contabo-eu 'python3 - --expected-ip 169.58.160.23' < scripts/preflight.py
+ssh matrix-host 'python3 - --expected-ip 192.0.2.10' < scripts/preflight.py
 ```
 
 Expected before DNS creation: exit `1` with exactly two failures, one for each missing Matrix DNS name. Any other failure blocks Task 3.
@@ -512,13 +443,12 @@ Expected before DNS creation: exit `1` with exactly two failures, one for each m
 - [ ] **Step 5: Commit the corrected runbook and per-domain DNS gate**
 
 ```bash
-git add .gitignore scripts/preflight.py tests/test_preflight.py docs/runbooks/host-readiness.md docs/PROPOSAL.md docs/superpowers/specs/2026-08-23-communicator-prototype-design.md docs/superpowers/plans/2026-08-23-matrix-core-implementation-plan.md
-git commit -m "docs: retarget Matrix pilot to Contabo"
+git commit -m "docs: retarget Matrix pilot to deployment"
 ```
 
 - [ ] **Step 6: Stop for DNS and provider snapshot evidence**
 
-Require both A records to equal `169.58.160.23`, require both AAAA records to be absent, and require a completed Contabo snapshot identifier. Then rerun Step 4 and require exit `0` with `"failures": []` before first deployment.
+Require both A records to equal `192.0.2.10`, require both AAAA records to be absent, and require a completed deployment snapshot identifier. Then rerun Step 4 and require exit `0` with `"failures": []` before first deployment.
 
 ### Task 3: Create runtime directories and secrets safely
 
@@ -869,8 +799,8 @@ Expected: non-zero because the renderer does not exist.
 Create `deploy/synapse/homeserver.yaml.template`:
 
 ```yaml
-server_name: "communicator.0000.gold"
-public_baseurl: "https://matrix.communicator.0000.gold/"
+server_name: "example.com"
+public_baseurl: "https://matrix.example.com/"
 pid_file: /data/homeserver.pid
 web_client_location: null
 
@@ -897,7 +827,7 @@ database:
 
 log_config: /data/log.config
 media_store_path: /data/media_store
-signing_key_path: /data/communicator.0000.gold.signing.key
+signing_key_path: /data/example.com.signing.key
 registration_shared_secret: "${REGISTRATION_SHARED_SECRET}"
 report_stats: false
 
@@ -998,15 +928,15 @@ disable_existing_loggers: false
 Create `deploy/caddy/Caddyfile`:
 
 ```caddyfile
-communicator.0000.gold {
+example.com {
   header /.well-known/matrix/* Access-Control-Allow-Origin "*"
   header /.well-known/matrix/* Content-Type "application/json"
-  respond /.well-known/matrix/server `{"m.server":"matrix.communicator.0000.gold:443"}` 200
-  respond /.well-known/matrix/client `{"m.homeserver":{"base_url":"https://matrix.communicator.0000.gold"}}` 200
+  respond /.well-known/matrix/server `{"m.server":"matrix.example.com:443"}` 200
+  respond /.well-known/matrix/client `{"m.homeserver":{"base_url":"https://matrix.example.com"}}` 200
   respond 404
 }
 
-matrix.communicator.0000.gold {
+matrix.example.com {
   @client path /_matrix/client/* /_matrix/media/* /_synapse/client/*
   handle @client {
     reverse_proxy synapse:8008
@@ -1058,9 +988,9 @@ export COMMUNICATOR_RUNTIME_DIR="$runtime_dir"
 
 ./scripts/init-runtime.sh
 
-if [[ ! -f "$runtime_dir/synapse/communicator.0000.gold.signing.key" ]]; then
+if [[ ! -f "$runtime_dir/synapse/example.com.signing.key" ]]; then
   docker run --rm \
-    -e SYNAPSE_SERVER_NAME=communicator.0000.gold \
+    -e SYNAPSE_SERVER_NAME=example.com \
     -e SYNAPSE_REPORT_STATS=no \
     -v "$runtime_dir/synapse:/data" \
     "$SYNAPSE_IMAGE" generate
@@ -1095,7 +1025,7 @@ Run preflight, initialize the runtime, deploy the core, and validate it. Do not 
 
 1. Build a release only from a clean local commit with `git archive`.
 2. Record the commit and archive SHA-256 in the private operator log.
-3. Transfer the archive to `contabo-eu` and verify its checksum before extraction under `/opt/communicator/releases/<commit>`.
+3. Transfer the archive to `matrix-host` and verify its checksum before extraction under `/opt/communicator/releases/<commit>`.
 4. Run the supported-host preflight remotely and stop on any failure.
 5. Obtain deployment approval tied to the exact commit, checksum, host key, DNS evidence, and completed provider snapshot.
 6. Run `deploy-core.sh` only inside the verified remote release with `COMMUNICATOR_RUNTIME_DIR=/srv/communicator` and `COMPOSE_PROJECT_NAME=communicator`.
@@ -1130,14 +1060,14 @@ release_commit=$(git rev-parse HEAD)
 archive=$(mktemp "/tmp/communicator-${release_commit}.XXXXXX.tar.gz")
 git archive --format=tar.gz --output="$archive" HEAD
 checksum=$(sha256sum "$archive" | awk '{print $1}')
-remote_dir=$(ssh contabo-eu 'set -eu; test "$(hostname)" = vmi3501337; ip -4 -brief address show eth0 | grep -q "169.58.160.23/"; umask 077; mktemp -d /tmp/communicator-release.XXXXXX')
+remote_dir=$(ssh matrix-host 'set -eu; test "$(hostname)" = matrix-host; ip -4 -brief address show eth0 | grep -q "192.0.2.10/"; umask 077; mktemp -d /tmp/communicator-release.XXXXXX')
 case "$remote_dir" in /tmp/communicator-release.*) ;; *) exit 1 ;; esac
-cleanup_release() { unlink -- "$archive"; ssh contabo-eu "test \"\$(hostname)\" = vmi3501337 && sudo rm -rf -- '$remote_dir'"; }
+cleanup_release() { unlink -- "$archive"; ssh matrix-host "test \"\$(hostname)\" = matrix-host && sudo rm -rf -- '$remote_dir'"; }
 trap cleanup_release EXIT
-scp "$archive" "contabo-eu:${remote_dir}/release.tar.gz"
-ssh contabo-eu "set -eu
-test \"\$(hostname)\" = vmi3501337
-ip -4 -brief address show eth0 | grep -q '169.58.160.23/'
+scp "$archive" "matrix-host:${remote_dir}/release.tar.gz"
+ssh matrix-host "set -eu
+test \"\$(hostname)\" = matrix-host
+ip -4 -brief address show eth0 | grep -q '192.0.2.10/'
 test \"\$(stat -c '%U:%G:%a' '$remote_dir')\" = admin:admin:700
 printf '%s  %s\n' '$checksum' '$remote_dir/release.tar.gz' | sha256sum -c -
 sudo install -d -o root -g root -m 0755 /opt/communicator/releases
@@ -1154,12 +1084,12 @@ Expected: remote archive checksum passes and `RELEASE_COMMIT` matches the local 
 
 ```bash
 release_commit=$(git rev-parse HEAD)
-ssh contabo-eu bash -s -- "$release_commit" <<'REMOTE'
+ssh matrix-host bash -s -- "$release_commit" <<'REMOTE'
 set -eu
 release_commit=$1
 printf '%s\n' "$release_commit" | grep -Eq '^[0-9a-f]{40,64}$'
-test "$(hostname)" = vmi3501337
-ip -4 -brief address show eth0 | grep -q "169.58.160.23/"
+test "$(hostname)" = matrix-host
+ip -4 -brief address show eth0 | grep -q "192.0.2.10/"
 cd "/opt/communicator/releases/$release_commit"
 test "$(cat RELEASE_COMMIT)" = "$release_commit"
 sudo ln -sfn "/opt/communicator/releases/$release_commit" /opt/communicator/current
@@ -1198,7 +1128,7 @@ runtime_dir=${COMMUNICATOR_RUNTIME_DIR:-/srv/communicator}
 admin_flag=--no-admin
 [[ "$role" == "admin" ]] && admin_flag=--admin
 
-read -rsp "Password for @${localpart}:communicator.0000.gold: " password
+read -rsp "Password for @${localpart}:example.com: " password
 echo
 
 docker compose --env-file deploy/images.lock.env exec -T synapse \
@@ -1219,8 +1149,8 @@ Create executable `scripts/validate-core.sh`:
 #!/usr/bin/env bash
 set -euo pipefail
 
-matrix=https://matrix.communicator.0000.gold
-identity=https://communicator.0000.gold
+matrix=https://matrix.example.com
+identity=https://example.com
 
 curl -fsS "$matrix/_matrix/client/versions" | python3 -m json.tool >/dev/null
 curl -fsS "$identity/.well-known/matrix/client" | python3 -m json.tool >/dev/null
@@ -1255,7 +1185,7 @@ Create separate human, agent, and administrator accounts. Confirm that the human
 
 ## Technical checklist
 
-1. Verify `hostname` is exactly `vmi3501337` and `eth0` owns `169.58.160.23`, then create three accounts from an interactive remote terminal so passwords never enter command arguments: `ssh -t contabo-eu 'set -eu; test "$(hostname)" = vmi3501337; ip -4 -brief address show eth0 | grep -q "169.58.160.23/"; cd /opt/communicator/current; sudo env COMMUNICATOR_RUNTIME_DIR=/srv/communicator COMPOSE_PROJECT_NAME=communicator ./scripts/create-matrix-user.sh <localpart> <user|admin>'`.
+1. Verify `hostname` is exactly `matrix-host` and `eth0` owns `192.0.2.10`, then create three accounts from an interactive remote terminal so passwords never enter command arguments: `ssh -t matrix-host 'set -eu; test "$(hostname)" = matrix-host; ip -4 -brief address show eth0 | grep -q "192.0.2.10/"; cd /opt/communicator/current; sudo env COMMUNICATOR_RUNTIME_DIR=/srv/communicator COMPOSE_PROJECT_NAME=communicator ./scripts/create-matrix-user.sh <localpart> <user|admin>'`.
 2. Sign into the human and agent accounts on separate verified Matrix client profiles.
 3. Create one private encrypted room as the human. Do not invite the agent.
 4. Create one private encrypted room as the agent. Do not invite the human.
@@ -1301,9 +1231,9 @@ This process does not recover historical keys that the owning principal cannot s
 ```bash
 chmod +x scripts/create-matrix-user.sh scripts/validate-core.sh
 bash -n scripts/create-matrix-user.sh scripts/validate-core.sh
-ssh contabo-eu 'set -eu; test "$(hostname)" = vmi3501337; ip -4 -brief address show eth0 | grep -q "169.58.160.23/"; cd /opt/communicator/current; sudo env COMMUNICATOR_RUNTIME_DIR=/srv/communicator COMPOSE_PROJECT_NAME=communicator ./scripts/validate-core.sh'
-curl -fsS https://matrix.communicator.0000.gold/_matrix/client/versions | python3 -m json.tool >/dev/null
-curl -fsS https://communicator.0000.gold/.well-known/matrix/client | python3 -m json.tool >/dev/null
+ssh matrix-host 'set -eu; test "$(hostname)" = matrix-host; ip -4 -brief address show eth0 | grep -q "192.0.2.10/"; cd /opt/communicator/current; sudo env COMMUNICATOR_RUNTIME_DIR=/srv/communicator COMPOSE_PROJECT_NAME=communicator ./scripts/validate-core.sh'
+curl -fsS https://matrix.example.com/_matrix/client/versions | python3 -m json.tool >/dev/null
+curl -fsS https://example.com/.well-known/matrix/client | python3 -m json.tool >/dev/null
 ```
 
 Expected: local syntax passes, remote validation prints `core_validation=PASS`, and both external HTTPS requests exit `0`. Record the certificate names and expiry in the private operator log.
@@ -1355,7 +1285,7 @@ docker compose --env-file deploy/images.lock.env exec -T postgres \
 install -d -m 0700 "$staging/synapse-data" "$staging/secrets"
 cp -a "$runtime_dir/synapse/homeserver.yaml" "$staging/synapse-data/"
 cp -a "$runtime_dir/synapse/log.config" "$staging/synapse-data/"
-cp -a "$runtime_dir/synapse/communicator.0000.gold.signing.key" "$staging/synapse-data/"
+cp -a "$runtime_dir/synapse/example.com.signing.key" "$staging/synapse-data/"
 cp -a "$runtime_dir/synapse/media_store" "$staging/synapse-data/"
 cp -a "$runtime_dir/secrets/postgres.env" "$staging/secrets/"
 cp -a "$runtime_dir/secrets/synapse_registration_shared_secret" "$staging/secrets/"
@@ -1467,9 +1397,9 @@ git commit -m "feat: add encrypted Matrix core recovery workflow"
 - [ ] **Step 6: Execute backup and clean restoration remotely**
 
 ```bash
-ssh contabo-eu "set -eu
-test \"\$(hostname)\" = vmi3501337
-ip -4 -brief address show eth0 | grep -q '169.58.160.23/'
+ssh matrix-host "set -eu
+test \"\$(hostname)\" = matrix-host
+ip -4 -brief address show eth0 | grep -q '192.0.2.10/'
 sudo bash -c 'set -a
 test \"\$(stat -c %U:%G:%a /srv/communicator/secrets/restic.env)\" = root:root:600
 source /srv/communicator/secrets/restic.env
@@ -1493,7 +1423,7 @@ Expected: `backup=PASS` followed by `restore_test=PASS`.
 ```bash
 python3 -m unittest discover -s tests -v
 bash -n scripts/*.sh
-ssh contabo-eu 'set -eu; test "$(hostname)" = vmi3501337; ip -4 -brief address show eth0 | grep -q "169.58.160.23/"; cd /opt/communicator/current; sudo env COMMUNICATOR_RUNTIME_DIR=/srv/communicator COMPOSE_PROJECT_NAME=communicator docker compose --env-file deploy/images.lock.env config --quiet; sudo env COMMUNICATOR_RUNTIME_DIR=/srv/communicator COMPOSE_PROJECT_NAME=communicator ./scripts/validate-core.sh'
+ssh matrix-host 'set -eu; test "$(hostname)" = matrix-host; ip -4 -brief address show eth0 | grep -q "192.0.2.10/"; cd /opt/communicator/current; sudo env COMMUNICATOR_RUNTIME_DIR=/srv/communicator COMPOSE_PROJECT_NAME=communicator docker compose --env-file deploy/images.lock.env config --quiet; sudo env COMMUNICATOR_RUNTIME_DIR=/srv/communicator COMPOSE_PROJECT_NAME=communicator ./scripts/validate-core.sh'
 ```
 
 Expected: all Python tests pass, Bash syntax exits `0`, Compose validation exits `0`, and core validation prints `core_validation=PASS`.

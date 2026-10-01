@@ -1,3 +1,8 @@
+---
+repo: 0000-chat/0000
+status: current
+---
+
 # Historical msg documents
 
 The documents in this directory came from msg-specific source documentation.

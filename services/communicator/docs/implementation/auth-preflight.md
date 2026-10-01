@@ -1,3 +1,8 @@
+---
+repo: 0000-chat/0000
+status: current
+---
+
 # Authentication preflight for T02 / issue #13
 
 The current OIDC placeholders ending in `.invalid` and the disabled ingress

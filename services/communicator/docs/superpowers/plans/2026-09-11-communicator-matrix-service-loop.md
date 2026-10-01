@@ -1,4 +1,14 @@
+---
+repo: 0000-chat/0000
+status: archived
+---
+
 # Communicator Matrix Gateway Service Loop Implementation Plan
+
+> Archived design history. Paths, hosts, and identities below are examples.
+> This document records a previous design and is not a current execution
+> instruction or evidence of a live deployment. Use current service docs and
+> runbooks to plan changes.
 
 > **Executor:** Implement this plan with ephemeral `codex exec` workers using
 > `gpt-5.6-luna`, maximum reasoning, and the fast service tier. Every worker is
@@ -39,7 +49,7 @@ modules.
 Implement from this worktree baseline, not from an older Task 10 branch:
 
 ```bash
-cd /home/ubuntu/communicator/.worktrees/matrix-live-ingestion
+cd /path/to/0000/services/communicator/.worktrees/matrix-live-ingestion
 git status --short --branch
 git rev-parse HEAD
 ```
@@ -50,7 +60,7 @@ worktree begins at that exact commit.
 
 Authoritative requirements, in descending order:
 
-1. `docs/PROPOSAL.md`
+1. `docs/product-alignment.md`
 2. `docs/superpowers/specs/2026-09-09-communicator-matrix-gateway-design.md`
 3. Task 10 of
    `docs/superpowers/plans/2026-09-09-communicator-matrix-gateway-implementation.md`
@@ -78,7 +88,7 @@ the proposal or design specification.
 Run this baseline gate before editing:
 
 ```bash
-export CARGO_TARGET_DIR=/home/ubuntu/communicator/.worktrees/matrix-wave1-security-fix/target
+export CARGO_TARGET_DIR=/path/to/0000/services/communicator/.worktrees/matrix-wave1-security-fix/target
 cargo test -p communicator-matrix-gateway --all-targets
 cargo clippy -p communicator-matrix-gateway --all-targets -- -D warnings
 cargo fmt --all -- --check
@@ -495,7 +505,7 @@ coordinator exists:
 Run:
 
 ```bash
-export CARGO_TARGET_DIR=/home/ubuntu/communicator/.worktrees/matrix-wave1-security-fix/target
+export CARGO_TARGET_DIR=/path/to/0000/services/communicator/.worktrees/matrix-wave1-security-fix/target
 cargo test -p communicator-matrix-gateway --test service_failure_matrix --no-fail-fast
 ```
 
@@ -868,7 +878,7 @@ the integration branch, and re-review by a different read-only worker.
 Use the shared target directory and run once after all reviews are closed:
 
 ```bash
-export CARGO_TARGET_DIR=/home/ubuntu/communicator/.worktrees/matrix-wave1-security-fix/target
+export CARGO_TARGET_DIR=/path/to/0000/services/communicator/.worktrees/matrix-wave1-security-fix/target
 
 cargo test -p communicator-matrix-gateway --all-targets --no-fail-fast
 cargo clippy -p communicator-matrix-gateway --all-targets -- -D warnings
@@ -906,7 +916,7 @@ Only after Section 12 passes:
 4. Wait for required GitHub checks. Fix failures through reviewed commits.
 5. Merge only when the diff and checks match the reviewed head.
 6. Produce and review the exact deployment delta from Task 8.
-7. Deploy to the Contabo pilot with a reversible release and no secret output.
+7. Deploy to the deployment pilot with a reversible release and no secret output.
 8. Prove locally on the server: daemon healthy, Synapse healthy, no maintenance,
    no terminal quarantine, and restart persistence.
 9. Prove live end to end with a newly sent WhatsApp message and opaque evidence

@@ -1,3 +1,8 @@
+---
+repo: 0000-chat/0000
+status: current
+---
+
 # Implementation worker ledger
 
 Snapshot: 2026-09-13 (Pacific/Auckland). Evidence below records the serialized
@@ -21,7 +26,7 @@ merger can preserve this coordination state.
 | Offline acceptance worker (#19) | `/tmp/communicator-implementation/worker-19/0000-communicator` | `codex/implement-offline-19` | `d7dee32db7d5f718252e545c761d0ede31413b48` base | Active isolated worker from the verified #18 aggregate for offline confirmation, cancel, and administrator scope. First bounded controlled-clock checkpoint is pending; no acceptance claim. |
 | Webhook/config worker (#25) | `/tmp/communicator-implementation/worker-25/0000-communicator` | `codex/implement-webhook-config-25` | `145a1206f98387efc1edb3c75b2572087ca553ef` | Clean source merged as aggregate `b42ff168c5ca198f7c5e49f44d456100cdfdb0c5`; full Worker 43 files/597 tests, realtime 16, migration 20, TypeScript/build, and `scripts/check` 245 files pass. Migration `0010_webhook_subscriptions` is included; credential references remain opaque deployment metadata and later delivery must owner-scope them. Atomic cutover follow-up `008ddfc49ae6f98774524925541a43c63b9b445e` is merged as aggregate `f9a22905`; focused webhook 5/5 passes. |
 | Provider research | `/tmp/communicator-provider-research` | `research/whatsapp-provider-boundaries` | `fdac312fad746a31f44d2949e3c286020c8715a0` | Clean research branch; not an implementation merge. |
-| Oxlint/biome | `/home/ubuntu/0000-full/worktrees/oxlint-biome-communicator/0000-communicator` | `codex/oxlint-biome-communicator` | `e5bc69edcab510c9f3732e1a7995365a946076c6` | Clean and protected unrelated worktree. |
+| Oxlint/biome | `/path/to/0000/services/communicator` | `codex/oxlint-biome-communicator` | `e5bc69edcab510c9f3732e1a7995365a946076c6` | Clean and protected unrelated worktree. |
 
 The canonical migration root remains on `codex/migration-communicator` at
 `0a9455de0b4569fa63ee755888b0f7abb2fe67ea` with its pre-existing dirty
@@ -408,18 +413,6 @@ cutover follow-up, and #18 is now integrated at `d7dee32`. Migration
 `0011_history`; no migration is added merely to fill numbers. The parent
 dispatched #19 from `d7dee32` on `codex/implement-offline-19` for its first
 bounded offline confirmation checkpoint.
-
-The latest resource checkpoint recovered `/tmp` from 216 MB to approximately
-854 MB after worker #25's private dependency relocation; root disk reported
-approximately 12 GB free. Source worktrees and temporary gateway databases
-were preserved, and workers continue using disk-backed caches.
-
-The aggregate commit is local and the branch is nine commits ahead of its
-remote tracking ref. An automatic approval review rejected the authorized
-`git push origin codex/implement-agent-messaging` because it treated the push
-as exporting private source/history without trusted destination evidence. No
-push workaround was attempted; the commit and evidence remain preserved for
-the parent to handle through the approved channel.
 
 ## #17 search aggregate merge evidence
 

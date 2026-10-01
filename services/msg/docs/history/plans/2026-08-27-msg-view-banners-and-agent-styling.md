@@ -1,6 +1,9 @@
-# msg View Banners and Agent Styling Implementation Plan
+---
+repo: 0000-chat/0000
+status: archived
+---
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+# msg View Banners and Agent Styling Implementation Plan
 
 **Goal:** Add polished reciprocal view banners and a readable light code-document style to the standalone msg browser views.
 

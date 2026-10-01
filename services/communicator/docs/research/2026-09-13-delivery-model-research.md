@@ -1,3 +1,8 @@
+---
+repo: 0000-chat/0000
+status: archived
+---
+
 # Delivery model research
 
 Research date: 2026-09-13. Scope: area 1, durable outgoing commands; area 2,

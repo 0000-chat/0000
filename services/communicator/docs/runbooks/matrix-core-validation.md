@@ -1,3 +1,8 @@
+---
+repo: 0000-chat/0000
+status: current
+---
+
 # Matrix Core Validation
 
 ## Simple explanation
@@ -6,7 +11,10 @@ Create separate human, agent, and administrator accounts. Confirm that the human
 
 ## Technical checklist
 
-1. Verify `hostname` is exactly `vmi3501337` and `eth0` owns `169.58.160.23`, then create three accounts from an interactive remote terminal so passwords never enter command arguments: `ssh -t contabo-eu 'set -eu; test "$(hostname)" = vmi3501337; ip -4 -brief address show eth0 | grep -q "169.58.160.23/"; cd /opt/communicator/current; sudo env COMMUNICATOR_RUNTIME_DIR=/srv/communicator COMPOSE_PROJECT_NAME=communicator ./scripts/create-matrix-user.sh <localpart> <user|admin>'`.
+1. Verify the target SSH host key, hostname, and network address against the
+   operator record. From an interactive terminal in the verified release, use
+   `scripts/create-matrix-user.sh <localpart> <user|admin>` so passwords never
+   enter command arguments. Use your configured runtime and Compose project.
 2. Sign into the human and agent accounts on separate verified Matrix client profiles.
 3. Create one private encrypted room as the human. Do not invite the agent.
 4. Create one private encrypted room as the agent. Do not invite the human.

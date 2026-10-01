@@ -1,4 +1,13 @@
+---
+repo: 0000-chat/0000
+status: current
+---
+
 # Personal mautrix-whatsapp Validation
+
+This is a self-hosting procedure. Example Matrix identities use `example.com`;
+substitute the domain and exact identities configured for your deployment.
+Acceptance markers describe expected results, not live account evidence.
 
 ## Simple explanation
 
@@ -8,7 +17,7 @@ receives messages, survives restart, and remains isolated from the Agent.
 
 ## Automated gate
 
-From the verified release on `contabo-eu`, run:
+From the verified release on `matrix-host`, run:
 
 ```bash
 sudo env COMMUNICATOR_RUNTIME_DIR=/srv/communicator COMPOSE_PROJECT_NAME=communicator ./scripts/validate-whatsapp.sh

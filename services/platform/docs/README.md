@@ -1,3 +1,8 @@
+---
+repo: 0000-chat/0000
+status: current
+---
+
 # Platform documentation
 
 This directory is reserved for design and operational documentation that is

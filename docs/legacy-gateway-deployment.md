@@ -1,3 +1,8 @@
+---
+repo: 0000-chat/0000
+status: current
+---
+
 # Gateway production fallback
 
 The former public `main` workflow checked out the repository, ran the public

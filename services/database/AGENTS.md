@@ -1,3 +1,8 @@
+---
+repo: 0000-chat/0000
+status: current
+---
+
 # 0000-database
 
 This directory contains the `0000-database` service inside the public `0000`

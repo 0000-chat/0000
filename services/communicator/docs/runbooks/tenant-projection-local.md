@@ -1,3 +1,8 @@
+---
+repo: 0000-chat/0000
+status: current
+---
+
 # Tenant Projection Durable Object: Local Runbook
 
 This runbook is the local operator and developer reference for the

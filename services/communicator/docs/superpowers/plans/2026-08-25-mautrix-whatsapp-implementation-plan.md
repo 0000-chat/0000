@@ -1,12 +1,20 @@
+---
+repo: 0000-chat/0000
+status: archived
+---
+
 # Personal mautrix-whatsapp Bridge Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:executing-plans` to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax.
+> Archived design history. Paths, hosts, and identities below are examples.
+> This document records a previous design and is not a current execution
+> instruction or evidence of a live deployment. Use current service docs and
+> runbooks to plan changes.
 
-**Goal:** Deploy one private mautrix-whatsapp bridge on `contabo-eu`, link only the Human Matrix account to one personal WhatsApp account, and prove safe text/media synchronization, restart persistence, identity isolation, and recovery coverage without adding public ports or Cloudflare data-plane components.
+**Goal:** Deploy one private mautrix-whatsapp bridge on `matrix-host`, link only the Human Matrix account to one personal WhatsApp account, and prove safe text/media synchronization, restart persistence, identity isolation, and recovery coverage without adding public ports or Cloudflare data-plane components.
 
 **Architecture:** Add one pinned `mautrix-whatsapp` service to the existing Compose project on the existing internal `core` network. Synapse reaches `http://whatsapp:29318` and the bridge reaches `http://synapse:8008`; neither is published on the host. The bridge uses separate `whatsapp_bridge` PostgreSQL database/login and runtime. Existing Matrix data, users, rooms, Caddy routes, registration policy, federation policy, and Agent identity are unchanged.
 
-**Tech Stack:** Docker Compose, PostgreSQL 16, Synapse 1.159, mautrix-whatsapp `v0.2608.0`/`v26.08`, Python 3, Bash, restic, and the existing Contabo archive/checksum release procedure.
+**Tech Stack:** Docker Compose, PostgreSQL 16, Synapse 1.159, mautrix-whatsapp `v0.2608.0`/`v26.08`, Python 3, Bash, restic, and the existing deployment archive/checksum release procedure.
 
 ---
 
@@ -21,8 +29,7 @@
 
 ## Hard boundaries
 
-1. Work only in `/home/ubuntu/communicator/.worktrees/implement-matrix-core` on `feat/matrix-core`; deploy only to `contabo-eu` after checking `vmi3501337` and `169.58.160.23`.
-2. Do not deploy to local OVH, upgrade the host, alter UFW, publish DNS, or open an inbound port.
+2. Do not deploy to local, upgrade the host, alter UFW, publish DNS, or open an inbound port.
 3. Keep public registration/federation disabled, federation/key endpoints at 404, and existing Caddy routes unchanged.
 4. Provision only Human; do not link Agent WhatsApp.
 5. No full sync, three-month/backfill import, Telegram, Messenger, Cloudflare data-plane, public provisioning, public admin, or custom UI.
@@ -49,10 +56,10 @@ git rev-parse origin/feat/matrix-core
 
 Expected: `## feat/matrix-core...origin/feat/matrix-core`, identical commits, no changes.
 
-- [ ] Verify Contabo before Docker:
+- [ ] Verify deployment before Docker:
 
 `bash
-ssh -o BatchMode=yes contabo-e 'set -eu; test "$(hostname)" = vmi3501337; test "$(ip -4 -o addr show dev eth0 | awk "{print \$4}" | cut -d/ -f1)" = 169.58.160.23; sudo -n docker ps --format "{{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}"; ss -H -ltn'
+ssh -o BatchMode=yes matrix-host 'set -eu; test "$(hostname)" = matrix-host; test "$(ip -4 -o addr show dev eth0 | awk "{print \$4}" | cut -d/ -f1)" = 192.0.2.10; sudo -n docker ps --format "{{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}"; ss -H -ltn'
 `
 
 Expected: exact host/IP, production PostgreSQL/Synapse healthy, Caddy up, only approved listeners.
@@ -60,7 +67,7 @@ Expected: exact host/IP, production PostgreSQL/Synapse healthy, Caddy up, only a
 - [ ] Record resolved previous release and only file metadata:
 
 `bash
-ssh -o BatchMode=yes contabo-e 'set -eu; test "$(hostname)" = vmi3501337; readlink -f /opt/communicator/current; stat -c "%U:%G:%a %n" /srv/communicator/synapse/homeserver.yaml /srv/communicator/synapse/log.config'
+ssh -o BatchMode=yes matrix-host 'set -eu; test "$(hostname)" = matrix-host; readlink -f /opt/communicator/current; stat -c "%U:%G:%a %n" /srv/communicator/synapse/homeserver.yaml /srv/communicator/synapse/log.config'
 `
 
 Expected previous release: `74a8ced7c020cda5fa8fa2b9311e68a3d62bfdcb`.
@@ -150,15 +157,15 @@ database:
   uri: construct at runtime as `postgres://whatsapp_bridge:` + `urllib.parse.quote(password, safe="")` + `@postgres/whatsapp_bridge?sslmode=disable` from the protected password file
 homeserver:
   address: http://synapse:8008
-  domain: communicator.0000.gold
+  domain: example.com
   software: standard
 bridge:
   split_portals: false
   personal_filtering_spaces: true
   permissions:
     "*": relay
-    "@human:communicator.0000.gold": user
-    "@platform-admin:communicator.0000.gold": admin
+    "@human:example.com": user
+    "@platform-admin:example.com": admin
 relay:
   enabled: false
   admin_only: true
@@ -247,7 +254,7 @@ git commit -m "feat: validate internal WhatsApp bridge health"
 
 ---
 
-### Task 5: Package, checksum, activate, and verify Contabo
+### Task 5: Package, checksum, activate, and verify deployment
 
 **Files:** `docs/runbooks/matrix-core-operations.md`; no host mutation before archive verification.
 
@@ -265,12 +272,12 @@ Require PostgreSQL, Synapse, Caddy, and WhatsApp healthy. Failure requires syste
 `bash
 sudo env COMMUNICATOR_RUNTIME_DIR=/srv/communicator COMPOSE_PROJECT_NAME=communicator ./scripts/validate-core.sh
 sudo env COMMUNICATOR_RUNTIME_DIR=/srv/communicator COMPOSE_PROJECT_NAME=communicator ./scripts/validate-whatsapp.sh
-curl -fsS https://matrix.communicator.0000.gold/_matrix/client/versions >/dev/null
-curl -fsS https://communicator.0000.gold/.well-known/matrix/client >/dev/null
-curl -fsS https://communicator.0000.gold/.well-known/matrix/server >/dev/null
+curl -fsS https://matrix.example.com/_matrix/client/versions >/dev/null
+curl -fsS https://example.com/.well-known/matrix/client >/dev/null
+curl -fsS https://example.com/.well-known/matrix/server >/dev/null
 `
 
-Expected core/bridge/public HTTPS pass and no bridge port on `169.58.160.23`.
+Expected core/bridge/public HTTPS pass and no bridge port on `192.0.2.10`.
 - [ ] Commit only operations documentation with `docs: record WhatsApp bridge release procedure`.
 
 ---
@@ -280,7 +287,7 @@ Expected core/bridge/public HTTPS pass and no bridge port on `169.58.160.23`.
 **Files:** `docs/runbooks/mautrix-whatsapp-operations.md` and `docs/runbooks/mautrix-whatsapp-validation.md`. No automated authentication.
 
 - [ ] Run `validate-whatsapp.sh` and record only health markers.
-- [ ] Send the coordinator this exact procedure: Element as `@human:communicator.0000.gold` → encrypted private chat with `@whatsappbot:communicator.0000.gold` → `login qr`, or `login phone` with phone number entered only interactively in Element → physical WhatsApp Settings/Menu → Linked devices → Link a device → scan QR or enter eight-letter code → complete any passkey prompt → wait for bot success.
+- [ ] Send the coordinator this exact procedure: Element as `@human:example.com` → encrypted private chat with `@whatsappbot:example.com` → `login qr`, or `login phone` with phone number entered only interactively in Element → physical WhatsApp Settings/Menu → Linked devices → Link a device → scan QR or enter eight-letter code → complete any passkey prompt → wait for bot success.
 - [ ] State risk exactly: the bridge uses WhatsApp's web API; normal use is not documented as an automatic ban, but Android emulators, VoIP/new accounts, and initiating DMs to non-contacts increase risk. Physical phone is preferred. Pairing adds this server as a linked device; phone offline over two weeks can disconnect it. No real-contact message is sent during pairing.
 - [ ] State rollback: send `logout`, verify/remedy device removal in Linked devices, stop only `whatsapp` if needed, preserve encrypted backup/runtime/DB, and if necessary activate the previous release and restore pre-change Synapse config. Never remove Matrix data or bridge state without separate approval.
 - [ ] Pause for the user's interactive approval and pairing. Never infer success from a displayed QR. Ask coordinator to confirm no message is sent during pairing.

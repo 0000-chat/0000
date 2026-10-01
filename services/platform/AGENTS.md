@@ -1,3 +1,8 @@
+---
+repo: 0000-chat/0000
+status: current
+---
+
 # Platform task entry
 
 Read [README.md](README.md) for Platform's scope, ownership boundaries and

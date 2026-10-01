@@ -1,4 +1,14 @@
+---
+repo: 0000-chat/0000
+status: archived
+---
+
 # Resumable realtime WebSocket implementation plan
+
+> Archived design history. Paths, hosts, and identities below are examples.
+> This document records a previous design and is not a current execution
+> instruction or evidence of a live deployment. Use current service docs and
+> runbooks to plan changes.
 
 > **Execution requirement:** The primary session plans, orchestrates, reviews,
 > commits, opens the pull request, and merges. Implementation and test execution
@@ -10,11 +20,6 @@
 > never edit or review their own work. Give every worker an explicit file list and
 > a 20-minute wall-clock limit. Stop and split a task that exceeds the limit.
 > Verify the Git diff after every worker wave.
-
-> **For agentic workers:** REQUIRED SUB-SKILL: Use
-> `superpowers:test-driven-development` and `superpowers:executing-plans` for each
-> implementation task. Write the failing test first, run it and record the
-> expected failure, then write the minimum production change.
 
 > **Execution waves:** Complete Task 1 first on the integration branch. Create
 > three task worktrees from that commit and run Tasks 2, 3, and 7 in parallel;

@@ -1,3 +1,8 @@
+---
+repo: 0000-chat/0000
+status: current
+---
+
 # Mermaid diagrams in the human view
 
 Closed code fences labelled `mermaid` render in the human conversation view. The language label is case-insensitive. The current supported diagram families are flowcharts (`flowchart` or `graph` with an optional direction for `flowchart`) and sequence diagrams (`sequenceDiagram`). Other Mermaid diagram families keep their source and show a short unavailable notice. Unclosed fences remain ordinary code blocks.

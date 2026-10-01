@@ -1,3 +1,8 @@
+---
+repo: 0000-chat/0000
+status: current
+---
+
 # Reliable room coordination ticket graph
 
 Spec: [0000-chat/0000-full#31](https://github.com/0000-chat/0000-full/issues/31)

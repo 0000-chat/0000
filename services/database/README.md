@@ -1,3 +1,8 @@
+---
+repo: 0000-chat/0000
+status: current
+---
+
 # 0000-database
 
 This service lives at `services/database` in the public `0000` monorepo. The

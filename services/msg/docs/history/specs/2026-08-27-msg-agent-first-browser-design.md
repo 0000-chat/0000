@@ -1,3 +1,8 @@
+---
+repo: 0000-chat/0000
+status: archived
+---
+
 # msg Agent-First Browser Design
 
 ## Goal

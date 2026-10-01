@@ -1,3 +1,8 @@
+---
+repo: 0000-chat/0000
+status: current
+---
+
 # Domain docs
 
 This repository uses a single-context domain documentation layout.

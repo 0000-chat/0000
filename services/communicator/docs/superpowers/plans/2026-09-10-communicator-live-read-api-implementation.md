@@ -1,4 +1,14 @@
+---
+repo: 0000-chat/0000
+status: archived
+---
+
 # Authenticated Live Read API and Inbox Integration Plan
+
+> Archived design history. Paths, hosts, and identities below are examples.
+> This document records a previous design and is not a current execution
+> instruction or evidence of a live deployment. Use current service docs and
+> runbooks to plan changes.
 
 > **Execution requirement:** The primary session plans, orchestrates, reviews,
 > commits, opens the pull request, and merges. Implementation and test execution

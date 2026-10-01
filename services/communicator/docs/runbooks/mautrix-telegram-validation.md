@@ -1,4 +1,13 @@
+---
+repo: 0000-chat/0000
+status: current
+---
+
 # Mautrix Telegram Validation
+
+This is a self-hosting procedure. Example Matrix identities use `example.com`;
+substitute the domain and exact identities configured for your deployment.
+Acceptance markers describe expected results, not live account evidence.
 
 ## Simple explanation
 
@@ -21,10 +30,10 @@ database passwords, or API credentials in that record.
 
 Before login, confirm:
 
-- only @human:communicator.0000.gold is configured as the pilot Telegram
+- only @human:example.com is configured as the pilot Telegram
   user;
-- @agent:communicator.0000.gold is not a Telegram portal member;
-- @platform-admin:communicator.0000.gold is not an automatic portal
+- @agent:example.com is not a Telegram portal member;
+- @platform-admin:example.com is not an automatic portal
   member;
 - bridge.split_portals=true is set before login and will not be changed;
 - the Telegram service has no published port or public Caddy route;
@@ -61,7 +70,7 @@ If this marker is absent, do not pair the account.
 ## Human pairing and live traffic
 
 Pair only from the Human's encrypted private room with
-@telegrambot:communicator.0000.gold. The primary command is:
+@telegrambot:example.com. The primary command is:
 
 ```text
 login qr
@@ -209,5 +218,5 @@ telegram_restart_persistence=PASS
 telegram_backup_restore=PASS
 ```
 
-Any failed, missing, or unexplained marker blocks release and PR creation.
+Any failed, missing, or unexplained marker blocks acceptance of that deployment.
 Retain only the minimum evidence required by the approved retention policy.

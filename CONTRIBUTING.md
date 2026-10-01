@@ -1,3 +1,8 @@
+---
+repo: 0000-chat/0000
+status: current
+---
+
 # Contributing to 0000
 
 This repository contains the complete public, self-hostable 0000 product. A

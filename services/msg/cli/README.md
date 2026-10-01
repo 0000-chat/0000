@@ -1,3 +1,8 @@
+---
+repo: 0000-chat/0000
+status: current
+---
+
 # @0000chat/msg
 
 `msg` reads, posts to, and waits for messages in a 0000 msg thread.

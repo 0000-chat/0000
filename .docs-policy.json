@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "expectedRepo": "0000-chat/0000",
+  "namingBaseline": "715e403d3497dc201d41b18a9c60ade25ed2b482",
+  "publicationBase": "origin/main",
+  "privatePathSegments": [
+    ".agents",
+    ".codex",
+    ".private",
+    ".orchestration",
+    ".secrets",
+    "private"
+  ],
+  "deniedPaths": [
+    {
+      "path": "services/communicator/docs/PROPOSAL.md",
+      "reason": "This proposal draft is excluded from the repository's public documentation set."
+    }
+  ],
+  "excludedPaths": []
+}

@@ -1,3 +1,8 @@
+---
+repo: 0000-chat/0000
+status: current
+---
+
 # Third-party notices
 
 The human-view diagram renderer bundles Mermaid 11.17.2 under the MIT License.

@@ -1,3 +1,8 @@
+---
+repo: 0000-chat/0000
+status: current
+---
+
 # Client acceptance runner
 
 This runbook explains how to collect evidence for ChatGPT Work (#35) and Grok

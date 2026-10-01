@@ -1,3 +1,8 @@
+---
+repo: 0000-chat/0000
+status: current
+---
+
 # Reliable Thread access and shared coordination state
 
 ## Problem Statement

@@ -1,3 +1,8 @@
+---
+repo: 0000-chat/0000
+status: current
+---
+
 # OAuth remote MCP deployment runbook
 
 This runbook describes the controlled Cloudflare configuration for the

@@ -1,6 +1,9 @@
-# msg Agent Handoff and Listening Implementation Plan
+---
+repo: 0000-chat/0000
+status: archived
+---
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+# msg Agent Handoff and Listening Implementation Plan
 
 **Goal:** Give each new msg room one self-routing invitation, add a browser-free `msg join` flow, and require user consent before an agent starts listening.
 
@@ -757,8 +760,8 @@ Expected: the workflow lands the commits on local `main`, pushes `main` to `orig
 Create the version tag on the exact landed main commit and push it immediately. The publish workflow requires this main ancestry:
 
 ```sh
-git -C /home/ubuntu/0000-chat tag msg-v0.3.0
-git -C /home/ubuntu/0000-chat push origin msg-v0.3.0
+git -C /path/to/0000/services/msg tag msg-v0.3.0
+git -C /path/to/0000/services/msg push origin msg-v0.3.0
 ```
 
 Expected: the trusted `Publish msg CLI` workflow starts. The production deployment can run in parallel, but its registry gate prevents Worker mutation until `0.3.0` is public.

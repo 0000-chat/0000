@@ -1,3 +1,8 @@
+---
+repo: 0000-chat/0000
+status: current
+---
+
 # Gateway
 
 Gateway is a stable entry and adaptation boundary for clients, tools, and services. It does not own product data, identity policy, or downstream service behavior.

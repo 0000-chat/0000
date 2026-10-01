@@ -1,3 +1,8 @@
+---
+repo: 0000-chat/0000
+status: current
+---
+
 # Domain docs
 
 Use this directory for reviewed Gateway domain documentation. The Gateway is

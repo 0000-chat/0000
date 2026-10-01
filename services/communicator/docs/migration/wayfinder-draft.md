@@ -1,3 +1,8 @@
+---
+repo: 0000-chat/0000
+status: archived
+---
+
 # Wayfinder pointer
 
 The canonical wayfinder map is [WhatsApp pilot with reusable provider

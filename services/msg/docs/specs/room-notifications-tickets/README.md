@@ -1,3 +1,8 @@
+---
+repo: 0000-chat/0000
+status: current
+---
+
 # Thread Notifications Ticket Breakdown
 
 **Status: Published; five issues are ready for agent work.**

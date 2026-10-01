@@ -1,3 +1,8 @@
+---
+repo: 0000-chat/0000
+status: current
+---
+
 # 0000-brain
 
 This service is located in the 0000 monorepo at services/brain. The monorepo

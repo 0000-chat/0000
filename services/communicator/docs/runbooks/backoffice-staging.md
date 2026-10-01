@@ -1,8 +1,12 @@
+---
+repo: 0000-chat/0000
+status: current
+---
+
 # Communicator backoffice staging gate
 
 This runbook describes a protected, simulated-only staging preview for the
-Communicator backoffice. It is documentation for a later, explicitly approved
-deployment. It does not authorize or perform a Cloudflare mutation.
+Communicator backoffice. Use it with an operator-owned staging account and hostname.
 
 ## Safety boundary
 
@@ -29,8 +33,8 @@ Perform these checks in order. Stop immediately if a check fails.
    hostname, including every path and API path. The hostname must be supplied
    and approved by the operator; this phase does not create a custom hostname,
    certificate, DNS record, or Access application.
-3. Verify that the Access allowed-identity list contains only the pilot
-   operator. Do not place identity identifiers, provider identifiers, or
+3. Verify that the Access allowed-identity list contains only the selected test
+   operators. Do not place identity identifiers, provider identifiers, or
    credentials in this repository, command output, fixtures, screenshots, or
    logs.
 4. Run the complete local gate from the UI-foundation plan:
@@ -60,7 +64,7 @@ Perform these checks in order. Stop immediately if a check fails.
 6. Open the approved staging hostname in a signed-out browser and require
    Cloudflare Access denial for the root, every backoffice screen, and every
    API path.
-7. Sign in as the pilot operator, verify the persistent simulated-data banner,
+7. Sign in as an allowed test operator, verify the persistent simulated-data banner,
    and run these four Playwright-equivalent manual journeys:
 
    - navigate all five screens at desktop and mobile widths;
@@ -83,18 +87,17 @@ Perform these checks in order. Stop immediately if a check fails.
 
 ## Deployment-approval gate
 
-This implementation session intentionally stops before `wrangler deploy`.
-Before a later staging deployment, the operator must approve all of the
-following in writing:
+Before deploying, record the following deployment inputs and verify the
+Access protection and simulated data boundary:
 
 - the target Cloudflare account and Worker name;
 - the exact staging hostname and a verified Access application covering the
   whole hostname;
-- the Access policy containing only the pilot operator;
+- the Access policy containing only selected test operators;
 - the simulated-only data mode and absence of live provider credentials,
   Matrix or bridge sessions, Durable Objects, Queues, R2, PostgreSQL, and DNS
   changes; and
 - the post-deployment signed-out denial check and the four manual journeys.
 
-No custom hostname, DNS record, Cloudflare Access application, provider
-account, or external service is created or changed by this phase.
+Provision the staging hostname and Access policy separately before running
+this procedure. Keep live Matrix or bridge traffic disconnected.

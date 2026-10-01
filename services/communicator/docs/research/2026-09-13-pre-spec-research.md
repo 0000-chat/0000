@@ -1,3 +1,8 @@
+---
+repo: 0000-chat/0000
+status: archived
+---
+
 # Pre-spec research brief
 
 **Status: research synthesis completed 2026-09-13.** This is a research handoff,

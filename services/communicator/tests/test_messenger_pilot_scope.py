@@ -3,72 +3,57 @@ import unittest
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-PLAN = (ROOT / "docs/superpowers/plans/2026-08-26-messenger-bridge-implementation-plan.md").read_text()
-VALIDATION = (ROOT / "docs/runbooks/mautrix-messenger-validation.md").read_text()
-OPERATIONS = (ROOT / "docs/runbooks/mautrix-messenger-operations.md").read_text()
-CORE_OPERATIONS = (ROOT / "docs/runbooks/matrix-core-operations.md").read_text()
-CORE_RECOVERY = (ROOT / "docs/runbooks/matrix-core-recovery.md").read_text()
 
 
-DEFERRED_MARKERS = (
-    "agent_messenger_pairing=DEFERRED_BY_USER",
-    "agent_messenger_inbound_text=NOT_TESTED",
-    "agent_messenger_outbound_text=NOT_TESTED",
-    "agent_messenger_e2ee=NOT_TESTED",
-    "human_cannot_access_agent_messenger=NOT_TESTED",
-)
-
-FORBIDDEN_AGENT_PASS_MARKERS = (
-    "agent_messenger_pairing=PASS",
-    "agent_messenger_inbound_text=PASS",
-    "agent_messenger_outbound_text=PASS",
-    "agent_messenger_e2ee=PASS",
-    "human_cannot_access_agent_messenger=PASS",
-    "both_messenger_sessions_restart_persistence=PASS",
-)
+def document(path):
+    return " ".join(line.lstrip("> ") for line in (ROOT / "docs" / path).read_text().splitlines()).strip()
 
 
-def normalized(text: str) -> str:
-    return " ".join(text.split())
+def normalized_document(path):
+    return " ".join(document(path).split())
 
 
-class MessengerPilotScopeContractTests(unittest.TestCase):
-    def test_plan_records_human_only_variance_and_human_recovery(self):
-        plan = normalized(PLAN)
-        self.assertIn("one connected Human Messenger account", plan)
-        self.assertIn("Agent Messenger onboarding is deferred by user", plan)
-        self.assertIn("human_messenger_session_preserved=PASS", PLAN)
-        self.assertIn("post_messenger_pairing_backup=PASS", PLAN)
-        self.assertIn("post_messenger_pairing_restore_test=PASS", PLAN)
-        for marker in DEFERRED_MARKERS:
-            self.assertIn(marker, PLAN)
+class MessengerScopeContractTests(unittest.TestCase):
+    def test_each_account_requires_independent_acceptance(self):
+        validation = normalized_document("runbooks/mautrix-messenger-validation.md")
+        for requirement in (
+            "It records no live account completion",
+            "NOT_TESTED",
+            "Check portal isolation in both directions",
+            "Do not claim symmetric two-account isolation",
+            "separate pairing, E2EE, isolation, restart, and backup acceptance",
+        ):
+            self.assertIn(requirement, validation)
 
-    def test_validation_runbook_records_only_human_completion(self):
-        validation = normalized(VALIDATION)
-        self.assertIn("one connected Human Messenger account", validation)
-        self.assertIn("Future Agent onboarding requires its own pairing, isolation, restart, and backup acceptance", validation)
-        for marker in DEFERRED_MARKERS:
-            self.assertIn(marker, VALIDATION)
-        for marker in FORBIDDEN_AGENT_PASS_MARKERS:
-            self.assertNotIn(marker, VALIDATION)
+    def test_operations_preserve_account_owner_authentication_and_private_boundary(self):
+        operations = normalized_document("runbooks/mautrix-messenger-operations.md")
+        for requirement in (
+            "Port 29319 must not be published",
+            "split_portals: true",
+            "disabled provisioning",
+            "disabled backfill",
+            "The owner completes authentication directly",
+            "must not log out or unlink accounts",
+        ):
+            self.assertIn(requirement, operations)
 
-    def test_operations_runbook_preserves_future_agent_configuration_without_claiming_login(self):
-        operations = normalized(OPERATIONS)
-        self.assertIn("one connected Human Messenger account", operations)
-        self.assertIn("Agent Messenger onboarding is deferred by user", operations)
-        self.assertIn("Do not create an Agent session", operations)
-        for marker in DEFERRED_MARKERS:
-            self.assertIn(marker, OPERATIONS)
-        for marker in FORBIDDEN_AGENT_PASS_MARKERS:
-            self.assertNotIn(marker, OPERATIONS)
+    def test_restore_never_connects_copied_sessions_to_external_services(self):
+        validation = normalized_document("runbooks/mautrix-messenger-validation.md")
+        recovery = normalized_document("runbooks/matrix-core-recovery.md")
+        self.assertIn("distinct Compose project", validation)
+        self.assertIn("Never start the restored Messenger service", validation)
+        self.assertIn("--network none", validation)
+        self.assertIn("restored Messenger and Telegram services are never started", recovery)
+        self.assertIn("does not create or authenticate an additional account", recovery)
 
-    def test_core_runbooks_do_not_claim_two_messenger_sessions(self):
-        core_operations = normalized(CORE_OPERATIONS)
-        core_recovery = normalized(CORE_RECOVERY)
-        self.assertIn("Agent onboarding is deferred by user", core_operations)
-        self.assertIn("no Agent session is created", core_recovery)
-        self.assertNotIn("both account sessions", core_operations)
-        self.assertNotIn("either restored account", core_recovery)
+    def test_historical_plan_is_not_a_deployment_acceptance_record(self):
+        plan = normalized_document("superpowers/plans/2026-08-26-messenger-bridge-implementation-plan.md")
+        self.assertIn("Archived design history", plan)
+        self.assertIn("not a current execution plan or live deployment acceptance record", plan)
+        self.assertIn("An unpaired identity remains `NOT_TESTED`", plan)
+        for text in (plan, normalized_document("runbooks/mautrix-messenger-validation.md")):
+            self.assertNotIn("DEFERRED_BY_USER", text)
+            self.assertNotIn("human_messenger_pairing=PASS", text)
 
 
 if __name__ == "__main__":
