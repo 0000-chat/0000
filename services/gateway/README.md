@@ -40,11 +40,19 @@ From the monorepo root, run `bun run check`, `bun run check:turbo`, and
 `pnpm --dir services/gateway/tooling install --frozen-lockfile` followed by
 `pnpm --dir services/gateway run check:application`.
 
-## Production deployment
+## MCP topology and delivery maturity
 
-A push to `main` runs the Gateway deployment workflow after the full workspace
-and application checks pass. Configure the repository secret
-`CLOUDFLARE_API_TOKEN` with permission to deploy Workers in account
-`d8f2eee5aab20d72439aabdfbb221bb7`; the workflow supplies the account ID,
-verifies that `main` still points at the commit being built, and smoke-tests
-`https://gateway.0000.chat/health` after deployment.
+The public cross-service contract is the [MCP topology](../../docs/architecture/mcp-topology.md).
+It names `https://0000.chat/mcp` as the canonical Gateway address and
+`https://gateway.0000.chat/mcp` as a standalone host for the same MCP surface.
+Both addresses are intended to serve MCP directly, without a redirect, after
+the apex route is provisioned. Gateway's default built-in catalog includes
+enabled, service-published first-party tools; profile grants and each owning
+service's resource authorization remain separate checks. A catalog entry does
+not grant permission or create a hard dependency on every service.
+
+The current Worker milestone remains a health endpoint and a stateless
+`gateway_info` diagnostic. The addresses and connected service-tool catalog
+are target behavior; this README does not claim a configured route or live
+deployment. Public CI publishes the immutable Worker artifact, while the
+operator-owned release path supplies environment routes and promotion evidence.

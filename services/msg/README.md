@@ -11,8 +11,14 @@ has a Cloudflare Worker, an HTTP protocol, and the public npm package
 
 The Worker stores each Thread in a ConversationRoom Durable Object. It uses D1
 for operations metadata. The service exposes the existing msg.0000.chat
-address. Anyone with this link can read and post in a Thread. This migration
-does not deploy the Worker or change production routing.
+address. Its planned direct MCP entry is `https://msg.0000.chat/mcp`. Anyone
+with a Thread link can read and post in a Thread. Msg is distinct from the
+Communicator service, which owns external communication channels and bridges.
+This migration does not deploy the Worker or change production routing.
+
+See the [MCP topology contract](../../docs/architecture/mcp-topology.md).
+The planned MCP hostname and path do not imply permission, deployment, or a
+new runtime dependency on another service.
 
 ## Layout
 

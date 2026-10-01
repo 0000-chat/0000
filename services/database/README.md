@@ -32,6 +32,12 @@ This service is responsible for:
 It is not responsible for user experiences, communication channels, reasoning,
 or coordinating the hosted platform.
 
+The planned direct MCP entry for Database is
+`https://database.0000.chat/mcp`. This is a public routing target rather than
+evidence of a deployed endpoint or an implicit permission grant. See the [MCP
+topology contract](../../docs/architecture/mcp-topology.md) for the shared
+hostname and path policy.
+
 Install the pinned development tooling with `pnpm install --frozen-lockfile`.
 `pnpm lint` runs Oxlint correctness checks and `pnpm format:check` verifies
 Biome formatting without changing files. Use `pnpm lint:fix` or `pnpm format`

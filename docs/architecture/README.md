@@ -19,6 +19,10 @@ contracts with their owner instead of copying them into each service.
 | Communicator | Communication channels and bridges | [Communicator docs](../../services/communicator/docs/README.md) |
 | Msg | Temporary Threads | [Msg README](../../services/msg/README.md) |
 
+The maintained cross-service MCP address and Gateway connected-tool contract
+is in [MCP topology](mcp-topology.md). Service documentation owns each
+surface's implementation, authentication, and resource authorization.
+
 The [workspace README](../../README.md) describes the monorepo. Each service
 README states its role and maturity. Follow that service's documentation for
 implementation details. A proposal or migration record alone does not establish

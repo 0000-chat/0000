@@ -19,7 +19,11 @@ The Worker exposes browser, API, and MCP surfaces. Browser requests use
 Cloudflare Access, while MCP requests use the configured bearer token. A hosted
 0000 account is not required. Cloudflare is the public ingress and runtime
 class. The Wrangler route and migration configuration are present, but this
-service's deployment has not been verified. No license has been selected.
+service's deployment has not been verified. The planned direct MCP entry is
+`https://streams.0000.chat/mcp`; the hostname does not change the configured
+authentication or imply permission to access a stream. See the [MCP topology
+contract](../../docs/architecture/mcp-topology.md). No license has been
+selected.
 
 From the monorepo root, run the workspace checks:
 

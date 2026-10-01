@@ -73,3 +73,9 @@ Matrix keys stay on that VPS and never enter Cloudflare.
 Cloudflare is the public ingress and normal runtime class. Communicator uses
 `0000-platform` for common identity and authentication. Standalone public use
 does not require a hosted 0000 account.
+
+This service README does not establish a direct public MCP endpoint for
+Communicator. If a future public Communicator contract exposes one, it must be
+recorded in the [MCP topology contract](../../docs/architecture/mcp-topology.md)
+and follow that service's authentication and resource-authorization rules.
+Gateway catalog inclusion, if enabled later, would not grant direct access.
