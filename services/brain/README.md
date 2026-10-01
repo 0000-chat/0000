@@ -19,5 +19,10 @@ Cloudflare is the public ingress and normal runtime class. No resources are
 provisioned by this service. The service uses AGPL-3.0-only under the public
 monorepo license topology.
 
+The planned direct MCP entry for Brain is `https://brain.0000.chat/mcp`. Brain
+does not currently provide an implemented public API or deployment route, so
+this address is a topology target and grants no access. See the [MCP topology
+contract](../../docs/architecture/mcp-topology.md).
+
 Run ./scripts/check for the service validation. The outer monorepo check
 validates the @0000/brain workspace wrapper.

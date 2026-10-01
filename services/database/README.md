@@ -47,6 +47,12 @@ transport envelopes. Global admission, physical expiry cleanup, bounded export
 capacity, and hosted suspension controls are still launch gates; the pilot
 does not claim public-service readiness.
 
+The planned direct MCP entry for Database is
+`https://database.0000.chat/mcp`. This is a public routing target rather than
+evidence of a deployed endpoint or an implicit permission grant. See the [MCP
+topology contract](../../docs/architecture/mcp-topology.md) for the shared
+hostname and path policy.
+
 ## Local smoke test
 
 Install the exact service dependencies and start a local Cloudflare runtime:

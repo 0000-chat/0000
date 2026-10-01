@@ -18,6 +18,11 @@ it. The service may compose the Executor SDK later.
 The foundation plan, specification, and ADR are approved. This documentation
 does not claim a production deployment or live hostname evidence.
 
+The maintained cross-service target is recorded in the [MCP topology](../../docs/architecture/mcp-topology.md):
+`https://0000.chat/mcp` is canonical and
+`https://gateway.0000.chat/mcp` is the same direct MCP surface without a
+redirect. Route provisioning and deployment evidence remain operator-owned.
+
 The root Bun and Turborepo workspace owns monorepo validation. Run
 `bun run check`, `bun run check:turbo`, and `bun run check:turbo:dry` from the
 monorepo root. Gateway source and tooling checks are exposed as

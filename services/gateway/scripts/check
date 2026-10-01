@@ -25,6 +25,7 @@ required = {
     "CONTEXT.md",
     "docs/README.md",
     "docs/adr/0001-curated-gateway-capabilities.md",
+    "docs/adr/0002-canonical-apex-mcp-address.md",
     "docs/agents/domain.md",
     "docs/agents/issue-tracker.md",
     "docs/agents/triage-labels.md",
