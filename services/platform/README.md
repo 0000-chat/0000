@@ -33,6 +33,11 @@ deployment, not one global authority across all self-hosted installations.
 Spaces are optional product organization, not a required tenant layer for
 service-only customers.
 
+Platform owns identity and credential authority; this README does not imply a
+direct Platform MCP endpoint. See the [MCP topology
+contract](../../docs/architecture/mcp-topology.md) for the service endpoint
+policy and the separate Gateway entry.
+
 Managed signup is open by default and creates a default organization. Self-hosted
 operators choose open or invitation-only signup. That choice is independent of
 guest access to shared resources.

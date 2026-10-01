@@ -23,6 +23,11 @@ The [service architecture map](docs/architecture/README.md) links to each
 service's scope and architecture owners and records the cross-service writing
 convention.
 
+The [MCP topology](docs/architecture/mcp-topology.md) records the target
+`/mcp` addresses, the direct Gateway apex and standalone-host behavior, and
+the default connected-tool contract. It distinguishes those targets from
+implemented code and operator-owned route or deployment evidence.
+
 Every reusable product service uses `0000-platform` for shared identity and
 authentication. Platform is the single authority for accounts, credentials,
 and user or organization access; services authorize their own resources.
