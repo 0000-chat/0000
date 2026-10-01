@@ -6,14 +6,16 @@ status: current
 # 0000-gateway
 
 This directory contains the gateway service inside the public `0000` monorepo.
-Gateway now has its first Cloudflare Worker application: public liveness
-`GET /health` and a public stateless MCP endpoint at `/mcp` exposing only the
-`gateway_info` diagnostic. These are operational probes, not Gateway
-Capabilities. This milestone makes no downstream service calls and has no
-Platform auth middleware, service bindings, database, or secret. It requires
-Platform for the shared identity boundary even though these public probes do
-not authenticate requests. It composes `mcp-use`; it does not fork or vendor
-it. The service may compose the Executor SDK later.
+Gateway has a Cloudflare Worker application with public liveness `GET /health`
+and a public stateless MCP endpoint at `/mcp` exposing the `gateway_info`
+diagnostic. When Platform Verification, the Gateway D1 migration, and a
+service binding are configured, the same `/mcp` entry and compatible
+profile-specific paths expose an authenticated, profile-bound `use` boundary
+and deterministic `tools.search`. New profiles have no grants; every service
+call is checked against the current profile and the owning service's resource
+rules. The checked-in Wrangler config binds neither dependency, so protected
+requests fail closed until a deployment supplies them. It composes `mcp-use`;
+it does not fork or vendor it. The service may compose the Executor SDK later.
 
 The foundation plan, specification, and ADR are approved. This documentation
 does not claim a production deployment or live hostname evidence.
