@@ -1,3 +1,8 @@
+---
+repo: 0000-chat/0000
+status: current
+---
+
 # 0000-communicator
 
 This directory contains the `0000-communicator` service inside the public
@@ -7,15 +12,14 @@ workspace checks; run service commands from this directory.
 
 The application history was migrated from the previous local Communicator
 checkout. Treat `docs/migration/2026-09-12-communicator-migration.md` as the
-handoff for preserved refs, dirty work, excluded local state, and pending
-validation. Keep credentials, runtime databases, generated dependencies, and
+public provenance and validation summary. Keep credentials, runtime databases, generated dependencies, and
 other local state outside tracked files. The canonical product metadata name
 remains `0000-communicator`, even though the service directory is named
 `communicator`.
 
 The monorepo import record is
 `docs/migration/2026-09-15-monorepo-import.md`; use it for the source ref and
-local-state preservation details.
+public validation details.
 
 Standalone public use does not require a hosted 0000 account. Communicator
 uses `0000-platform` for common identity and authentication. Cloudflare is the
@@ -45,15 +49,12 @@ The default five-role triage vocabulary is used. See `docs/agents/triage-labels.
 
 This repository uses a single-context domain-doc layout. See `docs/agents/domain.md`.
 
-### Wayfinding
+### Choosing work
 
-When choosing the next product slice, defining a pilot boundary, or deciding
-the outbound route, read `/home/ubuntu/0000-full/skills/ecosystem/wayfinder/SKILL.md`
-first and then follow the [WhatsApp pilot with reusable provider boundaries](https://github.com/0000-chat/0000/issues/1).
-
-The pilot direction is settled: WhatsApp comes first, with provider boundaries
-that support adding other providers shortly thereafter. Preserve and reconcile
-the imported history recorded in `docs/migration/2026-09-12-communicator-migration.md`.
-The map Notes allow execution because the user requested continuation. Execute
-at most one nonresearch ticket per session. Use the map and named child tickets
-for current acceptance, dependencies, and ticket order.
+Read the service README, product alignment, and the
+[WhatsApp pilot with reusable provider boundaries](https://github.com/0000-chat/0000/issues/1)
+before choosing a product slice. Identify the acceptance criteria, dependencies,
+and smallest independently verifiable change. Use the current issue and its
+child tickets for execution order; historical plans are design evidence.
+Keep provider boundaries reusable and verify the public service without access
+to private infrastructure or operational records.

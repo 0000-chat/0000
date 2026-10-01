@@ -1,3 +1,8 @@
+---
+repo: 0000-chat/0000
+status: current
+---
+
 # 0000 Platform
 
 Start here when working on Platform. This document defines its scope and

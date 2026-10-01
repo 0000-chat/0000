@@ -1,3 +1,8 @@
+---
+repo: 0000-chat/0000
+status: current
+---
+
 # Decision 07: authoritative connection status and capability publication
 
 Status: implementation direction, not closed acceptance.

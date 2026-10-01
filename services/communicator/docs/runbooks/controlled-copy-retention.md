@@ -1,3 +1,8 @@
+---
+repo: 0000-chat/0000
+status: current
+---
+
 # Controlled-copy retention boundary
 
 The control-plane Worker cannot open the host PostgreSQL volumes, Synapse

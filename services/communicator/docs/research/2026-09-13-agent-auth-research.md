@@ -1,3 +1,8 @@
+---
+repo: 0000-chat/0000
+status: archived
+---
+
 # Agent authentication and credential model research
 
 Assessment date: 2026-09-13. This note answers the remaining credential and

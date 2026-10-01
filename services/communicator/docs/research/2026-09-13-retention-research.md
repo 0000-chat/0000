@@ -1,3 +1,8 @@
+---
+repo: 0000-chat/0000
+status: archived
+---
+
 # Retention, deletion, backup, and restore research
 
 **Date:** 2026-09-13  

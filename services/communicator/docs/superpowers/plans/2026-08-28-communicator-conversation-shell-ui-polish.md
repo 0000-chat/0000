@@ -1,6 +1,14 @@
+---
+repo: 0000-chat/0000
+status: archived
+---
+
 # Communicator Conversation Shell UI Polish Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> Archived design history. Paths, hosts, and identities below are examples.
+> This document records a previous design and is not a current execution
+> instruction or evidence of a live deployment. Use current service docs and
+> runbooks to plan changes.
 
 **Goal:** Turn the existing Conversations route into a dense, full-height, responsive messenger workspace without changing any authoritative data or command behavior.
 

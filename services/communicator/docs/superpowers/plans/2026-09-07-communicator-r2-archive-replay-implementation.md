@@ -1,6 +1,14 @@
+---
+repo: 0000-chat/0000
+status: archived
+---
+
 # Communicator R2 Archive and Deterministic Replay Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:test-driven-development` for every behavior change and `superpowers:verification-before-completion` before every completion claim. Execute one numbered task at a time. Do not skip red tests, broaden scope, deploy resources, or make architecture decisions that are not explicitly authorized here.
+> Archived design history. Paths, hosts, and identities below are examples.
+> This document records a previous design and is not a current execution
+> instruction or evidence of a live deployment. Use current service docs and
+> runbooks to plan changes.
 
 **Goal:** Freeze the canonical messaging-event contract and implement a tenant-isolated, batched, compressed, append-only ordinary-R2 archive with immutable commit manifests and deterministic, side-effect-free replay reads.
 
@@ -61,18 +69,18 @@ Each worker receives:
 6. an instruction to commit only that task; and
 7. an instruction to report files, tests, commit, and any deviation.
 
-Workers must not deploy, provision Cloudflare resources, touch the Contabo VPS, modify bridge/Synapse configuration, rewrite earlier commits, or merge branches. If a specified API is incompatible with the installed Cloudflare types, the worker stops with exact evidence instead of inventing a substitute architecture.
+Workers must not deploy, provision Cloudflare resources, touch the deployment VPS, modify bridge/Synapse configuration, rewrite earlier commits, or merge branches. If a specified API is incompatible with the installed Cloudflare types, the worker stops with exact evidence instead of inventing a substitute architecture.
 
 ## Required working-copy setup
 
 The implementation branch must start from the then-current `main` in a dedicated ignored worktree, for example:
 
 ```bash
-cd /home/ubuntu/communicator
+cd /path/to/0000/services/communicator
 git fetch origin
 git check-ignore -q .worktrees
 git worktree add .worktrees/r2-archive-replay -b codex/r2-archive-replay origin/main
-cd /home/ubuntu/communicator/.worktrees/r2-archive-replay
+cd /path/to/0000/services/communicator/.worktrees/r2-archive-replay
 pnpm install --frozen-lockfile
 ```
 
@@ -122,7 +130,7 @@ Expected baseline at plan creation: `pnpm check` exits 0, 138 TypeScript tests p
 - `apps/control-plane/worker/app.ts` and `worker/index.ts` — no route or runtime entry-point wiring yet.
 - UI source, mocks, or browser tests.
 - D1 migrations or authorization behavior.
-- Compose, Synapse, mautrix, backup/restore, bridge, or Contabo files.
+- Compose, Synapse, mautrix, backup/restore, bridge, or deployment files.
 - any live-resource IDs, API tokens, credentials, `.dev.vars`, or secret files.
 
 ## Locked canonical event contract
@@ -964,7 +972,7 @@ Do not merge with unresolved findings, conflicts, a dirty worktree, missing gene
 After merge:
 
 ```bash
-cd /home/ubuntu/communicator
+cd /path/to/0000/services/communicator
 git pull --ff-only
 git status --short --branch
 ```

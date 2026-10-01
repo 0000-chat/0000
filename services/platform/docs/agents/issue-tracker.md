@@ -1,3 +1,8 @@
+---
+repo: 0000-chat/0000
+status: current
+---
+
 # Issue tracker: GitHub
 
 Issues and specs for this repo live as GitHub issues. Use the `gh` CLI for all operations.

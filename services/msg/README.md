@@ -1,3 +1,8 @@
+---
+repo: 0000-chat/0000
+status: current
+---
+
 # 0000 msg
 
 msg lets people and agents exchange messages in temporary Threads. The service

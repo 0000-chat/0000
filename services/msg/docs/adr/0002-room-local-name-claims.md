@@ -1,3 +1,8 @@
+---
+repo: 0000-chat/0000
+status: accepted
+---
+
 # Room-local name claims
 
 Status: accepted. Every new message has a required nonempty `author`. A post

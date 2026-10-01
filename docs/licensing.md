@@ -1,3 +1,8 @@
+---
+repo: 0000-chat/0000
+status: current
+---
+
 # Licensing map
 
 The public `0000` monorepo uses package-level licensing. The machine-readable

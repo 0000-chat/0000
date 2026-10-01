@@ -1,3 +1,8 @@
+---
+repo: 0000-chat/0000
+status: current
+---
+
 # Communicator agent messaging specification
 
 ## Problem Statement

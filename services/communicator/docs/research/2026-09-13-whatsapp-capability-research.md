@@ -1,3 +1,8 @@
+---
+repo: 0000-chat/0000
+status: archived
+---
+
 # WhatsApp capability research: mautrix-whatsapp, Synapse, and Matrix
 
 **Assessment date:** 2026-09-13  

@@ -1,6 +1,14 @@
+---
+repo: 0000-chat/0000
+status: archived
+---
+
 # Communicator Control Directory and Product Authorization Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> Archived design history. Paths, hosts, and identities below are examples.
+> This document records a previous design and is not a current execution
+> instruction or evidence of a live deployment. Use current service docs and
+> runbooks to plan changes.
 
 **Goal:** Build the authoritative D1 tenant/identity directory and a fail-closed OIDC authorization boundary that exposes one authenticated `/api/v1/session` endpoint without yet replacing the simulated messaging UI.
 

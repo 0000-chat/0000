@@ -1,3 +1,8 @@
+---
+repo: 0000-chat/0000
+status: current
+---
+
 # Public release artifacts
 
 Every merge pushed to `main` creates a deterministic release record. The

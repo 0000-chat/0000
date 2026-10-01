@@ -1,3 +1,8 @@
+---
+repo: 0000-chat/0000
+status: current
+---
+
 # Matrix gateway operations
 
 The Matrix gateway is a receive-only daemon. It restores an already

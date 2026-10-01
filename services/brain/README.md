@@ -1,3 +1,8 @@
+---
+repo: 0000-chat/0000
+status: current
+---
+
 # 0000-brain
 
 0000-brain is an LLM-supported wiki and knowledge service for people and

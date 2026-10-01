@@ -1,10 +1,20 @@
+---
+repo: 0000-chat/0000
+status: archived
+---
+
 # Communicator Matrix Gateway Design
+
+> Archived design history. Paths, hosts, and identities below are examples.
+> This document records a previous design and is not a current execution
+> instruction or evidence of a live deployment. Use current service docs and
+> runbooks to plan changes.
 
 **Status:** Approved-boundary implementation design
 
 **Date:** 2026-09-09
 
-**Scope:** Contabo-side Matrix-to-Cloudflare ingestion only
+**Scope:** deployment-side Matrix-to-Cloudflare ingestion only
 
 ## Simple model
 
@@ -446,7 +456,7 @@ checkpoint values.
 6. Implement Matrix E2EE bootstrap/sync and controlled backfill.
 7. Integrate Compose, backup/restore, health, and operations documentation.
 8. Pass local failure-matrix tests and independent reviews.
-9. Deploy to staging Cloudflare and the Contabo pilot only after the existing
+9. Deploy to staging Cloudflare and the deployment pilot only after the existing
    placeholder issuer/audience bindings are replaced with real values.
 
 ## Acceptance criteria

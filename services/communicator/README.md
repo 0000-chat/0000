@@ -1,3 +1,8 @@
+---
+repo: 0000-chat/0000
+status: current
+---
+
 # 0000-communicator
 
 This directory contains the communication adapter service in the public `0000`

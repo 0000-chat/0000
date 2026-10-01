@@ -1,3 +1,8 @@
+---
+repo: 0000-chat/0000
+status: current
+---
+
 # Ordinary R2 Event Archive — Local Runbook
 
 This runbook is the local operator reference for the ordinary R2 event archive

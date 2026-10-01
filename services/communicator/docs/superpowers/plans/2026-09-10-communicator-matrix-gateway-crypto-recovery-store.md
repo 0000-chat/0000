@@ -1,6 +1,14 @@
+---
+repo: 0000-chat/0000
+status: archived
+---
+
 # Matrix crypto recovery store implementation plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:test-driven-development` while implementing this plan. Execute the tasks in order. The worker receives no conversation history, so this document and the repository are the complete instructions.
+> Archived design history. Paths, hosts, and identities below are examples.
+> This document records a previous design and is not a current execution
+> instruction or evidence of a live deployment. Use current service docs and
+> runbooks to plan changes.
 
 **Goal:** Complete the local durable-state boundary required for restart-safe Matrix `/keys/query` recovery by exposing a closed saved-response DTO, persisted maintenance operations, and a source-ordered `mark_crypto_drained` transition.
 
@@ -14,7 +22,7 @@
 
 Start from commit `f34f589` on branch `codex/matrix-gateway` in:
 
-`/home/ubuntu/communicator/.worktrees/matrix-gateway`
+`/path/to/0000/services/communicator/.worktrees/matrix-gateway`
 
 Read these files before editing:
 
@@ -178,7 +186,7 @@ Do not add a public constructor just to make the integration test easy. Obtain e
 - [ ] **Step 2: Run red**
 
 ```bash
-CARGO_TARGET_DIR=/home/ubuntu/communicator/node_modules/.cache/communicator-matrix-gateway-cargo \
+CARGO_TARGET_DIR=/path/to/0000/services/communicator/node_modules/.cache/communicator-matrix-gateway-cargo \
 CARGO_BUILD_JOBS=2 \
 cargo test --manifest-path services/matrix-gateway/Cargo.toml --test crypto_recovery_store
 ```
@@ -194,7 +202,7 @@ Use private fields and crate-private constructors. `SavedMatrixResponse::from_ve
 Run the command from Step 2 and:
 
 ```bash
-CARGO_TARGET_DIR=/home/ubuntu/communicator/node_modules/.cache/communicator-matrix-gateway-cargo \
+CARGO_TARGET_DIR=/path/to/0000/services/communicator/node_modules/.cache/communicator-matrix-gateway-cargo \
 CARGO_BUILD_JOBS=2 \
 cargo test --manifest-path services/matrix-gateway/Cargo.toml --doc
 ```
@@ -393,7 +401,7 @@ Run all four crypto-related integration targets and doctests. Expected: all pass
 - [ ] **Step 1: Run focused tests**
 
 ```bash
-export CARGO_TARGET_DIR=/home/ubuntu/communicator/node_modules/.cache/communicator-matrix-gateway-cargo
+export CARGO_TARGET_DIR=/path/to/0000/services/communicator/node_modules/.cache/communicator-matrix-gateway-cargo
 export CARGO_BUILD_JOBS=2
 cargo test --manifest-path services/matrix-gateway/Cargo.toml --test crypto_recovery_store
 cargo test --manifest-path services/matrix-gateway/Cargo.toml --test crypto_outbox_lifecycle

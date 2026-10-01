@@ -1,3 +1,8 @@
+---
+repo: 0000-chat/0000
+status: current
+---
+
 # Platform authentication MVP
 
 Date: 2026-09-18. Status: agreed MVP design, not implemented.

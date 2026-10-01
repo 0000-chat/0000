@@ -1,4 +1,14 @@
+---
+repo: 0000-chat/0000
+status: archived
+---
+
 # Communicator Product and Cloudflare Data Plane System Specification
+
+> Archived design history. Paths, hosts, and identities below are examples.
+> This document records a previous design and is not a current execution
+> instruction or evidence of a live deployment. Use current service docs and
+> runbooks to plan changes.
 
 **Status:** Approved system design; implementation planning follows this document
 
@@ -59,7 +69,7 @@ The Cloudflare data plane includes:
 
 - a canonical, versioned messaging-event envelope;
 - a verified Matrix event consumer and bidirectional Matrix Gateway on the
-  Contabo host;
+  deployment host;
 - an authenticated Cloudflare ingestion endpoint;
 - a small D1 control directory for tenant, principal, membership, identity
   scope, and non-secret connection-routing authority;
@@ -235,7 +245,7 @@ This prevents phantom messages that exist only in Cloudflare.
 Communicator user
     -> authenticated API Worker
     -> short-lived LinkSessionDO
-    -> private Connection Gateway on Contabo
+    -> private Connection Gateway on deployment
     -> selected mautrix provisioning interface
     -> remote provider authentication
     -> bridge-owned session storage
@@ -247,7 +257,7 @@ contract to Cloudflare, resolves the correct bridge instance and Matrix
 identity, and translates provider-specific steps into canonical link-session
 states and actions.
 
-Long-lived remote-provider sessions remain owned by mautrix on Contabo.
+Long-lived remote-provider sessions remain owned by mautrix on deployment.
 Cloudflare retains only non-secret connection identity, capability, lifecycle,
 health, and audit metadata. Element and bridge-bot commands remain an operator
 fallback, not the intended customer experience.
@@ -268,7 +278,7 @@ contain at least:
   "platform": "whatsapp",
   "account_id": "account_123",
   "conversation_id": "conversation_456",
-  "matrix_room_id": "!opaque:communicator.0000.gold",
+  "matrix_room_id": "!opaque:example.com",
   "matrix_event_id": "$matrix-event-id",
   "remote_message_id": "optional-remote-id",
   "occurred_at": "2026-08-27T10:00:00.000Z",
@@ -741,7 +751,7 @@ capability documents determine whether an application may send attachments,
 edit, delete, react, mark read, or emit typing.
 
 The gateway also contains a connection router. The router maps a connection to
-one concrete bridge instance and Contabo host. This indirection allows later
+one concrete bridge instance and deployment host. This indirection allows later
 horizontal placement or migration without changing public connection IDs or
 client APIs. Migration of an active provider session is provider-specific and
 must never be implied by merely changing the routing record.
@@ -759,7 +769,7 @@ other secret response is retrieved from the Connection Gateway through a
 short-lived, authenticated, single-purpose route and returned only to the
 authorized client. Once consumed or expired, the gateway invalidates it.
 
-Cloudflare-to-Contabo provisioning calls use a dedicated service identity,
+Cloudflare-to-deployment provisioning calls use a dedicated service identity,
 authenticated transport, bounded request lifetime, nonce or request ID, and
 idempotency key. The gateway authorizes each operation against the supplied
 tenant, identity, link session, provider, and bridge instance rather than
@@ -973,7 +983,7 @@ break-glass use without an active reason.
 
 Message content is sensitive. Access follows tenant and identity scopes at
 every interface. R2 objects and exports are private. Matrix encryption keys
-remain protected on the Contabo host.
+remain protected on the deployment host.
 
 Deletion is a workflow across distinct systems:
 
@@ -1016,7 +1026,7 @@ forward-only Durable Object migrations and versioned SQLite migrations. Worker
 deployment must remain compatible with the previous persisted schema until the
 corresponding migration has completed.
 
-Contabo gateway releases are immutable, checksummed artifacts deployed through
+deployment gateway releases are immutable, checksummed artifacts deployed through
 the existing release and rollback procedure. The Matrix and Connection
 Gateways are separate logical responsibilities but may initially run in one
 repository and VPS deployment. Neither requires a fork of Synapse or mautrix.
@@ -1140,7 +1150,7 @@ backoffice and public API are one same-origin Cloudflare application package:
 The first package is `apps/control-plane`, containing a React client and Hono
 Worker entry built by one Vite configuration. Shared schemas live in
 `packages/contracts`, and deterministic non-secret scenarios live in
-`packages/test-fixtures`. Later Queue consumers and Contabo gateways are
+`packages/test-fixtures`. Later Queue consumers and deployment gateways are
 separate deployable packages that import the same versioned contracts.
 
 D1 is used only for the authoritative control directory. Durable Object SQLite

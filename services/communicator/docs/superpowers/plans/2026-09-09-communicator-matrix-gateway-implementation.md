@@ -1,8 +1,16 @@
+---
+repo: 0000-chat/0000
+status: archived
+---
+
 # Communicator Matrix Gateway Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement the assigned task through ephemeral `codex exec`. Do not create native subagents. Steps use checkbox (`- [ ]`) syntax for tracking.
+> Archived design history. Paths, hosts, and identities below are examples.
+> This document records a previous design and is not a current execution
+> instruction or evidence of a live deployment. Use current service docs and
+> runbooks to plan changes.
 
-**Goal:** Build a crash-safe, E2EE-capable Matrix Gateway on the Contabo VPS that turns explicitly mapped Synapse events into tenant-isolated, archive-first Cloudflare ingestion batches.
+**Goal:** Build a crash-safe, E2EE-capable Matrix Gateway on the deployment VPS that turns explicitly mapped Synapse events into tenant-isolated, archive-first Cloudflare ingestion batches.
 
 **Architecture:** A single Rust process owns persistent Matrix SDK SQLite stores and an application SQLite database. Bootstrap uses the high-level SDK client. The daemon uses a bounded raw Ruma HTTP transport and a public `BaseClient`; it never calls high-level `sync_once`. It encrypts and fsyncs each exact `/sync` response before SDK processing, reconstructs interrupted processing from that inbox, normalizes supported events, and retries exact Matrix-crypto and Cloudflare requests. The service never reads Synapse or mautrix databases, never exposes a host port, and never advances the application checkpoint past an unaccepted batch.
 
@@ -52,7 +60,7 @@ Task 4's remaining application batch-outbox methods belong to Task 7 so one
 worker owns `store.rs` and `store_types.rs` during that change.
 
 This milestone creates no production Cloudflare resource, DNS record,
-credential, Matrix session, room mapping, or Contabo deployment. External
+credential, Matrix session, room mapping, or deployment deployment. External
 activation remains a separate, explicit plan after local acceptance. Tests use
 synthetic Matrix responses, fake OAuth and ingestion servers, temporary
 encrypted stores, and the existing local Worker runtime.
@@ -79,7 +87,7 @@ Implementation writers must:
    the commit SHA plus exact evidence;
 7. finish within 15 minutes or report the precise blocker; and
 8. never deploy, change DNS, access live Matrix credentials, create external
-   resources, or mutate Cloudflare or Contabo.
+   resources, or mutate Cloudflare or deployment.
 
 Test-running workers use `workspace-write` but do not modify source. Every
 static review also uses a fresh ephemeral `codex exec` session with model
@@ -861,15 +869,15 @@ stdin on a TTY, and secret values in stdout/stderr. The add document is exactly:
 ```json
 {
   "schema_version": 1,
-  "matrix_room_id": "!portal:communicator.0000.gold",
+  "matrix_room_id": "!portal:example.com",
   "tenant_id": "tenant_personal",
   "identity_id": "identity_human",
   "connection_id": "connection_human_whatsapp",
   "account_id": "account_human_whatsapp",
   "platform": "whatsapp",
-  "gateway_route_id": "gateway_route_contabo",
+  "gateway_route_id": "gateway_route_deployment",
   "conversation_id": "conversation_human_whatsapp_family",
-  "owner_matrix_user_id": "@human:communicator.0000.gold"
+  "owner_matrix_user_id": "@human:example.com"
 }
 ```
 
@@ -1683,19 +1691,19 @@ git commit -m "test: verify matrix gateway end to end"
 Push `codex/matrix-gateway`, create a PR against `main`, and include exact test
 counts and review results. The PR must state these external gates remain closed:
 real OIDC issuer/client provisioning, Worker staging deploy/migrations, gateway
-Matrix credentials, Contabo activation, and live provider data.
+Matrix credentials, deployment activation, and live provider data.
 
 ## External activation is deliberately a separate plan
 
 This implementation plan ends at a reviewed, merged, locally proven gateway.
 It does not authorize a Worker deploy, D1 migration, OIDC provisioning, Matrix
-login, Contabo activation, synthetic live event, or production backfill.
+login, deployment activation, synthetic live event, or production backfill.
 
 After this PR is merged, the orchestrator must first inspect then-current
-Cloudflare and Contabo state and write
+Cloudflare and deployment state and write
 `docs/superpowers/plans/2026-09-09-communicator-gateway-staging-activation.md`.
 That plan must contain the resolved Worker name, route, D1/R2/Queue resource
-IDs, migration list, OIDC issuer/audience/client mechanism, Contabo release SHA,
+IDs, migration list, OIDC issuer/audience/client mechanism, deployment release SHA,
 gateway Matrix user/device flow, protected-file paths and ownership, exact
 Executor/SSH commands, rollback commands, and credential-free expected outputs.
 It must require: empty-resource prechecks; ingress-disabled deploy first; one

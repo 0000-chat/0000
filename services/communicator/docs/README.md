@@ -1,3 +1,8 @@
+---
+repo: 0000-chat/0000
+status: current
+---
+
 # Communicator documentation
 
 This directory contains the imported application runbooks, design records,

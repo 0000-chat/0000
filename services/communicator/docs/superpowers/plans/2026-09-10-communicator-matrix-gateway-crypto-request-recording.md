@@ -1,6 +1,14 @@
+---
+repo: 0000-chat/0000
+status: archived
+---
+
 # Communicator Matrix Gateway Crypto Request Recording Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:executing-plans` and `superpowers:test-driven-development` to implement this plan. The orchestrator dispatches each implementation, test, and review step through a fresh ephemeral `codex exec` session using `gpt-5.6-luna`, maximum reasoning effort, and fast service tier. Do not create native subagents. Steps use checkbox (`- [ ]`) syntax for tracking.
+> Archived design history. Paths, hosts, and identities below are examples.
+> This document records a previous design and is not a current execution
+> instruction or evidence of a live deployment. Use current service docs and
+> runbooks to plan changes.
 
 **Goal:** Atomically mark one encrypted sync inbox response as SDK-processed and, when present, persist its single allowlisted Matrix `/keys/query` request before any network send.
 

@@ -1,7 +1,12 @@
+---
+repo: 0000-chat/0000
+status: current
+---
+
 # 0000
 
 This public repository is the 0000 monorepo. It contains service workspaces
-and three shared packages, with Bun and
+and shared packages, with Bun and
 Turborepo pinned for repeatable outer workspace checks. `services/communicator`
 contains the imported communication adapter application.
 `services/msg` contains the temporary conversation Worker and npm CLI. The
@@ -13,6 +18,10 @@ against the declared `0000-database` dependency.
 Several other service directories remain scaffold placeholders.
 
 ## Service boundaries
+
+The [service architecture map](docs/architecture/README.md) links to each
+service's scope and architecture owners and records the cross-service writing
+convention.
 
 Every reusable product service uses `0000-platform` for shared identity and
 authentication. Platform is the single authority for accounts, credentials,

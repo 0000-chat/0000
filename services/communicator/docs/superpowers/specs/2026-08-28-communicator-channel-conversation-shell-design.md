@@ -1,4 +1,14 @@
+---
+repo: 0000-chat/0000
+status: archived
+---
+
 # Communicator Channel and Conversation Shell Design
+
+> Archived design history. Paths, hosts, and identities below are examples.
+> This document records a previous design and is not a current execution
+> instruction or evidence of a live deployment. Use current service docs and
+> runbooks to plan changes.
 
 **Status:** Implemented and verified in simulation
 

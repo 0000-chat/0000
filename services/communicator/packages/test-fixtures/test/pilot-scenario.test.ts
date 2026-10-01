@@ -26,9 +26,9 @@ describe("pilotScenario", () => {
 
   it("contains no real infrastructure or credential markers", () => {
     const serialized = JSON.stringify(pilotScenario);
+    expect(serialized).not.toMatch(/\b(?:\d{1,3}\.){3}\d{1,3}\b/);
+    expect(serialized).not.toMatch(/https?:\/\/|@[a-z0-9_-]+:[a-z0-9.-]+/i);
     for (const forbidden of [
-      "169.58.160.23",
-      "communicator.0000.gold",
       "m.login",
       "access_token",
       "cookie",

@@ -1,3 +1,8 @@
+---
+repo: 0000-chat/0000
+status: current
+---
+
 # 02 Retry failed deliveries and disable unhealthy destinations
 
 ## What to build

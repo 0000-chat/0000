@@ -1,0 +1,5 @@
+#!/bin/sh
+set -eu
+
+root=$(git rev-parse --show-toplevel)
+exec node "$root/packages/documentation-tools/cli.mjs" --root "$root" --repo 0000-chat/0000 --mode index

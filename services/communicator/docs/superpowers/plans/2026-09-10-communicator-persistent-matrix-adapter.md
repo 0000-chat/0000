@@ -1,6 +1,14 @@
+---
+repo: 0000-chat/0000
+status: archived
+---
+
 # Persistent Matrix adapter implementation plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:test-driven-development`. Execute only the task batch assigned by the parent. This plan and the repository are the full context; do not assume access to prior conversation.
+> Archived design history. Paths, hosts, and identities below are examples.
+> This document records a previous design and is not a current execution
+> instruction or evidence of a live deployment. Use current service docs and
+> runbooks to plan changes.
 
 **Goal:** Replace the Matrix compile spike with a production adapter that bootstraps one service account, restores its persistent E2EE stores without logging in again, performs bounded raw Matrix HTTP operations, applies or recovers journaled sync responses, extracts joined-room events, and safely acknowledges the single permitted `/keys/query` crypto request.
 
@@ -14,7 +22,7 @@
 
 Start from commit `0a5e67a` in:
 
-`/home/ubuntu/communicator/.worktrees/matrix-gateway`
+`/path/to/0000/services/communicator/.worktrees/matrix-gateway`
 
 Read before editing:
 

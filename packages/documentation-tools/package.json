@@ -1,0 +1,28 @@
+{
+  "name": "@0000/documentation-tools",
+  "version": "1.0.0",
+  "private": true,
+  "license": "Apache-2.0",
+  "type": "module",
+  "engines": {
+    "node": "^20.19.0 || ^22.13.0 || >=24.0.0"
+  },
+  "exports": {
+    ".": "./cli.mjs",
+    "./eslint": "./cli.mjs"
+  },
+  "bin": {
+    "docs-check": "./cli.mjs"
+  },
+  "scripts": {
+    "check": "node --test test/*.test.mjs && node scripts/build-release.mjs --check",
+    "test": "node --test test/*.test.mjs",
+    "build:release": "node scripts/build-release.mjs",
+    "check:release": "node scripts/build-release.mjs --check"
+  },
+  "dependencies": {
+    "@eslint/markdown": "8.0.3",
+    "eslint": "10.10.0",
+    "yaml": "2.9.1"
+  }
+}

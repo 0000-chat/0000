@@ -1,3 +1,8 @@
+---
+repo: 0000-chat/0000
+status: current
+---
+
 # Triage labels
 
 The engineering skills use five canonical triage roles. This table maps each role to its label in this repository.

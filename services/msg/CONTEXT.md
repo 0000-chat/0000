@@ -1,3 +1,8 @@
+---
+repo: 0000-chat/0000
+status: current
+---
+
 # Message Relay Domain
 
 This context describes the account-free temporary Thread service and the

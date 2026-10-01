@@ -1,6 +1,9 @@
-# msg.0000.chat Production Implementation Plan
+---
+repo: 0000-chat/0000
+status: archived
+---
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+# msg.0000.chat Production Implementation Plan
 
 **Goal:** Ship the independent anonymous `msg.0000.chat` relay through the repository production workflow.
 

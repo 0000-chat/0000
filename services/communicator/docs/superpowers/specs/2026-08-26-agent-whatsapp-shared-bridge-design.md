@@ -1,4 +1,14 @@
+---
+repo: 0000-chat/0000
+status: archived
+---
+
 # Agent WhatsApp Shared-Bridge Design
+
+> Archived design history. Paths, hosts, and identities below are examples.
+> This document records a previous design and is not a current execution
+> instruction or evidence of a live deployment. Use current service docs and
+> runbooks to plan changes.
 
 **Status:** Approved for implementation planning
 
@@ -22,9 +32,9 @@ Agent respond automatically.
 
 This milestone:
 
-- authorizes `@agent:communicator.0000.gold` as a normal mautrix user;
-- preserves `@human:communicator.0000.gold` as a normal mautrix user;
-- preserves `@platform-admin:communicator.0000.gold` as the bridge admin;
+- authorizes `@agent:example.com` as a normal mautrix user;
+- preserves `@human:example.com` as a normal mautrix user;
+- preserves `@platform-admin:example.com` as the bridge admin;
 - pairs the second self-owned WhatsApp account while signed into Matrix as the
   Agent;
 - validates bidirectional messaging, encryption, identity isolation, restart
@@ -70,9 +80,9 @@ The rendered bridge permission map must be exactly:
 ```yaml
 permissions:
   "*": relay
-  "@human:communicator.0000.gold": user
-  "@agent:communicator.0000.gold": user
-  "@platform-admin:communicator.0000.gold": admin
+  "@human:example.com": user
+  "@agent:example.com": user
+  "@platform-admin:example.com": admin
 ```
 
 The wildcard permission does not provide usable relay access because relay mode
@@ -101,9 +111,9 @@ permission map.
 Pairing is an interactive external-account action:
 
 1. The operator signs into Element as
-   `@agent:communicator.0000.gold`.
+   `@agent:example.com`.
 2. The Agent opens an encrypted private management chat with
-   `@whatsappbot:communicator.0000.gold`.
+   `@whatsappbot:example.com`.
 3. The Agent sends `login qr`.
 4. The operator uses the physical phone for the second self-owned WhatsApp
    account to scan the QR code under **Linked devices**.

@@ -1,3 +1,8 @@
+---
+repo: 0000-chat/0000
+status: current
+---
+
 # 0000-gateway
 
 This directory contains the gateway service inside the public `0000` monorepo.

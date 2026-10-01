@@ -1,12 +1,20 @@
+---
+repo: 0000-chat/0000
+status: archived
+---
+
 # Personal-First Multi-Tenant Telegram Bridge Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> Archived design history. Paths, hosts, and identities below are examples.
+> This document records a previous design and is not a current execution
+> instruction or evidence of a live deployment. Use current service docs and
+> runbooks to plan changes.
 
 **Goal:** Add one pinned `mautrix-telegram` service to Communicator, connect the Human's established personal Telegram account, preserve the existing WhatsApp and Messenger services, and establish a secure shared-process design that can later onboard separate customer Telegram accounts without adding one bridge container per customer.
 
 **Architecture:** Synapse remains the operational Matrix system of record. One private `telegram` container connects to Synapse and a dedicated `telegram_bridge` PostgreSQL database; each authorized Matrix user receives an independent Telegram login inside that shared process, and `bridge.split_portals: true` prevents different logins from sharing Matrix portal rooms. This repository owns only deployment topology, pinned versions, generated configuration, permissions, validation, backup/restore, and runbooks; the upstream mautrix project owns all Telegram protocol and session code.
 
-**Tech Stack:** Docker Compose, Synapse, PostgreSQL 16, Caddy, upstream `dock.mau.dev/mautrix/telegram:v26.08`, Bash, Python 3 standard library, `unittest`, restic with Cloudflare R2 as the encrypted backup repository, Ubuntu 24.04 LTS on the Contabo VPS.
+**Tech Stack:** Docker Compose, Synapse, PostgreSQL 16, Caddy, upstream `dock.mau.dev/mautrix/telegram:v26.08`, Bash, Python 3 standard library, `unittest`, restic with Cloudflare R2 as the encrypted backup repository, Ubuntu 24.04 LTS on the deployment VPS.
 
 ---
 
@@ -25,9 +33,8 @@ an independent remote login and independent Matrix portals inside the shared
 process. Adding a customer requires an explicit permission/onboarding change
 and isolation test, not a new container.
 
-Implement locally in the Telegram worktree. Do not touch the Messenger
-worktree. Do not mutate Contabo until the Messenger PR is merged, deployed,
-accepted, and the resource gate in Task 1 passes.
+The historical integration sequence required existing bridges to pass their
+acceptance and resource checks before adding Telegram.
 
 Every user-facing explanation and runbook section must give a short simple
 explanation first, followed by the technical procedure.
@@ -92,8 +99,8 @@ external state.
 
 ## Locked identity and policy decisions
 
-- Human Matrix identity: `@human:communicator.0000.gold` with `user` permission.
-- Platform Admin: `@platform-admin:communicator.0000.gold` with `admin`
+- Human Matrix identity: `@human:example.com` with `user` permission.
+- Platform Admin: `@platform-admin:example.com` with `admin`
   permission, but no automatic portal membership.
 - Agent: no Telegram login and no Telegram `user` permission in this phase.
 - Everyone else: `relay`, while relay mode is disabled; this grants no usable
@@ -162,7 +169,7 @@ phone numbers, or acceptance evidence containing contact identifiers.
 - [ ] **Step 1: Verify the isolated worktree and wait for Messenger integration**
 
 ```bash
-cd /home/ubuntu/communicator/.worktrees/telegram-bridge
+cd /path/to/0000/services/communicator/.worktrees/telegram-bridge
 test "$(git branch --show-current)" = codex/telegram-bridge
 git status --short --branch
 git fetch origin
@@ -178,7 +185,7 @@ record `telegram_integration_gate=PENDING`, skip Steps 2 and 4-6 for now, run
 the source-only Step 3, and continue Tasks 2-8 as parallel local development
 from this branch. Shared files may be changed normally in this isolated
 worktree, but never copy whole files from another worktree and never touch
-Contabo. Task 9 requires returning to this gate, rebasing onto the accepted
+deployment. Task 9 requires returning to this gate, rebasing onto the accepted
 Messenger implementation, resolving conflicts semantically, and rerunning
 every verification before implementation commits may be pushed or deployed.
 
@@ -222,13 +229,13 @@ If either digest differs, stop without changing the lock file.
 - [ ] **Step 4: Verify the exact remote and accepted Messenger release**
 
 ```bash
-starting_release=$(ssh -o BatchMode=yes contabo-eu 'cat /opt/communicator/current/RELEASE_COMMIT')
+starting_release=$(ssh -o BatchMode=yes matrix-host 'cat /opt/communicator/current/RELEASE_COMMIT')
 [[ "$starting_release" =~ ^[0-9a-f]{40,64}$ ]]
-ssh -o BatchMode=yes contabo-eu bash -s -- "$starting_release" <<'REMOTE'
+ssh -o BatchMode=yes matrix-host bash -s -- "$starting_release" <<'REMOTE'
 set -euo pipefail
 starting_release=$1
-test "$(hostname)" = vmi3501337
-ip -4 -o addr show dev eth0 | grep -q '169.58.160.23/'
+test "$(hostname)" = matrix-host
+ip -4 -o addr show dev eth0 | grep -q '192.0.2.10/'
 test "$(cat /opt/communicator/current/RELEASE_COMMIT)" = "$starting_release"
 test "$(readlink -f /opt/communicator/current)" = "/opt/communicator/releases/$starting_release"
 test -x /opt/communicator/current/scripts/validate-messenger.sh
@@ -249,10 +256,10 @@ fails, stop and let the Messenger implementer finish.
 - [ ] **Step 5: Enforce the post-Messenger resource and port gate**
 
 ```bash
-ssh -o BatchMode=yes contabo-eu 'bash -s' <<'REMOTE'
+ssh -o BatchMode=yes matrix-host 'bash -s' <<'REMOTE'
 set -euo pipefail
-test "$(hostname)" = vmi3501337
-ip -4 -o addr show dev eth0 | grep -q '169.58.160.23/'
+test "$(hostname)" = matrix-host
+ip -4 -o addr show dev eth0 | grep -q '192.0.2.10/'
 available_kib=$(awk '/MemAvailable:/ {print $2}' /proc/meminfo)
 free_kib=$(df --output=avail -k / | tail -1 | tr -d ' ')
 test "$available_kib" -ge 2097152
@@ -274,10 +281,10 @@ do not save logs or identifiers. Any failure is a hard stop.
 - [ ] **Step 6: Verify recovery prerequisites by metadata only**
 
 ```bash
-ssh -o BatchMode=yes contabo-eu 'bash -s' <<'REMOTE'
+ssh -o BatchMode=yes matrix-host 'bash -s' <<'REMOTE'
 set -euo pipefail
-test "$(hostname)" = vmi3501337
-ip -4 -o addr show dev eth0 | grep -q '169.58.160.23/'
+test "$(hostname)" = matrix-host
+ip -4 -o addr show dev eth0 | grep -q '192.0.2.10/'
 sudo -n test -f /srv/communicator/secrets/restic.env
 sudo -n test -f /srv/communicator/secrets/restic.password
 sudo -n stat -c '%a %n' /srv/communicator/secrets/restic.env /srv/communicator/secrets/restic.password
@@ -562,15 +569,15 @@ bridge:
     default_relays: []
   permissions:
     "*": relay
-    "@human:communicator.0000.gold": user
-    "@platform-admin:communicator.0000.gold": admin
+    "@human:example.com": user
+    "@platform-admin:example.com": admin
 database:
   type: postgres
   max_open_conns: 5
   max_idle_conns: 1
 homeserver:
   address: http://synapse:8008
-  domain: communicator.0000.gold
+  domain: example.com
   software: standard
 appservice:
   address: http://telegram:29317
@@ -990,7 +997,7 @@ break-glass access, rollback, retention/privacy behavior, licensing, and future
 customer onboarding.
 
 Primary login in the Human's encrypted private room with
-`@telegrambot:communicator.0000.gold`:
+`@telegrambot:example.com`:
 
 ```text
 login qr
@@ -1072,7 +1079,7 @@ git commit -m "docs: add Telegram bridge operations"
 - [ ] **Step 1: Close the Messenger integration gate and rebase**
 
 ```bash
-cd /home/ubuntu/communicator/.worktrees/telegram-bridge
+cd /path/to/0000/services/communicator/.worktrees/telegram-bridge
 git fetch origin
 git cat-file -e origin/main:scripts/init-messenger-runtime.sh
 git cat-file -e origin/main:scripts/validate-messenger.sh
@@ -1082,7 +1089,7 @@ git rebase origin/main
 
 All three artifact checks are mandatory here. If any is missing, report
 `telegram_integration_gate=BLOCKED_BY_MESSENGER` with only the missing file
-names, stop before pushing implementation commits or mutating Contabo, and
+names, stop before pushing implementation commits or mutating deployment, and
 wait for the coordinator. This expected sequencing gate is not permission to
 weaken tests or copy from another worktree.
 
@@ -1136,12 +1143,12 @@ Ask the user to create or select an application at `https://my.telegram.org/apps
 and obtain its numeric API ID and 32-character API hash. Do not request either
 value in chat.
 
-The user enters them directly into the verified Contabo terminal:
+The user enters them directly into the verified deployment terminal:
 
 ```bash
-ssh -t contabo-eu
-test "$(hostname)" = vmi3501337
-ip -4 -o addr show dev eth0 | grep -q '169.58.160.23/'
+ssh -t matrix-host
+test "$(hostname)" = matrix-host
+ip -4 -o addr show dev eth0 | grep -q '192.0.2.10/'
 sudo install -d -o root -g root -m 0700 /srv/communicator/secrets
 sudo bash -c '
 set -euo pipefail
@@ -1165,10 +1172,10 @@ The implementer verifies only paths, types, and modes, never content.
 - [ ] **Step 2: Take a fresh encrypted pre-change backup**
 
 ```bash
-ssh -o BatchMode=yes contabo-eu 'bash -s' <<'REMOTE'
+ssh -o BatchMode=yes matrix-host 'bash -s' <<'REMOTE'
 set -euo pipefail
-test "$(hostname)" = vmi3501337
-ip -4 -o addr show dev eth0 | grep -q '169.58.160.23/'
+test "$(hostname)" = matrix-host
+ip -4 -o addr show dev eth0 | grep -q '192.0.2.10/'
 cd /opt/communicator/current
 sudo -n bash -c '
   set -euo pipefail
@@ -1199,15 +1206,15 @@ printf 'release_commit=%s\nrelease_sha256=%s\n' "$release_commit" "$release_sha"
 - [ ] **Step 4: Verify identity before transfer and verify checksum after**
 
 ```bash
-ssh -o BatchMode=yes contabo-eu 'set -euo pipefail; test "$(hostname)" = vmi3501337; ip -4 -o addr show dev eth0 | grep -q "169.58.160.23/"'
+ssh -o BatchMode=yes matrix-host 'set -euo pipefail; test "$(hostname)" = matrix-host; ip -4 -o addr show dev eth0 | grep -q "192.0.2.10/"'
 remote_archive="/tmp/communicator-${release_commit}.tar"
-scp -o BatchMode=yes "$release_archive" "contabo-eu:${remote_archive}"
-ssh -o BatchMode=yes contabo-eu bash -s -- "$remote_archive" "$release_sha" <<'REMOTE'
+scp -o BatchMode=yes "$release_archive" "matrix-host:${remote_archive}"
+ssh -o BatchMode=yes matrix-host bash -s -- "$remote_archive" "$release_sha" <<'REMOTE'
 set -euo pipefail
 remote_archive=$1
 expected_sha=$2
-test "$(hostname)" = vmi3501337
-ip -4 -o addr show dev eth0 | grep -q '169.58.160.23/'
+test "$(hostname)" = matrix-host
+ip -4 -o addr show dev eth0 | grep -q '192.0.2.10/'
 test "$(sha256sum "$remote_archive" | awk '{print $1}')" = "$expected_sha"
 REMOTE
 ```
@@ -1215,13 +1222,13 @@ REMOTE
 - [ ] **Step 5: Extract, deploy, and activate only after a second identity check**
 
 ```bash
-ssh -o BatchMode=yes contabo-eu bash -s -- "$release_commit" "$remote_archive" <<'REMOTE'
+ssh -o BatchMode=yes matrix-host bash -s -- "$release_commit" "$remote_archive" <<'REMOTE'
 set -euo pipefail
 release_commit=$1
 remote_archive=$2
 [[ "$release_commit" =~ ^[0-9a-f]{40,64}$ ]]
-test "$(hostname)" = vmi3501337
-ip -4 -o addr show dev eth0 | grep -q '169.58.160.23/'
+test "$(hostname)" = matrix-host
+ip -4 -o addr show dev eth0 | grep -q '192.0.2.10/'
 release_dir="/opt/communicator/releases/$release_commit"
 sudo -n test ! -e "$release_dir"
 sudo -n install -d -o root -g root -m 0755 "$release_dir"
@@ -1243,18 +1250,18 @@ WhatsApp, and Messenger. Never delete Telegram runtime or log out the account.
 - [ ] **Step 6: Run the mandatory pre-login gate**
 
 ```bash
-ssh -o BatchMode=yes contabo-eu 'bash -s' <<'REMOTE'
+ssh -o BatchMode=yes matrix-host 'bash -s' <<'REMOTE'
 set -euo pipefail
-test "$(hostname)" = vmi3501337
-ip -4 -o addr show dev eth0 | grep -q '169.58.160.23/'
+test "$(hostname)" = matrix-host
+ip -4 -o addr show dev eth0 | grep -q '192.0.2.10/'
 cd /opt/communicator/current
 for validator in validate-core.sh validate-whatsapp.sh validate-messenger.sh validate-telegram.sh; do
   sudo -n env COMMUNICATOR_RUNTIME_DIR=/srv/communicator COMPOSE_PROJECT_NAME=communicator "./scripts/$validator"
 done
 REMOTE
-curl -fsS https://matrix.communicator.0000.gold/_matrix/client/versions >/dev/null
-curl -fsS https://communicator.0000.gold/.well-known/matrix/client >/dev/null
-curl -fsS https://communicator.0000.gold/.well-known/matrix/server >/dev/null
+curl -fsS https://matrix.example.com/_matrix/client/versions >/dev/null
+curl -fsS https://example.com/.well-known/matrix/client >/dev/null
+curl -fsS https://example.com/.well-known/matrix/server >/dev/null
 ```
 
 Report `telegram_prelogin_gate=PASS` and stop for user pairing.
@@ -1266,7 +1273,7 @@ Report `telegram_prelogin_gate=PASS` and stop for user pairing.
 - [ ] **Step 1: User performs QR login**
 
 The Human opens an encrypted private room with
-`@telegrambot:communicator.0000.gold`, sends `login qr`, and scans the QR from
+`@telegrambot:example.com`, sends `login qr`, and scans the QR from
 the official Telegram app. Any 2FA prompt is handled only by the user. The
 implementer waits for `human_telegram_pairing=PASS` and never asks for
 credentials or screenshots.
@@ -1310,10 +1317,10 @@ messenger_preserved=PASS
 - [ ] **Step 1: Restart the Telegram container and validate the existing login**
 
 ```bash
-ssh -o BatchMode=yes contabo-eu 'bash -s' <<'REMOTE'
+ssh -o BatchMode=yes matrix-host 'bash -s' <<'REMOTE'
 set -euo pipefail
-test "$(hostname)" = vmi3501337
-ip -4 -o addr show dev eth0 | grep -q '169.58.160.23/'
+test "$(hostname)" = matrix-host
+ip -4 -o addr show dev eth0 | grep -q '192.0.2.10/'
 cd /opt/communicator/current
 sudo -n env COMMUNICATOR_RUNTIME_DIR=/srv/communicator COMPOSE_PROJECT_NAME=communicator \
   docker compose --env-file deploy/images.lock.env restart telegram
@@ -1338,10 +1345,10 @@ in Task 10. Record only the short snapshot ID and `backup=PASS`.
 - [ ] **Step 3: Run the isolated restore**
 
 ```bash
-ssh -o BatchMode=yes contabo-eu 'bash -s' <<'REMOTE'
+ssh -o BatchMode=yes matrix-host 'bash -s' <<'REMOTE'
 set -euo pipefail
-test "$(hostname)" = vmi3501337
-ip -4 -o addr show dev eth0 | grep -q '169.58.160.23/'
+test "$(hostname)" = matrix-host
+ip -4 -o addr show dev eth0 | grep -q '192.0.2.10/'
 cd /opt/communicator/current
 sudo -n bash -c '
   set -euo pipefail
@@ -1370,7 +1377,7 @@ bash -n scripts/*.sh
 python3 -m py_compile scripts/*.py
 git diff --check origin/main...HEAD
 git status --short --branch
-ssh -o BatchMode=yes contabo-eu 'cd /opt/communicator/current && sudo -n env COMMUNICATOR_RUNTIME_DIR=/srv/communicator COMPOSE_PROJECT_NAME=communicator ./scripts/validate-core.sh && sudo -n env COMMUNICATOR_RUNTIME_DIR=/srv/communicator COMPOSE_PROJECT_NAME=communicator ./scripts/validate-whatsapp.sh && sudo -n env COMMUNICATOR_RUNTIME_DIR=/srv/communicator COMPOSE_PROJECT_NAME=communicator ./scripts/validate-messenger.sh && sudo -n env COMMUNICATOR_RUNTIME_DIR=/srv/communicator COMPOSE_PROJECT_NAME=communicator ./scripts/validate-telegram.sh'
+ssh -o BatchMode=yes matrix-host 'cd /opt/communicator/current && sudo -n env COMMUNICATOR_RUNTIME_DIR=/srv/communicator COMPOSE_PROJECT_NAME=communicator ./scripts/validate-core.sh && sudo -n env COMMUNICATOR_RUNTIME_DIR=/srv/communicator COMPOSE_PROJECT_NAME=communicator ./scripts/validate-whatsapp.sh && sudo -n env COMMUNICATOR_RUNTIME_DIR=/srv/communicator COMPOSE_PROJECT_NAME=communicator ./scripts/validate-messenger.sh && sudo -n env COMMUNICATOR_RUNTIME_DIR=/srv/communicator COMPOSE_PROJECT_NAME=communicator ./scripts/validate-telegram.sh'
 ```
 
 Require clean Git state and all validators green.
@@ -1407,7 +1414,7 @@ Report:
 ## Completion boundary
 
 This plan is complete only when one upstream Telegram container is deployed on
-Contabo, the Human's personal Telegram account works bidirectionally in encrypted
+deployment, the Human's personal Telegram account works bidirectionally in encrypted
 Matrix portals, the Agent cannot access those portals, WhatsApp and Messenger
 remain healthy, restart persistence and encrypted backup/isolated restore pass,
 and a reviewable PR exists.

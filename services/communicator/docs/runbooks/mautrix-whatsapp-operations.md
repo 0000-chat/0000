@@ -1,4 +1,13 @@
+---
+repo: 0000-chat/0000
+status: current
+---
+
 # Personal mautrix-whatsapp Operations
+
+This is a self-hosting procedure. Example Matrix identities use `example.com`;
+substitute the domain and exact identities configured for your deployment.
+Acceptance markers describe expected results, not live account evidence.
 
 ## Simple explanation
 
@@ -8,11 +17,11 @@ configuration, registration, and linked-device state protected and backed up.
 
 ## Release procedure
 
-1. Work from a clean `feat/matrix-core` checkout and build an archive from the
+1. Work from a clean release checkout and build an archive from the
    exact commit being released. Never transfer Git history, local environment
    files, runtime data, backups, or secrets.
-2. Verify the Contabo SSH alias, hostname `vmi3501337`, and `eth0` address
-   `169.58.160.23` before any Docker command.
+2. Verify the target SSH host key, hostname, and network address against the
+   private operator record before any Docker command.
 3. Compare the local and remote archive SHA-256 values before extracting under
    `/opt/communicator/releases/<commit>`.
 4. Preserve a root-only, timestamped copy of the current Synapse configuration
@@ -38,8 +47,8 @@ configuration, registration, and linked-device state protected and backed up.
 
 Pairing is an interactive user action, never an automated deployment action.
 
-1. Sign into Element as `@human:communicator.0000.gold`.
-2. Open an encrypted private chat with `@whatsappbot:communicator.0000.gold`.
+1. Sign into Element as `@human:example.com`.
+2. Open an encrypted private chat with `@whatsappbot:example.com`.
 3. Send `login qr`, or send `login phone` and enter the phone number only in
    Element's interactive prompt.
 4. On the physical WhatsApp phone, open Settings/Menu → Linked devices → Link

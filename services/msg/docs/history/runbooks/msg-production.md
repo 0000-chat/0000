@@ -1,6 +1,13 @@
-# msg.0000.chat production runbook
+---
+repo: 0000-chat/0000
+status: archived
+---
 
-Use this runbook for the independent `msg.0000.chat` Worker. Do not run a local production deploy. The GitHub `Deploy msg production` workflow deploys only after the `Quality Gate` workflow succeeds for the exact current `main` commit.
+# Msg deployment and recovery history
+
+> Archived deployment design. This record preserves product operation and
+> recovery contracts; it does not describe the current hosted deployment path.
+> Use current release documentation and operator-owned deployment configuration.
 
 ## Required production setup
 
@@ -8,11 +15,11 @@ Before the first deploy, an operator must do these tasks.
 
 1. Create the Cloudflare D1 database named `0000-msg-operations` in the target account. Do not add its ID to Git.
 2. Confirm that `msg.0000.chat` can be used as a Cloudflare Worker Custom Domain. The account token must be able to manage the Worker, D1, Durable Objects, routes, and Custom Domains.
-3. Add these keys to Phase at `/domains/0000-chat/msg-production` in the `development` environment. Do not print their values.
+3. Supply these runtime inputs through an operator-owned protected secret store. Do not print their values.
    - `MSG_D1_DATABASE_ID`
    - `MSG_DATA_ENCRYPTION_KEY_V1` — one 32-byte base64url key.
    - `MSG_OPERATOR_TOKEN` — a high-entropy bearer token.
-4. Confirm the existing Phase keys at `/shared/providers`: `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID`.
+4. Supply scoped Cloudflare deployment credentials through the operator-owned deployment environment.
 5. Review the public policy text before launch. It must state that this anonymous relay does not provide a public email support address.
 
 The Worker uses one SQLite Durable Object class, `ConversationRoom`, and one D1 binding, `MSG_DB`. The retention Cron runs at 03:17 UTC each day. It performs at most ten small purge passes per trigger.
@@ -34,15 +41,13 @@ Cloudflare limits are POP-local and eventually consistent. The same actor can ha
 
 When a configured binding denies or fails, the Worker returns the stable `rate_limited` protocol error, HTTP 429, and `Retry-After: 60`. This includes read and export requests. The Worker fails closed so an unavailable limiter cannot bypass a protected path. Operator, health, discovery, policy, and static asset routes do not use these bindings.
 
-## Normal deploy
+## Release requirements
 
-1. Make and review the change in an ephemeral worktree.
-2. Land the commit on `main` through the normal worktree workflow.
-3. Wait for `Quality Gate` to succeed.
-4. The msg deployment workflow runs for every successful `Quality Gate` result for the exact current `main` commit. It also runs for unrelated app changes.
-5. Review the redacted workflow result. A successful run completed a Wrangler dry run, D1 migration check, deploy, and public synthetic proof.
-
-The workflow reads Phase values into the job environment. It creates a short-lived Wrangler config with the D1 ID and a short-lived secrets file. Neither file is committed.
+Build and validate an immutable release, identify the exact target environment,
+apply compatible migrations, and retain the prior version's traffic allocation.
+Run a redacted synthetic proof after promotion. Keep credentials and rendered
+runtime configuration outside Git. The historical deployment-on-main workflow
+has been superseded; this record does not authorize or configure that path.
 
 ## First launch and D1 migration
 
@@ -101,7 +106,7 @@ These are Worker configuration values. To change them, make a reviewed `main` co
 
 ## Operator reports and forced deletion
 
-The repository operator command sends requests only to `https://msg.0000.chat`. Load `MSG_OPERATOR_TOKEN` from Phase into a protected temporary environment. Do not echo it.
+Configure the operator command for the intended self-hosted Msg endpoint. Load `MSG_OPERATOR_TOKEN` from the operator-owned secret store into a protected temporary environment. Do not echo it.
 
 ```sh
 bun run msg:operator status
@@ -115,7 +120,7 @@ Use forced deletion only for an approved incident or abuse action. Treat room ID
 
 ## Key rotation
 
-`MSG_OPERATOR_TOKEN` can rotate through a reviewed deploy. Update the Phase value, deploy, then update every approved operator environment.
+`MSG_OPERATOR_TOKEN` can rotate through a reviewed deploy. Update the protected secret value, deploy, then update every approved operator environment.
 
 Do not replace `MSG_DATA_ENCRYPTION_KEY_V1` without a migration plan. It encrypts retained D1 creation records and abuse reports. The current Worker cannot read old records with a replacement key. First add and deploy a versioned key migration with read support for both keys, re-encrypt retained records, and prove operator reads. A simpler retirement path is to stop writes, wait until the 90-day operator-audit retention window has ended and the scheduled purge has completed, verify D1 is empty of old encrypted records, then deploy the new key. Keep the old key available until this proof is complete.
 

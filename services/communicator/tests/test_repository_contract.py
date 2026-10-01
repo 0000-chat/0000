@@ -548,7 +548,7 @@ class RepositoryContractTests(unittest.TestCase):
             with self.subTest(fixture=fixture):
                 self.assertTrue(list(_credential_material_findings(fixture)))
 
-    def test_communicator_staging_runbook_has_approval_gate_and_safe_order(self):
+    def test_communicator_staging_runbook_has_access_gate_and_safe_order(self):
         runbook = (ROOT / "docs/runbooks/backoffice-staging.md").read_text()
         required_steps = [
             "1. Verify the intended Cloudflare account",
@@ -557,14 +557,14 @@ class RepositoryContractTests(unittest.TestCase):
             "4. Run the complete local gate",
             "5. Build the simulated staging bundle",
             "6. Open the approved staging hostname",
-            "7. Sign in as the pilot operator",
+            "7. Sign in as an allowed test operator",
             "8. Inspect Worker logs",
             "9. If Access denial or the persistent simulated-data banner fails",
         ]
         positions = [runbook.index(step) for step in required_steps]
         self.assertEqual(sorted(positions), positions)
-        self.assertIn("This implementation session intentionally stops before `wrangler deploy`", runbook)
-        self.assertIn("No custom hostname, DNS record", runbook)
+        self.assertIn("verify the\nAccess protection and simulated data boundary", runbook)
+        self.assertIn("Provision the staging hostname and Access policy separately", runbook)
         self.assertIn("live Matrix or bridge traffic", runbook)
 
     def test_tenant_projection_configuration_and_generated_binding_are_stable(self):

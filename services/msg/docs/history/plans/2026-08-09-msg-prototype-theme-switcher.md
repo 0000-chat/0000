@@ -1,6 +1,9 @@
-# msg.0000.chat Theme Switcher Implementation Plan
+---
+repo: 0000-chat/0000
+status: archived
+---
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+# msg.0000.chat Theme Switcher Implementation Plan
 
 **Goal:** Add a persistent Light, Dark, and System appearance control to the responsive msg.0000.chat prototype and publish the complete option 2 redesign.
 
@@ -309,7 +312,7 @@ Save the screenshot as `/tmp/msg-option-2-mobile.png`.
 Use the selected source image:
 
 ```text
-/home/ubuntu/.codex/generated_images/019fe0c1-5751-7633-9029-51b2f0e60036/exec-49542232-a312-4424-a32b-5d36500fb05a.png
+/path/to/design-reference.png
 ```
 
 Create a same-height side-by-side comparison with `/tmp/msg-option-2-desktop.png` and save it as `/tmp/msg-option-2-comparison.png`. Open the combined image and review typography, spacing, colors, content, icons, interaction surfaces, and responsive intent.
@@ -378,7 +381,7 @@ Run:
 
 ```bash
 curl -fsS -o /dev/null -w "%{http_code}\n" http://127.0.0.1:4176/msg-0000-chat/
-curl -sS -o /dev/null -w "%{http_code}\n" https://dev.0000.gold/msg-0000-chat/
+curl -sS -o /dev/null -w "%{http_code}\n" https://preview.example.com/msg-0000-chat/
 ```
 
 Expected: local returns `200`; the public route returns `200` for an authenticated request or `302` to Cloudflare Access for an unauthenticated request.

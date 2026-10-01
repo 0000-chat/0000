@@ -1,3 +1,8 @@
+---
+repo: 0000-chat/0000
+status: current
+---
+
 # Communicator Control Directory: Local Verification
 
 ## Purpose

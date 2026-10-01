@@ -1,3 +1,8 @@
+---
+repo: 0000-chat/0000
+status: current
+---
+
 # Product alignment interview
 
 **Status:** Shared understanding confirmed on 2026-09-13. Implementation remains paused by explicit user instruction.

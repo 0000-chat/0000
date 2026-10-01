@@ -1,3 +1,8 @@
+---
+repo: 0000-chat/0000
+status: current
+---
+
 # Pinned mautrix-whatsapp account-linking contract
 
 Assessment: 2026-09-13. Research only; no live account, send, deploy, or

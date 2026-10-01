@@ -1,3 +1,8 @@
+---
+repo: 0000-chat/0000
+status: current
+---
+
 # Import a service repository into the 0000 monorepo
 
 Use this how-to when a service moves from an independent repository into
@@ -5,8 +10,8 @@ Use this how-to when a service moves from an independent repository into
 local work, GitHub issues, and Codex sessions.
 
 The [Communicator import report](../../services/communicator/docs/migration/2026-09-15-monorepo-import.md)
-contains the run-specific SHAs, counts, mappings, backup manifest, and
-validation output. Keep those facts in the report so this page stays reusable.
+contains public source provenance and validation summaries. Keep workstation
+paths, backup manifests, and session mappings in a private operator record.
 
 Run local work on a `codex/` migration branch. Follow the user's existing
 authorization for the import and issue transfer. Keep the source checkout
@@ -18,7 +23,7 @@ when those actions are within the authorized scope.
 
 Infer the source from the current checkout's Git root and remote. Strip the
 `0000-` prefix from its repository name to derive the service name, and use
-`/home/ubuntu/0000-full/0000/services/<service>` as the destination. Inspect
+`/path/to/0000/services/<service>` as the destination. Inspect
 existing destination content first. Resolve ambiguity if the current root
 is the ecosystem controller or already the monorepo.
 
@@ -41,19 +46,19 @@ Use absolute paths and resolve symlinks before copying a checkout or worktree.
 Use a task directory outside `/tmp` when that filesystem is constrained.
 
 ~~~sh
-source_repo=/home/ubuntu/0000-full/repos/0000-communicator
-destination_repo=/home/ubuntu/0000-full/0000
+source_repo=/path/to/source/0000-communicator
+destination_repo=/path/to/0000
 service_name=communicator
 service_dir="$destination_repo/services/$service_name"
 package_name="@0000/$service_name"
 source_github_repo=0000-chat/0000-communicator
 destination_github_repo=0000-chat/0000
 migration_stamp=$(date -u +%Y%m%dT%H%M%SZ)
-backup_root="/home/ubuntu/0000-full/migration-backups/$service_name-$migration_stamp"
-task_tmp="/home/ubuntu/0000-full/migration-tmp/$service_name-$migration_stamp"
+backup_root="/path/to/private/migration-backups/$service_name-$migration_stamp"
+task_tmp="/path/to/private/migration-tmp/$service_name-$migration_stamp"
 mkdir -p "$backup_root" "$task_tmp"
 chmod 700 "$backup_root" "$task_tmp"
-df -h /tmp /home/ubuntu/0000-full
+df -h /tmp /path/to/private/workspace
 export TMPDIR="$task_tmp"
 ~~~
 
@@ -61,15 +66,12 @@ Do not reuse a backup directory. Preserve the original source checkout.
 
 ## 2. Read instructions and establish scope
 
-Read the controller rules, architecture records, both repository READMEs, and
-all applicable source instructions before selecting a source tip:
+Read both repository READMEs and all applicable `AGENTS.md` instructions before
+selecting a source tip. Resolve service roles, identity dependencies, license
+boundaries, and destination policy from the public repository's current docs.
 
 ~~~sh
-sed -n '1,240p' /home/ubuntu/0000-full/AGENTS.md
-sed -n '1,260p' /home/ubuntu/0000-full/docs/GRAND_VISION.md
-sed -n '1,260p' /home/ubuntu/0000-full/docs/ARCHITECTURE_HANDOFF.md
-sed -n '1,260p' /home/ubuntu/0000-full/workspace.json
-find "$source_repo" -name AGENTS.md -print
+rg --files --hidden -g AGENTS.md "$source_repo" "$destination_repo"
 sed -n '1,220p' "$source_repo/README.md"
 sed -n '1,220p' "$destination_repo/README.md"
 ~~~
@@ -231,7 +233,7 @@ metadata, modes, and live files. Do not scan unrelated workspace databases.
 Inspect each discovered SQLite database read-only and use SQLite's backup API:
 
 ~~~sh
-codex_root=/home/ubuntu/.codex
+codex_root=${CODEX_HOME:-$HOME/.codex}
 mkdir -p "$backup_root/codex"
 find "$codex_root" -type f -print > "$backup_root/codex/session-files.txt"
 find "$codex_root" -type f \( -name '*.db' -o -name '*.sqlite' -o -name '*.sqlite3' \) \

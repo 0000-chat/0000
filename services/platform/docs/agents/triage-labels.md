@@ -1,3 +1,8 @@
+---
+repo: 0000-chat/0000
+status: current
+---
+
 # Triage labels
 
 The skills use five canonical triage roles. This file maps those roles to the label strings in this repository's issue tracker.

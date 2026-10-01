@@ -1,3 +1,8 @@
+---
+repo: 0000-chat/0000
+status: archived
+---
+
 # Built versus agreed scope
 
 Assessment date: 2026-09-13. Baseline: `codex/migration-communicator` at

@@ -1,3 +1,8 @@
+---
+repo: 0000-chat/0000
+status: current
+---
+
 # 0000-streams
 
 This directory contains the Streams service in the public `0000` monorepo.

@@ -1,3 +1,8 @@
+---
+repo: 0000-chat/0000
+status: current
+---
+
 # Agent messaging aggregate plan
 
 Snapshot: 2026-09-13 (Pacific/Auckland)
@@ -136,7 +141,7 @@ acceptance is claimed.
 ## Validation baseline
 
 From the canonical migration root
-(`/home/ubuntu/0000-full/repos/0000-communicator`), `./scripts/check` passed
+(`/path/to/0000/services/communicator`), `./scripts/check` passed
 with the pre-existing planning edits. After relocating the clean aggregate to
 `/tmp/communicator-implementation/aggregate/0000-communicator`, the same
 `./scripts/check` passed there too; the basename now matches
@@ -145,7 +150,7 @@ with the pre-existing planning edits. After relocating the clean aggregate to
 Recovery note: the bounded status sweep initially failed because `/tmp` was
 full. The hypothesis was an inactive generated cache, so the intact 3.4 GB
 `/tmp/cargo-target` tree was moved to
-`/home/ubuntu/0000-full/repos/0000-communicator/node_modules/.cache/tmp-recovery/cargo-target`
+`/path/to/0000/services/communicator/node_modules/.cache/tmp-recovery/cargo-target`
 and `/tmp/cargo-target` was symlinked to that location. `df` then reported
 3.4 GB free on `/tmp` and sandboxed status/check commands worked again. No
 source worktree, dirty branch, or root `.target-health/` cache was copied,

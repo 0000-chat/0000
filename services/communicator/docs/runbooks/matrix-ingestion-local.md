@@ -1,3 +1,8 @@
+---
+repo: 0000-chat/0000
+status: current
+---
+
 # Matrix ingestion local runbook
 
 This runbook is for a local developer or operator exercising the authenticated

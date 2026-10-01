@@ -1,3 +1,8 @@
+---
+repo: 0000-chat/0000
+status: current
+---
+
 # 0000-gateway
 
 `0000-gateway` aims to give clients, tools, and services one clear way to reach

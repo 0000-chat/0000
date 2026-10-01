@@ -1,3 +1,8 @@
+---
+repo: 0000-chat/0000
+status: current
+---
+
 # Matrix Core Recovery
 
 ## Simple explanation
@@ -6,9 +11,9 @@ Backups are valid only after a clean restore test. The restore test uses a diffe
 
 ## Technical procedure
 
-1. Before execution, obtain the user's off-server backend choice and connection details. For this non-Cloudflare stage, prefer SFTP unless the user explicitly selects another backend.
+1. Select an operator-owned off-server encrypted backup backend and verify its connection details. SFTP and S3-compatible storage are supported examples.
 2. For SFTP, set `RESTIC_REPOSITORY=sftp:<user>@<host>:/<absolute-path>` and `RESTIC_PASSWORD_FILE=/srv/communicator/secrets/restic.password` in `/srv/communicator/secrets/restic.env`. Create a dedicated root-readable SSH key, pin the verified server host key in `/root/.ssh/known_hosts`, and require `StrictHostKeyChecking=yes`; never accept a host key non-interactively without comparing its fingerprint to operator-provided evidence.
-3. If the user instead selects an S3-compatible backend, record its endpoint and required `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` variables in the same root-only environment file. Do not assume R2 or create Cloudflare resources in this stage.
+3. For an S3-compatible backend, record its endpoint and required `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` variables in the same root-only environment file. Provision storage separately and verify the intended repository.
 4. Require `restic.env`, the password file, and any backend key to be owned by `root:root` with mode `0600`. Never pass secret values through SSH arguments or write them to Git or operator logs.
 5. Load the verified root-only environment and initialize once with `restic snapshots`; run `restic init` only when the repository is confirmed absent, never to replace an unexpected or inaccessible repository.
 6. From `/opt/communicator/current`, run `sudo bash -c 'set -a; source /srv/communicator/secrets/restic.env; set +a; COMMUNICATOR_RUNTIME_DIR=/srv/communicator ./scripts/backup-core.sh'`.
@@ -41,8 +46,8 @@ WhatsApp, Messenger, and messenger_bridge databases, checks a positive public
 table count, and validates the restored Messenger config with the pinned
 image on --network none. It starts isolated PostgreSQL and Synapse only; the
 restored Messenger and Telegram services are never started and cannot
-reconnect a restored Human session to an external service. Agent onboarding
-is deferred by user and no Agent session is created. Preserve the successful
+reconnect any restored session to an external service. A restore test does not
+create or authenticate an additional account. Preserve the successful
 restore evidence directory until separately approved cleanup.
 ## Telegram bridge recovery
 

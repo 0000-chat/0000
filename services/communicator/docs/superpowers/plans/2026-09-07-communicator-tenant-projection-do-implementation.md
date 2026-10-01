@@ -1,6 +1,14 @@
+---
+repo: 0000-chat/0000
+status: archived
+---
+
 # TenantProjectionDO SQLite Projection Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> Archived design history. Paths, hosts, and identities below are examples.
+> This document records a previous design and is not a current execution
+> instruction or evidence of a live deployment. Use current service docs and
+> runbooks to plan changes.
 
 **Goal:** Add one SQLite-backed `TenantProjectionDO` per tenant that atomically and idempotently projects canonical messaging events into tenant- and identity-scoped conversation/message query state, supports deterministic replay and resumable rebuilds, and remains internal to the Worker in this phase.
 
@@ -1184,7 +1192,7 @@ The PR body must state that this is an internal, rebuildable projection; list ty
 Do not merge with findings, conflicts, dirty/generated drift, failed checks, or unknown GitHub status. After merge:
 
 ```bash
-cd /home/ubuntu/communicator
+cd /path/to/0000/services/communicator
 git pull --ff-only
 git status --short --branch
 git rev-parse HEAD

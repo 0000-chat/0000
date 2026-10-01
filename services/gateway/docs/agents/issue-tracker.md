@@ -1,3 +1,8 @@
+---
+repo: 0000-chat/0000
+status: current
+---
+
 # Issue tracker: GitHub
 
 Gateway issues and specifications are tracked in the `0000-chat/0000`

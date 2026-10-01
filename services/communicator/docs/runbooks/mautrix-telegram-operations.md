@@ -1,11 +1,20 @@
+---
+repo: 0000-chat/0000
+status: current
+---
+
 # Mautrix Telegram Operations
+
+This is a self-hosting procedure. Example Matrix identities use `example.com`;
+substitute the domain and exact identities configured for your deployment.
+Acceptance markers describe expected results, not live account evidence.
 
 ## Simple explanation
 
 The Telegram bridge is one shared, pinned `mautrix-telegram` process inside the
 private Compose network. It translates new Telegram traffic into Matrix rooms
 and keeps each Telegram login's portals separate. The pilot connects only
-`@human:communicator.0000.gold` to the Human's established personal Telegram
+`@human:example.com` to the Human's established personal Telegram
 account. It does not create an Agent Telegram identity, expose a Telegram
 port, enable Matrix federation, or import Telegram history.
 
@@ -17,10 +26,10 @@ host and are never printed, committed, or sent to an operator through Codex.
 ## Identity and isolation contract
 
 - The Human is the only pilot Telegram portal member:
-  `@human:communicator.0000.gold`.
-- `@agent:communicator.0000.gold` must not be able to access Human Telegram
+  `@human:example.com`.
+- `@agent:example.com` must not be able to access Human Telegram
   portals.
-- `@platform-admin:communicator.0000.gold` has break-glass administrative
+- `@platform-admin:example.com` has break-glass administrative
   permission only; it is not an automatic member of Human portal rooms.
 - `bridge.split_portals` is `true` before the first login and must never be
   changed afterward.
@@ -35,7 +44,7 @@ Creating or selecting the Telegram application at
 1. The operator creates or selects the application in the user's Telegram
    account and obtains the API ID and API hash.
 2. The user enters the API ID and API hash directly into the protected
-   Contabo terminal. Do not paste either value into Codex, Element, a ticket,
+   deployment terminal. Do not paste either value into Codex, Element, a ticket,
    a shell argument, Git, or a command transcript.
 3. Store them as the root-owned, mode-`0600` files expected by the runtime
    initialization script under `/srv/communicator/secrets/`. The API ID is
@@ -87,7 +96,7 @@ account during deployment or while this gate is incomplete.
 ## QR login
 
 Pair only the Human identity, from the Human's encrypted private room with
-`@telegrambot:communicator.0000.gold`:
+`@telegrambot:example.com`:
 
 ```text
 login qr
@@ -174,7 +183,7 @@ already bridged events; logout is not a Matrix-history deletion workflow.
 The Platform Admin may use the approved administrative command path to repair
 service state or inspect bounded health results. Break-glass access must be
 time-limited, recorded, and restricted to the smallest necessary operation.
-It does not add `@platform-admin:communicator.0000.gold` to Human portal
+It does not add `@platform-admin:example.com` to Human portal
 rooms, grant access to Human Telegram data, or authorize QR, phone-code,
 2FA, logout, or device-removal actions.
 

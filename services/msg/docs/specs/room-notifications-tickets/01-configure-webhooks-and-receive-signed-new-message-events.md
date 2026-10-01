@@ -1,3 +1,8 @@
+---
+repo: 0000-chat/0000
+status: current
+---
+
 # 01 Configure webhooks and receive signed new-message events
 
 ## What to build

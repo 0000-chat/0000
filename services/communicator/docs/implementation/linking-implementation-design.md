@@ -1,3 +1,8 @@
+---
+repo: 0000-chat/0000
+status: current
+---
+
 # T24 / #14 WhatsApp linking implementation design
 
 Status: read-only preparation, 2026-09-13. No source files, phone/account,

@@ -1,3 +1,8 @@
+---
+repo: 0000-chat/0000
+status: current
+---
+
 # 05 Suppress redundant browser alerts
 
 ## What to build
