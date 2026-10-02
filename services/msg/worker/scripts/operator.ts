@@ -27,18 +27,18 @@ export function parseOperatorCommand(args: readonly string[]): OperatorCommand {
 }
 
 async function main(): Promise<void> {
-  const token = process.env.MSG_OPERATOR_TOKEN;
-  if (!token) throw new Error("MSG_OPERATOR_TOKEN is required in the environment.");
+  const credential = process.env.MSG_PLATFORM_OPERATOR_CREDENTIAL;
+  if (!credential) throw new Error("MSG_PLATFORM_OPERATOR_CREDENTIAL is required in the environment.");
   const command = parseOperatorCommand(process.argv.slice(2));
   const base = operatorBase(productionOrigin);
-  const response = await fetch(buildRequest(base, command, token));
+  const response = await fetch(buildRequest(base, command, credential));
   const body = await response.text();
   if (!response.ok) throw new Error(`Operator request failed with status ${response.status}.`);
   process.stdout.write(`${body}\n`);
 }
 
-function buildRequest(base: URL, command: OperatorCommand, token: string): Request {
-  const headers = { authorization: `Bearer ${token}` };
+function buildRequest(base: URL, command: OperatorCommand, credential: string): Request {
+  const headers = { authorization: `Bearer ${credential}` };
   if (command.kind === "status" || command.kind === "diagnostics") return new Request(new URL(`/operator/v1/${command.kind}`, base), { headers });
   if (command.kind === "reports") {
     const url = new URL("/operator/v1/reports", base);

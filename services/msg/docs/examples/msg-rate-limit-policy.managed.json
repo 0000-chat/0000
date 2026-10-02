@@ -1,0 +1,6 @@
+{
+  "creation": { "limit": 6, "namespace_id": "2026080901" },
+  "reads": { "limit": 60, "namespace_id": "2026080902" },
+  "posts": { "limit": 20, "namespace_id": "2026080903" },
+  "live": { "limit": 10, "namespace_id": "2026080904" }
+}

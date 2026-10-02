@@ -22,6 +22,8 @@ export const REALTIME_INTERNAL_HOST = "tenant-projection.internal";
 export const REALTIME_INTERNAL_PATH = "/realtime";
 export const REALTIME_CONTEXT_HEADER = "X-Communicator-Realtime-Context";
 export const REALTIME_INTERNAL_CONTEXT_HEADER = REALTIME_CONTEXT_HEADER;
+export const REALTIME_PLATFORM_CREDENTIAL_HEADER =
+  "X-Communicator-Platform-Credential";
 export const REALTIME_SOCKET_TAG = "realtime";
 
 type RealtimeReplayStorageRow = {
@@ -29,23 +31,38 @@ type RealtimeReplayStorageRow = {
   event_type: string;
   connection_id: string;
   conversation_id: string;
+  account_id: string;
   occurred_at: string;
   generation: number;
 };
 
 export type RealtimeReplayRow = RealtimeProjectionChange & {
+  readonly account_id: string;
   readonly generation: number;
 };
 
 export type RealtimeBroadcastChange = RealtimeProjectionChange & {
+  readonly account_id: string;
   readonly identity_id: string;
   readonly generation: number;
 };
 
-type RealtimeSocket = Pick<
+export type RealtimeSocket = Pick<
   WebSocket,
   "close" | "deserializeAttachment" | "send" | "serializeAttachment"
 >;
+
+export type RealtimeChangeAuthorizer = (
+  socket: RealtimeSocket,
+  attachment: RealtimeSocketAttachment,
+  change: RealtimeBroadcastChange,
+) => boolean;
+
+type RealtimeGroupedChange = RealtimeProjectionChange & {
+  readonly account_id: string;
+  readonly identity_id: string;
+  readonly generation: number;
+};
 
 const safeInteger = (value: unknown, positive: boolean): value is number =>
   typeof value === "number" &&
@@ -64,8 +81,12 @@ const parseReplayRow = (row: RealtimeReplayStorageRow): RealtimeReplayRow => {
     occurred_at: row.occurred_at,
   });
   if (!parsed.success) throw helperFailure();
+  if (!RealtimeIdSchema.safeParse(row.account_id).success) {
+    throw helperFailure();
+  }
   return {
     ...parsed.data,
+    account_id: row.account_id,
     generation: row.generation,
   };
 };
@@ -96,7 +117,7 @@ export const readRealtimeReplay = (
   validateReplayInput(identityId, generation, afterSequence, limit);
   const rows = sql
     .exec<RealtimeReplayStorageRow>(
-      "SELECT identity_sequence AS sequence, event_type, connection_id, conversation_id, occurred_at, generation FROM projection_changes WHERE identity_id = ? AND generation = ? AND identity_sequence > ? ORDER BY identity_sequence ASC LIMIT ?",
+      "SELECT identity_sequence AS sequence, event_type, account_id, connection_id, conversation_id, occurred_at, generation FROM projection_changes WHERE identity_id = ? AND generation = ? AND identity_sequence > ? ORDER BY identity_sequence ASC LIMIT ?",
       identityId,
       generation,
       afterSequence,
@@ -189,14 +210,15 @@ const advanceRealtimeAttachment = (
 
 const groupedRealtimeChanges = (
   changes: readonly RealtimeBroadcastChange[],
-): Map<string, { generation: number; changes: RealtimeProjectionChange[] }> => {
+): Map<string, { generation: number; changes: RealtimeGroupedChange[] }> => {
   const grouped = new Map<
     string,
-    { generation: number; changes: RealtimeProjectionChange[] }
+    { generation: number; changes: RealtimeGroupedChange[] }
   >();
   for (const change of changes) {
     if (
       !RealtimeIdSchema.safeParse(change.identity_id).success ||
+      !RealtimeIdSchema.safeParse(change.account_id).success ||
       !safeInteger(change.generation, true)
     ) {
       continue;
@@ -214,15 +236,47 @@ const groupedRealtimeChanges = (
     if (existing === undefined) {
       grouped.set(change.identity_id, {
         generation: change.generation,
-        changes: [parsed.data],
+        changes: [
+          {
+            ...parsed.data,
+            account_id: change.account_id,
+            identity_id: change.identity_id,
+            generation: change.generation,
+          },
+        ],
       });
       continue;
     }
     if (existing.generation === change.generation) {
-      existing.changes.push(parsed.data);
+      existing.changes.push({
+        ...parsed.data,
+        account_id: change.account_id,
+        identity_id: change.identity_id,
+        generation: change.generation,
+      });
     }
   }
   return grouped;
+};
+
+const publicRealtimeChange = (
+  change: RealtimeGroupedChange,
+): RealtimeProjectionChange => {
+  const {
+    account_id: _accountId,
+    identity_id: _identityId,
+    generation: _generation,
+    ...publicChange
+  } = change;
+  return publicChange;
+};
+
+export const realtimeLeaseIsCurrent = (
+  attachment: Pick<RealtimeSocketAttachment, "lease_expires_at">,
+  now = Date.now(),
+): boolean => {
+  const expiresAt = Date.parse(attachment.lease_expires_at);
+  return Number.isSafeInteger(expiresAt) && expiresAt > now;
 };
 
 /** Broadcast only newly persisted, identity-scoped projection metadata. */
@@ -230,6 +284,7 @@ export const broadcastRealtimeChanges = (
   sockets: readonly RealtimeSocket[],
   tenantId: string,
   changes: readonly RealtimeBroadcastChange[],
+  authorizeChange?: RealtimeChangeAuthorizer,
 ): void => {
   if (changes.length === 0) return;
   const grouped = groupedRealtimeChanges(changes);
@@ -242,6 +297,10 @@ export const broadcastRealtimeChanges = (
     }
     if (attachment.tenant_id !== tenantId) {
       closeRealtimeSocket(socket, 1008, "invalid realtime attachment");
+      continue;
+    }
+    if (!realtimeLeaseIsCurrent(attachment)) {
+      closeRealtimeSocket(socket, 1000, "realtime lease expired");
       continue;
     }
 
@@ -263,10 +322,30 @@ export const broadcastRealtimeChanges = (
         const pending = group.changes.filter(
           (change) => change.sequence > position.sequence,
         );
-        for (const frameChanges of batchRealtimeChanges(pending)) {
+        if (pending.length === 0) continue;
+
+        let denied = false;
+        const permitted: RealtimeGroupedChange[] = [];
+        for (const change of pending) {
+          if (
+            authorizeChange !== undefined &&
+            !authorizeChange(socket, currentAttachment, change)
+          ) {
+            denied = true;
+            break;
+          }
+          permitted.push(change);
+        }
+
+        const publicChanges = permitted.map(publicRealtimeChange);
+        for (const frameChanges of batchRealtimeChanges(publicChanges)) {
           const first = frameChanges[0];
           const last = frameChanges.at(-1);
           if (first === undefined || last === undefined) continue;
+          if (!realtimeLeaseIsCurrent(currentAttachment)) {
+            closeRealtimeSocket(socket, 1000, "realtime lease expired");
+            break;
+          }
           sendRealtimeFrame(socket, {
             schema_version: 1,
             type: "projection.changes",
@@ -285,6 +364,31 @@ export const broadcastRealtimeChanges = (
             last.sequence,
           );
         }
+
+        if (denied) {
+          const latest = pending.at(-1);
+          if (latest === undefined) continue;
+          if (!realtimeLeaseIsCurrent(currentAttachment)) {
+            closeRealtimeSocket(socket, 1000, "realtime lease expired");
+            continue;
+          }
+          sendRealtimeFrame(socket, {
+            schema_version: 1,
+            type: "reset_required",
+            tenant_id: tenantId,
+            identity_id: subscription.identity_id,
+            generation: group.generation,
+            latest_sequence: latest.sequence,
+            reason: "history_unavailable",
+          });
+          currentAttachment = advanceRealtimeAttachment(
+            socket,
+            currentAttachment,
+            subscription.identity_id,
+            group.generation,
+            latest.sequence,
+          );
+        }
       }
     } catch {
       closeRealtimeSocket(socket, 1011, "realtime socket unavailable");
@@ -297,6 +401,10 @@ export const resetRealtimeSocketsForRebuild = (
   sockets: readonly RealtimeSocket[],
   tenantId: string,
   nextGeneration: number,
+  authorizeSocket: (
+    socket: RealtimeSocket,
+    attachment: RealtimeSocketAttachment,
+  ) => boolean = () => true,
 ): void => {
   if (
     !RealtimeIdSchema.safeParse(tenantId).success ||
@@ -311,8 +419,22 @@ export const resetRealtimeSocketsForRebuild = (
       closeRealtimeSocket(socket, 1008, "invalid realtime attachment");
       continue;
     }
+    if (!realtimeLeaseIsCurrent(attachment)) {
+      closeRealtimeSocket(socket, 1000, "realtime lease expired");
+      continue;
+    }
+    if (!authorizeSocket(socket, attachment)) {
+      closeRealtimeSocket(socket, 1008, "realtime authority revoked");
+      continue;
+    }
+    let expiredDuringReset = false;
     try {
       for (const subscription of attachment.subscriptions) {
+        if (!realtimeLeaseIsCurrent(attachment)) {
+          closeRealtimeSocket(socket, 1000, "realtime lease expired");
+          expiredDuringReset = true;
+          break;
+        }
         const frame: RealtimeResetRequiredFrame =
           RealtimeResetRequiredFrameSchema.parse({
             schema_version: 1,
@@ -329,6 +451,7 @@ export const resetRealtimeSocketsForRebuild = (
       closeRealtimeSocket(socket, 1011, "realtime socket unavailable");
       continue;
     }
+    if (expiredDuringReset) continue;
     closeRealtimeSocket(socket, 1012, "projection rebuild in progress");
   }
 };
@@ -369,7 +492,17 @@ export const realtimeSocketCapacity = {
   principal: MAX_REALTIME_SOCKETS_PER_PRINCIPAL,
 } as const;
 
-export const realtimeConnectionExpiry = (now = Date.now()): string =>
-  new Date(now + REALTIME_CONNECTION_TTL_MS).toISOString();
+export const realtimeConnectionExpiry = (
+  now = Date.now(),
+  maximum?: string,
+): string => {
+  const nominal = now + REALTIME_CONNECTION_TTL_MS;
+  const maximumMs =
+    maximum === undefined ? Number.POSITIVE_INFINITY : Date.parse(maximum);
+  const expiry = Number.isSafeInteger(maximumMs)
+    ? Math.min(nominal, maximumMs)
+    : nominal;
+  return new Date(expiry).toISOString();
+};
 
 export { parseRealtimeAttachment };

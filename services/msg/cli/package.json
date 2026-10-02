@@ -29,8 +29,8 @@
     "build": "bun build src/index.ts --target=node --outfile=dist/cli.js",
     "lint": "oxlint --config ../.oxlintrc.json src scripts",
     "prepack": "bun run build",
-    "test": "bun test src scripts",
-    "test:pack": "bun test scripts/pack.test.ts",
+    "test": "bun test ./src",
+    "test:pack": "bun test ./scripts/pack.test.ts",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "check:application": "bun run lint && bun run typecheck && bun run test && bun run build && bun run test:pack"
   },

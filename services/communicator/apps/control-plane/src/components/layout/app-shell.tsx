@@ -12,6 +12,7 @@ import {
 import {
   IdentityProvider,
   IdentitySwitcher,
+  useIdentityContext,
 } from "@/components/identity/identity-switcher";
 import { cn } from "@/lib/utils";
 import { EnvironmentBanner } from "./environment-banner";
@@ -42,6 +43,59 @@ function NavigationLinks({ onNavigate }: { onNavigate?: () => void }) {
         </Link>
       ))}
     </nav>
+  );
+}
+
+function AuthenticationBanner() {
+  const {
+    authStatus,
+    authError,
+    login,
+    retrySession,
+    logout,
+    acceptContextChange,
+  } = useIdentityContext();
+  if (authStatus === "loading" || authStatus === "authenticated") return null;
+
+  const copy =
+    authStatus === "unavailable"
+      ? "Platform is temporarily unavailable. Your workspace and pending draft remain open."
+      : authStatus === "context_changed"
+        ? "Your renewed login has a different organization or identity. Review it before continuing."
+        : "Sign in to read and change protected Communicator data.";
+  return (
+    <div
+      role="status"
+      className="flex flex-wrap items-center gap-3 border-b bg-muted/50 px-4 py-2 text-sm sm:px-6"
+    >
+      <span className="min-w-0 flex-1">{copy}</span>
+      {authError && authStatus !== "context_changed" ? (
+        <span className="sr-only">{authError}</span>
+      ) : null}
+      {authStatus === "context_changed" ? (
+        <Button size="sm" onClick={acceptContextChange}>
+          Review and continue
+        </Button>
+      ) : (
+        <>
+          <Button size="sm" onClick={login}>
+            Sign in in a new tab
+          </Button>
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => void retrySession()}
+          >
+            Retry
+          </Button>
+          {authStatus === "unavailable" ? (
+            <Button size="sm" variant="ghost" onClick={() => void logout()}>
+              Log out
+            </Button>
+          ) : null}
+        </>
+      )}
+    </div>
   );
 }
 
@@ -86,6 +140,7 @@ export function AppShell() {
             </div>
           </div>
         </header>
+        <AuthenticationBanner />
         <div
           className={cn(
             "grid min-h-0 w-full flex-1",

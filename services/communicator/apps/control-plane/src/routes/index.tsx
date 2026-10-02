@@ -5,17 +5,21 @@ import { apiClient } from "@/lib/api/client";
 import { queryKeys } from "@/lib/api/query-keys";
 
 function OverviewRoute() {
-  const { activeIdentity, isLoading: identityLoading } = useIdentityContext();
+  const {
+    activeIdentity,
+    isLoading: identityLoading,
+    authStatus,
+  } = useIdentityContext();
   const identityId = activeIdentity?.id ?? "";
   const connectionsQuery = useQuery({
     queryKey: queryKeys.connections(identityId),
     queryFn: () => apiClient.getConnections(identityId),
-    enabled: Boolean(identityId),
+    enabled: Boolean(identityId && authStatus === "authenticated"),
   });
   const commandsQuery = useQuery({
     queryKey: queryKeys.commands(identityId),
     queryFn: () => apiClient.getCommands(identityId),
-    enabled: Boolean(identityId),
+    enabled: Boolean(identityId && authStatus === "authenticated"),
   });
   const connectionCount = connectionsQuery.data?.length ?? 0;
   const commandCount = commandsQuery.data?.length ?? 0;

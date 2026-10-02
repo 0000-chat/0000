@@ -9,11 +9,15 @@ import { ingestionError, ingestionErrorResponse } from "../ingestion/errors";
 import { isIngressEnabled } from "../ingestion/config";
 import { AuthenticationError, parseBearerToken } from "./bearer";
 import { OidcVerificationError, type TokenVerifier } from "./oidc";
+import type { PlatformAuthenticator } from "./platform";
+import { resolvePlatformBinding } from "../control-directory/platform-bindings";
 
 export type IngestionAuthorization = {
   service_principal_id: string;
   issuer: string;
   token_id: string;
+  platform_binding_id?: string;
+  capabilities?: readonly string[];
 };
 
 export type IngestionAuthorizationVariables = {
@@ -28,7 +32,10 @@ export type IngestionServiceResolver = (
 ) => Promise<IngestionDirectoryResult<ActiveIngestionService>>;
 
 export type IngestionAuthorizationMiddlewareOptions = {
-  getVerifier: (env: Cloudflare.Env) => TokenVerifier;
+  getVerifier?: (env: Cloudflare.Env) => TokenVerifier;
+  getPlatformAuthenticator?: (
+    env: Cloudflare.Env,
+  ) => PlatformAuthenticator | null;
   resolveService?: IngestionServiceResolver;
 };
 
@@ -66,11 +73,46 @@ export function createIngestionAuthorizationMiddleware(
 
     try {
       const token = parseBearerToken(context.req.header("Authorization"));
-      const subject = await options.getVerifier(context.env).verify(token);
-      if (!subject.token_id) return respond(401, "ingestion_unauthenticated");
-
       const database = context.env.CONTROL_DB;
       if (!database) return respond(503, "ingestion_unavailable");
+
+      if (options.getPlatformAuthenticator !== undefined) {
+        const authenticator = options.getPlatformAuthenticator(context.env);
+        if (!authenticator) return respond(503, "ingestion_unavailable");
+        const authenticated = await authenticator.authenticate(token);
+        if (authenticated.status === "authority_unavailable") {
+          return respond(503, "ingestion_unavailable");
+        }
+        if (
+          authenticated.status !== "authenticated" ||
+          authenticated.principal.kind !== "service" ||
+          !authenticated.principal.capabilities.includes("ingestion.write")
+        ) {
+          return respond(401, "ingestion_unauthenticated");
+        }
+        const binding = await resolvePlatformBinding(
+          database,
+          authenticated.principal,
+        );
+        if (!binding.ok) {
+          return binding.code === "not_found"
+            ? respond(404, "ingestion_not_found")
+            : respond(503, "ingestion_unavailable");
+        }
+        context.set("ingestionAuthorization", {
+          service_principal_id: binding.binding.localPrincipalId,
+          issuer: binding.binding.authority,
+          token_id: authenticated.principal.credentialId,
+          platform_binding_id: binding.binding.bindingId,
+          capabilities: authenticated.principal.capabilities,
+        });
+        await next();
+        return;
+      }
+
+      if (!options.getVerifier) return respond(503, "ingestion_unavailable");
+      const subject = await options.getVerifier(context.env).verify(token);
+      if (!subject.token_id) return respond(401, "ingestion_unauthenticated");
 
       const result = await resolveService(
         database,

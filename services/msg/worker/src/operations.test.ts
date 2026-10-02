@@ -139,16 +139,38 @@ test("stores opaque keyed creation identifiers and fingerprints", { timeout: 20_
   expect(row?.plan_envelope).not.toContain("management");
 });
 
-test("replays a complete pre-plan creation receipt for 24-hour compatibility", { timeout: 20_000 }, async () => {
-  const { d1, operations } = await store({ now: 1_000 }, ["0001_operations.sql", "0002_operations_retention.sql"]);
+test("does not recover an unscoped pre-plan receipt", { timeout: 20_000 }, async () => {
+  const { d1, operations } = await store({ now: 1_000 });
   const { wait: _wait, ...legacyCreated } = created;
   const envelope = await (await import("./operations-crypto")).encryptOperationRecord(key, "creation_idempotency", "legacy-key", legacyCreated);
-  await d1.prepare("INSERT INTO creation_idempotency (idempotency_key, request_fingerprint, state, response_envelope, lease_token, created_at, updated_at, expires_at) VALUES (?, ?, 'complete', ?, '', ?, ?, ?)").bind("legacy-key", "legacy-fingerprint", envelope, 1, 1, 86_400_001).run();
-  await expect(operations.claimCreation("legacy-key", "legacy-fingerprint")).resolves.toEqual({ kind: "complete", response: legacyCreated });
+  await d1.prepare("INSERT INTO creation_idempotency (idempotency_key, request_fingerprint, state, response_envelope, plan_envelope, lease_token, created_at, updated_at, expires_at) VALUES (?, ?, 'complete', ?, '', '', ?, ?, ?)").bind("legacy-key", "legacy-fingerprint", envelope, 1, 1, 86_400_001).run();
+  const claim = await operations.claimCreation("legacy-key", "legacy-fingerprint", "guest-a");
+  expect(claim.kind).toBe("claimed");
+  expect(claim.kind === "complete" ? claim.response : undefined).not.toEqual(legacyCreated);
 });
 
-test("holds an unexpired pre-plan pending row without creating a new room", { timeout: 20_000 }, async () => {
-  const { d1, operations } = await store({ now: 1_000 }, ["0001_operations.sql", "0002_operations_retention.sql"]);
-  await d1.prepare("INSERT INTO creation_idempotency (idempotency_key, request_fingerprint, state, response_envelope, lease_token, created_at, updated_at, expires_at) VALUES (?, ?, 'pending', NULL, 'legacy', ?, ?, ?)").bind("legacy-key", "legacy-fingerprint", 1, 1, 86_400_001).run();
-  await expect(operations.claimCreation("legacy-key", "legacy-fingerprint")).resolves.toEqual({ kind: "pending" });
+test("does not hold an unscoped pre-plan pending row", { timeout: 20_000 }, async () => {
+  const { d1, operations } = await store({ now: 1_000 });
+  await d1.prepare("INSERT INTO creation_idempotency (idempotency_key, request_fingerprint, state, response_envelope, plan_envelope, lease_token, created_at, updated_at, expires_at) VALUES (?, ?, 'pending', NULL, '', 'legacy', ?, ?, ?)").bind("legacy-key", "legacy-fingerprint", 1, 1, 86_400_001).run();
+  const claim = await operations.claimCreation("legacy-key", "legacy-fingerprint", "guest-a");
+  expect(claim.kind).toBe("claimed");
+});
+
+test("scopes creation plans and receipts by stable guest control", { timeout: 20_000 }, async () => {
+  const { operations } = await store({ now: 1_000 });
+  const first = await operations.claimCreation("same-key", "fingerprint", "guest-a");
+  if (first.kind !== "claimed") throw new Error("Expected the first guest to claim the plan.");
+  await operations.completeCreation("same-key", first.leaseToken, created, "guest-a");
+  await expect(operations.claimCreation("same-key", "fingerprint", "guest-a")).resolves.toEqual({ kind: "complete", response: created });
+  const second = await operations.claimCreation("same-key", "fingerprint", "guest-b");
+  expect(second.kind).toBe("claimed");
+  if (second.kind === "claimed") expect(second.plan.room).not.toBe(first.plan.room);
+});
+
+test("persists the owner grant reference for an idempotent retry", { timeout: 20_000 }, async () => {
+  const { operations } = await store({ now: 1_000 });
+  const first = await operations.claimCreation("same-key", "fingerprint", "guest-a");
+  if (first.kind !== "claimed") throw new Error("Expected the first guest to claim the plan.");
+  await operations.completeCreation("same-key", first.leaseToken, created, "guest-a", "owner-grant-a");
+  await expect(operations.claimCreation("same-key", "fingerprint", "guest-a")).resolves.toEqual({ kind: "complete", response: created, ownerGrantId: "owner-grant-a" });
 });

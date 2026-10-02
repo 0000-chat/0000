@@ -52,22 +52,23 @@ export interface WaitSocket {
 
 export interface WaitOptions extends WaitCommand {
   readonly fetch: typeof globalThis.fetch;
+  readonly serviceOrigin?: string;
   readonly signal?: AbortSignal;
   readonly sleep?: (delayMs: number, signal?: AbortSignal) => Promise<void>;
   readonly status?: (text: string) => void;
   readonly setTimer?: (callback: () => void, delayMs: number) => ReturnType<typeof setTimeout>;
   readonly clearTimer?: (timer: ReturnType<typeof setTimeout>) => void;
-  readonly websocket: (url: string) => WaitSocket;
+  readonly websocket: (url: string, init?: { readonly headers?: Record<string, string> }) => WaitSocket;
 }
 
 export class WaitSignalError extends Error {
   constructor() { super("The msg wait was interrupted."); }
 }
 
-export function parseWaitCommand(args: readonly string[]): WaitCommand {
+export function parseWaitCommand(args: readonly string[], serviceOrigin?: string): WaitCommand {
   const usage = "Usage: msg wait <conversation-url> --after <nonnegative integer> [--timeout <duration>]";
   if (args[0] !== "wait" || args.length < 4) throw new Error(usage);
-  const conversationUrl = validateConversationUrl(args[1] ?? "");
+  const conversationUrl = validateConversationUrl(args[1] ?? "", serviceOrigin);
   const after = parseNonnegativeInteger(args[3] ?? "", "--after");
   if (args[2] !== "--after") throw new Error("--after must be a nonnegative safe integer.");
   const timeout = args.slice(4);
@@ -77,7 +78,7 @@ export function parseWaitCommand(args: readonly string[]): WaitCommand {
 }
 
 export async function waitForMessages(options: WaitOptions): Promise<WaitResult> {
-  validateConversationUrl(options.conversationUrl);
+  validateConversationUrl(options.conversationUrl, options.serviceOrigin);
   validateNonnegativeInteger(options.after, "after");
   const timeoutMs = validateTimeout(options.timeoutMs);
   if (options.signal?.aborted) throw new WaitSignalError();
@@ -189,7 +190,8 @@ export async function waitForMessages(options: WaitOptions): Promise<WaitResult>
       reconnecting = false;
       if (settled) return;
       try {
-        const connectedSocket = options.websocket(liveUrl(options.conversationUrl, options.after));
+        const socketUrl = liveUrl(options.conversationUrl, options.after);
+        const connectedSocket = options.websocket(socketUrl);
         socket = connectedSocket;
         connectedSocket.addEventListener("message", (event) => {
           if (socket !== connectedSocket) return;
@@ -383,11 +385,13 @@ function sleep(delayMs: number, options: WaitOptions, registerCancel: (cancel: (
   });
 }
 
-export function validateConversationUrl(value: string): string {
+export function validateConversationUrl(value: string, serviceOrigin = "https://msg.0000.chat"): string {
   let url: URL;
   try { url = new URL(value); } catch { throw new Error("The conversation URL must be https://msg.0000.chat/{room}."); }
-  if (url.protocol !== "https:" || url.hostname !== "msg.0000.chat" || url.port || url.username || url.password || url.search || url.hash || !/^\/[^/]+$/.test(url.pathname)) {
-    throw new Error("The conversation URL must be https://msg.0000.chat/{room}.");
+  let expected: URL;
+  try { expected = new URL(serviceOrigin); } catch { throw new Error("MSG_SERVICE_ORIGIN is invalid."); }
+  if (url.origin !== expected.origin || url.protocol !== expected.protocol || url.username || url.password || url.search || url.hash || !/^\/[^/]+$/.test(url.pathname)) {
+    throw new Error(`The conversation URL must be ${expected.origin}/{room}.`);
   }
   return url.toString();
 }

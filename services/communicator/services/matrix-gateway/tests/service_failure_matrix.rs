@@ -13,9 +13,11 @@ use async_trait::async_trait;
 use chrono::{DateTime, TimeZone, Utc};
 use communicator_matrix_gateway::{
     batch::{RoutedEvent, WindowSource, build_window},
+    config::GatewayConfig,
+    credentials::load_ingestion_service_credential,
     crypto::Keyring,
     crypto_outbox::{ExactMatrixRequest, RawMatrixResponse},
-    ingestion::{BatchSink, Delivery, PendingBatch},
+    ingestion::{BatchSink, Delivery, IngestionClient, PendingBatch},
     ledger::NewLiveWindow,
     matrix::{
         CryptoAckProof, FetchedMatrixSync, LimitedTimelineGap, MATRIX_CRYPTO_ACK_UNRECOVERABLE,
@@ -39,6 +41,7 @@ use rusqlite::{Connection, params};
 use sha2::{Digest, Sha256};
 use tempfile::{TempDir, tempdir};
 use tokio::sync::Notify;
+use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate, matchers};
 
 const INITIAL_TOKEN: &[u8] = b"initial-token";
 const NOW_MILLIS: i64 = 1_757_500_000_000;
@@ -93,6 +96,34 @@ fn fetched_sync(request_token: &[u8], next_token: &[u8], body: &[u8]) -> Fetched
         SecretBytes::from_text(body, 64 * 1024).expect("response body"),
     )
     .expect("valid fetched response")
+}
+
+fn response_sequence(responses: Vec<ResponseTemplate>) -> impl Respond {
+    let responses = Arc::new(responses);
+    let next = Arc::new(AtomicUsize::new(0));
+    move |_request: &Request| {
+        let index = next.fetch_add(1, Ordering::SeqCst);
+        responses[index.min(responses.len() - 1)].clone()
+    }
+}
+
+fn response_for_batch(tenant_id: &str, batch_id: &str) -> ResponseTemplate {
+    ResponseTemplate::new(202).set_body_raw(
+        format!(
+            "{{\"schema_version\":1,\"tenant_id\":\"{tenant_id}\",\"batch_id\":\"{batch_id}\",\"status\":\"accepted\",\"archive_status\":\"created\"}}"
+        ),
+        "application/json",
+    )
+}
+
+fn request_header(request: &Request, name: &str) -> String {
+    request
+        .headers
+        .get(name)
+        .unwrap_or_else(|| panic!("missing request header {name}"))
+        .to_str()
+        .expect("header is valid UTF-8")
+        .to_owned()
 }
 
 #[derive(Clone)]
@@ -517,12 +548,64 @@ fn service_with(
     DeterministicJitter,
     FakeShutdown,
 > {
-    GatewayService::new(
+    service_with_sink(
         fixture.store.take().expect("fixture store is available"),
         processor,
         transport,
+        jitter,
+        shutdown,
         FakeIngestionSink,
-        ManualClock::new(timestamp(NOW_MILLIS)),
+    )
+}
+
+fn service_with_sink<I: BatchSink>(
+    store: Store,
+    processor: FakeProcessor,
+    transport: FakeMatrixTransport,
+    jitter: DeterministicJitter,
+    shutdown: FakeShutdown,
+    sink: I,
+) -> GatewayService<
+    FakeMatrixTransport,
+    FakeProcessor,
+    I,
+    ManualClock,
+    DeterministicJitter,
+    FakeShutdown,
+> {
+    service_with_sink_at(
+        store,
+        processor,
+        transport,
+        jitter,
+        shutdown,
+        sink,
+        timestamp(NOW_MILLIS),
+    )
+}
+
+fn service_with_sink_at<I: BatchSink>(
+    store: Store,
+    processor: FakeProcessor,
+    transport: FakeMatrixTransport,
+    jitter: DeterministicJitter,
+    shutdown: FakeShutdown,
+    sink: I,
+    now: DateTime<Utc>,
+) -> GatewayService<
+    FakeMatrixTransport,
+    FakeProcessor,
+    I,
+    ManualClock,
+    DeterministicJitter,
+    FakeShutdown,
+> {
+    GatewayService::new(
+        store,
+        processor,
+        transport,
+        sink,
+        ManualClock::new(now),
         jitter,
         shutdown,
         RetryPolicy::new(Duration::from_millis(100), Duration::from_secs(5), 10)
@@ -564,6 +647,64 @@ fn append_inbox(
         .expect("append raw sync")
         .as_str()
         .to_owned()
+}
+
+fn append_pending_live_batch(fixture: &mut StoreFixture) -> (String, String, Vec<u8>) {
+    let inbox_id = append_test_inbox(fixture, timestamp(NOW_MILLIS - 1_000));
+    let store = fixture.store.as_mut().expect("fixture store");
+    store
+        .record_sdk_processing(&inbox_id, &[])
+        .expect("persist empty crypto set");
+    store
+        .mark_crypto_drained(&inbox_id)
+        .expect("drain empty crypto set");
+    let window = build_window(
+        WindowSource::live(b"next-token"),
+        timestamp(NOW_MILLIS),
+        &[RoutedEvent::new("route_demo", canonical_delivery_event())],
+    )
+    .expect("build deterministic delivery window");
+    let batch = window.batches.first().expect("one delivery batch");
+    let tenant_id = batch.tenant_id().to_owned();
+    let batch_id = batch.batch_id.clone();
+    let request_bytes = batch.exact_request_bytes().to_vec();
+    let window_id = expected_window_id(&inbox_id);
+    store
+        .create_collecting_live_window(
+            &inbox_id,
+            NewLiveWindow::new(window_id.clone(), timestamp(NOW_MILLIS), 0)
+                .expect("collecting window"),
+        )
+        .expect("create collecting window");
+    store
+        .finalize_live_window(&inbox_id, &window_id, &window, &[], &[])
+        .expect("persist exact delivery bytes");
+    (tenant_id, batch_id, request_bytes)
+}
+
+fn ingestion_credential_config(path: &Path) -> GatewayConfig {
+    GatewayConfig::from_json(
+        &serde_json::json!({
+            "homeserver_url": "http://synapse:8008",
+            "matrix_user_id": "@gateway:example.org",
+            "matrix_store_dir": "/var/lib/communicator/matrix",
+            "state_db_path": "/var/lib/communicator/state.sqlite3",
+            "ingestion_base_url": "https://ingest.example.org",
+            "ingestion_service_credential_file": path,
+            "matrix_password_file": "/run/secrets/matrix-password",
+            "matrix_store_passphrase_file": "/run/secrets/matrix-store-passphrase",
+            "state_key_file": "/run/secrets/state-key",
+            "request_timeout_secs": 10,
+            "sync_timeout_secs": 30
+        })
+        .to_string(),
+    )
+    .expect("valid startup credential config")
+}
+
+fn write_protected_credential(path: &Path, value: &[u8]) {
+    fs::write(path, value).expect("write protected credential");
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600)).expect("protect credential file");
 }
 
 fn observed_message_event() -> ObservedMatrixEvent {
@@ -815,6 +956,112 @@ async fn run_exits_when_shutdown_interrupts_a_persisted_retry_wait() {
         .expect("service task must join")
         .expect("shutdown must return successfully");
     assert_eq!(fetch_calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn unauthorized_ingestion_stops_run_and_restart_recovers_exact_pending_batch() {
+    let mut fixture = store_fixture();
+    let (tenant_id, batch_id, expected_body) = append_pending_live_batch(&mut fixture);
+    let credential_path = fixture._directory.path().join("ingestion-credential");
+    write_protected_credential(&credential_path, b"old-ingestion-credential\n");
+    let config = ingestion_credential_config(&credential_path);
+    let server = MockServer::start().await;
+    Mock::given(matchers::path("/internal/v1/ingestion/batches"))
+        .respond_with(response_sequence(vec![
+            ResponseTemplate::new(401),
+            response_for_batch(&tenant_id, &batch_id),
+        ]))
+        .mount(&server)
+        .await;
+
+    let sink = IngestionClient::new_for_test(
+        server.uri(),
+        load_ingestion_service_credential(&config).expect("old ingestion credential"),
+        Duration::from_secs(1),
+    )
+    .expect("loopback ingestion client");
+    let (jitter, _) = DeterministicJitter::new(0);
+    let mut service = service_with_sink(
+        fixture.store.take().expect("fixture store is available"),
+        FakeProcessor::at_digest(Some(Sha256::digest(INITIAL_TOKEN).into())),
+        FakeMatrixTransport::with_fetch(fetched_sync(
+            INITIAL_TOKEN,
+            b"unused-fetch",
+            br#"{"next_batch":"unused-fetch"}"#,
+        )),
+        jitter,
+        FakeShutdown::new(),
+        sink,
+    );
+
+    let error = tokio::time::timeout(Duration::from_secs(3), service.run())
+        .await
+        .expect("401 must stop the coordinator without a replay loop")
+        .expect_err("401 must return the stable paused error");
+    assert_eq!(error.code(), "ingestion_unauthorized");
+    drop(service);
+
+    let requests = server.received_requests().await.expect("401 request");
+    assert_eq!(requests.len(), 1, "paused delivery must not replay in run");
+    assert_eq!(
+        request_header(&requests[0], "authorization"),
+        "Bearer old-ingestion-credential"
+    );
+    assert_eq!(requests[0].body, expected_body);
+
+    let inspection_store = Store::open(&fixture.path, keyring()).expect("reopen pending store");
+    let pending = inspection_store
+        .next_pending_ingestion_batch(timestamp(NOW_MILLIS + 2))
+        .expect("inspect pending batch")
+        .expect("401 must retain pending batch");
+    assert_eq!(
+        pending.batch().exact_request_bytes(),
+        expected_body.as_slice()
+    );
+    drop(inspection_store);
+
+    let replacement_path = credential_path.with_extension("replacement");
+    write_protected_credential(&replacement_path, b"replacement-ingestion-credential\n");
+    fs::rename(&replacement_path, &credential_path).expect("atomically replace credential");
+    let replacement_sink = IngestionClient::new_for_test(
+        server.uri(),
+        load_ingestion_service_credential(&ingestion_credential_config(&credential_path))
+            .expect("replacement ingestion credential"),
+        Duration::from_secs(1),
+    )
+    .expect("replacement loopback ingestion client");
+    let reopened_store = Store::open(&fixture.path, keyring()).expect("restart store");
+    let (jitter, _) = DeterministicJitter::new(0);
+    let mut restarted = service_with_sink_at(
+        reopened_store,
+        FakeProcessor::at_digest(Some(Sha256::digest(INITIAL_TOKEN).into())),
+        FakeMatrixTransport::with_fetch(fetched_sync(
+            INITIAL_TOKEN,
+            b"unused-fetch",
+            br#"{"next_batch":"unused-fetch"}"#,
+        )),
+        jitter,
+        FakeShutdown::new(),
+        replacement_sink,
+        timestamp(NOW_MILLIS + 2),
+    );
+    restarted
+        .reconcile_startup()
+        .await
+        .expect("explicit restart reconciliation");
+    assert_eq!(
+        restarted.tick().await.expect("replacement delivery"),
+        ServiceAction::AcceptedIngestionBatch
+    );
+    drop(restarted);
+
+    let requests = server.received_requests().await.expect("recovery requests");
+    assert_eq!(requests.len(), 2);
+    assert_eq!(
+        request_header(&requests[1], "authorization"),
+        "Bearer replacement-ingestion-credential"
+    );
+    assert_eq!(requests[1].body, expected_body);
 }
 
 #[tokio::test(start_paused = true)]

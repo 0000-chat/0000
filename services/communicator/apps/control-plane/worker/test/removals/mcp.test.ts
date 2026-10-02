@@ -6,6 +6,7 @@ import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/
 import { OpenAPIHono } from "@hono/zod-openapi";
 import type {
   CanonicalEventEnvelope,
+  RemovalAuthority,
   SessionResponse,
 } from "@communicator/contracts";
 import {
@@ -40,6 +41,7 @@ import {
   purgeRecordedRemoval,
   recordRemovalWithArchivePurge,
 } from "../../archive/lifecycle";
+import { readArchivePurgeForRemoval } from "../../archive/purge";
 import {
   cleanupArchiveTenant as cleanupArchiveObjects,
   makeEvent,
@@ -317,6 +319,29 @@ const seedArchiveMessage = async (
   return { event, dataKey: committed.manifest.data_key };
 };
 
+const purgeAfterStoredSafetyDeadline = async (
+  authority: RemovalAuthority,
+): Promise<void> => {
+  const archive = await readArchivePurgeForRemoval(
+    workerEnv.CONTROL_DB,
+    tenantId,
+    authority.id,
+  );
+  expect(archive).not.toBeNull();
+  expect(archive?.operation.status).toBe("pending_deletion");
+  const safetyDeadline = Date.parse(archive?.operation.safety_deadline ?? "");
+  expect(Number.isFinite(safetyDeadline)).toBe(true);
+  await purgeRecordedRemoval(
+    {
+      database: workerEnv.CONTROL_DB,
+      bucket: archiveBucket,
+      safetyWindowMs: 0,
+    },
+    authority,
+    new Date(safetyDeadline + 1),
+  );
+};
+
 describe("removal administrator API and MCP boundaries", () => {
   it("allows an administrator through the API and exposes status and expiry state", async () => {
     const record = await apiRequest(adminSession, "/api/v1/removals", {
@@ -395,15 +420,7 @@ describe("removal administrator API and MCP boundaries", () => {
         }),
       ],
     });
-    await purgeRecordedRemoval(
-      {
-        database: workerEnv.CONTROL_DB,
-        bucket: archiveBucket,
-        safetyWindowMs: 0,
-      },
-      recordedAuthority,
-      new Date("2026-09-16T00:00:00.000Z"),
-    );
+    await purgeAfterStoredSafetyDeadline(recordedAuthority);
     const completedStatus = await apiRequest(adminSession, "/api/v1/removals");
     expect(await completedStatus.json()).toMatchObject({
       archive_purge: expect.arrayContaining([
@@ -433,15 +450,7 @@ describe("removal administrator API and MCP boundaries", () => {
       const mcpAuthority = RemovalAuthoritySchema.parse(
         structured(recordResult),
       );
-      await purgeRecordedRemoval(
-        {
-          database: workerEnv.CONTROL_DB,
-          bucket: archiveBucket,
-          safetyWindowMs: 0,
-        },
-        mcpAuthority,
-        new Date("2026-09-16T00:00:00.000Z"),
-      );
+      await purgeAfterStoredSafetyDeadline(mcpAuthority);
       const statusResult = await mcp.client.callTool({
         name: "get_removal_status",
         arguments: {},

@@ -1,0 +1,61 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "platform",
+  "main": "src/worker.ts",
+  "compatibility_date": "2026-09-18",
+  "compatibility_flags": ["nodejs_compat"],
+  "d1_databases": [
+    {
+      "binding": "IDENTITY_DB",
+      "database_name": "platform-identity",
+      "database_id": "00000000-0000-0000-0000-000000000001",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "ratelimits": [
+    {
+      "name": "PLATFORM_RATE_LIMIT_LOGIN",
+      "namespace_id": "2026092001",
+      "simple": { "limit": 30, "period": 60 }
+    },
+    {
+      "name": "PLATFORM_RATE_LIMIT_ISSUANCE",
+      "namespace_id": "2026092002",
+      "simple": { "limit": 60, "period": 60 }
+    },
+    {
+      "name": "PLATFORM_RATE_LIMIT_MANAGEMENT",
+      "namespace_id": "2026092003",
+      "simple": { "limit": 60, "period": 60 }
+    },
+    {
+      "name": "PLATFORM_RATE_LIMIT_VERIFICATION",
+      "namespace_id": "2026092004",
+      "simple": { "limit": 600, "period": 60 }
+    },
+    {
+      "name": "PLATFORM_RATE_LIMIT_GUEST_CONTROL",
+      "namespace_id": "2026092005",
+      "simple": { "limit": 120, "period": 60 }
+    }
+  ],
+  "vars": {
+    "PLATFORM_BASE_URL": "http://localhost:8787",
+    "PLATFORM_AUTHORITY_ID": "platform-t01-authority",
+    "PLATFORM_OPERATOR_USER_ID": "",
+    "PLATFORM_DEPLOYMENT_MODE": "self-hosted",
+    "PLATFORM_SIGNUP_POLICY": "open",
+    "PLATFORM_CREDENTIAL_MAX_LIFETIME_DAYS": "90",
+    "PLATFORM_SERVER_DEADLINE_MS": "8000",
+    "PLATFORM_RATE_LIMIT_POLICY": "",
+    "GOOGLE_CLIENT_ID": "platform-google-client",
+    "GITHUB_CLIENT_ID": "platform-t01-probe"
+  },
+  "secrets": {
+    "required": [
+      "GOOGLE_CLIENT_SECRET",
+      "GITHUB_CLIENT_SECRET",
+      "BETTER_AUTH_SECRET"
+    ]
+  }
+}

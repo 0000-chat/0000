@@ -6,6 +6,9 @@ use communicator_matrix_gateway::config::{
     MAX_PENDING_AGE_SECS, MAX_PENDING_REQUEST_ROWS, MAX_RECOVERY_BYTES, MAX_SYNC_RESPONSE_BYTES,
     PRODUCER_VERSION,
 };
+use communicator_matrix_gateway::credentials::{
+    load_ingestion_service_credential, load_provisioning_credentials,
+};
 use communicator_matrix_gateway::protected::Protected;
 use communicator_matrix_gateway::secret::{
     SECRET_INVALID, SECRET_TOO_LARGE, SecretKind, load_secret,
@@ -15,6 +18,7 @@ use std::{
     os::unix::fs::{PermissionsExt, symlink},
     path::{Path, PathBuf},
 };
+use tempfile::tempdir;
 
 const CANARY: &str = "secret-canary-must-not-escape";
 
@@ -48,13 +52,10 @@ fn valid_config() -> serde_json::Value {
         "matrix_store_dir": "/var/lib/communicator/matrix",
         "state_db_path": "/var/lib/communicator/state.sqlite3",
         "ingestion_base_url": "https://ingest.example.org",
-        "oauth_token_url": "https://auth.example.org/oauth/token",
-        "oauth_client_id": "communicator-gateway",
-        "oauth_client_auth_method": "client_secret_basic",
+        "ingestion_service_credential_file": "/run/secrets/ingestion-service-credential",
         "matrix_password_file": "/run/secrets/matrix-password",
         "matrix_store_passphrase_file": "/run/secrets/matrix-store-passphrase",
         "state_key_file": "/run/secrets/state-key",
-        "oauth_client_secret_file": "/run/secrets/oauth-client-secret",
         "request_timeout_secs": 10,
         "sync_timeout_secs": 30
     })
@@ -65,6 +66,7 @@ fn valid_provisioning_config() -> serde_json::Value {
         "listen_addr": "127.0.0.1:8448",
         "bridge_url": "https://bridge.example.org",
         "authority_base_url": "https://authority.example.org",
+        "authority_service_credential_file": "/run/secrets/authority-service-credential",
         "bridge_shared_secret_file": "/run/secrets/bridge-shared-secret",
         "gateway_shared_secret_file": "/run/secrets/gateway-shared-secret",
         "matrix_user_id": "@gateway:example.org",
@@ -91,10 +93,9 @@ fn valid_config_deserializes_and_limits_are_fixed() {
     );
     assert_eq!(config.ingestion_base_url(), "https://ingest.example.org");
     assert_eq!(
-        config.oauth_token_url(),
-        "https://auth.example.org/oauth/token"
+        config.ingestion_service_credential_file(),
+        Path::new("/run/secrets/ingestion-service-credential")
     );
-    assert_eq!(config.oauth_client_id(), "communicator-gateway");
     assert_eq!(
         config.matrix_password_file(),
         Path::new("/run/secrets/matrix-password")
@@ -104,14 +105,6 @@ fn valid_config_deserializes_and_limits_are_fixed() {
         Path::new("/run/secrets/matrix-store-passphrase")
     );
     assert_eq!(config.state_key_file(), Path::new("/run/secrets/state-key"));
-    assert_eq!(
-        config.oauth_client_secret_file(),
-        Path::new("/run/secrets/oauth-client-secret")
-    );
-    assert!(matches!(
-        config.oauth_client_auth_method(),
-        communicator_matrix_gateway::config::OAuthClientAuthMethod::Basic
-    ));
     assert_eq!(MAX_RECOVERY_BYTES, 256 * 1024 * 1024);
     assert_eq!(MAX_PENDING_REQUEST_ROWS, 2_000);
     assert_eq!(MAX_PENDING_AGE_SECS, 24 * 60 * 60);
@@ -139,6 +132,10 @@ fn provisioning_authority_is_a_private_https_root_endpoint() {
         provisioning.authority_base_url(),
         "https://authority.example.org"
     );
+    assert_eq!(
+        provisioning.authority_service_credential_file(),
+        Path::new("/run/secrets/authority-service-credential")
+    );
 
     for authority_base_url in [
         "http://authority.example.org",
@@ -152,6 +149,71 @@ fn provisioning_authority_is_a_private_https_root_endpoint() {
 }
 
 #[test]
+fn startup_loaders_keep_ingestion_claim_and_gateway_credentials_distinct() {
+    let directory = tempdir().expect("credential directory");
+    let ingestion_path = write_secret(
+        directory.path(),
+        "ingestion",
+        b"ingestion-service-credential\n",
+        0o600,
+    );
+    let authority_path = write_secret(
+        directory.path(),
+        "authority",
+        b"authority-claim-credential\n",
+        0o600,
+    );
+    let bridge_path = write_secret(
+        directory.path(),
+        "bridge",
+        b"bridge-transport-secret\n",
+        0o600,
+    );
+    let gateway_path = write_secret(
+        directory.path(),
+        "gateway",
+        b"gateway-transport-secret\n",
+        0o600,
+    );
+
+    let mut value = valid_config();
+    value["ingestion_service_credential_file"] = serde_json::json!(ingestion_path);
+    let mut provisioning = valid_provisioning_config();
+    provisioning["authority_service_credential_file"] = serde_json::json!(authority_path);
+    provisioning["bridge_shared_secret_file"] = serde_json::json!(bridge_path);
+    provisioning["gateway_shared_secret_file"] = serde_json::json!(gateway_path);
+    value["provisioning"] = provisioning;
+    let config = parse_config(value).expect("credential-loader config");
+
+    let ingestion = load_ingestion_service_credential(&config).expect("ingestion credential");
+    let provisioning =
+        load_provisioning_credentials(config.provisioning().expect("provisioning credentials"))
+            .expect("provisioning credentials");
+
+    assert_eq!(ingestion.as_str(), "ingestion-service-credential");
+    assert_eq!(
+        provisioning.authority_service().as_str(),
+        "authority-claim-credential"
+    );
+    assert_eq!(
+        provisioning.bridge_shared().as_str(),
+        "bridge-transport-secret"
+    );
+    assert_eq!(
+        provisioning.gateway_transport().as_str(),
+        "gateway-transport-secret"
+    );
+    assert_ne!(
+        ingestion.as_str(),
+        provisioning.authority_service().as_str()
+    );
+    assert_ne!(
+        provisioning.authority_service().as_str(),
+        provisioning.gateway_transport().as_str()
+    );
+}
+
+#[test]
 fn unknown_fields_are_rejected() {
     let mut value = valid_config();
     value[CANARY] = serde_json::json!(true);
@@ -160,12 +222,21 @@ fn unknown_fields_are_rejected() {
 }
 
 #[test]
+fn legacy_oauth_configuration_has_no_fallback() {
+    let mut value = valid_config();
+    value["oauth_token_url"] = serde_json::json!("https://auth.example.org/token");
+    value["oauth_client_id"] = serde_json::json!("legacy-client");
+    value["oauth_client_auth_method"] = serde_json::json!("client_secret_basic");
+    value["oauth_client_secret_file"] = serde_json::json!("/run/secrets/legacy-secret");
+    assert_safe_config_error(parse_config(value).expect_err("legacy OAuth fields rejected"));
+}
+
+#[test]
 fn semantic_security_rules_are_rejected() {
     for (field, bad) in [
         ("matrix_store_dir", "relative/store"),
         ("state_db_path", "state.sqlite3"),
         ("ingestion_base_url", "http://ingest.example.org"),
-        ("oauth_token_url", "http://auth.example.org/token"),
         ("homeserver_url", "http://other:8008"),
         ("matrix_user_id", "not-a-user-id"),
     ] {
@@ -187,19 +258,6 @@ fn timeouts_must_be_nonzero() {
 }
 
 #[test]
-fn auth_method_is_an_exact_enum() {
-    for method in ["client_secret_basic", "client_secret_post"] {
-        let mut value = valid_config();
-        value["oauth_client_auth_method"] = serde_json::json!(method);
-        assert!(parse_config(value).is_ok(), "{method}");
-    }
-    let mut value = valid_config();
-    value["oauth_client_auth_method"] = serde_json::json!(CANARY);
-    let error = parse_config(value).unwrap_err();
-    assert_safe_config_error(error);
-}
-
-#[test]
 fn malformed_json_is_a_code_only_error() {
     let malformed = format!("{{\"{CANARY}\":");
     let error = GatewayConfig::from_json(&malformed).expect_err("malformed JSON must fail");
@@ -208,7 +266,7 @@ fn malformed_json_is_a_code_only_error() {
 
 #[test]
 fn fragments_are_rejected_before_uri_parsing() {
-    for field in ["homeserver_url", "ingestion_base_url", "oauth_token_url"] {
+    for field in ["homeserver_url", "ingestion_base_url"] {
         let mut value = valid_config();
         value[field] = serde_json::json!(format!("https://valid.example/{CANARY}#fragment"));
         if field == "homeserver_url" {
@@ -227,11 +285,24 @@ fn parent_directory_components_are_rejected_for_every_config_path() {
         "matrix_password_file",
         "matrix_store_passphrase_file",
         "state_key_file",
-        "oauth_client_secret_file",
+        "ingestion_service_credential_file",
     ] {
         let mut value = valid_config();
         value[field] = serde_json::json!(format!("/var/lib/communicator/../{CANARY}"));
         let error = parse_config(value).unwrap_err();
+        assert_safe_config_error(error);
+    }
+
+    let mut value = valid_config();
+    value["provisioning"] = valid_provisioning_config();
+    for field in [
+        "authority_service_credential_file",
+        "bridge_shared_secret_file",
+        "gateway_shared_secret_file",
+    ] {
+        value["provisioning"][field] =
+            serde_json::json!(format!("/var/lib/communicator/../{CANARY}"));
+        let error = parse_config(value.clone()).unwrap_err();
         assert_safe_config_error(error);
     }
 }

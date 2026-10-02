@@ -11,15 +11,16 @@ export type WebhooksCommand =
 export type WebhooksOptions = WebhooksCommand & {
   readonly fetch: typeof globalThis.fetch;
   readonly signal?: AbortSignal;
+  readonly serviceOrigin?: string;
 };
 
 export class WebhooksSignalError extends Error {
   constructor() { super("The msg webhooks command was interrupted."); }
 }
 
-export function parseWebhooksCommand(args: readonly string[]): WebhooksCommand {
+export function parseWebhooksCommand(args: readonly string[], serviceOrigin?: string): WebhooksCommand {
   if (args[0] !== "webhooks" || args.length < 3) throw new Error(USAGE);
-  const conversationUrl = validateConversationUrl(args[1] ?? "");
+  const conversationUrl = validateConversationUrl(args[1] ?? "", serviceOrigin);
   const operation = args[2];
   if (operation === "list" && args.length === 3) return { conversationUrl, operation };
   if (operation === "create" && args.length === 4 && args[3]) {
@@ -40,7 +41,7 @@ export function parseWebhooksCommand(args: readonly string[]): WebhooksCommand {
 
 export async function manageWebhooks(options: WebhooksOptions): Promise<unknown> {
   if (options.signal?.aborted) throw new WebhooksSignalError();
-  const endpoint = webhooksUrl(options.conversationUrl);
+  const endpoint = webhooksUrl(options.conversationUrl, options.serviceOrigin);
   let method: "DELETE" | "GET" | "POST";
   let body: string | undefined;
   if (options.operation === "remove") {
@@ -85,8 +86,8 @@ export async function manageWebhooks(options: WebhooksOptions): Promise<unknown>
   }
 }
 
-function webhooksUrl(conversationUrl: string): URL {
-  const url = new URL(validateConversationUrl(conversationUrl));
+function webhooksUrl(conversationUrl: string, serviceOrigin?: string): URL {
+  const url = new URL(validateConversationUrl(conversationUrl, serviceOrigin));
   url.pathname = `${url.pathname}/webhooks`;
   return url;
 }

@@ -404,7 +404,7 @@ export async function reserveOutboundAcceptance(
          AND i.status = 'active'
          AND (
            (p.principal_type IN ('human', 'operator') AND i.identity_kind = 'human')
-           OR (p.principal_type = 'agent' AND i.identity_kind = 'agent')
+           OR (p.principal_type IN ('agent', 'service') AND i.identity_kind = 'agent')
          )
          AND (
            (
@@ -799,7 +799,7 @@ export async function claimOutboundDispatch(
          AND i.status = 'active'
          AND (
            (p.principal_type IN ('human', 'operator') AND i.identity_kind = 'human')
-           OR (p.principal_type = 'agent' AND i.identity_kind = 'agent')
+           OR (p.principal_type IN ('agent', 'service') AND i.identity_kind = 'agent')
          )
          AND (
            (
