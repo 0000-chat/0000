@@ -1,0 +1,20 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "0000-database",
+  "main": "src/worker.ts",
+  "compatibility_date": "2026-09-11",
+  "compatibility_flags": ["nodejs_compat"],
+  "durable_objects": {
+    "bindings": [
+      { "name": "DATABASES", "class_name": "DatabaseObject" },
+      { "name": "REGISTRY", "class_name": "DatabaseRegistry" }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["DatabaseObject", "DatabaseRegistry"]
+    }
+  ],
+  "observability": { "enabled": false }
+}
