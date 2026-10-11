@@ -1,4 +1,24 @@
 import { DurableObject } from "cloudflare:workers";
+import type { CapacityPolicyBindings } from "./capacity-policy";
+import { getGlobalAdmission, type DatabaseUsage } from "./global-admission";
+import {
+  MUTATION_LOGICAL_RESERVATION_BYTES,
+  MUTATION_REPLAY_RESERVATION_BYTES,
+} from "./global-admission";
+import {
+  buildExportItems,
+  exportCursorPosition,
+  ExportFault,
+  pageExportItemWindow,
+  serializeExportItems,
+  EXPORT_DEFAULT_PAGE_ITEMS,
+  EXPORT_MAX_PAGE_ITEMS,
+  EXPORT_MAX_SNAPSHOT_BYTES,
+  EXPORT_TTL_MS,
+  type ExportItem,
+  type ExportManifest,
+  type ExportPage,
+} from "./export";
 
 const DAY_MS = 24 * 60 * 60 * 1_000;
 const INACTIVITY_MS = 7 * DAY_MS;
@@ -15,13 +35,15 @@ const MAX_TABLES = 100;
 const MAX_COLUMNS_PER_TABLE = 64;
 const MAX_RECORDS_PER_DATABASE = 10_000;
 const MAX_REPLAY_BYTES = 51 * 1024 * 1024;
+const OBJECT_ALARM_RETRY_MS = 60 * 1_000;
+const MAX_EXPIRED_EXPORT_TOMBSTONES = 2 * MAX_DAILY_REQUESTS;
 const ACCESS_WARNING =
   "Anyone with this link can read and change this database while writable. Use it at your own risk and do not store sensitive information.";
 
 export type DatabaseBindings = {
   DATABASES: DurableObjectNamespace;
   REGISTRY: DurableObjectNamespace;
-};
+} & CapacityPolicyBindings;
 
 export type DatabaseResource = {
   databaseId: string;
@@ -79,6 +101,8 @@ type MetadataRow = {
   created_at: number;
   write_until: number;
   last_activity_at: number;
+  last_activity_paused_total_ms: number;
+  usage_version: number;
   quota_day: string;
   daily_requests: number;
   daily_mutations: number;
@@ -105,6 +129,21 @@ type RecordRow = {
   table_id: string;
   values_json: string;
   version: number;
+};
+
+type ExportSnapshotRow = {
+  export_id: string;
+  export_key: string;
+  format_version: number;
+  snapshot_at: string;
+  expires_at: number;
+  snapshot_bytes: number;
+  item_count: number;
+};
+
+type ExportSnapshotItemRow = {
+  item_index: number;
+  item_json: string;
 };
 
 type MutationContext = {
@@ -155,8 +194,10 @@ function messageFor(code: string): string {
     QUOTA_EXCEEDED: "A database quota has been reached",
     CAPACITY_UNAVAILABLE:
       "The service cannot reserve capacity for this operation",
+    SERVICE_SUSPENDED: "The service is temporarily suspended",
     REQUEST_TOO_LARGE: "The request body exceeds 65536 bytes",
     RESULT_TOO_LARGE: "The result exceeds 262144 bytes",
+    EXPORT_EXPIRED: "The export handle has expired",
     INVALID_JSON: "Request body must be valid JSON",
     UNSUPPORTED_MEDIA_TYPE: "Content-Type must be application/json",
     INTERNAL_ERROR: "Internal server error",
@@ -327,6 +368,18 @@ function pageLimit(url: URL): number {
   return Number(raw);
 }
 
+function exportPageLimit(url: URL): number {
+  validateQueryKeys(url, ["limit", "cursor"]);
+  const raw = url.searchParams.get("limit");
+  if (raw === null) return EXPORT_DEFAULT_PAGE_ITEMS;
+  if (!/^(?:[1-9]|[1-9][0-9]|100)$/.test(raw))
+    throw new ApiFault("VALIDATION_ERROR", 400, { field: "limit" });
+  const limit = Number(raw);
+  if (limit > EXPORT_MAX_PAGE_ITEMS)
+    throw new ApiFault("VALIDATION_ERROR", 400, { field: "limit" });
+  return limit;
+}
+
 function validateQueryKeys(url: URL, allowed: readonly string[]): void {
   const seen = new Set<string>();
   const accepted = new Set(allowed);
@@ -373,20 +426,62 @@ function getRequestKey(headers: Headers): string {
 }
 
 export class DatabaseObject extends DurableObject<DatabaseBindings> {
+  private currentPausedTotalMs = 0;
+  private maxPhysicalBytesPerDatabase = 128 * 1024 * 1024;
+  private mutationTail: Promise<void> = Promise.resolve();
+  private activityTail: Promise<void> = Promise.resolve();
+  private schemaReady = false;
+
   constructor(ctx: DurableObjectState, env: DatabaseBindings) {
     super(ctx, env);
   }
 
-  ensureCreated(input: {
-    databaseId: string;
-    databaseUrl: string;
-    name: string;
-    description: string;
-    createdAt: number;
-    writeUntil: number;
-  }): DurableCallOutcome<DatabaseResource> {
+  async ensureCreated(
+    input: {
+      databaseId: string;
+      databaseUrl: string;
+      name: string;
+      description: string;
+      createdAt: number;
+      writeUntil: number;
+    },
+    creationKeyDigest: string,
+    leaseToken: string,
+  ): Promise<DurableCallOutcome<DatabaseResource>> {
+    return await this.enqueueActivity(() =>
+      this.ensureCreatedUnlocked(input, creationKeyDigest, leaseToken),
+    );
+  }
+
+  private async ensureCreatedUnlocked(
+    input: {
+      databaseId: string;
+      databaseUrl: string;
+      name: string;
+      description: string;
+      createdAt: number;
+      writeUntil: number;
+    },
+    creationKeyDigest: string,
+    leaseToken: string,
+  ): Promise<DurableCallOutcome<DatabaseResource>> {
     try {
-      this.migrate();
+      const authorization = await getGlobalAdmission(
+        this.env,
+      ).authorizeDatabaseCreation({
+        databaseId: input.databaseId,
+        creationKeyDigest,
+        leaseToken,
+      });
+      if (!authorization.ok) return authorization;
+      this.currentPausedTotalMs = authorization.result.pausedTotalMs;
+      this.maxPhysicalBytesPerDatabase =
+        authorization.result.maxPhysicalBytesPerDatabase;
+      if (authorization.result.mayInitialize) {
+        this.migrate();
+        this.schemaReady = true;
+      }
+      let reusedExisting = false;
       const result = this.transaction(() => {
         const existing = this.metadata();
         if (existing) {
@@ -399,13 +494,20 @@ export class DatabaseObject extends DurableObject<DatabaseBindings> {
             existing.write_until !== input.writeUntil
           )
             throw new ApiFault("IDEMPOTENCY_CONFLICT", 409);
+          reusedExisting = true;
+          this.assertPhysicalLimit();
           return this.databaseResource(existing, Date.now());
         }
+        if (!authorization.result.mayInitialize)
+          throw new ApiFault("CAPACITY_UNAVAILABLE", 503, {
+            reason: "databaseStateUnavailable",
+          });
         this.ctx.storage.sql.exec(
           `INSERT INTO database_state
             (singleton, database_id, database_url, name, description, created_at, write_until,
-             last_activity_at, quota_day, daily_requests, daily_mutations, daily_returned_bytes)
-           VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0)`,
+             last_activity_at, last_activity_paused_total_ms, usage_version,
+             quota_day, daily_requests, daily_mutations, daily_returned_bytes)
+           VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, 0, 0, 0)`,
           input.databaseId,
           input.databaseUrl,
           input.name,
@@ -413,16 +515,697 @@ export class DatabaseObject extends DurableObject<DatabaseBindings> {
           input.createdAt,
           input.writeUntil,
           input.createdAt,
+          authorization.result.pausedTotalMs,
           utcDay(input.createdAt),
         );
         const row = this.metadata();
         if (!row) throw new Error("database state insert did not persist");
+        this.assertPhysicalLimit();
         return this.databaseResource(row, Date.now());
       });
+      await this.scheduleInactivityAlarm(result.databaseId);
+      const stillAuthorized = await getGlobalAdmission(
+        this.env,
+      ).authorizeDatabaseCreation({
+        databaseId: result.databaseId,
+        creationKeyDigest,
+        leaseToken,
+      });
+      if (!stillAuthorized.ok) return stillAuthorized;
+      if (!stillAuthorized.result.mayInitialize && !reusedExisting) {
+        return errorOutcome(
+          new ApiFault("CAPACITY_UNAVAILABLE", 503, {
+            reason: "databaseStateUnavailable",
+          }),
+        );
+      }
       return { ok: true, result };
     } catch (error) {
       return errorOutcome(error);
     }
+  }
+
+  getUsage(): DurableCallOutcome<DatabaseUsage> {
+    try {
+      const metadata = this.metadata();
+      if (!metadata) throw new ApiFault("NOT_FOUND", 404);
+      return { ok: true, result: this.measureUsage(metadata) };
+    } catch (error) {
+      return errorOutcome(error);
+    }
+  }
+
+  async reconcileMutation(
+    databaseId: string,
+    operationKey: string,
+  ): Promise<
+    DurableCallOutcome<{ committed: boolean; usage?: DatabaseUsage }>
+  > {
+    return await this.enqueueActivity(async () => {
+      try {
+        const metadata = this.metadata();
+        const registry = getGlobalAdmission(this.env);
+        if (!metadata) {
+          const released = await registry.releaseMutation(
+            databaseId,
+            operationKey,
+          );
+          if (!released.ok) return released;
+          return { ok: true, result: { committed: false } };
+        }
+        if (metadata.database_id !== databaseId)
+          throw new ApiFault("CAPACITY_UNAVAILABLE", 503, {
+            reason: "databaseIdentityMismatch",
+          });
+        const committed =
+          this.ctx.storage.sql
+            .exec<{ request_key: string }>(
+              "SELECT request_key FROM mutation_outcomes WHERE request_key = ?",
+              operationKey,
+            )
+            .toArray().length > 0;
+        if (!committed) {
+          const released = await registry.releaseMutation(
+            databaseId,
+            operationKey,
+          );
+          if (!released.ok) return released;
+          return { ok: true, result: { committed: false } };
+        }
+        const usage = this.measureUsage(metadata);
+        const settled = await registry.settleMutation(
+          databaseId,
+          operationKey,
+          usage,
+        );
+        if (!settled.ok) return settled;
+        return { ok: true, result: { committed: true, usage } };
+      } catch (error) {
+        return errorOutcome(error);
+      }
+    });
+  }
+
+  async reconcileExport(
+    databaseId: string,
+    exportKey: string,
+  ): Promise<DurableCallOutcome<"active" | "missing" | "pending">> {
+    return await this.enqueueActivity(async () => {
+      try {
+        const registry = getGlobalAdmission(this.env);
+        const hasTable =
+          this.ctx.storage.sql
+            .exec<{ name: string }>(
+              "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'export_snapshots'",
+            )
+            .toArray().length > 0;
+        if (!hasTable) {
+          const released = await registry.releaseExport(databaseId, exportKey);
+          if (!released.ok) return released;
+          return { ok: true, result: "missing" };
+        }
+        const metadata = this.metadata();
+        if (metadata && metadata.database_id !== databaseId)
+          throw new ApiFault("CAPACITY_UNAVAILABLE", 503, {
+            reason: "databaseIdentityMismatch",
+          });
+        const snapshot = this.ctx.storage.sql
+          .exec<ExportSnapshotRow>(
+            "SELECT * FROM export_snapshots WHERE export_key = ?",
+            exportKey,
+          )
+          .toArray()[0];
+        if (!snapshot) {
+          const released = await registry.releaseExport(databaseId, exportKey);
+          if (!released.ok) return released;
+          return { ok: true, result: "missing" };
+        }
+        if (snapshot.expires_at <= Date.now()) {
+          this.deleteLocalExport(snapshot.export_id, exportKey, true);
+          const released = await registry.releaseExport(databaseId, exportKey);
+          if (!released.ok) return released;
+          return { ok: true, result: "missing" };
+        }
+        const completed = await registry.completeExport({
+          databaseId,
+          exportKey,
+          exportId: snapshot.export_id,
+          snapshotBytes: snapshot.snapshot_bytes,
+          expiresAt: snapshot.expires_at,
+        });
+        if (!completed.ok) return completed;
+        const activated = await registry.activateExport(databaseId, exportKey);
+        if (!activated.ok) return activated;
+        return { ok: true, result: "active" };
+      } catch (error) {
+        return errorOutcome(error);
+      }
+    });
+  }
+
+  async startExport(
+    requestKey: string,
+  ): Promise<DurableCallOutcome<ExportManifest>> {
+    return await this.enqueueMutation(() => this.startExportOnce(requestKey));
+  }
+
+  async readExport(
+    exportId: string,
+    cursor: string | null,
+    limit: number,
+    responseBudget: number,
+  ): Promise<DurableCallOutcome<ExportPage>> {
+    try {
+      if (!exportId || exportId.length > 128)
+        throw new ApiFault("VALIDATION_ERROR", 400);
+      if (cursor !== null && cursor.length > 512)
+        throw new ApiFault("VALIDATION_ERROR", 400, { field: "cursor" });
+      if (
+        !Number.isSafeInteger(limit) ||
+        limit < 1 ||
+        limit > EXPORT_MAX_PAGE_ITEMS
+      )
+        throw new ApiFault("VALIDATION_ERROR", 400, { field: "limit" });
+      await this.cleanupExpiredExports(Date.now());
+      const result = this.transaction(() => {
+        const now = Date.now();
+        const beforeBytes = this.ctx.storage.sql.databaseSize;
+        const metadata = this.requireMetadata(now);
+        const snapshot = this.ctx.storage.sql
+          .exec<ExportSnapshotRow>(
+            "SELECT * FROM export_snapshots WHERE export_id = ?",
+            exportId,
+          )
+          .toArray()[0];
+        if (!snapshot) {
+          const expired = this.ctx.storage.sql
+            .exec<{ expired_at: number }>(
+              "SELECT expired_at FROM expired_exports WHERE export_id = ?",
+              exportId,
+            )
+            .toArray()[0];
+          if (expired) throw new ApiFault("EXPORT_EXPIRED", 410);
+          throw new ApiFault("NOT_FOUND", 404);
+        }
+        if (snapshot.expires_at <= now)
+          throw new ApiFault("EXPORT_EXPIRED", 410);
+        let position: ReturnType<typeof exportCursorPosition>;
+        try {
+          position = exportCursorPosition(cursor ?? undefined, exportId);
+        } catch (error) {
+          if (error instanceof ExportFault)
+            throw new ApiFault(error.code, error.status, error.details);
+          throw error;
+        }
+        if (
+          position.itemIndex >= snapshot.item_count &&
+          snapshot.item_count > 0
+        )
+          throw new ApiFault("VALIDATION_ERROR", 400, { field: "cursor" });
+        const rows = this.ctx.storage.sql
+          .exec<ExportSnapshotItemRow>(
+            `SELECT item_index, item_json FROM export_snapshot_items
+             WHERE export_id = ? AND item_index >= ? ORDER BY item_index LIMIT ?`,
+            exportId,
+            position.itemIndex,
+            limit,
+          )
+          .toArray();
+        if (rows.length === 0 && position.itemIndex < snapshot.item_count)
+          throw new ApiFault("CAPACITY_UNAVAILABLE", 503, {
+            reason: "exportSnapshotUnavailable",
+          });
+        const items = rows.map(
+          (row) => JSON.parse(row.item_json) as ExportItem,
+        );
+        const manifest: ExportManifest = {
+          exportId: snapshot.export_id,
+          formatVersion: 1,
+          snapshotAt: snapshot.snapshot_at,
+          expiresAt: new Date(snapshot.expires_at).toISOString(),
+        };
+        let page: ExportPage;
+        try {
+          page = pageExportItemWindow(
+            items,
+            position.itemIndex,
+            snapshot.item_count,
+            manifest,
+            cursor ?? undefined,
+            limit,
+            responseBudget,
+          );
+        } catch (error) {
+          if (error instanceof ExportFault)
+            throw new ApiFault(error.code, error.status, error.details);
+          throw error;
+        }
+        const bytes = encodedBytes(JSON.stringify(page));
+        this.resetDailyQuota(metadata, now);
+        if (metadata.daily_returned_bytes + bytes > MAX_DAILY_RETURNED_BYTES)
+          throw new ApiFault("QUOTA_EXCEEDED", 429, {
+            quota: "returnedBytes",
+            limitBytes: MAX_DAILY_RETURNED_BYTES,
+          });
+        metadata.daily_returned_bytes += bytes;
+        metadata.last_activity_at = now;
+        metadata.last_activity_paused_total_ms = this.currentPausedTotalMs;
+        this.writeMetadata(metadata);
+        this.assertPhysicalLimit(beforeBytes);
+        return page;
+      });
+      await this.scheduleInactivityAlarm();
+      return { ok: true, result };
+    } catch (error) {
+      return errorOutcome(error);
+    }
+  }
+
+  async deleteRetiredStorage(
+    databaseId?: string,
+  ): Promise<DurableCallOutcome<void>> {
+    return await this.enqueueActivity(() =>
+      this.deleteRetiredStorageUnlocked(databaseId),
+    );
+  }
+
+  private async deleteRetiredStorageUnlocked(
+    databaseId?: string,
+  ): Promise<DurableCallOutcome<void>> {
+    try {
+      if (!databaseId) return { ok: true, result: undefined };
+      const metadata = this.metadata();
+      if (metadata && metadata.database_id !== databaseId)
+        throw new ApiFault("CAPACITY_UNAVAILABLE", 503, {
+          reason: "databaseIdentityMismatch",
+        });
+      await this.ctx.storage.deleteAll();
+      this.schemaReady = false;
+      return { ok: true, result: undefined };
+    } catch (error) {
+      return errorOutcome(error);
+    }
+  }
+
+  private async startExportOnce(
+    requestKey: string,
+  ): Promise<DurableCallOutcome<ExportManifest>> {
+    try {
+      if (
+        requestKey.length < 8 ||
+        requestKey.length > 128 ||
+        requestKey.trim() !== requestKey
+      )
+        throw new ApiFault("VALIDATION_ERROR", 400);
+      const databaseId = this.metadata()?.database_id;
+      if (!databaseId) throw new ApiFault("NOT_FOUND", 404);
+      const requestKeyDigest = await fingerprint(requestKey);
+      await this.cleanupExpiredExports(Date.now());
+      const old = this.ctx.storage.sql
+        .exec<ExportSnapshotRow>(
+          "SELECT * FROM export_snapshots WHERE export_key = ?",
+          requestKeyDigest,
+        )
+        .toArray()[0];
+      const registry = getGlobalAdmission(this.env);
+      if (old) {
+        const manifest: ExportManifest = {
+          exportId: old.export_id,
+          formatVersion: 1,
+          snapshotAt: old.snapshot_at,
+          expiresAt: new Date(old.expires_at).toISOString(),
+        };
+        this.assertExportStartResponseAllowance(manifest);
+        const reserved = await registry.reserveExport({
+          databaseId,
+          exportKey: requestKeyDigest,
+          exportId: old.export_id,
+          snapshotBytes: old.snapshot_bytes,
+          expiresAt: old.expires_at,
+        });
+        if (!reserved.ok) return reserved;
+        if (reserved.result.exportId !== old.export_id)
+          throw new ApiFault("CAPACITY_UNAVAILABLE", 503, {
+            reason: "exportReservationMismatch",
+          });
+        if (reserved.result.state === "pending") {
+          const completed = await registry.completeExport({
+            databaseId,
+            exportKey: requestKeyDigest,
+            exportId: old.export_id,
+            snapshotBytes: old.snapshot_bytes,
+            expiresAt: old.expires_at,
+          });
+          if (!completed.ok) return completed;
+          const activated = await registry.activateExport(
+            databaseId,
+            requestKeyDigest,
+          );
+          if (!activated.ok) return activated;
+        }
+        this.chargeExportStartResponse(
+          manifest,
+          reserved.result.state === "pending",
+        );
+        return { ok: true, result: manifest };
+      }
+      const exportId = crypto.randomUUID().replaceAll("-", "");
+      const snapshotAtMs = Date.now();
+      const expiresAt = snapshotAtMs + EXPORT_TTL_MS;
+      const manifest: ExportManifest = {
+        exportId,
+        formatVersion: 1,
+        snapshotAt: new Date(snapshotAtMs).toISOString(),
+        expiresAt: new Date(expiresAt).toISOString(),
+      };
+      this.assertExportStartResponseAllowance(manifest);
+      const reserved = await registry.reserveExport({
+        databaseId,
+        exportKey: requestKeyDigest,
+        exportId,
+        snapshotBytes: EXPORT_MAX_SNAPSHOT_BYTES,
+        expiresAt,
+      });
+      if (!reserved.ok) return reserved;
+      if (reserved.result.state === "active")
+        throw new ApiFault("CAPACITY_UNAVAILABLE", 503, {
+          reason: "exportSnapshotUnavailable",
+        });
+      const effectiveExportId = reserved.result.exportId;
+      let items: ExportItem[];
+      let serialized: ReturnType<typeof serializeExportItems>;
+      try {
+        const snapshot = this.transaction(() => {
+          const beforeBytes = this.ctx.storage.sql.databaseSize;
+          const metadata = this.requireMetadata(snapshotAtMs);
+          const exportMetadata = {
+            ...metadata,
+            last_activity_at: snapshotAtMs,
+            last_activity_paused_total_ms: this.currentPausedTotalMs,
+          };
+          const database = this.databaseResource(exportMetadata, snapshotAtMs);
+          const tables = this.ctx.storage.sql
+            .exec<TableRow>("SELECT * FROM tables ORDER BY id")
+            .toArray()
+            .map((row) => this.tableResource(row));
+          const columns = this.ctx.storage.sql
+            .exec<ColumnRow>("SELECT * FROM columns ORDER BY id")
+            .toArray()
+            .map((row) => ({
+              ...this.columnResource(row),
+              tableId: row.table_id,
+            }));
+          const records = this.ctx.storage.sql
+            .exec<RecordRow>("SELECT * FROM records ORDER BY id")
+            .toArray()
+            .map((row) => ({
+              ...this.recordResource(row),
+              tableId: row.table_id,
+            }));
+          const built = buildExportItems(
+            {
+              name: database.name,
+              description: database.description,
+              createdAt: database.createdAt,
+              writeUntil: database.writeUntil,
+              lastActivityAt: database.lastActivityAt,
+              state: database.state,
+            },
+            tables,
+            columns,
+            records,
+          );
+          this.assertPhysicalLimit(beforeBytes);
+          return { items: built, serialized: serializeExportItems(built) };
+        });
+        items = snapshot.items;
+        serialized = snapshot.serialized;
+        if (serialized.bytes > EXPORT_MAX_SNAPSHOT_BYTES)
+          throw new ApiFault("RESULT_TOO_LARGE", 413, {
+            maxBytes: EXPORT_MAX_SNAPSHOT_BYTES,
+          });
+      } catch (error) {
+        await registry.releaseExport(databaseId, requestKeyDigest);
+        throw error;
+      }
+
+      const storedManifest: ExportManifest = {
+        exportId: effectiveExportId,
+        formatVersion: 1,
+        snapshotAt: new Date(snapshotAtMs).toISOString(),
+        expiresAt: new Date(expiresAt).toISOString(),
+      };
+      try {
+        this.transaction(() => {
+          const beforeBytes = this.ctx.storage.sql.databaseSize;
+          const existing = this.ctx.storage.sql
+            .exec<ExportSnapshotRow>(
+              "SELECT * FROM export_snapshots WHERE export_key = ?",
+              requestKeyDigest,
+            )
+            .toArray()[0];
+          if (existing) return;
+          this.requireMetadata(Date.now());
+          this.ctx.storage.sql.exec(
+            `INSERT INTO export_snapshots
+              (export_id, export_key, format_version, snapshot_at, expires_at,
+               snapshot_bytes, item_count)
+             VALUES (?, ?, 1, ?, ?, ?, ?)`,
+            effectiveExportId,
+            requestKeyDigest,
+            storedManifest.snapshotAt,
+            expiresAt,
+            serialized.bytes,
+            items.length,
+          );
+          items.forEach((item, index) => {
+            this.ctx.storage.sql.exec(
+              "INSERT INTO export_snapshot_items (export_id, item_index, item_json) VALUES (?, ?, ?)",
+              effectiveExportId,
+              index,
+              JSON.stringify(item),
+            );
+          });
+          this.assertPhysicalLimit(beforeBytes);
+        });
+      } catch (error) {
+        const released = await registry.releaseExport(
+          databaseId,
+          requestKeyDigest,
+        );
+        if (!released.ok) return released;
+        throw error;
+      }
+      const completed = await registry.completeExport({
+        databaseId,
+        exportKey: requestKeyDigest,
+        exportId: effectiveExportId,
+        snapshotBytes: serialized.bytes,
+        expiresAt,
+      });
+      if (!completed.ok) return completed;
+      const activated = await registry.activateExport(
+        databaseId,
+        requestKeyDigest,
+      );
+      if (!activated.ok) return activated;
+      this.chargeExportStartResponse(storedManifest, true);
+      return { ok: true, result: storedManifest };
+    } catch (error) {
+      return errorOutcome(error);
+    }
+  }
+
+  private assertExportStartResponseAllowance(manifest: ExportManifest): void {
+    this.transaction(() => {
+      const now = Date.now();
+      const metadata = this.requireMetadata(now);
+      this.resetDailyQuota(metadata, now);
+      const bytes = encodedBytes(JSON.stringify(manifest));
+      if (metadata.daily_returned_bytes + bytes > MAX_DAILY_RETURNED_BYTES)
+        throw new ApiFault("QUOTA_EXCEEDED", 429, {
+          quota: "returnedBytes",
+          limitBytes: MAX_DAILY_RETURNED_BYTES,
+        });
+    });
+  }
+
+  private chargeExportStartResponse(
+    manifest: ExportManifest,
+    renewActivity: boolean,
+  ): void {
+    this.transaction(() => {
+      const now = Date.now();
+      const beforeBytes = this.ctx.storage.sql.databaseSize;
+      const metadata = this.requireMetadata(now);
+      this.resetDailyQuota(metadata, now);
+      const bytes = encodedBytes(JSON.stringify(manifest));
+      if (metadata.daily_returned_bytes + bytes > MAX_DAILY_RETURNED_BYTES)
+        throw new ApiFault("QUOTA_EXCEEDED", 429, {
+          quota: "returnedBytes",
+          limitBytes: MAX_DAILY_RETURNED_BYTES,
+        });
+      metadata.daily_returned_bytes += bytes;
+      if (renewActivity) {
+        metadata.last_activity_at = now;
+        metadata.last_activity_paused_total_ms = this.currentPausedTotalMs;
+      }
+      this.writeMetadata(metadata);
+      this.assertPhysicalLimit(beforeBytes);
+    });
+  }
+
+  private async cleanupExpiredExports(now: number): Promise<void> {
+    const expired = this.ctx.storage.sql
+      .exec<ExportSnapshotRow>(
+        "SELECT * FROM export_snapshots WHERE expires_at <= ? ORDER BY expires_at LIMIT 100",
+        now,
+      )
+      .toArray();
+    for (const snapshot of expired) {
+      this.deleteLocalExport(snapshot.export_id, snapshot.export_key, true);
+    }
+    if (expired.length === 0) return;
+    const databaseId = this.metadata()?.database_id;
+    if (!databaseId) return;
+    const registry = getGlobalAdmission(this.env);
+    for (const snapshot of expired) {
+      const released = await registry.releaseExport(
+        databaseId,
+        snapshot.export_key,
+      );
+      if (!released.ok)
+        throw new ApiFault(released.body.error.code, released.status, {
+          ...released.body.error.details,
+          reason: "expiredExportCapacityReleaseUncertain",
+        });
+    }
+  }
+
+  private pruneExpiredExportsLocally(now: number): void {
+    const expired = this.ctx.storage.sql
+      .exec<ExportSnapshotRow>(
+        "SELECT * FROM export_snapshots WHERE expires_at <= ? ORDER BY expires_at LIMIT 100",
+        now,
+      )
+      .toArray();
+    for (const snapshot of expired)
+      this.deleteLocalExport(snapshot.export_id, snapshot.export_key, true);
+  }
+
+  private deleteLocalExport(
+    exportId: string,
+    exportKey: string,
+    expired = false,
+  ): void {
+    this.transaction(() => {
+      const beforeBytes = this.ctx.storage.sql.databaseSize;
+      if (expired) {
+        const row = this.ctx.storage.sql
+          .exec<{ expires_at: number }>(
+            "SELECT expires_at FROM export_snapshots WHERE export_id = ? AND export_key = ?",
+            exportId,
+            exportKey,
+          )
+          .toArray()[0];
+        if (row) {
+          this.ctx.storage.sql.exec(
+            "INSERT OR IGNORE INTO expired_exports (export_id, expired_at) VALUES (?, ?)",
+            exportId,
+            row.expires_at,
+          );
+        }
+      }
+      this.ctx.storage.sql.exec(
+        "DELETE FROM export_snapshot_items WHERE export_id = ?",
+        exportId,
+      );
+      this.ctx.storage.sql.exec(
+        "DELETE FROM export_snapshots WHERE export_id = ? AND export_key = ?",
+        exportId,
+        exportKey,
+      );
+      if (expired) {
+        const cutoff = Date.now() - EXPORT_TTL_MS;
+        this.ctx.storage.sql.exec(
+          "DELETE FROM expired_exports WHERE expired_at <= ?",
+          cutoff,
+        );
+        this.ctx.storage.sql.exec(
+          `DELETE FROM expired_exports WHERE export_id IN (
+             SELECT export_id FROM expired_exports ORDER BY expired_at DESC LIMIT -1 OFFSET ?
+           )`,
+          MAX_EXPIRED_EXPORT_TOMBSTONES,
+        );
+        const metadata = this.metadata();
+        if (metadata) this.writeMetadata(metadata);
+      }
+      this.assertPhysicalLimit(beforeBytes);
+    });
+  }
+
+  private async enqueueMutation<T>(work: () => Promise<T> | T): Promise<T> {
+    const previous = this.mutationTail;
+    let release = (): void => {};
+    this.mutationTail = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await previous;
+    try {
+      return await work();
+    } finally {
+      release();
+    }
+  }
+
+  private async enqueueActivity<T>(work: () => Promise<T> | T): Promise<T> {
+    const previous = this.activityTail;
+    let release = (): void => {};
+    this.activityTail = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await previous;
+    try {
+      return await work();
+    } finally {
+      release();
+    }
+  }
+
+  async alarm(): Promise<void> {
+    await this.enqueueActivity(() => this.alarmUnlocked());
+  }
+
+  private async alarmUnlocked(): Promise<void> {
+    const metadata = this.metadata();
+    if (!metadata) return;
+    const databaseId = metadata.database_id;
+    const registry = getGlobalAdmission(this.env);
+    const clock = await registry.getServiceClock();
+    if (!clock.ok) {
+      await this.ctx.storage.setAlarm(Date.now() + OBJECT_ALARM_RETRY_MS);
+      return;
+    }
+    this.currentPausedTotalMs = clock.result.pausedTotalMs;
+    this.maxPhysicalBytesPerDatabase = clock.result.maxPhysicalBytesPerDatabase;
+    this.pruneExpiredExportsLocally(Date.now());
+    const pausedSinceActivity = Math.max(
+      0,
+      this.currentPausedTotalMs - metadata.last_activity_paused_total_ms,
+    );
+    const inactiveFor =
+      Date.now() - metadata.last_activity_at - pausedSinceActivity;
+    if (inactiveFor >= INACTIVITY_MS) {
+      const retiring = await registry.retireDatabase(databaseId);
+      if (!retiring.ok || !retiring.result) {
+        await this.ctx.storage.setAlarm(Date.now() + OBJECT_ALARM_RETRY_MS);
+        return;
+      }
+      await this.ctx.storage.deleteAll();
+      this.schemaReady = false;
+      return;
+    }
+    await this.scheduleInactivityAlarm(databaseId);
   }
 
   isInitialized(): DurableCallOutcome<boolean> {
@@ -434,12 +1217,40 @@ export class DatabaseObject extends DurableObject<DatabaseBindings> {
   }
 
   async fetch(request: Request): Promise<Response> {
+    return await this.enqueueActivity(() => this.fetchUnlocked(request));
+  }
+
+  private async fetchUnlocked(request: Request): Promise<Response> {
+    let admittedDatabaseId: string | undefined;
     try {
+      const admission = getGlobalAdmission(this.env);
+      const clock = await admission.getServiceClock();
+      if (!clock.ok) return this.outcomeResponse(clock);
+      this.currentPausedTotalMs = clock.result.pausedTotalMs;
+      this.maxPhysicalBytesPerDatabase =
+        clock.result.maxPhysicalBytesPerDatabase;
+      if (clock.result.suspended)
+        throw new ApiFault("SERVICE_SUSPENDED", 503, {
+          policyRevision: clock.result.policyRevision,
+        });
+      const targetDatabaseId = this.databaseIdFromRequest(request);
+      if (!targetDatabaseId) throw new ApiFault("NOT_FOUND", 404);
+      const serving = await admission.isDatabaseServing(targetDatabaseId);
+      if (!serving.ok) return this.outcomeResponse(serving);
+      if (!serving.result) throw new ApiFault("NOT_FOUND", 404);
+      // Only known, active slugs may touch their SQLite database. This additive
+      // migration also upgrades databases created by the local pilot.
+      if (!this.metadata()) throw new ApiFault("NOT_FOUND", 404);
+      if (!this.schemaReady) {
+        this.migrate();
+        this.schemaReady = true;
+      }
       const url = new URL(request.url);
       const route = this.matchRoute(url, request.method);
       if (!route) throw new ApiFault("NOT_FOUND", 404);
       const now = Date.now();
       this.admitRequest(now);
+      admittedDatabaseId = targetDatabaseId;
       const maxResponseBytes = responseBudget(request.headers);
       const body = route.mutating
         ? await this.readJsonBody(request)
@@ -570,6 +1381,27 @@ export class DatabaseObject extends DurableObject<DatabaseBindings> {
             ),
           );
           break;
+        case "start_export": {
+          const outcome = await this.startExport(
+            getRequestKey(request.headers),
+          );
+          response = outcome.ok
+            ? Response.json(outcome.result, { status: 201 })
+            : this.outcomeResponse(outcome);
+          break;
+        }
+        case "read_export": {
+          const outcome = await this.readExport(
+            route.exportId!,
+            url.searchParams.get("cursor"),
+            exportPageLimit(url),
+            maxResponseBytes,
+          );
+          response = outcome.ok
+            ? Response.json(outcome.result)
+            : this.outcomeResponse(outcome);
+          break;
+        }
         default:
           throw new ApiFault("NOT_FOUND", 404);
       }
@@ -584,10 +1416,43 @@ export class DatabaseObject extends DurableObject<DatabaseBindings> {
           String(this.tableRow(route.tableId).schema_version),
         );
       }
+      await this.scheduleInactivityAlarm();
+      const usage = this.getUsage();
+      if (usage.ok)
+        await admission.reportDatabaseUsage(targetDatabaseId, usage.result);
       return response;
     } catch (error) {
+      if (admittedDatabaseId) {
+        const usage = this.getUsage();
+        if (usage.ok) {
+          try {
+            await getGlobalAdmission(this.env).reportDatabaseUsage(
+              admittedDatabaseId,
+              usage.result,
+            );
+          } catch {
+            // The fixed physical reservation remains charged if reporting is uncertain.
+          }
+        }
+      }
       return errorResponse(error);
     }
+  }
+
+  private databaseIdFromRequest(request: Request): string {
+    const parts = new URL(request.url).pathname.split("/").filter(Boolean);
+    return parts[0] === "v1" && parts[1] === "databases"
+      ? (parts[2] ?? "")
+      : "";
+  }
+
+  private outcomeResponse<T>(
+    outcome: Extract<DurableCallOutcome<T>, { ok: false }>,
+  ): Response {
+    return Response.json(outcome.body, {
+      status: outcome.status,
+      headers: outcome.headers,
+    });
   }
 
   private matchRoute(
@@ -599,6 +1464,7 @@ export class DatabaseObject extends DurableObject<DatabaseBindings> {
         tableId?: string;
         columnId?: string;
         recordId?: string;
+        exportId?: string;
         mutating: boolean;
       }
     | undefined {
@@ -610,6 +1476,14 @@ export class DatabaseObject extends DurableObject<DatabaseBindings> {
       throw new ApiFault("NOT_FOUND", 404);
     if (parts.length === 3 && method === "GET")
       return { operation: "get_database", mutating: false };
+    if (parts.length === 4 && parts[3] === "exports" && method === "POST")
+      return { operation: "start_export", mutating: false };
+    if (parts.length === 5 && parts[3] === "exports" && method === "GET")
+      return {
+        operation: "read_export",
+        exportId: parts[4],
+        mutating: false,
+      };
     if (parts[3] !== "tables") return undefined;
     if (parts.length === 4 && method === "POST")
       return { operation: "create_table", mutating: true };
@@ -673,6 +1547,7 @@ export class DatabaseObject extends DurableObject<DatabaseBindings> {
 
   private migrate(): void {
     this.transaction(() => {
+      const beforeBytes = this.ctx.storage.sql.databaseSize;
       const sql = this.ctx.storage.sql;
       sql.exec(`CREATE TABLE IF NOT EXISTS database_state (
         singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
@@ -683,11 +1558,28 @@ export class DatabaseObject extends DurableObject<DatabaseBindings> {
         created_at INTEGER NOT NULL,
         write_until INTEGER NOT NULL,
         last_activity_at INTEGER NOT NULL,
+        last_activity_paused_total_ms INTEGER NOT NULL DEFAULT 0,
+        usage_version INTEGER NOT NULL DEFAULT 0,
         quota_day TEXT NOT NULL,
         daily_requests INTEGER NOT NULL,
         daily_mutations INTEGER NOT NULL,
         daily_returned_bytes INTEGER NOT NULL
       )`);
+      const stateColumns = sql
+        .exec<{ name: string }>("PRAGMA table_info(database_state)")
+        .toArray();
+      if (
+        !stateColumns.some(
+          (column) => column.name === "last_activity_paused_total_ms",
+        )
+      )
+        sql.exec(
+          "ALTER TABLE database_state ADD COLUMN last_activity_paused_total_ms INTEGER NOT NULL DEFAULT 0",
+        );
+      if (!stateColumns.some((column) => column.name === "usage_version"))
+        sql.exec(
+          "ALTER TABLE database_state ADD COLUMN usage_version INTEGER NOT NULL DEFAULT 0",
+        );
       sql.exec(`CREATE TABLE IF NOT EXISTS tables (
         id TEXT PRIMARY KEY, name TEXT NOT NULL COLLATE NOCASE UNIQUE,
         description TEXT NOT NULL, schema_version INTEGER NOT NULL
@@ -731,6 +1623,34 @@ export class DatabaseObject extends DurableObject<DatabaseBindings> {
       sql.exec(
         `CREATE INDEX IF NOT EXISTS request_timestamps_at ON request_timestamps(request_at)`,
       );
+      sql.exec(`CREATE TABLE IF NOT EXISTS export_snapshots (
+        export_id TEXT PRIMARY KEY,
+        export_key TEXT NOT NULL UNIQUE,
+        format_version INTEGER NOT NULL CHECK (format_version = 1),
+        snapshot_at TEXT NOT NULL,
+        expires_at INTEGER NOT NULL,
+        snapshot_bytes INTEGER NOT NULL,
+        item_count INTEGER NOT NULL
+      )`);
+      sql.exec(`CREATE TABLE IF NOT EXISTS export_snapshot_items (
+        export_id TEXT NOT NULL,
+        item_index INTEGER NOT NULL,
+        item_json TEXT NOT NULL,
+        PRIMARY KEY (export_id, item_index)
+      )`);
+      sql.exec(
+        "CREATE INDEX IF NOT EXISTS export_snapshots_expiry ON export_snapshots(expires_at)",
+      );
+      sql.exec(`CREATE TABLE IF NOT EXISTS expired_exports (
+        export_id TEXT PRIMARY KEY,
+        expired_at INTEGER NOT NULL
+      )`);
+      sql.exec(
+        "CREATE INDEX IF NOT EXISTS expired_exports_at ON expired_exports(expired_at)",
+      );
+      const metadata = this.metadata();
+      if (metadata) this.writeMetadata(metadata);
+      this.assertPhysicalLimit(beforeBytes);
     });
   }
 
@@ -749,10 +1669,16 @@ export class DatabaseObject extends DurableObject<DatabaseBindings> {
 
   private requireMetadata(now: number): MetadataRow {
     const metadata = this.metadata();
+    const pausedSinceActivity = metadata
+      ? Math.max(
+          0,
+          this.currentPausedTotalMs - metadata.last_activity_paused_total_ms,
+        )
+      : 0;
     if (
       !metadata ||
       metadata.database_id.length === 0 ||
-      now - metadata.last_activity_at >= INACTIVITY_MS
+      now - metadata.last_activity_at - pausedSinceActivity >= INACTIVITY_MS
     ) {
       throw new ApiFault("NOT_FOUND", 404);
     }
@@ -760,16 +1686,20 @@ export class DatabaseObject extends DurableObject<DatabaseBindings> {
   }
 
   private writeMetadata(metadata: MetadataRow): void {
+    metadata.usage_version += 1;
     this.ctx.storage.sql.exec(
       `UPDATE database_state SET database_url = ?, name = ?, description = ?, created_at = ?,
-       write_until = ?, last_activity_at = ?, quota_day = ?, daily_requests = ?,
-       daily_mutations = ?, daily_returned_bytes = ? WHERE singleton = 1`,
+       write_until = ?, last_activity_at = ?, last_activity_paused_total_ms = ?,
+       usage_version = ?, quota_day = ?, daily_requests = ?, daily_mutations = ?,
+       daily_returned_bytes = ? WHERE singleton = 1`,
       metadata.database_url,
       metadata.name,
       metadata.description,
       metadata.created_at,
       metadata.write_until,
       metadata.last_activity_at,
+      metadata.last_activity_paused_total_ms,
+      metadata.usage_version,
       metadata.quota_day,
       metadata.daily_requests,
       metadata.daily_mutations,
@@ -802,6 +1732,7 @@ export class DatabaseObject extends DurableObject<DatabaseBindings> {
   ): T {
     return this.transaction(() => {
       const currentTime = Date.now();
+      const beforeBytes = this.ctx.storage.sql.databaseSize;
       const metadata = this.requireMetadata(currentTime);
       this.resetDailyQuota(metadata, currentTime);
       const result = operation();
@@ -821,14 +1752,19 @@ export class DatabaseObject extends DurableObject<DatabaseBindings> {
         });
       }
       metadata.daily_returned_bytes += responseBytes;
-      if (renewActivity) metadata.last_activity_at = currentTime;
+      if (renewActivity) {
+        metadata.last_activity_at = currentTime;
+        metadata.last_activity_paused_total_ms = this.currentPausedTotalMs;
+      }
       this.writeMetadata(metadata);
+      this.assertPhysicalLimit(beforeBytes);
       return result;
     });
   }
 
   private admitRequest(now: number): void {
     this.transaction(() => {
+      const beforeBytes = this.ctx.storage.sql.databaseSize;
       const metadata = this.requireMetadata(now);
       this.resetDailyQuota(metadata, now);
       if (metadata.daily_requests >= MAX_DAILY_REQUESTS) {
@@ -859,6 +1795,7 @@ export class DatabaseObject extends DurableObject<DatabaseBindings> {
         "INSERT INTO request_timestamps (request_at) VALUES (?)",
         now,
       );
+      this.assertPhysicalLimit(beforeBytes);
     });
   }
 
@@ -870,6 +1807,45 @@ export class DatabaseObject extends DurableObject<DatabaseBindings> {
       metadata.daily_mutations = 0;
       metadata.daily_returned_bytes = 0;
     }
+  }
+
+  private measureUsage(metadata: MetadataRow): DatabaseUsage {
+    return {
+      logicalBytes: this.logicalStorageBytes(metadata),
+      replayBytes: this.replayStorageBytes(),
+      physicalBytes: this.ctx.storage.sql.databaseSize,
+      version: metadata.usage_version,
+    };
+  }
+
+  private assertPhysicalLimit(beforeBytes?: number): void {
+    const physicalBytes = this.ctx.storage.sql.databaseSize;
+    if (
+      physicalBytes > this.maxPhysicalBytesPerDatabase &&
+      (beforeBytes === undefined || physicalBytes > beforeBytes)
+    ) {
+      throw new ApiFault("CAPACITY_UNAVAILABLE", 503, {
+        quota: "physicalBytesPerDatabase",
+        maxBytes: this.maxPhysicalBytesPerDatabase,
+        usedBytes: physicalBytes,
+      });
+    }
+  }
+
+  private async scheduleInactivityAlarm(databaseId?: string): Promise<void> {
+    const metadata = this.metadata();
+    if (!metadata || (databaseId && metadata.database_id !== databaseId))
+      return;
+    const pausedSinceActivity = Math.max(
+      0,
+      this.currentPausedTotalMs - metadata.last_activity_paused_total_ms,
+    );
+    const elapsed = Math.max(
+      0,
+      Date.now() - metadata.last_activity_at - pausedSinceActivity,
+    );
+    const delay = Math.max(1, INACTIVITY_MS - elapsed);
+    await this.ctx.storage.setAlarm(Date.now() + delay);
   }
 
   private async readJsonBody(
@@ -953,34 +1929,70 @@ export class DatabaseObject extends DurableObject<DatabaseBindings> {
       expectedSchemaVersion: context.expectedSchemaVersion ?? null,
     });
     const requestKeyDigest = await fingerprint(context.requestKey);
-    // Expiry pruning commits independently so a later rejected mutation cannot roll it back.
+    // Expired replay cleanup is an independent durable step. A later failed
+    // write must not restore outcomes that have passed their retention window.
     this.transaction(() => this.cleanupExpiredOutcomes(Date.now()));
-    return this.transaction(() => {
-      const currentTime = Date.now();
-      const metadata = this.requireMetadata(currentTime);
-      this.resetDailyQuota(metadata, currentTime);
-      const previous = this.ctx.storage.sql
-        .exec<{
-          request_fingerprint: string;
-          response_status: number;
-          response_json: string;
-          response_headers_json: string;
-          response_bytes: number;
-        }>(
-          "SELECT request_fingerprint, response_status, response_json, response_headers_json, response_bytes FROM mutation_outcomes WHERE request_key = ?",
+    const replay = this.transaction(() =>
+      this.readMutationReplay<T>(
+        requestKeyDigest,
+        requestFingerprint,
+        mutationResponseBudget,
+        Date.now(),
+      ),
+    );
+    if (replay) return replay;
+
+    const databaseId = String(target.databaseId ?? "");
+    if (!databaseId) throw new ApiFault("NOT_FOUND", 404);
+    const registry = getGlobalAdmission(this.env);
+    const reservation = await registry.reserveMutation({
+      databaseId,
+      operationKey: requestKeyDigest,
+      operationFingerprint: requestFingerprint,
+      logicalBytes: MUTATION_LOGICAL_RESERVATION_BYTES,
+      replayBytes: MUTATION_REPLAY_RESERVATION_BYTES,
+    });
+    if (!reservation.ok)
+      throw new ApiFault(
+        reservation.body.error.code,
+        reservation.status,
+        reservation.body.error.details,
+      );
+
+    let committed = false;
+    try {
+      const outcome = this.transaction(() => {
+        const currentTime = Date.now();
+        const beforeBytes = this.ctx.storage.sql.databaseSize;
+        const metadata = this.requireMetadata(currentTime);
+        this.resetDailyQuota(metadata, currentTime);
+        const previous = this.readMutationReplay<T>(
           requestKeyDigest,
-        )
-        .toArray()[0];
-      if (previous) {
-        if (previous.request_fingerprint !== requestFingerprint)
-          throw new ApiFault("IDEMPOTENCY_CONFLICT", 409);
-        if (previous.response_bytes > mutationResponseBudget) {
+          requestFingerprint,
+          mutationResponseBudget,
+          currentTime,
+        );
+        if (previous) return { replay: true as const, outcome: previous };
+        if (currentTime >= metadata.write_until)
+          throw new ApiFault("DATABASE_READ_ONLY", 409);
+        if (metadata.daily_mutations >= MAX_DAILY_MUTATIONS) {
+          throw new ApiFault("QUOTA_EXCEEDED", 429, {
+            quota: "mutations",
+            limit: MAX_DAILY_MUTATIONS,
+          });
+        }
+        const body = apply(metadata);
+        const responseJson = JSON.stringify(body);
+        const responseBytes = body === null ? 0 : encodedBytes(responseJson);
+        const responseHeaders = makeResponseHeaders?.() ?? {};
+        const responseHeadersJson = JSON.stringify(responseHeaders);
+        if (responseBytes > mutationResponseBudget) {
           throw new ApiFault("RESULT_TOO_LARGE", 413, {
             maxBytes: mutationResponseBudget,
           });
         }
         if (
-          metadata.daily_returned_bytes + previous.response_bytes >
+          metadata.daily_returned_bytes + responseBytes >
           MAX_DAILY_RETURNED_BYTES
         ) {
           throw new ApiFault("QUOTA_EXCEEDED", 429, {
@@ -988,89 +2000,133 @@ export class DatabaseObject extends DurableObject<DatabaseBindings> {
             limitBytes: MAX_DAILY_RETURNED_BYTES,
           });
         }
-        metadata.daily_returned_bytes += previous.response_bytes;
+        const logicalBytes = this.logicalStorageBytes(metadata);
+        if (logicalBytes > MAX_STORAGE_BYTES) {
+          throw new ApiFault("QUOTA_EXCEEDED", 429, {
+            quota: "storageBytes",
+            limitBytes: MAX_STORAGE_BYTES,
+            usedBytes: logicalBytes,
+          });
+        }
+        const replayBytes =
+          this.replayStorageBytes() +
+          responseBytes +
+          encodedBytes(responseHeadersJson) +
+          requestFingerprint.length +
+          128;
+        if (replayBytes > MAX_REPLAY_BYTES)
+          throw new ApiFault("CAPACITY_UNAVAILABLE", 503, {
+            quota: "replayBytes",
+          });
+        metadata.daily_mutations += 1;
+        metadata.daily_returned_bytes += responseBytes;
+        metadata.last_activity_at = currentTime;
+        metadata.last_activity_paused_total_ms = this.currentPausedTotalMs;
         this.writeMetadata(metadata);
+        this.ctx.storage.sql.exec(
+          `INSERT INTO mutation_outcomes
+            (request_key, request_fingerprint, response_status, response_json, response_headers_json, response_bytes, completed_at, expires_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+          requestKeyDigest,
+          requestFingerprint,
+          status,
+          responseJson,
+          responseHeadersJson,
+          responseBytes,
+          currentTime,
+          currentTime + IDEMPOTENCY_MS,
+        );
+        this.assertPhysicalLimit(beforeBytes);
         return {
-          status: previous.response_status,
-          body: JSON.parse(previous.response_json) as T | null,
-          headers: JSON.parse(previous.response_headers_json) as Record<
-            string,
-            string
-          >,
+          replay: false as const,
+          outcome: { status, body, headers: responseHeaders },
         };
+      });
+      if (outcome.replay) {
+        await registry.releaseMutation(databaseId, requestKeyDigest);
+        return outcome.outcome;
       }
-      if (currentTime >= metadata.write_until)
-        throw new ApiFault("DATABASE_READ_ONLY", 409);
-      if (metadata.daily_mutations >= MAX_DAILY_MUTATIONS) {
-        throw new ApiFault("QUOTA_EXCEEDED", 429, {
-          quota: "mutations",
-          limit: MAX_DAILY_MUTATIONS,
-        });
-      }
-      const body = apply(metadata);
-      const responseJson = JSON.stringify(body);
-      const responseBytes = body === null ? 0 : encodedBytes(responseJson);
-      const responseHeaders = makeResponseHeaders?.() ?? {};
-      const responseHeadersJson = JSON.stringify(responseHeaders);
-      if (responseBytes > mutationResponseBudget) {
-        throw new ApiFault("RESULT_TOO_LARGE", 413, {
-          maxBytes: mutationResponseBudget,
-        });
-      }
-      if (
-        metadata.daily_returned_bytes + responseBytes >
-        MAX_DAILY_RETURNED_BYTES
-      ) {
-        throw new ApiFault("QUOTA_EXCEEDED", 429, {
-          quota: "returnedBytes",
-          limitBytes: MAX_DAILY_RETURNED_BYTES,
-        });
-      }
-      const logicalBytes = this.logicalStorageBytes(metadata);
-      if (logicalBytes > MAX_STORAGE_BYTES) {
-        throw new ApiFault("QUOTA_EXCEEDED", 429, {
-          quota: "storageBytes",
-          limitBytes: MAX_STORAGE_BYTES,
-          usedBytes: logicalBytes,
-        });
-      }
-      const replayBytes =
-        this.replayStorageBytes() +
-        responseBytes +
-        encodedBytes(responseHeadersJson) +
-        requestFingerprint.length +
-        128;
-      if (replayBytes > MAX_REPLAY_BYTES)
-        throw new ApiFault("CAPACITY_UNAVAILABLE", 503, {
-          quota: "replayBytes",
-        });
-      metadata.daily_mutations += 1;
-      metadata.daily_returned_bytes += responseBytes;
-      metadata.last_activity_at = currentTime;
-      this.writeMetadata(metadata);
-      this.ctx.storage.sql.exec(
-        `INSERT INTO mutation_outcomes
-          (request_key, request_fingerprint, response_status, response_json, response_headers_json, response_bytes, completed_at, expires_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      committed = true;
+      const usage = this.getUsage();
+      if (usage.ok)
+        await registry.settleMutation(
+          databaseId,
+          requestKeyDigest,
+          usage.result,
+        );
+      return outcome.outcome;
+    } catch (error) {
+      if (!committed)
+        await registry.releaseMutation(databaseId, requestKeyDigest);
+      throw error;
+    }
+  }
+
+  private readMutationReplay<T>(
+    requestKeyDigest: string,
+    requestFingerprint: string,
+    responseBudget: number,
+    now: number,
+  ): MutationOutcome<T> | null {
+    const beforeBytes = this.ctx.storage.sql.databaseSize;
+    const metadata = this.requireMetadata(now);
+    this.resetDailyQuota(metadata, now);
+    const previous = this.ctx.storage.sql
+      .exec<{
+        request_fingerprint: string;
+        response_status: number;
+        response_json: string;
+        response_headers_json: string;
+        response_bytes: number;
+      }>(
+        "SELECT request_fingerprint, response_status, response_json, response_headers_json, response_bytes FROM mutation_outcomes WHERE request_key = ?",
         requestKeyDigest,
-        requestFingerprint,
-        status,
-        responseJson,
-        responseHeadersJson,
-        responseBytes,
-        currentTime,
-        currentTime + IDEMPOTENCY_MS,
-      );
-      return { status, body, headers: responseHeaders };
-    });
+      )
+      .toArray()[0];
+    if (!previous) return null;
+    if (previous.request_fingerprint !== requestFingerprint)
+      throw new ApiFault("IDEMPOTENCY_CONFLICT", 409);
+    if (previous.response_bytes > responseBudget)
+      throw new ApiFault("RESULT_TOO_LARGE", 413, { maxBytes: responseBudget });
+    if (
+      metadata.daily_returned_bytes + previous.response_bytes >
+      MAX_DAILY_RETURNED_BYTES
+    )
+      throw new ApiFault("QUOTA_EXCEEDED", 429, {
+        quota: "returnedBytes",
+        limitBytes: MAX_DAILY_RETURNED_BYTES,
+      });
+    metadata.daily_returned_bytes += previous.response_bytes;
+    this.writeMetadata(metadata);
+    this.assertPhysicalLimit(beforeBytes);
+    return {
+      status: previous.response_status,
+      body: JSON.parse(previous.response_json) as T | null,
+      headers: JSON.parse(previous.response_headers_json) as Record<
+        string,
+        string
+      >,
+    };
   }
 
   private cleanupExpiredOutcomes(now: number): void {
+    const beforeBytes = this.ctx.storage.sql.databaseSize;
+    const hasExpired =
+      this.ctx.storage.sql
+        .exec<{ request_key: string }>(
+          "SELECT request_key FROM mutation_outcomes WHERE expires_at <= ? ORDER BY expires_at LIMIT 1",
+          now,
+        )
+        .toArray().length > 0;
+    if (!hasExpired) return;
     this.ctx.storage.sql.exec(
       `DELETE FROM mutation_outcomes WHERE request_key IN
        (SELECT request_key FROM mutation_outcomes WHERE expires_at <= ? ORDER BY expires_at LIMIT 100)`,
       now,
     );
+    const metadata = this.metadata();
+    if (metadata) this.writeMetadata(metadata);
+    this.assertPhysicalLimit(beforeBytes);
   }
 
   private replayStorageBytes(): number {

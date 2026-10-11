@@ -15,7 +15,7 @@ The accepted temporary-database policy governs this contract. The user's later d
 
 ## Current implementation
 
-The durable pilot implements database create/read; table create/list/read; column create/list/read; and record create/list/read/update/delete. It uses the REST and MCP paths in the operation table below. Table/column changes beyond creation, indexes, and exports remain unimplemented. Passing the runtime acceptance suite proves local SQLite Durable Object persistence and transport parity for the supported slice; it does not prove a managed deployment or host-client compatibility.
+The current implementation supports database create/read; table create/list/read; column create/list/read; record create/list/read/update/delete; and bounded immutable JSON exports over REST and MCP. It also exposes `GET /health` as a provider-neutral readiness endpoint. Table/column changes beyond creation, indexes, whole-database administration, and unrestricted SQL are not supported. Local SQLite Durable Object tests and a prebuilt artifact runtime test establish local behavior only; they do not prove a managed deployment or host-client compatibility.
 
 ## Identity and transport
 
@@ -69,8 +69,8 @@ In the table, `D` means `/v1/databases/{databaseId}` and `T` means `D/tables/{ta
 | `GET T/records/{recordId}` | `get_record` | None |
 | `PATCH T/records/{recordId}` | `update_record` | `values`, record precondition |
 | `DELETE T/records/{recordId}` | `delete_record` | Record precondition |
-| `POST D/exports` | `start_export` | None |
-| `GET D/exports/{exportId}` | `read_export` | Optional continuation cursor |
+| `POST D/exports` | `start_export` | Required `Idempotency-Key` / `requestKey` |
+| `GET D/exports/{exportId}` | `read_export` | Optional continuation cursor and page limit |
 
 Table deletion removes its definitions and records atomically. Column deletion removes its cells and dependent indexes atomically. Index deletion leaves records intact. Schema changes that cannot preserve current values and declared constraints fail atomically; no silent type coercion or destructive migration occurs on a type/nullability patch.
 
@@ -106,19 +106,19 @@ Ordinary list pagination is a live view, not a point-in-time snapshot. Use expor
 
 ## JSON exports
 
-Starting an export captures table definitions, indexes, and records at one consistent point in time. The operation creates an export handle, not a user data mutation, and remains available after the write cutoff. It is subject to bounded export admission and capacity controls.
+Starting an export captures the currently supported database metadata, table definitions, columns, and records at one consistent point in time. Indexes are not part of the current resource model. The operation creates an export handle, not a user data mutation, and remains available after the write cutoff. Starting and reading an export count as successful data operations for inactivity expiry. Both are subject to bounded export admission and capacity controls.
 
-The start result returns `exportId`, `formatVersion: 1`, `snapshotAt`, and `expiresAt`. The handle is scoped to the database and does not bypass its access/lifecycle rules. Read results contain those identifiers, `items`, and `nextCursor`. Items are tagged as `table`, `column`, `index`, or `record`, include parent IDs where needed, and use the resource representations above. The first item describes the database, excluding access capabilities and retry history. Clients can assemble the bounded JSON pages into a complete export.
+The start result returns `exportId`, `formatVersion: 1`, `snapshotAt`, and `expiresAt`. The handle is scoped to the database and does not bypass its access/lifecycle rules. Read results contain those identifiers, `items`, and `nextCursor`. Items use `type` tags `database`, `table`, `column`, or `record` and include parent IDs where needed. A column item's `columnType` field carries its `string`, `number`, or `boolean` value so `type` remains the item tag. An ordinary record item includes `values`; if those values do not fit in one response, the service emits record chunks with `chunk: { encoding: "json", offsetBytes, totalBytes }` and a `data` string. Concatenate each record's UTF-8 `data` chunks in offset order to reconstruct the JSON-encoded `values`. The first item describes the database but excludes its slug, URL, access warning, and creation retry history. Clients can assemble the bounded JSON pages into a complete export.
 
-Every page uses the same snapshot, including its schema. A cursor must identify that snapshot; never resume against live data. An expired handle returns `EXPORT_EXPIRED`, requiring a new export. A response identifies completion through `nextCursor: null`. Clients must not treat a partial export as complete.
+Every page uses the same snapshot, including its schema. A cursor identifies that snapshot; pagination never resumes against live data. An expired handle returns HTTP 410 `EXPORT_EXPIRED`, requiring a new export. A response identifies completion through `nextCursor: null`. Clients must not treat a partial export as complete.
 
-Snapshot lifetime and capacity admission are operating parameters to settle before release, communicated through `expiresAt` and errors. No unbounded snapshot retention or import API is promised. Preserve reserved bounded export capacity during ordinary workload suspension; database expiry/removal still makes the resource unavailable.
+The implemented bounds are 12 MiB per serialized snapshot, three active exports per database, 128 MiB of global logical export reservations, and a 24-hour TTL. Page limits range from 1 to 100 (default 20), and each full REST/MCP response is limited to 256 KiB. The REST start route requires `Idempotency-Key`; MCP uses `requestKey`, and reusing the same key returns the same handle. Expiry releases the logical export reservation, while SQLite pages stay covered by the database's physical reservation until database cleanup deletes them. No unbounded snapshot retention or import API is promised; database expiry/removal makes the resource unavailable.
 
 ## Lifecycle and limits
 
 The database is writable for 30 days from creation. At the cutoff all data/schema mutations fail with `DATABASE_READ_ONLY`; successful replay is not a new write. Reads and bounded exports remain available. Seven-day inactivity expiry follows the accepted policy: successful data reads/writes renew it; metadata, failed requests, and replays do not. Capacity suspension pauses the inactivity countdown but not the 30-day write window. Per-database quota exhaustion does not pause or renew either clock.
 
-The provisional pilot bounds are 10 MiB storage; 1,000 data requests per UTC day including at most 100 mutations; 60 requests/minute burst; 64 KiB request bodies; 256 KiB ordinary response bodies; and 100 MiB returned data per UTC day. UTC daily reset is 00:00. All slug holders and both interfaces share the same counters. Global ceilings take precedence. Export uses a separately bounded allowance; its exact limits and renewal accounting remain in the operating-limits decision.
+The provisional per-database bounds are 10 MiB logical storage; 1,000 data requests per UTC day including at most 100 mutations; 60 requests/minute burst; 64 KiB request bodies; 256 KiB ordinary response bodies; and 100 MiB returned data per UTC day. UTC daily reset is 00:00. All slug holders and both interfaces share the same counters. Global limits take precedence: 32 databases, 512 MiB logical storage, 1 GiB replay reservation, 4 GiB aggregate database physical reservation (128 MiB per database), 64 MiB for the separate Registry/control store, 50,000 admitted requests per UTC day and 1,000 per minute, 5,000 mutations per UTC day, and 128 MiB of global export reservation. Capacity values and suspension state use revisioned public policy configuration. These admission ceilings do not cap incoming provider HTTP invocations or guarantee an absolute provider billing ceiling.
 
 Single-resource mutation outcomes use a 255 KiB encoded-resource ceiling so the MCP JSON-RPC envelope remains within the 256 KiB full-response cap. Daily returned-byte accounting counts logical resource JSON and excludes transport envelopes.
 

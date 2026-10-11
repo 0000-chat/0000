@@ -3,6 +3,18 @@
 interface __BaseEnv_Env {
   DATABASES: DurableObjectNamespace<import("./worker").DatabaseObject>;
   REGISTRY: DurableObjectNamespace<import("./worker").DatabaseRegistry>;
+  CAPACITY_POLICY_REVISION: string;
+  CAPACITY_MAX_DATABASES: string;
+  CAPACITY_MAX_LOGICAL_BYTES: string;
+  CAPACITY_MAX_REPLAY_BYTES: string;
+  CAPACITY_MAX_PHYSICAL_BYTES: string;
+  CAPACITY_MAX_PHYSICAL_BYTES_PER_DATABASE: string;
+  CAPACITY_MAX_DAILY_REQUESTS: string;
+  CAPACITY_MAX_REQUESTS_PER_MINUTE: string;
+  CAPACITY_MAX_DAILY_MUTATIONS: string;
+  CAPACITY_MAX_EXPORT_BYTES: string;
+  CAPACITY_MAX_CONTROL_BYTES: string;
+  SERVICE_SUSPENDED: string;
 }
 declare namespace Cloudflare {
   interface GlobalProps {

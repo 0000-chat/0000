@@ -97,6 +97,38 @@
           "uniqueItems": true,
           "items": { "type": "string", "pattern": "^[A-Za-z0-9._-]+$" }
         },
+        "vars": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "CAPACITY_POLICY_REVISION",
+            "CAPACITY_MAX_DATABASES",
+            "CAPACITY_MAX_LOGICAL_BYTES",
+            "CAPACITY_MAX_REPLAY_BYTES",
+            "CAPACITY_MAX_PHYSICAL_BYTES",
+            "CAPACITY_MAX_PHYSICAL_BYTES_PER_DATABASE",
+            "CAPACITY_MAX_DAILY_REQUESTS",
+            "CAPACITY_MAX_REQUESTS_PER_MINUTE",
+            "CAPACITY_MAX_DAILY_MUTATIONS",
+            "CAPACITY_MAX_EXPORT_BYTES",
+            "CAPACITY_MAX_CONTROL_BYTES",
+            "SERVICE_SUSPENDED"
+          ],
+          "properties": {
+            "CAPACITY_POLICY_REVISION": { "type": "string", "pattern": "^[1-9][0-9]*$" },
+            "CAPACITY_MAX_DATABASES": { "type": "string", "pattern": "^[1-9][0-9]*$" },
+            "CAPACITY_MAX_LOGICAL_BYTES": { "type": "string", "pattern": "^[1-9][0-9]*$" },
+            "CAPACITY_MAX_REPLAY_BYTES": { "type": "string", "pattern": "^[1-9][0-9]*$" },
+            "CAPACITY_MAX_PHYSICAL_BYTES": { "type": "string", "pattern": "^[1-9][0-9]*$" },
+            "CAPACITY_MAX_PHYSICAL_BYTES_PER_DATABASE": { "type": "string", "pattern": "^[1-9][0-9]*$" },
+            "CAPACITY_MAX_DAILY_REQUESTS": { "type": "string", "pattern": "^[1-9][0-9]*$" },
+            "CAPACITY_MAX_REQUESTS_PER_MINUTE": { "type": "string", "pattern": "^[1-9][0-9]*$" },
+            "CAPACITY_MAX_DAILY_MUTATIONS": { "type": "string", "pattern": "^[1-9][0-9]*$" },
+            "CAPACITY_MAX_EXPORT_BYTES": { "type": "string", "pattern": "^[1-9][0-9]*$" },
+            "CAPACITY_MAX_CONTROL_BYTES": { "type": "string", "pattern": "^[1-9][0-9]*$" },
+            "SERVICE_SUSPENDED": { "enum": ["true", "false"] }
+          }
+        },
         "migration_files": {
           "type": "array",
           "items": {

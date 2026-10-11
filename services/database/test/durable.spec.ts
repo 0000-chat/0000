@@ -9,6 +9,8 @@ import {
 } from "@modelcontextprotocol/client";
 import { convertV4MiniflareOptions, Miniflare } from "miniflare";
 import { expect, test } from "bun:test";
+import { REGISTRY_ID } from "../src/global-admission";
+import { EXPORT_MAX_SNAPSHOT_BYTES } from "../src/export";
 
 const BASE_URL = "https://database.0000.chat";
 const DATABASES_PATH = "/v1/databases";
@@ -21,6 +23,24 @@ const maxRequestBodyBytes = 64 * 1024;
 const maxResponseBodyBytes = 256 * 1024;
 const maxMutationResponseBytes = 255 * 1024;
 const maxStorageBytes = 10 * 1024 * 1024;
+const kibibyte = 1024;
+const mebibyte = 1024 * kibibyte;
+const maxDailyRequests = 1_000;
+const maxDailyReturnedBytes = 100 * mebibyte;
+const testAdmissionBindings = {
+  CAPACITY_MAX_DATABASES: "32",
+  CAPACITY_MAX_LOGICAL_BYTES: String(512 * mebibyte),
+  CAPACITY_MAX_REPLAY_BYTES: String(1_024 * mebibyte),
+  CAPACITY_MAX_PHYSICAL_BYTES: String(4_096 * mebibyte),
+  CAPACITY_MAX_PHYSICAL_BYTES_PER_DATABASE: String(128 * mebibyte),
+  CAPACITY_MAX_DAILY_REQUESTS: "50000",
+  CAPACITY_MAX_REQUESTS_PER_MINUTE: "1000",
+  CAPACITY_MAX_DAILY_MUTATIONS: "5000",
+  CAPACITY_MAX_EXPORT_BYTES: String(128 * mebibyte),
+  CAPACITY_MAX_CONTROL_BYTES: String(64 * mebibyte),
+  CAPACITY_POLICY_REVISION: "1",
+  SERVICE_SUSPENDED: "false",
+} satisfies Record<string, string>;
 
 type Database = {
   databaseId: string;
@@ -67,6 +87,20 @@ type Collection<T> = {
   nextCursor: string | null;
 };
 
+type ExportManifest = {
+  exportId: string;
+  formatVersion: 1;
+  snapshotAt: string;
+  expiresAt: string;
+};
+
+type ExportItem = Record<string, unknown> & { type: string };
+
+type ExportPage = ExportManifest & {
+  items: ExportItem[];
+  nextCursor: string | null;
+};
+
 type McpResult = Awaited<ReturnType<Client["callTool"]>>;
 
 const workerScriptPromises = new Map<string, Promise<string>>();
@@ -104,7 +138,11 @@ async function workerScript(entryPoint = workerEntry): Promise<string> {
 
 async function startRuntime(
   persistenceDirectory: string,
-  options: { failAfterCreate?: boolean; testClock?: boolean } = {},
+  options: {
+    failAfterCreate?: boolean;
+    testClock?: boolean;
+    admissionBindings?: Partial<typeof testAdmissionBindings>;
+  } = {},
 ): Promise<Miniflare> {
   const testHarness =
     options.failAfterCreate === true || options.testClock === true;
@@ -116,6 +154,10 @@ async function startRuntime(
           name: "database",
           compatibilityDate: "2026-09-11",
           compatibilityFlags: ["nodejs_compat"],
+          bindings: {
+            ...testAdmissionBindings,
+            ...options.admissionBindings,
+          },
           durableObjects: {
             DATABASES: {
               className: options.failAfterCreate
@@ -125,7 +167,12 @@ async function startRuntime(
                   : "DatabaseObject",
               useSQLite: true,
             },
-            REGISTRY: { className: "DatabaseRegistry", useSQLite: true },
+            REGISTRY: {
+              className: options.testClock
+                ? "TestClockDatabaseRegistry"
+                : "DatabaseRegistry",
+              useSQLite: true,
+            },
           },
           modules: true,
           script: await workerScript(
@@ -359,6 +406,81 @@ function mcpBody(result: McpResult): Record<string, unknown> {
   return JSON.parse(textBlock.text) as Record<string, unknown>;
 }
 
+function normalizeExportItems(pages: readonly ExportPage[]): ExportItem[] {
+  const normalized: ExportItem[] = [];
+  const encoder = new TextEncoder();
+  let pending:
+    | {
+        item: ExportItem;
+        data: string;
+        byteLength: number;
+        totalBytes: number;
+      }
+    | undefined;
+
+  const finishChunkedRecord = () => {
+    if (!pending) return;
+    if (pending.byteLength !== pending.totalBytes)
+      throw new Error("Export record chunks did not cover the full JSON value");
+    normalized.push({
+      type: "record",
+      id: pending.item.id,
+      tableId: pending.item.tableId,
+      version: pending.item.version,
+      values: JSON.parse(pending.data) as Record<string, unknown>,
+    });
+    pending = undefined;
+  };
+
+  for (const page of pages) {
+    for (const item of page.items) {
+      const chunk = item.chunk;
+      if (typeof chunk === "object" && chunk !== null) {
+        const details = chunk as {
+          encoding?: unknown;
+          offsetBytes?: unknown;
+          totalBytes?: unknown;
+        };
+        if (
+          details.encoding !== "json" ||
+          typeof details.offsetBytes !== "number" ||
+          typeof details.totalBytes !== "number" ||
+          typeof item.data !== "string"
+        ) {
+          throw new Error("Export record chunk had an invalid shape");
+        }
+        if (!pending) {
+          if (details.offsetBytes !== 0)
+            throw new Error("Export record chunks did not start at byte zero");
+          pending = {
+            item,
+            data: "",
+            byteLength: 0,
+            totalBytes: details.totalBytes,
+          };
+        }
+        if (
+          pending.item.id !== item.id ||
+          pending.item.tableId !== item.tableId ||
+          pending.item.version !== item.version ||
+          pending.totalBytes !== details.totalBytes ||
+          pending.byteLength !== details.offsetBytes
+        ) {
+          throw new Error("Export record chunks were not contiguous");
+        }
+        pending.data += item.data;
+        pending.byteLength += encoder.encode(item.data).byteLength;
+        continue;
+      }
+
+      finishChunkedRecord();
+      normalized.push(item);
+    }
+  }
+  finishChunkedRecord();
+  return normalized;
+}
+
 async function callMcp(
   client: Client,
   name: string,
@@ -382,20 +504,304 @@ async function setTestClock(
   databaseId: string,
   nowMs: number,
 ): Promise<void> {
+  const databaseNamespace = (await runtime.getDurableObjectNamespace(
+    "DATABASES",
+  )) as unknown as {
+    idFromName: (name: string) => unknown;
+    get: (id: unknown) => {
+      __testSetClock: (nowMs: number) => Promise<void>;
+    };
+  };
+  await databaseNamespace
+    .get(databaseNamespace.idFromName(databaseId))
+    .__testSetClock(nowMs);
+
+  const registryNamespace = (await runtime.getDurableObjectNamespace(
+    "REGISTRY",
+  )) as unknown as {
+    idFromName: (name: string) => unknown;
+    get: (id: unknown) => {
+      __testSetClock: (nowMs: number) => Promise<void>;
+    };
+  };
+  await registryNamespace
+    .get(registryNamespace.idFromName(REGISTRY_ID))
+    .__testSetClock(nowMs);
+}
+
+async function setInvalidRegistryServiceClock(
+  runtime: Miniflare,
+  mode: "missingPhysicalBytesPerDatabase" | "zeroPolicyRevision" | null,
+): Promise<void> {
+  const namespace = (await runtime.getDurableObjectNamespace(
+    "REGISTRY",
+  )) as unknown as {
+    idFromName: (name: string) => unknown;
+    get: (id: unknown) => {
+      __testSetInvalidServiceClock: (
+        mode: "missingPhysicalBytesPerDatabase" | "zeroPolicyRevision" | null,
+      ) => Promise<void>;
+    };
+  };
+  await namespace
+    .get(namespace.idFromName(REGISTRY_ID))
+    .__testSetInvalidServiceClock(mode);
+}
+
+async function runDatabaseAlarm(
+  runtime: Miniflare,
+  databaseId: string,
+): Promise<void> {
   const namespace = (await runtime.getDurableObjectNamespace(
     "DATABASES",
   )) as unknown as {
     idFromName: (name: string) => unknown;
-    get: (id: unknown) => { fetch: (request: Request) => Promise<Response> };
+    get: (id: unknown) => { __testRunAlarm: () => Promise<void> };
   };
-  const stub = namespace.get(namespace.idFromName(databaseId));
-  const response = await stub.fetch(
-    new Request(`${BASE_URL}/__test/clock`, {
-      method: "POST",
-      headers: { "x-test-now-ms": String(nowMs) },
-    }),
-  );
-  expect(response.status).toBe(204);
+  await namespace.get(namespace.idFromName(databaseId)).__testRunAlarm();
+}
+
+async function runRegistryAlarm(runtime: Miniflare): Promise<void> {
+  const namespace = (await runtime.getDurableObjectNamespace(
+    "REGISTRY",
+  )) as unknown as {
+    idFromName: (name: string) => unknown;
+    get: (id: unknown) => { __testRunAlarm: () => Promise<void> };
+  };
+  await namespace.get(namespace.idFromName(REGISTRY_ID)).__testRunAlarm();
+}
+
+async function failNextRegistryExportCompletion(
+  runtime: Miniflare,
+): Promise<void> {
+  const namespace = (await runtime.getDurableObjectNamespace(
+    "REGISTRY",
+  )) as unknown as {
+    idFromName: (name: string) => unknown;
+    get: (id: unknown) => {
+      __testFailNextExportCompletion: () => Promise<void>;
+    };
+  };
+  await namespace
+    .get(namespace.idFromName(REGISTRY_ID))
+    .__testFailNextExportCompletion();
+}
+
+async function failNextDatabaseExportReconciliation(
+  runtime: Miniflare,
+  databaseId: string,
+): Promise<void> {
+  const namespace = (await runtime.getDurableObjectNamespace(
+    "DATABASES",
+  )) as unknown as {
+    idFromName: (name: string) => unknown;
+    get: (id: unknown) => {
+      __testFailNextExportReconciliation: () => Promise<void>;
+    };
+  };
+  await namespace
+    .get(namespace.idFromName(databaseId))
+    .__testFailNextExportReconciliation();
+}
+
+async function reservePendingMutation(
+  runtime: Miniflare,
+  databaseId: string,
+  operationKey: string,
+): Promise<void> {
+  const namespace = (await runtime.getDurableObjectNamespace(
+    "REGISTRY",
+  )) as unknown as {
+    idFromName: (name: string) => unknown;
+    get: (id: unknown) => {
+      __testReservePendingMutation: (
+        databaseId: string,
+        operationKey: string,
+      ) => Promise<{ ok: boolean }>;
+    };
+  };
+  const result = await namespace
+    .get(namespace.idFromName(REGISTRY_ID))
+    .__testReservePendingMutation(databaseId, operationKey);
+  expect(result.ok).toBe(true);
+}
+
+async function reservePendingExport(
+  runtime: Miniflare,
+  databaseId: string,
+  exportKey: string,
+): Promise<void> {
+  const namespace = (await runtime.getDurableObjectNamespace(
+    "REGISTRY",
+  )) as unknown as {
+    idFromName: (name: string) => unknown;
+    get: (id: unknown) => {
+      __testReservePendingExport: (
+        databaseId: string,
+        exportKey: string,
+      ) => Promise<{ ok: boolean }>;
+    };
+  };
+  const result = await namespace
+    .get(namespace.idFromName(REGISTRY_ID))
+    .__testReservePendingExport(databaseId, exportKey);
+  expect(result.ok).toBe(true);
+}
+
+async function armRegistryServiceClockBarrier(
+  runtime: Miniflare,
+): Promise<void> {
+  const namespace = (await runtime.getDurableObjectNamespace(
+    "REGISTRY",
+  )) as unknown as {
+    idFromName: (name: string) => unknown;
+    get: (id: unknown) => {
+      __testArmServiceClockBarrier: () => Promise<void>;
+    };
+  };
+  await namespace
+    .get(namespace.idFromName(REGISTRY_ID))
+    .__testArmServiceClockBarrier();
+}
+
+async function waitForRegistryServiceClockBarrier(
+  runtime: Miniflare,
+): Promise<void> {
+  const namespace = (await runtime.getDurableObjectNamespace(
+    "REGISTRY",
+  )) as unknown as {
+    idFromName: (name: string) => unknown;
+    get: (id: unknown) => {
+      __testWaitForServiceClockBarrier: () => Promise<void>;
+    };
+  };
+  await namespace
+    .get(namespace.idFromName(REGISTRY_ID))
+    .__testWaitForServiceClockBarrier();
+}
+
+async function releaseRegistryServiceClockBarrier(
+  runtime: Miniflare,
+): Promise<void> {
+  const namespace = (await runtime.getDurableObjectNamespace(
+    "REGISTRY",
+  )) as unknown as {
+    idFromName: (name: string) => unknown;
+    get: (id: unknown) => {
+      __testReleaseServiceClockBarrier: () => Promise<void>;
+    };
+  };
+  await namespace
+    .get(namespace.idFromName(REGISTRY_ID))
+    .__testReleaseServiceClockBarrier();
+}
+
+async function databaseStorageSnapshot(
+  runtime: Miniflare,
+  databaseId: string,
+): Promise<{ databaseSize: number; applicationTables: string[] }> {
+  const namespace = (await runtime.getDurableObjectNamespace(
+    "DATABASES",
+  )) as unknown as {
+    idFromName: (name: string) => unknown;
+    get: (id: unknown) => {
+      __testStorageSnapshot: () => Promise<{
+        databaseSize: number;
+        applicationTables: string[];
+      }>;
+    };
+  };
+  return await namespace
+    .get(namespace.idFromName(databaseId))
+    .__testStorageSnapshot();
+}
+
+async function databaseLastActivityAt(
+  runtime: Miniflare,
+  databaseId: string,
+): Promise<number | null> {
+  const namespace = (await runtime.getDurableObjectNamespace(
+    "DATABASES",
+  )) as unknown as {
+    idFromName: (name: string) => unknown;
+    get: (id: unknown) => {
+      __testLastActivityAt: () => Promise<number | null>;
+    };
+  };
+  return await namespace
+    .get(namespace.idFromName(databaseId))
+    .__testLastActivityAt();
+}
+
+async function setDatabaseLastActivityAt(
+  runtime: Miniflare,
+  databaseId: string,
+  nowMs: number,
+): Promise<void> {
+  const namespace = (await runtime.getDurableObjectNamespace(
+    "DATABASES",
+  )) as unknown as {
+    idFromName: (name: string) => unknown;
+    get: (id: unknown) => {
+      __testSetLastActivityAt: (nowMs: number) => Promise<void>;
+    };
+  };
+  await namespace
+    .get(namespace.idFromName(databaseId))
+    .__testSetLastActivityAt(nowMs);
+}
+
+async function resetCapacityProjectionForLegacyDatabase(
+  runtime: Miniflare,
+  databaseId: string,
+): Promise<void> {
+  const namespace = (await runtime.getDurableObjectNamespace(
+    "REGISTRY",
+  )) as unknown as {
+    idFromName: (name: string) => unknown;
+    get: (id: unknown) => {
+      __testResetCapacityProjection: (databaseId: string) => Promise<void>;
+    };
+  };
+  const registry = namespace.get(namespace.idFromName(REGISTRY_ID));
+  await registry.__testResetCapacityProjection(databaseId);
+}
+
+async function inspectCapacityProjection(
+  runtime: Miniflare,
+  databaseId: string,
+): Promise<{
+  capacity: {
+    status: string;
+    logicalBytes: number;
+    replayBytes: number;
+    physicalBytes: number;
+    physicalReservedBytes: number;
+  } | null;
+  legacyBackfillDone: number | null;
+  policyRevision: number | null;
+}> {
+  const namespace = (await runtime.getDurableObjectNamespace(
+    "REGISTRY",
+  )) as unknown as {
+    idFromName: (name: string) => unknown;
+    get: (id: unknown) => {
+      __testCapacityProjection: (databaseId: string) => Promise<{
+        capacity: {
+          status: string;
+          logicalBytes: number;
+          replayBytes: number;
+          physicalBytes: number;
+          physicalReservedBytes: number;
+        } | null;
+        legacyBackfillDone: number | null;
+        policyRevision: number | null;
+      }>;
+    };
+  };
+  return await namespace
+    .get(namespace.idFromName(REGISTRY_ID))
+    .__testCapacityProjection(databaseId);
 }
 
 test.serial(
@@ -1038,6 +1444,7 @@ test.serial(
     try {
       runtime = await startRuntime(persistenceDirectory, {
         failAfterCreate: true,
+        admissionBindings: { CAPACITY_MAX_DATABASES: "1" },
       });
       await expectApiError(
         await jsonRequest(
@@ -1051,9 +1458,22 @@ test.serial(
         "INTERNAL_ERROR",
       );
 
+      await expectApiError(
+        await jsonRequest(
+          runtime,
+          DATABASES_PATH,
+          "POST",
+          { name: "Another database while commit is uncertain" },
+          { "Idempotency-Key": retryKey("uncertain-commit-capacity") },
+        ),
+        503,
+        "CAPACITY_UNAVAILABLE",
+      );
+
       await runtime.dispose();
       runtime = await startRuntime(persistenceDirectory, {
         failAfterCreate: true,
+        admissionBindings: { CAPACITY_MAX_DATABASES: "1" },
       });
       const recovered = await createDatabase(runtime, name, key);
       expect(recovered.name).toBe(name);
@@ -1062,6 +1482,544 @@ test.serial(
       expect(replayed).toEqual(recovered);
       const stored = await getDatabase(runtime, recovered.databaseId);
       expect(stored).toEqual(recovered);
+
+      await expectApiError(
+        await jsonRequest(
+          runtime,
+          DATABASES_PATH,
+          "POST",
+          { name: "Another database after uncertain commit recovery" },
+          { "Idempotency-Key": retryKey("recovered-capacity") },
+        ),
+        503,
+        "CAPACITY_UNAVAILABLE",
+      );
+    } finally {
+      await disposeRuntime(runtime);
+      await rm(persistenceDirectory, { force: true, recursive: true });
+    }
+  },
+);
+
+test.serial(
+  "legacy create rows receive pessimistic global capacity before new writes are admitted",
+  { timeout: 120_000 },
+  async () => {
+    const persistenceDirectory = await createPersistenceDirectory();
+    let runtime: Miniflare | undefined;
+    try {
+      runtime = await startRuntime(persistenceDirectory, { testClock: true });
+      const legacyDatabase = await createDatabase(
+        runtime,
+        "Legacy database before capacity projection",
+      );
+      await resetCapacityProjectionForLegacyDatabase(
+        runtime,
+        legacyDatabase.databaseId,
+      );
+      expect(
+        await inspectCapacityProjection(runtime, legacyDatabase.databaseId),
+      ).toMatchObject({ capacity: null, legacyBackfillDone: null });
+
+      await runtime.dispose();
+      runtime = await startRuntime(persistenceDirectory, {
+        testClock: true,
+        admissionBindings: {
+          CAPACITY_POLICY_REVISION: "2",
+          CAPACITY_MAX_DATABASES: "2",
+          CAPACITY_MAX_LOGICAL_BYTES: String(10 * mebibyte),
+          CAPACITY_MAX_REPLAY_BYTES: String(51 * mebibyte),
+        },
+      });
+      const createAttempt = await jsonRequest(
+        runtime,
+        DATABASES_PATH,
+        "POST",
+        { name: "Must account for legacy logical reservation" },
+        { "Idempotency-Key": retryKey("legacy-logical-backfill") },
+      );
+      if (createAttempt.status !== 503) {
+        throw new Error(
+          `Legacy backfill admitted create with ${createAttempt.status}: ${await createAttempt
+            .clone()
+            .text()}; projection=${JSON.stringify(
+            await inspectCapacityProjection(runtime, legacyDatabase.databaseId),
+          )}`,
+        );
+      }
+      const blockedCreate = await expectApiError(
+        createAttempt,
+        503,
+        "CAPACITY_UNAVAILABLE",
+      );
+      expect(
+        await inspectCapacityProjection(runtime, legacyDatabase.databaseId),
+      ).toMatchObject({
+        capacity: {
+          status: "active",
+          logicalBytes: 10 * mebibyte,
+          replayBytes: 51 * mebibyte,
+          physicalReservedBytes: 128 * mebibyte,
+        },
+        legacyBackfillDone: 1,
+        policyRevision: 2,
+      });
+      expect(blockedCreate.error.details).toMatchObject({
+        quota: "globalLogicalBytes",
+      });
+      await runtime.dispose();
+      runtime = await startRuntime(persistenceDirectory, {
+        testClock: true,
+        admissionBindings: {
+          CAPACITY_POLICY_REVISION: "3",
+          CAPACITY_MAX_DATABASES: "2",
+          CAPACITY_MAX_LOGICAL_BYTES: String(20 * mebibyte),
+          CAPACITY_MAX_REPLAY_BYTES: String(51 * mebibyte),
+        },
+      });
+      const writeKey = retryKey("legacy-replay-backfill");
+      const blockedWrite = await expectApiError(
+        await jsonRequest(
+          runtime,
+          tablesPath(legacyDatabase.databaseId),
+          "POST",
+          { name: "Must account for legacy replay reservation" },
+          { "Idempotency-Key": writeKey },
+        ),
+        503,
+        "CAPACITY_UNAVAILABLE",
+      );
+      expect(blockedWrite.error.details).toMatchObject({
+        quota: "globalReplayBytes",
+      });
+      expect(
+        (await getDatabase(runtime, legacyDatabase.databaseId)).databaseId,
+      ).toBe(legacyDatabase.databaseId);
+      const tables = await jsonResponse<Collection<Table>>(
+        await request(
+          runtime,
+          `${tablesPath(legacyDatabase.databaseId)}?limit=100`,
+        ),
+        200,
+      );
+      expect(tables.items).toEqual([]);
+      expect(tables.nextCursor).toBeNull();
+    } finally {
+      await disposeRuntime(runtime);
+      await rm(persistenceDirectory, { force: true, recursive: true });
+    }
+  },
+);
+
+test.serial(
+  "concurrent global admission at capacity allows one reservation and replays it after restart",
+  { timeout: 120_000 },
+  async () => {
+    const persistenceDirectory = await createPersistenceDirectory();
+    let runtime: Miniflare | undefined;
+    const capacity = 2;
+    const contenders = Array.from({ length: 12 }, (_, index) => ({
+      name: `Capacity contender ${index}`,
+      key: retryKey(`capacity-contender-${index}`),
+    }));
+    try {
+      runtime = await startRuntime(persistenceDirectory, {
+        admissionBindings: { CAPACITY_MAX_DATABASES: String(capacity) },
+      });
+      await createDatabase(runtime, "Occupies one global slot");
+
+      const responses = await Promise.all(
+        contenders.map(({ name, key }) =>
+          jsonRequest(
+            runtime!,
+            DATABASES_PATH,
+            "POST",
+            { name },
+            { "Idempotency-Key": key },
+          ),
+        ),
+      );
+      const successfulIndexes: number[] = [];
+      for (const [index, response] of responses.entries()) {
+        if (response.status === 201) {
+          successfulIndexes.push(index);
+          continue;
+        }
+        const capacityError = await expectApiError(
+          response,
+          503,
+          "CAPACITY_UNAVAILABLE",
+        );
+        expect(capacityError.error.details).toMatchObject({
+          quota: "databases",
+          limit: capacity,
+        });
+      }
+      expect(successfulIndexes).toHaveLength(1);
+
+      const winner = contenders[successfulIndexes[0]!]!;
+      const firstResult = await createDatabase(
+        runtime,
+        winner.name,
+        winner.key,
+      );
+      const replay = await createDatabase(runtime, winner.name, winner.key);
+      expect(replay).toEqual(firstResult);
+
+      await runtime.dispose();
+      runtime = await startRuntime(persistenceDirectory, {
+        admissionBindings: { CAPACITY_MAX_DATABASES: String(capacity) },
+      });
+      expect(await createDatabase(runtime, winner.name, winner.key)).toEqual(
+        firstResult,
+      );
+      await expectApiError(
+        await jsonRequest(
+          runtime,
+          DATABASES_PATH,
+          "POST",
+          { name: "Capacity remains full after restart" },
+          { "Idempotency-Key": retryKey("capacity-after-restart") },
+        ),
+        503,
+        "CAPACITY_UNAVAILABLE",
+      );
+    } finally {
+      await disposeRuntime(runtime);
+      await rm(persistenceDirectory, { force: true, recursive: true });
+    }
+  },
+);
+
+test.serial(
+  "health reports the admitted policy revision and fails closed for invalid policy",
+  { timeout: 60_000 },
+  async () => {
+    const persistenceDirectory = await createPersistenceDirectory();
+    let runtime: Miniflare | undefined;
+    try {
+      runtime = await startRuntime(persistenceDirectory);
+      expect(
+        await jsonResponse<{
+          status: string;
+          service: string;
+          policyRevision: number;
+        }>(await request(runtime, "/health"), 200),
+      ).toEqual({
+        status: "ready",
+        service: "0000-database",
+        policyRevision: 1,
+      });
+
+      await runtime.dispose();
+      runtime = await startRuntime(persistenceDirectory, {
+        admissionBindings: { CAPACITY_MAX_DATABASES: "0" },
+      });
+      await expectApiError(
+        await request(runtime, "/health"),
+        503,
+        "CAPACITY_UNAVAILABLE",
+      );
+
+      await runtime.dispose();
+      runtime = await startRuntime(persistenceDirectory, {
+        admissionBindings: {
+          CAPACITY_POLICY_REVISION: "2",
+          CAPACITY_MAX_DAILY_REQUESTS: "2",
+        },
+      });
+      await jsonResponse(await request(runtime, "/health"), 200);
+      const exhausted = await expectApiError(
+        await request(runtime, "/health"),
+        429,
+        "QUOTA_EXCEEDED",
+      );
+      expect(exhausted.error.details).toMatchObject({
+        quota: "globalDailyRequests",
+        limit: 2,
+      });
+
+      await runtime.dispose();
+      runtime = await startRuntime(persistenceDirectory, {
+        admissionBindings: {
+          CAPACITY_POLICY_REVISION: "3",
+          CAPACITY_MAX_DAILY_REQUESTS: "2",
+          SERVICE_SUSPENDED: "true",
+        },
+      });
+      await expectApiError(
+        await request(runtime, "/health"),
+        503,
+        "SERVICE_SUSPENDED",
+      );
+    } finally {
+      await disposeRuntime(runtime);
+      await rm(persistenceDirectory, { force: true, recursive: true });
+    }
+  },
+);
+
+test.serial(
+  "health fails closed for an invalid service clock returned by global admission",
+  { timeout: 60_000 },
+  async () => {
+    const persistenceDirectory = await createPersistenceDirectory();
+    let runtime: Miniflare | undefined;
+    try {
+      runtime = await startRuntime(persistenceDirectory, { testClock: true });
+      for (const mode of [
+        "missingPhysicalBytesPerDatabase",
+        "zeroPolicyRevision",
+      ] as const) {
+        await setInvalidRegistryServiceClock(runtime, mode);
+        const failure = await expectApiError(
+          await request(runtime, "/health"),
+          503,
+          "CAPACITY_UNAVAILABLE",
+        );
+        expect(failure.error.details).toMatchObject({
+          reason: "invalidGlobalAdmissionState",
+        });
+      }
+    } finally {
+      await disposeRuntime(runtime);
+      await rm(persistenceDirectory, { force: true, recursive: true });
+    }
+  },
+);
+
+test.serial(
+  "an expired database keeps global capacity reserved until physical cleanup completes",
+  { timeout: 120_000 },
+  async () => {
+    const persistenceDirectory = await createPersistenceDirectory();
+    let runtime: Miniflare | undefined;
+    try {
+      runtime = await startRuntime(persistenceDirectory, {
+        testClock: true,
+        admissionBindings: {
+          CAPACITY_MAX_PHYSICAL_BYTES: String(128 * mebibyte),
+          CAPACITY_MAX_PHYSICAL_BYTES_PER_DATABASE: String(128 * mebibyte),
+        },
+      });
+      const database = await createDatabase(runtime, "Expires before cleanup");
+      const expiresAt = Date.parse(database.lastActivityAt) + 7 * utcDayMs;
+      await setTestClock(runtime, database.databaseId, expiresAt);
+
+      const expiredRead = await request(
+        runtime,
+        databasePath(database.databaseId),
+      );
+      if (expiredRead.status !== 404) {
+        throw new Error(
+          `Expired database GET returned ${expiredRead.status}: ${await expiredRead
+            .clone()
+            .text()}`,
+        );
+      }
+      await expectApiError(expiredRead, 404, "NOT_FOUND");
+      const heldCapacity = await expectApiError(
+        await jsonRequest(
+          runtime,
+          DATABASES_PATH,
+          "POST",
+          { name: "Waits for physical cleanup" },
+          { "Idempotency-Key": retryKey("before-expiry-cleanup") },
+        ),
+        503,
+        "CAPACITY_UNAVAILABLE",
+      );
+      expect(heldCapacity.error.details).toMatchObject({
+        quota: "globalPhysicalBytes",
+      });
+
+      await runDatabaseAlarm(runtime, database.databaseId);
+      await runRegistryAlarm(runtime);
+
+      const retiredStorage = await databaseStorageSnapshot(
+        runtime,
+        database.databaseId,
+      );
+      expect(retiredStorage.applicationTables).toEqual([]);
+      for (let attempt = 0; attempt < 8; attempt += 1) {
+        const repeatedExpiredRead = await request(
+          runtime,
+          databasePath(database.databaseId),
+        );
+        if (repeatedExpiredRead.status !== 404) {
+          throw new Error(
+            `Retired database GET returned ${repeatedExpiredRead.status}: ${await repeatedExpiredRead
+              .clone()
+              .text()}`,
+          );
+        }
+        await expectApiError(repeatedExpiredRead, 404, "NOT_FOUND");
+      }
+      const afterRepeatedReads = await databaseStorageSnapshot(
+        runtime,
+        database.databaseId,
+      );
+      expect(afterRepeatedReads.applicationTables).toEqual([]);
+      expect(afterRepeatedReads.databaseSize).toBe(retiredStorage.databaseSize);
+
+      const replacement = await createDatabase(
+        runtime,
+        "Admitted after physical cleanup",
+      );
+      expect(replacement.databaseId).not.toBe(database.databaseId);
+    } finally {
+      await disposeRuntime(runtime);
+      await rm(persistenceDirectory, { force: true, recursive: true });
+    }
+  },
+);
+
+test.serial(
+  "pending mutation and export reservations prevent retirement until reconciliation",
+  { timeout: 120_000 },
+  async () => {
+    const persistenceDirectory = await createPersistenceDirectory();
+    let runtime: Miniflare | undefined;
+    try {
+      runtime = await startRuntime(persistenceDirectory, { testClock: true });
+      const database = await createDatabase(runtime, "Pending retirement work");
+      await createTable(runtime, database.databaseId, "Retained until settled");
+      const lastActivityAt = await databaseLastActivityAt(
+        runtime,
+        database.databaseId,
+      );
+      expect(lastActivityAt).not.toBeNull();
+      const inactivityDeadline = lastActivityAt! + 7 * utcDayMs;
+      await setTestClock(runtime, database.databaseId, inactivityDeadline);
+      await reservePendingMutation(
+        runtime,
+        database.databaseId,
+        retryKey("pending-retirement-mutation"),
+      );
+      await reservePendingExport(
+        runtime,
+        database.databaseId,
+        retryKey("pending-retirement-export"),
+      );
+
+      await runDatabaseAlarm(runtime, database.databaseId);
+      expect(
+        (await databaseStorageSnapshot(runtime, database.databaseId))
+          .applicationTables,
+      ).toContain("tables");
+
+      await setTestClock(
+        runtime,
+        database.databaseId,
+        inactivityDeadline + 6 * 60 * 1_000,
+      );
+      await runRegistryAlarm(runtime);
+      expect(
+        (await databaseStorageSnapshot(runtime, database.databaseId))
+          .applicationTables,
+      ).toContain("tables");
+
+      await runRegistryAlarm(runtime);
+      expect(
+        (await databaseStorageSnapshot(runtime, database.databaseId))
+          .applicationTables,
+      ).toEqual([]);
+    } finally {
+      await disposeRuntime(runtime);
+      await rm(persistenceDirectory, { force: true, recursive: true });
+    }
+  },
+);
+
+test.serial(
+  "service suspension pauses inactivity while the thirty-day write cutoff stays fixed",
+  { timeout: 120_000 },
+  async () => {
+    const persistenceDirectory = await createPersistenceDirectory();
+    let runtime: Miniflare | undefined;
+    try {
+      runtime = await startRuntime(persistenceDirectory, { testClock: true });
+      const database = await createDatabase(runtime, "Suspension clock");
+      const createdAt = Date.parse(database.createdAt);
+      const writeUntil = Date.parse(database.writeUntil);
+      expect(writeUntil).toBe(createdAt + 30 * utcDayMs);
+
+      const pauseAt = createdAt + 6 * utcDayMs;
+      await setTestClock(runtime, database.databaseId, pauseAt);
+      await createTable(runtime, database.databaseId, "Before suspension");
+      const beforeSuspension = await getDatabase(runtime, database.databaseId);
+      expect(beforeSuspension.lastActivityAt).toBe(
+        new Date(pauseAt).toISOString(),
+      );
+
+      await runtime.dispose();
+      runtime = await startRuntime(persistenceDirectory, {
+        testClock: true,
+        admissionBindings: {
+          CAPACITY_POLICY_REVISION: "2",
+          SERVICE_SUSPENDED: "true",
+        },
+      });
+      await expectApiError(
+        await request(runtime, databasePath(database.databaseId)),
+        503,
+        "SERVICE_SUSPENDED",
+      );
+
+      const resumeAt = pauseAt + 20 * utcDayMs;
+      await setTestClock(runtime, database.databaseId, resumeAt);
+      await runtime.dispose();
+      runtime = await startRuntime(persistenceDirectory, {
+        testClock: true,
+        admissionBindings: {
+          CAPACITY_POLICY_REVISION: "1",
+          SERVICE_SUSPENDED: "false",
+        },
+      });
+      await expectApiError(
+        await request(runtime, databasePath(database.databaseId)),
+        503,
+        "CAPACITY_UNAVAILABLE",
+      );
+      const staleRevision = await expectApiError(
+        await request(runtime, databasePath(database.databaseId)),
+        503,
+        "CAPACITY_UNAVAILABLE",
+      );
+      expect(staleRevision.error.details).toMatchObject({
+        reason: "staleCapacityPolicyRevision",
+        currentRevision: 2,
+      });
+
+      await runtime.dispose();
+      runtime = await startRuntime(persistenceDirectory, {
+        testClock: true,
+        admissionBindings: {
+          CAPACITY_POLICY_REVISION: "3",
+          SERVICE_SUSPENDED: "false",
+        },
+      });
+      const resumed = await getDatabase(runtime, database.databaseId);
+      expect(resumed.databaseId).toBe(database.databaseId);
+      expect(resumed.writeUntil).toBe(database.writeUntil);
+      expect(resumed.state).toBe("writable");
+
+      await setTestClock(runtime, database.databaseId, writeUntil);
+      const atFixedCutoff = await getDatabase(runtime, database.databaseId);
+      expect(atFixedCutoff.state).toBe("read_only");
+      expect(atFixedCutoff.writeUntil).toBe(database.writeUntil);
+
+      await expectApiError(
+        await jsonRequest(
+          runtime,
+          tablesPath(database.databaseId),
+          "POST",
+          { name: "Too late after suspension" },
+          { "Idempotency-Key": retryKey("suspension-write-cutoff") },
+        ),
+        409,
+        "DATABASE_READ_ONLY",
+      );
     } finally {
       await disposeRuntime(runtime);
       await rm(persistenceDirectory, { force: true, recursive: true });
@@ -1509,6 +2467,122 @@ test.serial(
 );
 
 test.serial(
+  "an inactivity alarm does not retire a database after a queued read renews activity",
+  { timeout: 120_000 },
+  async () => {
+    const persistenceDirectory = await createPersistenceDirectory();
+    let runtime: Miniflare | undefined;
+    let alarm: Promise<void> | undefined;
+    let barrierArmed = false;
+    try {
+      runtime = await startRuntime(persistenceDirectory, { testClock: true });
+      const database = await createDatabase(runtime, "Alarm read race");
+      const table = await createTable(runtime, database.databaseId, "Entries");
+      const column = await createColumn(runtime, database.databaseId, table, {
+        name: "Value",
+        type: "string",
+        nullable: false,
+      });
+      const record = await createRecord(
+        runtime,
+        database.databaseId,
+        table.id,
+        { [column.id]: "still available" },
+      );
+      const inactivityDeadline = Date.now() + 5_000;
+      const staleActivityAt = inactivityDeadline - 7 * utcDayMs;
+      await setDatabaseLastActivityAt(
+        runtime,
+        database.databaseId,
+        staleActivityAt,
+      );
+      await armRegistryServiceClockBarrier(runtime);
+      barrierArmed = true;
+
+      alarm = runDatabaseAlarm(runtime, database.databaseId);
+      await waitForRegistryServiceClockBarrier(runtime);
+      const read = request(
+        runtime,
+        `${recordsPath(database.databaseId, table.id)}?limit=10`,
+      );
+      const readResponseBeforeRelease = await Promise.race([
+        read,
+        new Promise<undefined>((resolve) =>
+          setTimeout(() => resolve(undefined), 250),
+        ),
+      ]);
+      const readCommittedBeforeRelease =
+        readResponseBeforeRelease !== undefined;
+      if (readCommittedBeforeRelease) {
+        if (readResponseBeforeRelease.status !== 200) {
+          throw new Error(
+            `Pre-release read returned ${readResponseBeforeRelease.status}: ${await readResponseBeforeRelease
+              .clone()
+              .text()}; now=${Date.now()}, deadline=${inactivityDeadline}, activity=${await databaseLastActivityAt(
+              runtime,
+              database.databaseId,
+            )}, previous=${staleActivityAt}`,
+          );
+        }
+        const activityAtRead = await databaseLastActivityAt(
+          runtime,
+          database.databaseId,
+        );
+        if (activityAtRead === null || activityAtRead <= staleActivityAt) {
+          throw new Error(
+            `A successful pre-release read did not renew activity: status=${readResponseBeforeRelease.status}, body=${await readResponseBeforeRelease
+              .clone()
+              .text()}, activity=${activityAtRead}, previous=${staleActivityAt}`,
+          );
+        }
+        expect(activityAtRead).toBeLessThan(inactivityDeadline);
+        // A concurrent read has already committed while the alarm holds its
+        // old metadata snapshot. Advance time before releasing that snapshot.
+        await new Promise((resolve) =>
+          setTimeout(resolve, Math.max(0, inactivityDeadline - Date.now() + 1)),
+        );
+      }
+
+      // If fetch and alarm are serialized, the read is still queued. Releasing
+      // at the pre-expiry instant lets the alarm reschedule before it commits.
+      if (!readCommittedBeforeRelease)
+        expect(Date.now()).toBeLessThan(inactivityDeadline);
+      await releaseRegistryServiceClockBarrier(runtime);
+      barrierArmed = false;
+      await alarm;
+      alarm = undefined;
+
+      const rows = await jsonResponse<Collection<RecordResource>>(
+        await read,
+        200,
+      );
+      expect(rows.items).toEqual([record]);
+      const renewedAt = await databaseLastActivityAt(
+        runtime,
+        database.databaseId,
+      );
+      expect(renewedAt).toBeGreaterThan(staleActivityAt);
+
+      // At the database's original inactivity boundary, the committed read
+      // is recent and the next alarm must keep the database serving.
+      await runDatabaseAlarm(runtime, database.databaseId);
+      expect(
+        await jsonResponse<Database>(
+          await request(runtime, databasePath(database.databaseId)),
+          200,
+        ),
+      ).toMatchObject({ databaseId: database.databaseId });
+    } finally {
+      if (barrierArmed && runtime)
+        await releaseRegistryServiceClockBarrier(runtime);
+      await alarm?.catch(() => undefined);
+      await disposeRuntime(runtime);
+      await rm(persistenceDirectory, { force: true, recursive: true });
+    }
+  },
+);
+
+test.serial(
   "the request burst boundary is sixty reads per database",
   { timeout: 60_000 },
   async () => {
@@ -1542,6 +2616,67 @@ test.serial(
         "QUOTA_EXCEEDED",
       );
     } finally {
+      await disposeRuntime(runtime);
+      await rm(persistenceDirectory, { force: true, recursive: true });
+    }
+  },
+);
+
+test.serial(
+  "the daily request limit is shared by REST and MCP and resets at UTC rollover",
+  { timeout: 300_000 },
+  async () => {
+    const persistenceDirectory = await createPersistenceDirectory();
+    let runtime: Miniflare | undefined;
+    let client: Client | undefined;
+    try {
+      runtime = await startRuntime(persistenceDirectory, { testClock: true });
+      const database = await createDatabase(runtime, "Daily request quota");
+      let fakeNow = nextUtcMidday(database.createdAt);
+      await setTestClock(runtime, database.databaseId, fakeNow);
+      client = await connectMcp(runtime);
+
+      let requestsInMinute = 0;
+      for (let index = 0; index < maxDailyRequests; index += 1) {
+        if (requestsInMinute >= 59) {
+          fakeNow += 61_001;
+          await setTestClock(runtime, database.databaseId, fakeNow);
+          requestsInMinute = 0;
+        }
+
+        if (index % 2 === 0) {
+          await jsonResponse<Database>(
+            await request(runtime, databasePath(database.databaseId)),
+            200,
+          );
+        } else {
+          const result = await callMcp(client, "get_database", {
+            databaseId: database.databaseId,
+          });
+          expect(result.databaseId).toBe(database.databaseId);
+        }
+        requestsInMinute += 1;
+      }
+
+      const dailyLimitError = await expectApiError(
+        await request(runtime, databasePath(database.databaseId)),
+        429,
+        "QUOTA_EXCEEDED",
+      );
+      expect(dailyLimitError.error.details).toMatchObject({
+        quota: "requests",
+        limit: maxDailyRequests,
+      });
+
+      fakeNow = nextUtcMidday(new Date(fakeNow).toISOString());
+      await setTestClock(runtime, database.databaseId, fakeNow);
+      expect(
+        await callMcp(client, "get_database", {
+          databaseId: database.databaseId,
+        }),
+      ).toMatchObject({ databaseId: database.databaseId });
+    } finally {
+      await client?.close();
       await disposeRuntime(runtime);
       await rm(persistenceDirectory, { force: true, recursive: true });
     }
@@ -1617,6 +2752,138 @@ test.serial(
       );
       expect(independentTable.name).toBe("Still writable");
     } finally {
+      await disposeRuntime(runtime);
+      await rm(persistenceDirectory, { force: true, recursive: true });
+    }
+  },
+);
+
+test.serial(
+  "the daily returned-byte limit is shared by REST and MCP and resets at UTC rollover",
+  { timeout: 300_000 },
+  async () => {
+    const persistenceDirectory = await createPersistenceDirectory();
+    let runtime: Miniflare | undefined;
+    let client: Client | undefined;
+    try {
+      runtime = await startRuntime(persistenceDirectory, { testClock: true });
+      const database = await createDatabase(runtime, "Daily byte quota");
+      let fakeNow = nextUtcMidday(database.createdAt);
+      await setTestClock(runtime, database.databaseId, fakeNow);
+
+      let table = await createTable(runtime, database.databaseId, "Large rows");
+      const columns: Column[] = [];
+      for (let index = 0; index < 26; index += 1) {
+        columns.push(
+          await createColumn(runtime, database.databaseId, table, {
+            name: `Value${index}`,
+            type: "string",
+            nullable: true,
+          }),
+        );
+        table = await getTable(runtime, database.databaseId, table.id);
+      }
+
+      let record = await createRecord(
+        runtime,
+        database.databaseId,
+        table.id,
+        {},
+      );
+      fakeNow += 61_001;
+      await setTestClock(runtime, database.databaseId, fakeNow);
+      for (let start = 0; start < columns.length; start += 5) {
+        const values = Object.fromEntries(
+          columns
+            .slice(start, Math.min(start + 5, columns.length))
+            .map((column) => [column.id, "x".repeat(9_700)]),
+        );
+        record = await jsonResponse<RecordResource>(
+          await jsonRequest(
+            runtime,
+            recordPath(database.databaseId, table.id, record.id),
+            "PATCH",
+            { values },
+            {
+              "Idempotency-Key": retryKey("daily-returned-byte-fixture"),
+              "X-Expected-Version": record.version,
+            },
+          ),
+          200,
+        );
+      }
+
+      const bytesPerRead = new TextEncoder().encode(
+        JSON.stringify(record),
+      ).byteLength;
+      expect(bytesPerRead).toBeGreaterThan(240 * kibibyte);
+      expect(bytesPerRead).toBeLessThanOrEqual(maxMutationResponseBytes);
+
+      fakeNow = nextUtcMidday(new Date(fakeNow).toISOString());
+      await setTestClock(runtime, database.databaseId, fakeNow);
+      client = await connectMcp(runtime);
+
+      const permittedReads = Math.floor(maxDailyReturnedBytes / bytesPerRead);
+      expect(permittedReads).toBeGreaterThan(100);
+      let requestsInMinute = 0;
+      for (let index = 0; index < permittedReads; index += 1) {
+        if (requestsInMinute >= 59) {
+          fakeNow += 61_001;
+          await setTestClock(runtime, database.databaseId, fakeNow);
+          requestsInMinute = 0;
+        }
+
+        if (index % 2 === 0) {
+          expect(
+            await jsonResponse<RecordResource>(
+              await request(
+                runtime,
+                recordPath(database.databaseId, table.id, record.id),
+              ),
+              200,
+            ),
+          ).toEqual(record);
+        } else {
+          expect(
+            await callMcp(client, "get_record", {
+              databaseId: database.databaseId,
+              tableId: table.id,
+              recordId: record.id,
+            }),
+          ).toEqual(record);
+        }
+        requestsInMinute += 1;
+      }
+
+      if (requestsInMinute >= 59) {
+        fakeNow += 61_001;
+        await setTestClock(runtime, database.databaseId, fakeNow);
+        requestsInMinute = 0;
+      }
+      const byteLimitError = await expectApiError(
+        await request(
+          runtime,
+          recordPath(database.databaseId, table.id, record.id),
+        ),
+        429,
+        "QUOTA_EXCEEDED",
+      );
+      expect(byteLimitError.error.details).toMatchObject({
+        quota: "returnedBytes",
+        limitBytes: maxDailyReturnedBytes,
+      });
+
+      fakeNow = nextUtcMidday(new Date(fakeNow).toISOString());
+      await setTestClock(runtime, database.databaseId, fakeNow);
+      expect(
+        await callMcp(client, "get_record", {
+          databaseId: database.databaseId,
+          tableId: table.id,
+          recordId: record.id,
+        }),
+      ).toEqual(record);
+    } finally {
+      await client?.close();
       await disposeRuntime(runtime);
       await rm(persistenceDirectory, { force: true, recursive: true });
     }
@@ -1860,6 +3127,567 @@ test.serial(
 
       expect(listedIds).toHaveLength(successfulRecordIds.length);
       expect(listedIds.sort()).toEqual(successfulRecordIds.sort());
+    } finally {
+      await disposeRuntime(runtime);
+      await rm(persistenceDirectory, { force: true, recursive: true });
+    }
+  },
+);
+
+test.serial(
+  "REST and MCP read the same immutable bounded export across source changes, restart, and expiry",
+  { timeout: 300_000 },
+  async () => {
+    const persistenceDirectory = await createPersistenceDirectory();
+    let runtime: Miniflare | undefined;
+    let client: Client | undefined;
+    const mcpResponseBytes: number[] = [];
+    try {
+      runtime = await startRuntime(persistenceDirectory, { testClock: true });
+      const database = await createDatabase(runtime, "Immutable export");
+      let fakeNow = Date.parse(database.createdAt) + 1;
+      await setTestClock(runtime, database.databaseId, fakeNow);
+
+      let table = await createTable(
+        runtime,
+        database.databaseId,
+        "Export rows",
+      );
+      const columns: Column[] = [];
+      for (let index = 0; index < 64; index += 1) {
+        if (index > 0 && index % 25 === 0) {
+          fakeNow += 61_001;
+          await setTestClock(runtime, database.databaseId, fakeNow);
+        }
+        columns.push(
+          await createColumn(runtime, database.databaseId, table, {
+            name: `Value${index}`,
+            type: "string",
+            nullable: true,
+          }),
+        );
+        table = await getTable(runtime, database.databaseId, table.id);
+      }
+
+      let record = await createRecord(
+        runtime,
+        database.databaseId,
+        table.id,
+        {},
+      );
+      const unicodeColumn = columns[0]!;
+      const unicodeValue = `${'雪🙂"\\\n'.repeat(160)}${"u".repeat(2_500)}`;
+      const patchCount = Math.ceil(columns.length / 5);
+      const finalVersion = String(Number(record.version) + patchCount);
+      const targetRecordBytes = maxMutationResponseBytes - 100;
+      const candidateValues = (asciiLength: number) =>
+        Object.fromEntries(
+          columns.map((column, index) => [
+            column.id,
+            index === 0 ? unicodeValue : "x".repeat(asciiLength),
+          ]),
+        );
+      let low = 0;
+      let high = 5_000;
+      let asciiLength = 0;
+      while (low <= high) {
+        const middle = Math.floor((low + high) / 2);
+        const candidate = {
+          id: record.id,
+          values: candidateValues(middle),
+          version: finalVersion,
+        };
+        const bytes = new TextEncoder().encode(
+          JSON.stringify(candidate),
+        ).byteLength;
+        if (bytes <= targetRecordBytes) {
+          asciiLength = middle;
+          low = middle + 1;
+        } else {
+          high = middle - 1;
+        }
+      }
+      const desiredValues = candidateValues(asciiLength);
+      const expectedRecordBytes = new TextEncoder().encode(
+        JSON.stringify({
+          id: record.id,
+          values: desiredValues,
+          version: finalVersion,
+        }),
+      ).byteLength;
+      expect(expectedRecordBytes).toBeGreaterThan(targetRecordBytes - 100);
+      expect(expectedRecordBytes).toBeLessThanOrEqual(targetRecordBytes);
+
+      for (let start = 0; start < columns.length; start += 5) {
+        const values = Object.fromEntries(
+          columns
+            .slice(start, start + 5)
+            .map((column) => [column.id, desiredValues[column.id]]),
+        );
+        const update = await jsonRequest(
+          runtime,
+          recordPath(database.databaseId, table.id, record.id),
+          "PATCH",
+          { values },
+          {
+            "Idempotency-Key": retryKey("near-limit-export-value"),
+            "X-Expected-Version": record.version,
+          },
+        );
+        if (update.status !== 200)
+          throw new Error(
+            `Near-limit export source update returned ${update.status}: ${await update
+              .clone()
+              .text()}`,
+          );
+        record = await jsonResponse<RecordResource>(update, 200);
+      }
+      expect(record.version).toBe(finalVersion);
+      expect(new TextEncoder().encode(JSON.stringify(record)).byteLength).toBe(
+        expectedRecordBytes,
+      );
+
+      const startKey = retryKey("immutable-export-start");
+      const exportPath = `${databasePath(database.databaseId)}/exports`;
+      const manifest = await jsonResponse<ExportManifest>(
+        await jsonRequest(
+          runtime,
+          exportPath,
+          "POST",
+          {},
+          { "Idempotency-Key": startKey },
+        ),
+        201,
+      );
+      expect(manifest.formatVersion).toBe(1);
+      expect(Date.parse(manifest.expiresAt)).toBe(
+        Date.parse(manifest.snapshotAt) + utcDayMs,
+      );
+
+      client = await connectMcp(runtime, async (_mcpRequest, response) => {
+        mcpResponseBytes.push((await response.arrayBuffer()).byteLength);
+      });
+      expect(
+        await callMcp(client, "start_export", {
+          databaseId: database.databaseId,
+          requestKey: startKey,
+        }),
+      ).toEqual(manifest);
+      await callMcp(client, "start_export", {
+        databaseId: database.databaseId,
+        requestKey: retryKey("immutable-export-second"),
+      });
+      await callMcp(client, "start_export", {
+        databaseId: database.databaseId,
+        requestKey: retryKey("immutable-export-third"),
+      });
+      const fullRetentionError = await expectApiError(
+        await jsonRequest(
+          runtime,
+          exportPath,
+          "POST",
+          {},
+          { "Idempotency-Key": retryKey("immutable-export-fourth") },
+        ),
+        503,
+        "CAPACITY_UNAVAILABLE",
+      );
+      expect(fullRetentionError.error.details).toMatchObject({
+        quota: "exportsPerDatabase",
+        limit: 3,
+      });
+
+      const restPages: ExportPage[] = [];
+      let restCursor: string | null = null;
+      do {
+        const query = new URLSearchParams({ limit: "100" });
+        if (restCursor !== null) query.set("cursor", restCursor);
+        const response = await request(
+          runtime,
+          `${exportPath}/${manifest.exportId}?${query}`,
+        );
+        expect(response.status).toBe(200);
+        expect(
+          (await response.clone().arrayBuffer()).byteLength,
+        ).toBeLessThanOrEqual(maxResponseBodyBytes);
+        const page = (await response.json()) as ExportPage;
+        expect(page.exportId).toBe(manifest.exportId);
+        restPages.push(page);
+        restCursor = page.nextCursor;
+      } while (restCursor !== null);
+
+      const restItems = normalizeExportItems(restPages);
+      expect(restItems[0]?.type).toBe("database");
+      expect(Object.keys(restItems[0] ?? {})).not.toContain("databaseUrl");
+      expect(Object.keys(restItems[0] ?? {})).not.toContain("accessWarning");
+      const restRecord = restItems.find(
+        (item) => item.type === "record" && item.id === record.id,
+      );
+      expect(restRecord?.values).toEqual(record.values);
+      const restColumn = restItems.find(
+        (item) => item.type === "column" && item.id === unicodeColumn.id,
+      );
+      expect(restColumn).toMatchObject({
+        type: "column",
+        columnType: "string",
+        nullable: true,
+      });
+
+      const changedRecord = await jsonResponse<RecordResource>(
+        await jsonRequest(
+          runtime,
+          recordPath(database.databaseId, table.id, record.id),
+          "PATCH",
+          { values: { [unicodeColumn.id]: "source changed after snapshot" } },
+          {
+            "Idempotency-Key": retryKey("change-export-source"),
+            "X-Expected-Version": record.version,
+          },
+        ),
+        200,
+      );
+      expect(changedRecord.version).not.toBe(record.version);
+      expect(changedRecord.values[unicodeColumn.id]).toBe(
+        "source changed after snapshot",
+      );
+
+      await client.close();
+      client = undefined;
+      await runtime.dispose();
+      runtime = await startRuntime(persistenceDirectory, { testClock: true });
+      const justBeforeExpiry = Date.parse(manifest.expiresAt) - 1;
+      await setTestClock(runtime, database.databaseId, justBeforeExpiry);
+      client = await connectMcp(runtime, async (_mcpRequest, response) => {
+        mcpResponseBytes.push((await response.arrayBuffer()).byteLength);
+      });
+
+      const mcpPages: ExportPage[] = [];
+      let mcpCursor: string | null = null;
+      do {
+        const page = await callMcp(client, "read_export", {
+          databaseId: database.databaseId,
+          exportId: manifest.exportId,
+          limit: 100,
+          ...(mcpCursor === null ? {} : { cursor: mcpCursor }),
+        });
+        mcpPages.push(page as unknown as ExportPage);
+        mcpCursor =
+          typeof page.nextCursor === "string" ? page.nextCursor : null;
+      } while (mcpCursor !== null);
+
+      const mcpItems = normalizeExportItems(mcpPages);
+      expect(mcpItems).toEqual(restItems);
+      expect(
+        mcpPages.some((page) =>
+          page.items.some((item) => typeof item.chunk === "object"),
+        ),
+      ).toBe(true);
+      expect(
+        mcpItems.find((item) => item.type === "record" && item.id === record.id)
+          ?.values,
+      ).toEqual(record.values);
+      expect(mcpResponseBytes.length).toBeGreaterThan(0);
+      expect(Math.max(...mcpResponseBytes)).toBeLessThanOrEqual(
+        maxResponseBodyBytes,
+      );
+
+      await setTestClock(
+        runtime,
+        database.databaseId,
+        Date.parse(manifest.expiresAt),
+      );
+      await expectApiError(
+        await request(runtime, `${exportPath}/${manifest.exportId}?limit=1`),
+        410,
+        "EXPORT_EXPIRED",
+      );
+      const afterExpiry = await callMcp(client, "start_export", {
+        databaseId: database.databaseId,
+        requestKey: retryKey("export-slot-after-expiry"),
+      });
+      expect(afterExpiry.exportId).not.toBe(manifest.exportId);
+    } finally {
+      await client?.close();
+      await disposeRuntime(runtime);
+      await rm(persistenceDirectory, { force: true, recursive: true });
+    }
+  },
+);
+
+test.serial(
+  "export recovery settles a committed snapshot after the global export cap is lowered",
+  { timeout: 120_000 },
+  async () => {
+    const persistenceDirectory = await createPersistenceDirectory();
+    let runtime: Miniflare | undefined;
+    const exportKey = retryKey("export-recovery-after-policy-shrink");
+    try {
+      runtime = await startRuntime(persistenceDirectory, {
+        testClock: true,
+        admissionBindings: {
+          CAPACITY_MAX_EXPORT_BYTES: String(128 * mebibyte),
+        },
+      });
+      const database = await createDatabase(runtime, "Export recovery");
+      const exportPath = `${databasePath(database.databaseId)}/exports`;
+      const beforeReservation = Date.now() + 1_000;
+      await setTestClock(runtime, database.databaseId, beforeReservation);
+      await failNextRegistryExportCompletion(runtime);
+      await expectApiError(
+        await jsonRequest(
+          runtime,
+          exportPath,
+          "POST",
+          {},
+          { "Idempotency-Key": exportKey },
+        ),
+        503,
+        "CAPACITY_UNAVAILABLE",
+      );
+
+      await runtime.dispose();
+      runtime = await startRuntime(persistenceDirectory, {
+        testClock: true,
+        admissionBindings: {
+          CAPACITY_POLICY_REVISION: "2",
+          CAPACITY_MAX_EXPORT_BYTES: String(EXPORT_MAX_SNAPSHOT_BYTES),
+        },
+      });
+      await setTestClock(
+        runtime,
+        database.databaseId,
+        beforeReservation + 6 * 60 * 1_000,
+      );
+      await runRegistryAlarm(runtime);
+
+      const manifest = await jsonResponse<ExportManifest>(
+        await jsonRequest(
+          runtime,
+          exportPath,
+          "POST",
+          {},
+          { "Idempotency-Key": exportKey },
+        ),
+        201,
+      );
+      const page = await jsonResponse<ExportPage>(
+        await request(runtime, `${exportPath}/${manifest.exportId}?limit=100`),
+        200,
+      );
+      expect(page.items[0]?.type).toBe("database");
+
+      const additionalExport = await expectApiError(
+        await jsonRequest(
+          runtime,
+          exportPath,
+          "POST",
+          {},
+          { "Idempotency-Key": retryKey("export-recovery-cap-shrunk") },
+        ),
+        503,
+        "CAPACITY_UNAVAILABLE",
+      );
+      expect(additionalExport.error.details).toMatchObject({
+        quota: "globalExportBytes",
+      });
+    } finally {
+      await disposeRuntime(runtime);
+      await rm(persistenceDirectory, { force: true, recursive: true });
+    }
+  },
+);
+
+test.serial(
+  "expired export capacity stays charged until the Object confirms snapshot cleanup",
+  { timeout: 120_000 },
+  async () => {
+    const persistenceDirectory = await createPersistenceDirectory();
+    let runtime: Miniflare | undefined;
+    try {
+      runtime = await startRuntime(persistenceDirectory, {
+        testClock: true,
+        admissionBindings: {
+          CAPACITY_MAX_EXPORT_BYTES: String(EXPORT_MAX_SNAPSHOT_BYTES),
+        },
+      });
+      const expiredDatabase = await createDatabase(
+        runtime,
+        "Export held until cleanup",
+      );
+      const replacementDatabase = await createDatabase(
+        runtime,
+        "Export waits for cleanup",
+      );
+      const exportPath = `${databasePath(expiredDatabase.databaseId)}/exports`;
+      const replacementExportPath = `${databasePath(replacementDatabase.databaseId)}/exports`;
+      const expiredManifest = await jsonResponse<ExportManifest>(
+        await jsonRequest(
+          runtime,
+          exportPath,
+          "POST",
+          {},
+          { "Idempotency-Key": retryKey("export-expiry-held") },
+        ),
+        201,
+      );
+      const expiry = Date.parse(expiredManifest.expiresAt);
+      await setTestClock(runtime, expiredDatabase.databaseId, expiry);
+      await setTestClock(runtime, replacementDatabase.databaseId, expiry);
+      await failNextDatabaseExportReconciliation(
+        runtime,
+        expiredDatabase.databaseId,
+      );
+
+      await runRegistryAlarm(runtime);
+      const stillCharged = await expectApiError(
+        await jsonRequest(
+          runtime,
+          replacementExportPath,
+          "POST",
+          {},
+          { "Idempotency-Key": retryKey("export-expiry-still-charged") },
+        ),
+        503,
+        "CAPACITY_UNAVAILABLE",
+      );
+      expect(stillCharged.error.details).toMatchObject({
+        quota: "globalExportBytes",
+      });
+
+      await runRegistryAlarm(runtime);
+      const afterCleanup = await jsonResponse<ExportManifest>(
+        await jsonRequest(
+          runtime,
+          replacementExportPath,
+          "POST",
+          {},
+          { "Idempotency-Key": retryKey("export-expiry-capacity-released") },
+        ),
+        201,
+      );
+      expect(afterCleanup.exportId).not.toBe(expiredManifest.exportId);
+    } finally {
+      await disposeRuntime(runtime);
+      await rm(persistenceDirectory, { force: true, recursive: true });
+    }
+  },
+);
+
+test.serial(
+  "a per-database physical-cap rejection leaves the record and replay key available",
+  { timeout: 120_000 },
+  async () => {
+    const persistenceDirectory = await createPersistenceDirectory();
+    let runtime: Miniflare | undefined;
+    const updateKey = retryKey("physical-cap-rollback");
+    const expandedValue = "x".repeat(9_000);
+    try {
+      runtime = await startRuntime(persistenceDirectory, { testClock: true });
+      const database = await createDatabase(runtime, "Physical cap rollback");
+      const table = await createTable(runtime, database.databaseId, "Rows");
+      const column = await createColumn(runtime, database.databaseId, table, {
+        name: "Value",
+        type: "string",
+        nullable: false,
+      });
+      const original = await createRecord(
+        runtime,
+        database.databaseId,
+        table.id,
+        { [column.id]: "unchanged" },
+      );
+      const baseline = await databaseStorageSnapshot(
+        runtime,
+        database.databaseId,
+      );
+      const physicalCap = baseline.databaseSize + 4 * kibibyte;
+      const updatePath = recordPath(database.databaseId, table.id, original.id);
+      expect(
+        new TextEncoder().encode(
+          JSON.stringify({ values: { [column.id]: expandedValue } }),
+        ).byteLength,
+      ).toBeLessThan(maxRequestBodyBytes);
+
+      await runtime.dispose();
+      runtime = await startRuntime(persistenceDirectory, {
+        testClock: true,
+        admissionBindings: {
+          CAPACITY_POLICY_REVISION: "2",
+          CAPACITY_MAX_PHYSICAL_BYTES_PER_DATABASE: String(physicalCap),
+        },
+      });
+      const physicalError = await expectApiError(
+        await jsonRequest(
+          runtime,
+          updatePath,
+          "PATCH",
+          { values: { [column.id]: expandedValue } },
+          {
+            "Idempotency-Key": updateKey,
+            "X-Expected-Version": original.version,
+          },
+        ),
+        503,
+        "CAPACITY_UNAVAILABLE",
+      );
+      expect(physicalError.error.details).toMatchObject({
+        quota: "physicalBytesPerDatabase",
+        maxBytes: physicalCap,
+      });
+      expect(physicalError.error.details.usedBytes).toEqual(expect.any(Number));
+      const afterRejection = await databaseStorageSnapshot(
+        runtime,
+        database.databaseId,
+      );
+      expect(afterRejection.databaseSize).toBeLessThanOrEqual(physicalCap);
+
+      const unchanged = await jsonResponse<RecordResource>(
+        await request(runtime, updatePath),
+        200,
+      );
+      expect(unchanged).toEqual(original);
+
+      await runtime.dispose();
+      runtime = await startRuntime(persistenceDirectory, {
+        testClock: true,
+        admissionBindings: {
+          CAPACITY_POLICY_REVISION: "3",
+          CAPACITY_MAX_PHYSICAL_BYTES:
+            testAdmissionBindings.CAPACITY_MAX_PHYSICAL_BYTES,
+          CAPACITY_MAX_PHYSICAL_BYTES_PER_DATABASE:
+            testAdmissionBindings.CAPACITY_MAX_PHYSICAL_BYTES_PER_DATABASE,
+        },
+      });
+      const updated = await jsonResponse<RecordResource>(
+        await jsonRequest(
+          runtime,
+          updatePath,
+          "PATCH",
+          { values: { [column.id]: expandedValue } },
+          {
+            "Idempotency-Key": updateKey,
+            "X-Expected-Version": original.version,
+          },
+        ),
+        200,
+      );
+      expect(updated.version).toBe(String(Number(original.version) + 1));
+      expect(updated.values[column.id]).toBe(expandedValue);
+      expect(
+        await jsonResponse<RecordResource>(
+          await jsonRequest(
+            runtime,
+            updatePath,
+            "PATCH",
+            { values: { [column.id]: expandedValue } },
+            {
+              "Idempotency-Key": updateKey,
+              "X-Expected-Version": original.version,
+            },
+          ),
+          200,
+        ),
+      ).toEqual(updated);
     } finally {
       await disposeRuntime(runtime);
       await rm(persistenceDirectory, { force: true, recursive: true });

@@ -206,6 +206,7 @@ function buildWorkerUnit(unit, plan) {
         config: unit.build.config,
         files: unit.build.files,
         directories,
+        ...(unit.build.wrangler?.vars ? { vars: unit.build.wrangler.vars } : {}),
         migration_files: migrationFiles,
         modules,
         entrypoint_digest: `sha256:${sha256(workerBytes)}`,

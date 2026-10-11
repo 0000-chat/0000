@@ -6,6 +6,7 @@ import * as z from "zod/v4";
 import {
   ApiFault,
   DatabaseObject,
+  errorOutcome,
   errorResponse,
   parseObject,
   type DatabaseBindings,
@@ -13,6 +14,13 @@ import {
   type DurableCallOutcome,
 } from "./database-object";
 import { DatabaseRegistry } from "./database-registry";
+import { EXPORT_DEFAULT_PAGE_ITEMS, EXPORT_MAX_PAGE_ITEMS } from "./export";
+import {
+  getGlobalAdmission,
+  REGISTRY_ID,
+  type AdmissionKind,
+  type ServiceClock,
+} from "./global-admission";
 
 export { DatabaseObject, DatabaseRegistry };
 
@@ -20,7 +28,6 @@ const MAX_REQUEST_BYTES = 64 * 1024;
 const MAX_RESPONSE_BYTES = 256 * 1024;
 const MCP_ENVELOPE_OVERHEAD_BYTES = 1024;
 const MCP_EXPECTED_ID_BYTES = 64;
-const REGISTRY_ID = "database-create-registry-v1";
 const ACCESS_WARNING =
   "Anyone with this link can read and change the database while writable. Do not store sensitive information.";
 
@@ -59,6 +66,10 @@ const valuesSchema = z.record(z.string(), scalarSchema);
 const paginationFields = {
   limit: z.number().int().min(1).max(100).optional(),
   cursor: z.string().optional(),
+};
+const exportPaginationFields = {
+  limit: z.number().int().min(1).max(EXPORT_MAX_PAGE_ITEMS).optional(),
+  cursor: z.string().max(512).optional(),
 };
 
 function registerTool(
@@ -114,6 +125,33 @@ function registerDatabaseTools(
     "get_database",
     "Read database metadata and lifecycle state.",
     z.strictObject({ databaseId: idSchema }),
+    true,
+    origin,
+    env,
+    responseBudget,
+  );
+  registerTool(
+    server,
+    "start_export",
+    "Capture an immutable JSON snapshot. Reuse the same fresh requestKey only to retry this export request.",
+    z.strictObject({
+      databaseId: idSchema,
+      requestKey: creationKeySchema,
+    }),
+    false,
+    origin,
+    env,
+    responseBudget,
+  );
+  registerTool(
+    server,
+    "read_export",
+    `Read a page from an immutable export snapshot using its continuation cursor. The default page limit is ${EXPORT_DEFAULT_PAGE_ITEMS}.`,
+    z.strictObject({
+      databaseId: idSchema,
+      exportId: idSchema,
+      ...exportPaginationFields,
+    }),
     true,
     origin,
     env,
@@ -319,6 +357,7 @@ function requestForTool(
   const tableId = encodeURIComponent(String(args.tableId ?? ""));
   const columnId = encodeURIComponent(String(args.columnId ?? ""));
   const recordId = encodeURIComponent(String(args.recordId ?? ""));
+  const exportId = encodeURIComponent(String(args.exportId ?? ""));
   const databasePath = "/v1/databases/" + databaseId;
   const query = new URLSearchParams();
   const headers = new Headers();
@@ -340,6 +379,15 @@ function requestForTool(
       headers.set("idempotency-key", String(args.requestKey));
       break;
     case "get_database":
+      break;
+    case "start_export":
+      path += "/exports";
+      method = "POST";
+      headers.set("idempotency-key", String(args.requestKey));
+      break;
+    case "read_export":
+      path += "/exports/" + exportId;
+      appendQuery(query, args, ["limit", "cursor"]);
       break;
     case "create_table":
       path += "/tables";
@@ -430,6 +478,92 @@ function isJsonObject(value: unknown): value is JsonObject {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function randomRequestId(): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  return Array.from(bytes, (value) => value.toString(16).padStart(2, "0")).join(
+    "",
+  );
+}
+
+function isServiceClock(value: unknown): value is ServiceClock {
+  if (!isJsonObject(value)) return false;
+  return (
+    typeof value.suspended === "boolean" &&
+    typeof value.pausedTotalMs === "number" &&
+    Number.isFinite(value.pausedTotalMs) &&
+    value.pausedTotalMs >= 0 &&
+    (value.suspendedSince === null ||
+      (typeof value.suspendedSince === "number" &&
+        Number.isFinite(value.suspendedSince))) &&
+    typeof value.policyRevision === "number" &&
+    Number.isSafeInteger(value.policyRevision) &&
+    value.policyRevision > 0 &&
+    typeof value.maxPhysicalBytesPerDatabase === "number" &&
+    Number.isSafeInteger(value.maxPhysicalBytesPerDatabase) &&
+    value.maxPhysicalBytesPerDatabase > 0
+  );
+}
+
+async function admitGlobalWork(
+  env: DatabaseBindings,
+  kind: AdmissionKind,
+): Promise<ServiceClock> {
+  let outcome: DurableCallOutcome<ServiceClock>;
+  try {
+    outcome = await getGlobalAdmission(env).admitRequest(
+      kind,
+      randomRequestId(),
+    );
+  } catch {
+    throw new ApiFault("CAPACITY_UNAVAILABLE", 503, {
+      reason: "globalAdmissionUnavailable",
+    });
+  }
+  if (!outcome.ok) {
+    throw new ApiFault(
+      outcome.body.error.code,
+      outcome.status,
+      outcome.body.error.details,
+    );
+  }
+  if (!isServiceClock(outcome.result)) {
+    throw new ApiFault("CAPACITY_UNAVAILABLE", 503, {
+      reason: "invalidGlobalAdmissionState",
+    });
+  }
+  if (outcome.result.suspended) {
+    throw new ApiFault("CAPACITY_UNAVAILABLE", 503, {
+      reason: "serviceSuspended",
+    });
+  }
+  return outcome.result;
+}
+
+async function mcpAdmissionError(
+  request: Request,
+  error: unknown,
+): Promise<Response> {
+  let requestId: string | number | null = null;
+  try {
+    requestId = (await inspectMcpRequest(request)).requestId;
+  } catch {
+    // The admission error still wins; an unreadable request has no usable id.
+  }
+  const outcome = errorOutcome(error);
+  return Response.json(
+    {
+      jsonrpc: "2.0",
+      id: requestId,
+      error: {
+        code: -32000,
+        message: outcome.body.error.message,
+        data: outcome.body,
+      },
+    },
+    { status: outcome.status, headers: outcome.headers },
+  );
+}
+
 function toolText(name: string, result: JsonObject, isError: boolean): string {
   if (isError) {
     const error = isJsonObject(result.error) ? result.error : {};
@@ -452,6 +586,7 @@ async function callTool(
 ): Promise<McpToolResult> {
   let response: Response;
   try {
+    await admitGlobalWork(env, "mcp_tool");
     response = await fetchRest(
       requestForTool(name, args, origin, responseBudget),
       env,
@@ -530,6 +665,29 @@ async function readJson(request: Request): Promise<unknown> {
     return JSON.parse(new TextDecoder().decode(bytes));
   } catch {
     throw new ApiFault("INVALID_JSON", 400);
+  }
+}
+
+async function enforceRequestSize(request: Request): Promise<void> {
+  const declaredLength = Number(request.headers.get("content-length") ?? 0);
+  if (declaredLength > MAX_REQUEST_BYTES) {
+    throw new ApiFault("REQUEST_TOO_LARGE", 413, {
+      maxBytes: MAX_REQUEST_BYTES,
+    });
+  }
+  const reader = request.clone().body?.getReader();
+  if (!reader) return;
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) return;
+    total += value.byteLength;
+    if (total > MAX_REQUEST_BYTES) {
+      await reader.cancel().catch(() => undefined);
+      throw new ApiFault("REQUEST_TOO_LARGE", 413, {
+        maxBytes: MAX_REQUEST_BYTES,
+      });
+    }
   }
 }
 
@@ -624,8 +782,17 @@ async function fetchRest(
   request: Request,
   env: DatabaseBindings,
 ): Promise<Response> {
+  await enforceRequestSize(request);
   const url = new URL(request.url);
   const parts = url.pathname.split("/").filter(Boolean);
+  if (
+    parts.length === 5 &&
+    parts[3] === "exports" &&
+    request.method === "GET" &&
+    (url.searchParams.get("cursor")?.length ?? 0) > 512
+  ) {
+    throw new ApiFault("VALIDATION_ERROR", 400, { field: "cursor" });
+  }
   if (
     parts.length === 2 &&
     parts[0] === "v1" &&
@@ -748,8 +915,29 @@ async function fetchMcp(
 
 const worker = {
   async fetch(request: Request, env: DatabaseBindings): Promise<Response> {
+    let serviceClock: ServiceClock;
+    try {
+      serviceClock = await admitGlobalWork(env, "http");
+    } catch (error) {
+      if (new URL(request.url).pathname === "/mcp") {
+        return mcpAdmissionError(request, error);
+      }
+      return errorResponse(error);
+    }
     try {
       const url = new URL(request.url);
+      if (url.pathname === "/health") {
+        await enforceRequestSize(request);
+        if (request.method !== "GET") throw new ApiFault("NOT_FOUND", 404);
+        return Response.json(
+          {
+            status: "ready",
+            service: "0000-database",
+            policyRevision: serviceClock.policyRevision,
+          },
+          { headers: { "cache-control": "no-store" } },
+        );
+      }
       if (url.pathname === "/mcp") return await fetchMcp(request, env);
       return await fetchRest(request, env);
     } catch (error) {
