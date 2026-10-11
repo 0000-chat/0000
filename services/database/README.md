@@ -5,12 +5,13 @@ status: current
 
 # 0000-database
 
-This service lives at `services/database` in the public `0000` monorepo. It is
-in active development: the first durable pilot stores data in one SQLite
-Durable Object per database and exposes the same supported operations over
-REST and MCP. The implementation decision and its remaining launch gates are
-recorded in [`docs/architecture/storage.md`](docs/architecture/storage.md), and
-the accepted interface is in
+This service lives at `services/database` in the public `0000` monorepo.
+`0000-database` aims to provide durable JSON storage over REST and MCP. Its
+first durable pilot stores data in one SQLite Durable Object per database and
+is in active development. The implementation decision and its remaining
+launch gates are recorded in
+[`docs/architecture/storage.md`](docs/architecture/storage.md), and the
+accepted interface is in
 [`docs/specs/standalone-pilot-contract.md`](docs/specs/standalone-pilot-contract.md).
 
 `0000-database` provides durable storage through anonymous, high-entropy
@@ -21,11 +22,12 @@ store sensitive information. `0000-streams` depends on this service. Database
 owns data storage, access, limits, and lifecycle, not user identity or hosted
 account management.
 
-Platform identity integration is not part of this increment. Instead, the pilot
-uses shared high-entropy bearer database links: anyone with a link can read
-data and, during the write window, change it. Do not store sensitive
-information. There is no database directory, database deletion route, user
-login, or ownership credential in this pilot.
+`0000-database` is intended to use `0000-platform` for common identity and
+authentication in hosted compositions; that identity integration is not part
+of this standalone pilot. Instead, the pilot uses shared high-entropy bearer
+database links: anyone with a link can read data and, during the write window,
+change it. Do not store sensitive information. There is no database directory,
+database deletion route, user login, or ownership credential in this pilot.
 
 The REST and MCP interfaces create and read databases, tables, columns, and
 records; record updates and deletes use version preconditions. Mutations use
