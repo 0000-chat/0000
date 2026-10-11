@@ -68,7 +68,7 @@ evidence:
 
 | Surface | Repository evidence | Hosted status represented here |
 | --- | --- | --- |
-| Gateway | The Worker source provides health and the stateless `gateway_info` MCP diagnostic. | Canonical and standalone MCP routes are target behavior; this document claims no live route. |
+| Gateway | The Worker source provides health, the stateless `gateway_info` diagnostic, and a configured-app path for authenticated profile-bound `use`, `tools.search`, D1 grants, and service-owned catalog adapters. Gateway tests exercise the boundary in a real Worker runtime, including the Msg adapter. | Canonical and standalone MCP routes are target behavior; this document claims no live route or hosted binding. |
 | Msg | The Worker contains an MCP implementation and the service owns its Thread protocol. | The direct `/mcp` address is the target service contract; this document claims no new deployment. |
 | Database | The public service remains a scaffold without a selected application API. | The direct address is a planned service surface. |
 | Streams | The Worker exposes browser, API, and MCP surfaces; route configuration exists. | The direct address is the target service contract; deployment remains unverified. |

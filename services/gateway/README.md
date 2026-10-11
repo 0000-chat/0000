@@ -26,9 +26,11 @@ common identity and authentication; standalone use does not require a hosted
 
 This directory is the Gateway subtree in the `0000` monorepo. Its root
 `package.json` is the private `@0000/gateway` workspace. The Worker serves a
-public `GET /health` liveness endpoint that returns `{"status":"ok","service":"gateway"}`.
-The endpoint makes no downstream calls and reads no product data. It reports
-Worker liveness only and is not a Gateway Capability.
+public `GET /health` liveness endpoint that returns
+`{"status":"ok","service":"gateway"}`. It makes no downstream calls and reads
+no product data. It reports Worker liveness only and is not a Gateway
+Capability. The unauthenticated `/mcp` surface exposes the same operational
+`gateway_info` diagnostic.
 
 The Worker uses Hono and has an explicit Wrangler compatibility date and
 `nodejs_compat` flag. Its application test dispatches through a real
@@ -51,8 +53,37 @@ enabled, service-published first-party tools; profile grants and each owning
 service's resource authorization remain separate checks. A catalog entry does
 not grant permission or create a hard dependency on every service.
 
-The current Worker milestone remains a health endpoint and a stateless
-`gateway_info` diagnostic. The addresses and connected service-tool catalog
-are target behavior; this README does not claim a configured route or live
-deployment. Public CI publishes the immutable Worker artifact, while the
-operator-owned release path supplies environment routes and promotion evidence.
+The authenticated boundary is available when the deployment supplies the
+Platform Verification binding, the `gateway_profiles` and
+`gateway_profile_tool_grants` D1 tables, and a service binding. Platform
+returns an agent principal containing `agentId`, `organizationId`, and
+`profileId`; Gateway does not issue or interpret credentials itself. Gateway
+management accepts only a verified human session with Platform's explicit
+`canManageProfile` permission. A missing verifier, database, or service
+binding fails closed.
+
+The canonical `/mcp` route derives the organization and profile from the
+verified agent credential. `/mcp/profile/{id}` and
+`/mcp/organizations/{org}/profiles/{id}` remain compatible aliases and
+reject credential/profile mismatches. The profile-scoped catalog contains
+`use`, `tools.search`, and granted declarations published by service-owned
+MCP `tools/list` responses. The Msg adapter uses the direct
+`https://msg.0000.chat/mcp` surface through a service binding, never forwards
+the incoming Platform credential, and sends only informational Gateway
+identity headers. Msg still authorizes each Thread or resource capability.
+
+`use` accepts the documented restricted JavaScript subset: literals, arrays,
+null-prototype object literals, bindings, returns, direct `tools` calls,
+`tools.search`, and exact-name `tools.call`. It has complete-program
+parsing, bounded syntax depth and node count, at most eight host calls,
+bounded output, and a five-second execution/dependency deadline. Programs
+have no network, filesystem, credential, global, loop, import, or dynamic-code
+access; all effects pass through the per-call Gateway grant and a fresh
+Platform credential check. This is a bounded interpreter, not a general
+JavaScript runtime.
+
+The connected catalog and authenticated routes are locally tested Worker
+behavior. The addresses and hosted bindings remain target behavior; this
+README does not claim a configured route or live deployment. Cloud owns route,
+binding, migration, and secret configuration, while each downstream service
+owns its service-tool declarations and resource authorization.

@@ -14,6 +14,9 @@ directory owns Gateway implementation and protocol details:
 - [Gateway foundation plan](plans/2026-09-19-gateway-foundation.md) and
   [specification](specs/gateway-foundation.md) record the diagnostic milestone
   and its boundaries.
+- [Authenticated Gateway to Msg contract](specs/gateway-authenticated-msg.md)
+  records the profile-bound MCP boundary, restricted `use` contract, and the
+  exact Platform, Msg, and Cloud obligations for the connected milestone.
 - [ADR 0001](adr/0001-curated-gateway-capabilities.md) is retained as a
   superseded historical decision; the maintained topology governs the default
   service-tool catalog and profile grants.
