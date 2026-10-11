@@ -55,7 +55,7 @@ class FakeWebSocketPair {
 async function room(database = new Database(":memory:"), clock: () => number = Date.now, env: Record<string, string> = {}, signWebhook?: WebhookPayloadSigner) {
   const { ConversationRoom } = await import("./conversation-room");
   const context = new Context(database);
-  return { context, room: new ConversationRoom(context as never, env, clock, signWebhook) };
+  return { context, room: new ConversationRoom(context as never, { MSG_TEST_MODE: "1", MSG_TEST_ROOM_LIMITS: "{}", MSG_ROOM_EXPIRY_ENABLED: "1", ...env }, clock, signWebhook) };
 }
 
 function request(path: string, value: unknown) {
@@ -707,6 +707,50 @@ test("uses only the Durable Object clock for expiry and inactivity refresh", asy
   expect((await accepted.json()).expires_at).toBe(new Date(now + ROOM_LIMITS.inactivityTtlMs).toISOString());
   now = 2_000 + ROOM_LIMITS.inactivityTtlMs + 1;
   expect((await durable.fetch(request("/messages", { now: 0, input: { content: "late", author: "a", display_name: "a", semantic_type: "message" } }))).status).toBe(410);
+});
+
+test("pauses overdue room expiry while preserving the saved deadline and alarm cleanup", async () => {
+  const database = new Database(":memory:");
+  let now = 1_000;
+  const limits = JSON.stringify({ inactivityTtlMs: 1_000 });
+  const enabled = await room(database, () => now, { MSG_TEST_ROOM_LIMITS: limits, MSG_ROOM_EXPIRY_ENABLED: "1" });
+  await enabled.room.fetch(request("/initialize", { management_hash: "hash", initial: { content: "first", author: "a", display_name: "a", semantic_type: "message" } }));
+  const endpoint = await enabled.room.fetch(request("/webhooks", { url: "https://receiver.example.com/pause-expiry" }));
+  expect(endpoint.status).toBe(200);
+  const posted = await enabled.room.fetch(request("/messages", { input: { content: "queued", author: "a", display_name: "a", semantic_type: "message" } }));
+  expect(posted.status).toBe(200);
+  const deadline = new Date(now + 1_000).toISOString();
+  database.query("UPDATE webhook_deliveries SET status = 'delivered', created_at = ?").run(now - 8 * DAY_MS);
+
+  now += 2_000;
+  const paused = await room(database, () => now, { MSG_TEST_ROOM_LIMITS: limits, MSG_ROOM_EXPIRY_ENABLED: "0" });
+  const read = await paused.room.fetch(new Request("https://room/read?after=0"));
+  expect(read.status).toBe(200);
+  expect(await read.json()).toMatchObject({ expires_at: deadline, retention: { expiry_enabled: false, inactivity_window_ms: 1_000 } });
+  await paused.room.alarm();
+  expect(database.query("SELECT status FROM room_state WHERE singleton = 1").get()).toEqual({ status: "active" });
+  expect(database.query("SELECT COUNT(*) AS count FROM webhook_deliveries").get()).toEqual({ count: 0 });
+
+  const deleted = await paused.room.fetch(new Request("https://room/operator-delete", { method: "POST" }));
+  expect(deleted.status).toBe(200);
+  expect(database.query("SELECT status FROM room_state WHERE singleton = 1").get()).toEqual({ status: "deleted" });
+  database.close();
+});
+
+test("restoring expiry enforces an already-passed saved deadline", async () => {
+  const database = new Database(":memory:");
+  let now = 1_000;
+  const limits = JSON.stringify({ inactivityTtlMs: 1_000 });
+  const paused = await room(database, () => now, { MSG_TEST_ROOM_LIMITS: limits, MSG_ROOM_EXPIRY_ENABLED: "0" });
+  await paused.room.fetch(request("/initialize", { management_hash: "hash", initial: { content: "first", author: "a", display_name: "a", semantic_type: "message" } }));
+  const deadline = new Date(now + 1_000).toISOString();
+  now += 2_000;
+  expect((await paused.room.fetch(new Request("https://room/status"))).status).toBe(200);
+  const restored = await room(database, () => now, { MSG_TEST_ROOM_LIMITS: limits, MSG_ROOM_EXPIRY_ENABLED: "1" });
+  expect((await restored.room.fetch(new Request("https://room/read?after=0"))).status).toBe(410);
+  expect(database.query("SELECT status, inactivity_expires_at FROM room_state WHERE singleton = 1").get()).toEqual({ status: "deleted", inactivity_expires_at: 2_000 });
+  expect(deadline).toBe(new Date(2_000).toISOString());
+  database.close();
 });
 
 test("exports a complete ascending transcript with safety warnings", async () => {

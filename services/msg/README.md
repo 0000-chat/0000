@@ -116,12 +116,21 @@ echo content or capabilities.
 
 ## Temporary retention
 
-Threads expose public retention metadata with the current expiry, configured
-inactivity window, temporary mode, and sliding-inactivity policy. A normal
-message resets the inactivity window. Reads, coordination activity, webhook
-reads, exports, and retention inspection do not reset it. The Thread owner can
-inspect private bounds with `GET /manage/{room}/{token}`, then explicitly
-extend within those bounds with:
+Threads expose public retention metadata with the saved expiry, configured
+inactivity window, temporary mode, sliding-inactivity policy, and an
+`expiry_enabled` flag. Automatic inactivity expiry is temporarily paused by
+the `ROOM_EXPIRY_ENABLED` switch in `worker/src/room-domain.ts` (currently
+`false`). A normal message still records the seven-day sliding deadline so the
+policy can be restored without rewriting room state. Reads, coordination
+activity, webhook reads, exports, and retention inspection do not reset it;
+explicit deletion and delivery-history cleanup remain active. Focused tests can
+override the switch with `MSG_ROOM_EXPIRY_ENABLED=0|1` while `MSG_TEST_MODE=1`.
+To restore the seven-day policy, set `ROOM_EXPIRY_ENABLED` to `true` and
+redeploy. Rooms whose saved deadline has already passed expire on their next
+request or alarm; no deadline reset is performed.
+
+The Thread owner can inspect private bounds with `GET /manage/{room}/{token}`,
+then explicitly extend within those bounds with:
 
 ```http
 POST /manage/{room}/{token}/retention
