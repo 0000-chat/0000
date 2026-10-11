@@ -11,6 +11,20 @@ export const publicReleaseRecordSchema = "docs/schemas/public-release-record.sch
 const SHA_RE = /^[0-9a-f]{40}$/;
 const NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+const DATABASE_POLICY_VARS = new Set([
+  "CAPACITY_POLICY_REVISION",
+  "CAPACITY_MAX_DATABASES",
+  "CAPACITY_MAX_LOGICAL_BYTES",
+  "CAPACITY_MAX_REPLAY_BYTES",
+  "CAPACITY_MAX_PHYSICAL_BYTES",
+  "CAPACITY_MAX_PHYSICAL_BYTES_PER_DATABASE",
+  "CAPACITY_MAX_DAILY_REQUESTS",
+  "CAPACITY_MAX_REQUESTS_PER_MINUTE",
+  "CAPACITY_MAX_DAILY_MUTATIONS",
+  "CAPACITY_MAX_EXPORT_BYTES",
+  "CAPACITY_MAX_CONTROL_BYTES",
+  "SERVICE_SUSPENDED"
+]);
 export function readJson(filePath) {
   return JSON.parse(fs.readFileSync(filePath, "utf8"));
 }
@@ -267,10 +281,50 @@ function assertWorkerBuildConfig(unit, build) {
     if (!build.wrangler || typeof build.wrangler !== "object" || Array.isArray(build.wrangler)) {
       throw new Error(`release unit build.wrangler must be an object: ${unit.name}`);
     }
-    const allowed = new Set(["rules", "durable_objects", "migrations", "d1_databases", "secrets", "observability"]);
+    const allowed = new Set([
+      "rules",
+      "durable_objects",
+      "migrations",
+      "d1_databases",
+      "secrets",
+      "observability",
+      "vars"
+    ]);
     const unsupported = Object.keys(build.wrangler).filter((key) => !allowed.has(key));
     if (unsupported.length > 0) {
       throw new Error(`release unit build.wrangler contains environment-specific keys: ${unit.name}: ${unsupported.join(", ")}`);
+    }
+    if (unit.name === "database-worker" && build.wrangler.vars === undefined) {
+      throw new Error(`release unit build.wrangler.vars must define the complete Database public policy: ${unit.name}`);
+    }
+    if (build.wrangler.vars !== undefined) {
+      const vars = build.wrangler.vars;
+      if (!vars || typeof vars !== "object" || Array.isArray(vars)) {
+        throw new Error(`release unit build.wrangler.vars must be an object: ${unit.name}`);
+      }
+      const names = Object.keys(vars);
+      if (
+        unit.name === "database-worker" &&
+        (names.length !== DATABASE_POLICY_VARS.size || names.some((name) => !DATABASE_POLICY_VARS.has(name)))
+      ) {
+        throw new Error(`release unit build.wrangler.vars must define the complete Database public policy: ${unit.name}`);
+      }
+      for (const [name, value] of Object.entries(vars)) {
+        if (!DATABASE_POLICY_VARS.has(name)) {
+          throw new Error(`release unit build.wrangler.vars contains an unsupported public policy variable: ${unit.name}: ${name}`);
+        }
+        if (name === "SERVICE_SUSPENDED") {
+          if (value !== "true" && value !== "false") {
+            throw new Error(`release unit build.wrangler.vars.SERVICE_SUSPENDED must be "true" or "false": ${unit.name}`);
+          }
+        } else if (
+          typeof value !== "string" ||
+          !/^[1-9][0-9]*$/.test(value) ||
+          !Number.isSafeInteger(Number(value))
+        ) {
+          throw new Error(`release unit build.wrangler.vars.${name} must be a canonical positive safe integer string: ${unit.name}`);
+        }
+      }
     }
     if (build.wrangler.durable_objects !== undefined) {
       const bindings = build.wrangler.durable_objects?.bindings;
@@ -556,6 +610,7 @@ export function assertWorkerBuildConfigMatchesSource(unit, build, root = reposit
   const releaseContract = build.wrangler ?? {};
   const sourceContract = {
     rules: normalisedSourceRules(unit, build, source),
+    vars: source.vars,
     durable_objects: source.durable_objects,
     migrations: source.migrations,
     d1_databases: normalisedSourceD1Databases(unit, build, source),
@@ -567,6 +622,7 @@ export function assertWorkerBuildConfigMatchesSource(unit, build, root = reposit
   };
   const expectedContract = {
     rules: releaseContract.rules,
+    vars: releaseContract.vars,
     durable_objects: releaseContract.durable_objects,
     migrations: releaseContract.migrations,
     d1_databases: releaseContract.d1_databases,
@@ -584,6 +640,7 @@ export function assertWorkerBuildConfigMatchesSource(unit, build, root = reposit
   };
   for (const key of [
     "rules",
+    "vars",
     "durable_objects",
     "migrations",
     "d1_databases",
@@ -593,6 +650,10 @@ export function assertWorkerBuildConfigMatchesSource(unit, build, root = reposit
     "rate_limits",
     "triggers"
   ]) {
+    // Some source Wrangler configs contain environment-owned vars that are
+    // intentionally stripped from the release artifact. Only compare vars
+    // when the release unit explicitly publishes a reviewed public contract.
+    if (key === "vars" && releaseContract.vars === undefined) continue;
     assertSourceContract(unit, build, key, sourceContract[key], expectedContract[key]);
   }
 }
@@ -725,7 +786,7 @@ export function isDocumentationPath(file) {
   );
 }
 
-const SCAFFOLD_ONLY_SERVICE_ROOTS = [
+const FAIL_CLOSED_SERVICE_ROOTS = [
   "services/platform",
   "services/database",
   "services/brain"
@@ -747,7 +808,7 @@ const VALIDATION_ONLY_FILE_NAMES = new Set([
   "rust-toolchain.toml"
 ]);
 
-const VALIDATION_ONLY_DIRECTORY_NAMES = new Set([".githooks", "docs"]);
+const VALIDATION_ONLY_DIRECTORY_NAMES = new Set([".githooks", "docs", "test", "tests", "__tests__"]);
 
 function pathInside(file, root) {
   return file === root || file.startsWith(`${root}/`);
@@ -756,9 +817,9 @@ function pathInside(file, root) {
 function isValidationOnlyPath(file) {
   if (isDocumentationPath(file)) return true;
 
-  const scaffoldRoot = SCAFFOLD_ONLY_SERVICE_ROOTS.find((root) => pathInside(file, root));
-  if (scaffoldRoot) {
-    const relative = file.slice(scaffoldRoot.length + 1);
+  const failClosedRoot = FAIL_CLOSED_SERVICE_ROOTS.find((root) => pathInside(file, root));
+  if (failClosedRoot) {
+    const relative = file.slice(failClosedRoot.length + 1);
     const segments = relative.split("/");
     const basename = segments.at(-1);
     if (segments.some((segment) => VALIDATION_ONLY_DIRECTORY_NAMES.has(segment))) return true;
@@ -787,17 +848,18 @@ function isValidationOnlyPath(file) {
   return false;
 }
 
-export function unmappedRuntimeChanges(changedFiles) {
+export function unmappedRuntimeChanges(changedFiles, units = []) {
   const files = [...new Set(changedFiles)].sort();
   return files.filter(
     (file) =>
-      (SCAFFOLD_ONLY_SERVICE_ROOTS.some((root) => pathInside(file, root)) || pathInside(file, "apps")) &&
-      !isValidationOnlyPath(file),
+      (FAIL_CLOSED_SERVICE_ROOTS.some((root) => pathInside(file, root)) || pathInside(file, "apps")) &&
+      !isValidationOnlyPath(file) &&
+      !units.some((unit) => unitAffectsFile(unit, file)),
   );
 }
 
-function assertNoUnmappedRuntimeChanges(changedFiles) {
-  const unmapped = unmappedRuntimeChanges(changedFiles);
+function assertNoUnmappedRuntimeChanges(changedFiles, units) {
+  const unmapped = unmappedRuntimeChanges(changedFiles, units);
   if (unmapped.length > 0) {
     throw new Error(
       `unmapped runtime changes require an explicit release unit before merge: ${unmapped.join(", ")}`,
@@ -807,7 +869,7 @@ function assertNoUnmappedRuntimeChanges(changedFiles) {
 
 export function classifyChanges(changedFiles, units) {
   const files = [...new Set(changedFiles)].sort();
-  assertNoUnmappedRuntimeChanges(files);
+  assertNoUnmappedRuntimeChanges(files, units);
   if (units.length > 0) return "runtime";
   if (files.length === 0) return "empty";
   if (files.every(isDocumentationPath)) return "documentation";

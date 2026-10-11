@@ -11,16 +11,18 @@ point at another source revision. The record carries the exact source commit,
 affected runtime units, artifact digests, and the `api/config` compatibility
 pair consumed by private Cloud promotion.
 
-This activation publishes two runtime units:
+This activation publishes three runtime units:
 
 - `gateway`, a deterministic, prebuilt Cloudflare Worker bundle.
 - `msg-worker`, a deterministic, prebuilt Cloudflare Worker bundle.
+- `database-worker`, a deterministic, prebuilt Cloudflare Worker bundle with
+  its SQLite Durable Object contract.
 
-Streams and Communicator remain outside this activation. Platform, Database,
-and Brain remain validation-only until their own runtime artifacts and
-staging consumers are reviewed. The SDK placeholder and the `@0000chat/msg`
-CLI remain checks-only and are never release artifacts. Private Cloud content
-is never included.
+Streams and Communicator remain outside this activation. Platform and Brain
+remain validation-only until their own runtime artifacts and staging
+consumers are reviewed. The SDK placeholder and the `@0000chat/msg` CLI remain
+checks-only and are never release artifacts. Private Cloud content is never
+included.
 
 The planner selects each Worker from its runtime paths. The public release
 workflow is a Msg runtime input, so changes to the publication protocol
@@ -115,14 +117,53 @@ Cloud must verify the Gateway archive, metadata, release event, and
 attestation from the same immutable release before staging. Public CI builds
 and publishes the artifact but does not deploy it or claim live staging health.
 
+## Database Worker bundle
+
+`database-worker-<version>.tar.gz` is an `application/gzip` prebuilt
+Cloudflare Worker bundle containing:
+
+```text
+worker.js
+wrangler.json
+artifact-manifest.json
+```
+
+The embedded manifest and `database-worker.artifact.json` metadata record the
+release identity, source commit, compatibility contract, `DATABASES` and
+`REGISTRY` Durable Object bindings, the `v1` SQLite class migration, and the
+finite public capacity policy. The policy includes its monotonic revision,
+the configured service-wide ceilings, and the suspension flag. Its values are
+public service configuration, not credentials.
+
+The route-free `wrangler.json` contains compatibility settings, the public
+Durable Object bindings and migration, the public policy values, and disabled
+`workers_dev`. It contains no Worker name, route, custom domain, account ID, or
+secret value. The Worker bundles both Durable Object classes into the same
+prebuilt artifact. This unit has no separate SQL migration directory; its
+SQLite class migration is declared in Wrangler metadata.
+
+The public build uses the pinned Wrangler binary from the root workspace and
+archives the emitted Worker with fixed tar ownership, mtime, ordering, and gzip
+settings. Local release tests extract the archive, compare its manifest and
+neutral Wrangler config with the release contract, then boot the Worker with
+persistent SQLite Durable Objects and read a created database after runtime
+restart. This proves the packaged artifact's local behavior; it does not prove
+managed staging or public production deployment.
+
+The configured caps are conservative public policy inputs. They do not bound
+provider-level ingress charges, and the separate global physical and logical
+limits do not establish an exact physical-to-logical storage ratio. The
+Database service documentation records the acceptance boundaries and
+remaining operating limits.
+
 ## Release provenance and staging boundary
 
 After publishing the release record and provenance evidence, public CI can
 start the private Cloud `staging.yml` workflow through the GitHub Actions
 `workflow_dispatch` endpoint when `CLOUD_RELEASE_DISPATCH_ENABLED` is `true`.
 Its `release_event` input contains the immutable release version and commit,
-changed paths, the selected Gateway or Msg artifact digest and compatibility,
-and workflow provenance. Runtime events carry the attestation URL emitted by
+changed paths, each selected Worker artifact digest and compatibility, and
+workflow provenance. Runtime events carry the attestation URL emitted by
 the provenance action; documentation-only events have no artifact subject to
 attestation. The exact event is uploaded as release evidence. When automatic
 dispatch is disabled, the public workflow still publishes the same immutable

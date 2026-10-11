@@ -75,3 +75,9 @@ jobs:
           version: 10.14.0
       - run: pnpm --dir services/gateway/tooling install --frozen-lockfile
       - run: pnpm --dir services/gateway run check:application
+      - name: Install Database service dependencies
+        working-directory: services/database
+        run: pnpm install --frozen-lockfile
+      - name: Check Database service
+        working-directory: services/database
+        run: pnpm run check:application
