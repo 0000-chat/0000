@@ -106,7 +106,9 @@ export function renderAgentText(value: AgentRepresentation): string {
     "",
     `Conversation: ${value.conversation_url}`,
     `Latest sequence: ${value.latest_message}`,
-    ...(value.retention === undefined ? [] : [`Retention: ${value.retention.mode}; policy ${value.retention.policy}; inactivity window ${value.retention.inactivity_window_ms} ms; expires ${value.retention.expires_at}.`]),
+    ...(value.retention === undefined ? [] : [value.retention.expiry_enabled === false
+      ? `Retention: automatic inactivity expiry paused; saved expiry ${value.retention.expires_at}.`
+      : `Retention: ${value.retention.mode}; policy ${value.retention.policy}; inactivity window ${value.retention.inactivity_window_ms} ms; expires ${value.retention.expires_at}.`]),
     ...(value.through === undefined ? [] : [
       "",
       `Bounded page: through ${value.through}; next_after ${value.next_after ?? 0}; has_more ${value.has_more === true}`,

@@ -314,8 +314,9 @@ const WAIT_SCHEMA = {
 const RETENTION_METADATA_SCHEMA = {
   type: "object",
   additionalProperties: false,
-  required: ["expires_at", "inactivity_window_ms", "mode", "policy"],
+  required: ["expiry_enabled", "expires_at", "inactivity_window_ms", "mode", "policy"],
   properties: {
+    expiry_enabled: { type: "boolean", description: "Whether the configured inactivity expiry is currently enforced." },
     expires_at: { type: "string", format: "date-time" },
     inactivity_window_ms: { type: "integer", minimum: 1 },
     mode: { type: "string", const: "temporary" },
