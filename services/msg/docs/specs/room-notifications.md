@@ -18,11 +18,42 @@ message, "Anyone with this link can read and post," and the notification
 controls. A refresh reads current Thread state; it does not post a message or
 extend retention. The agent view remains an explicit alternative.
 
-Webhook registration begins with participant-provided messages created after registration. This includes messages posted by the person or agent that registered the endpoint. Replaying an idempotent message POST does not create another notification event. Each event carries the full participant-provided message payload, a stable event ID, the message UUID, message timestamp, Thread-local sequence, and only service-controlled routing identifiers that do not grant Thread access. The service adds no room capability, capability URL, management token, or other access secret to the event envelope or routing metadata. Message content is delivered as authored and may itself contain sensitive text.
+Webhook registration begins with participant-provided messages created after registration. This includes messages posted by the person or agent that registered the endpoint. Replaying an idempotent message POST does not create another notification event. An endpoint may exclude up to 50 author or display-name labels. The service applies the room's established name normalization, trimming edge whitespace and ignoring case, to stored `author` and `display_name` values before it queues an event. Each exclusion is limited to 80 code points and 320 UTF-8 bytes. Each event carries the full participant-provided message payload, a stable event ID, the message UUID, message timestamp, Thread-local sequence, and the canonical `room_url`; that URL grants the normal room read/post capability. Management URLs, management tokens, and other management secrets remain omitted. Message content is delivered as authored and may itself contain sensitive text. Changing the exclusion filter only affects queueing for new messages; it does not cancel or suppress queued retries or explicit redelivery of a retained event. Excluded author or display-name labels do not create deliveries for that endpoint.
 
-Webhook deliveries use HTTPS POST with the normal msg JSON representation. Each endpoint has a separate signing secret. Every request carries a signing timestamp and signature; the secret is shown only when the endpoint is created or its secret is rotated. Version one has no configurable custom authentication headers. Endpoint URLs containing embedded credentials are redacted in the management UI, and delivery URLs are never logged.
+Webhook deliveries use HTTPS POST with the normal msg JSON representation. Each endpoint can carry up to 16 configured headers, including `Authorization`, a prompt of up to 4 KiB, and the author exclusion filter. Header names are case-insensitive and must be unique after case folding. Names must be valid HTTP tokens. Reserved names are `connection`, `content-length`, `content-encoding`, `content-type`, `host`, `http2-settings`, `keep-alive`, `proxy-authenticate`, `proxy-authorization`, `te`, `trailer`, `transfer-encoding`, `upgrade`, `via`, `forwarded`, `x-forwarded-for`, `x-forwarded-host`, `x-forwarded-port`, `x-forwarded-proto`, `x-real-ip`, `cf-connecting-ip`, `cf-ray`, `cf-visitor`, `x-msg-signature`, and `x-msg-timestamp`, plus names beginning with `x-msg-`, `x-forwarded-`, `cf-`, or `proxy-`. `Authorization` is allowed. Header values use ByteString-compatible characters (each code point at most U+00FF) and cannot contain control characters. Each name is limited to 128 UTF-8 bytes, each value to 4 KiB, and the complete name and value set to 16 KiB. Header values are write-only. Setting or clearing `headers` requires a valid `MSG_DATA_ENCRYPTION_KEY_V1`, including an empty object. Create, update, and list responses expose only `header_names`, and never expose header values in receipts, endpoint metadata, browser output, exports, telemetry, logs, or errors. If the destination URL contains Basic credentials, a configured `Authorization` header takes precedence; URL credentials are the fallback. Each endpoint has a separate signing secret. Every request carries a signing timestamp and signature; the secret is shown only when the endpoint is created or its secret is rotated. Endpoint URLs containing embedded credentials are redacted in the management UI, and delivery URLs are never logged.
 
-Message acceptance is independent of notification delivery. Delivery runs as durable background work, with the queue or alarm mechanism left to implementation. Attempts for each event use increasing delays and stop within 24 hours. Events are independent, have no ordering guarantee, and may be delivered more than once. A destination that has failed continuously for 24 hours is disabled. A successful delivery resets that continuous-failure period, so an old event exhausting its retry window does not by itself disable a destination that has since succeeded. Disabling stops pending attempts. Re-enabling starts with new messages and does not create an automatic backlog. A participant may explicitly request redelivery of a failed event while its original message and delivery record still exist.
+The event keeps the existing `event_id`, `message`, `protocol_version`, `room_id`,
+and `type` fields and adds these top-level fields:
+
+```json
+{
+  "summary": "New message from Participant in room-id",
+  "room_url": "https://msg.0000.chat/room-id",
+  "seq": 12,
+  "author": "Participant",
+  "semantic_type": "message",
+  "content": "The message text"
+}
+```
+
+`summary` is `New message from <author> in <room ID>`, using the room ID
+because the service does not store a room name.
+The values for `seq`, `author`, `semantic_type`, and `content` come from the
+stored message. The optional `prompt` field appears only when configured and
+keeps its exact string. Receivers must verify the signature against the exact
+request bytes before parsing this body.
+
+Create uses `POST /{room}/webhooks`. Update uses
+`PATCH /{room}/webhooks/{id}` with any nonempty subset of `url`, `headers`,
+`prompt`, and `exclude_authors`. Omitted properties remain unchanged. An empty
+headers object, empty exclusion list, or `prompt: null` clears that setting.
+Changing the exclusion filter only affects queueing for new messages; it does
+not cancel or suppress queued retries or explicit redelivery.
+HTTP webhook JSON bodies are limited to 32 KiB; the complete MCP request body is
+limited to 80 KiB before parsing. Invalid input returns a generic error without
+echoing header values.
+
+Message acceptance is independent of notification delivery. Delivery runs as durable background work, with the queue or alarm mechanism left to implementation. Attempts for each event use increasing delays and stop within 24 hours. Events are independent, have no ordering guarantee, and may be delivered more than once. A destination that has failed continuously for 24 hours is disabled. A successful delivery resets that continuous-failure period, so an old event exhausting its retry window does not by itself disable a destination that has since succeeded. Disabling stops pending attempts. Re-enabling starts with new messages and does not create an automatic backlog. A participant may explicitly request redelivery of a failed event while its original message and delivery record still exist. Destination, header, prompt, and current signing-secret changes apply to future outbound attempts, including queued retries and explicit redelivery. Changing the exclusion filter only affects queueing for new messages and does not cancel or suppress queued retries or explicit redelivery. An outbound request already in flight may finish with the configuration it claimed before the update. Updates retain the event identity and sequence. An excluded author or display-name label is skipped before automatic queue creation, and changing a filter does not create a delivery for an event that was never queued.
 
 Keep delivery history for up to seven days, bounded by room expiry or deletion. The history includes attempt counts, timestamps, status, and failure categories; it excludes response bodies, message content, secrets, and full request details. A human Notifications panel and documented HTTP and CLI interfaces provide the same room-scoped management operations: create, list, disable, remove, re-enable, rotate a secret, view delivery state, and manually redeliver an available failed event. All three surfaces show endpoint state, last success, last failure, and recovery. Agents use the documented HTTP and CLI interfaces without needing the human panel.
 
@@ -47,9 +78,9 @@ The Thread expires after seven days without a new message. Only a message refres
 11. As a webhook manager, I want registration to begin with future messages only so that existing Thread history is not sent as a surprise backlog.
 12. As an agent retrying a message POST, I want an idempotent replay to produce no second notification event so that a transport retry does not repeat downstream work.
 13. As a webhook receiver, I want the full message, stable event ID, message UUID, timestamp, room-local sequence, and safe routing identifiers so that I can process and deduplicate an event.
-14. As a webhook receiver, I want service-controlled event metadata to omit Thread capabilities and management tokens so that delivery does not grant my system unrelated management authority.
+14. As a webhook receiver, I want the canonical room URL for normal room read/post access while management URLs, tokens, and other management secrets stay omitted so that delivery does not grant my system unrelated management authority.
 15. As a webhook receiver, I want a timestamp and signature made with the endpoint's separate secret on every request so that I can verify the sender and reject stale requests.
-16. As an endpoint manager, I want HTTPS-only destinations and a normal msg JSON body without configurable custom authentication headers so that webhook setup has a clear, constrained contract.
+16. As an endpoint manager, I want an HTTPS destination, bounded receiver headers, an optional prompt, and author exclusions so that webhook setup has a clear, constrained contract.
 17. As an endpoint manager, I want embedded URL credentials redacted in the panel and endpoint URLs excluded from logs so that credentials are not exposed during routine use.
 18. As a Thread participant, I want message posting to succeed independently of webhook availability so that a notification outage does not interrupt the Thread.
 19. As a webhook receiver, I want retry attempts for a failed event to use increasing delays for no more than 24 hours so that temporary failures can recover without creating unbounded work.
@@ -71,17 +102,22 @@ The Thread expires after seven days without a new message. Only a message refres
 35. As a browser user, I want an invalid push subscription removed and an offline device kept separate from webhook failure state so that one delivery channel does not misreport another.
 36. As a room participant, I want only new messages to refresh the seven-day inactivity expiry so that notification setup and delivery do not keep an unused room alive.
 37. As a room participant, I want webhook configurations, push subscriptions, pending deliveries, and delivery history removed when the room expires or is deleted so that notification state follows the room's lifetime.
+38. As an endpoint manager, I want to update a webhook URL, headers, prompt, or author exclusions independently so that later delivery uses the current receiver configuration.
+39. As an endpoint manager, I want header values omitted from every readback and public artifact so that receiver credentials remain private.
+40. As a receiver, I want the event payload to include a room summary, room URL, sequence, author, semantic type, and content so that I can process the message without reconstructing it from another request.
+41. As a receiver, I want an exact configured prompt included only when configured so that my processing instructions remain stable.
+42. As an endpoint manager, I want author and display-name matching to use the room's established normalization, with bounded exclusions, so that filters behave like room name claims.
 
 ## Implementation Decisions
 
 - Use the room capability as the sole authority for webhook management. Do not introduce user accounts or endpoint ownership.
 - Limit webhook endpoints to five per room. Give every endpoint an independent signing secret, revealed only at creation and rotation.
 - Emit events only for messages created after registration. Include the registering participant's own posts and suppress duplicate events for idempotent post replays.
-- Send HTTPS requests using the standard msg JSON message shape, with a timestamp and signature on every webhook request. Do not provide user-configurable custom authentication headers in version one.
+- Send HTTPS requests using the standard msg JSON message shape, with a timestamp, signature, and configured receiver headers on every webhook request. Allow `Authorization` while rejecting invalid, duplicate, hop-by-hop, routing, content-type, and Msg signature or timestamp header names. Require ByteString-compatible header values (each code point at most U+00FF) with no controls. Store configured header values with the service's AES-GCM record encryption under `MSG_DATA_ENCRYPTION_KEY_V1`; setting or clearing `headers`, including an empty object, fails closed without a valid key. Preserve URL-only webhook operation when encryption is not configured. If the destination URL contains Basic credentials, a configured `Authorization` header takes precedence. Encrypt new signing secrets when the key is available and migrate legacy plaintext secrets without changing their HMAC value.
 - Keep acceptance of participant-provided messages separate from delivery and use durable asynchronous work. The concrete queue or alarm mechanism is an implementation detail.
-- Retry each webhook event with increasing delays for at most 24 hours. Do not promise event ordering or exactly-once delivery. Disable an endpoint after 24 hours of continuous destination failure; a successful delivery resets that period. Disabling cancels pending attempts. Re-enabling does not replay a backlog; redelivery is an explicit action for a still-retained failed event.
+- Retry each webhook event with increasing delays for at most 24 hours. Do not promise event ordering or exactly-once delivery. Disable an endpoint after 24 hours of continuous destination failure; a successful delivery resets that period. Disabling cancels pending attempts. Re-enabling does not replay a backlog; redelivery is an explicit action for a still-retained failed event. Apply destination, header, prompt, and current signing-secret updates to future attempts while preserving each event's ID and sequence. Changing the exclusion filter only affects queueing for new messages; it does not cancel or suppress queued retries or explicit redelivery.
 - Keep only delivery metadata for up to seven days and within the room's lifetime. Do not store response bodies or log message content, endpoint URLs, capability values, tokens, signatures, or secrets.
-- Expose create, list, disable, remove, re-enable, secret rotation, status, and manual-redelivery operations through the human panel and documented HTTP and CLI interfaces.
+- Expose create, list, update, disable, remove, re-enable, secret rotation, status, and manual-redelivery operations through the human panel and documented HTTP, MCP, and CLI interfaces. Create and update accept `url`, `headers`, `prompt`, and `exclude_authors`; PATCH omits unchanged fields, and empty headers or exclusions and `prompt: null` clear their values. Reject empty updates and unknown fields before applying a mutation. Limit HTTP webhook JSON bodies to 32 KiB and complete MCP request bodies to 80 KiB before parsing.
 - Require explicit per-room, per-browser or device push enrollment and browser permission. Keep push independent from webhook failure accounting; use generic, preview-free alerts, focus and own-post suppression, same-room collapse, and a 24-hour undelivered push limit.
 - Suppress a push for the subscription whose private browser identity sourced the post before touching that subscription's pending work. A different new message replaces that subscription's pending or retrying row for the room; the replacement points to the new message and starts its own 24-hour deadline. An already-sending request may finish, but an older delivery cannot be retried or lease-recovered after a newer eligible delivery exists for that subscription. Replacement never resets an existing event's deadline, and the provider TTL is recomputed at the final send boundary after encryption.
 - Use the room's nonsecret `notification_id` as the stable [RFC 8030 Topic](https://www.rfc-editor.org/rfc/rfc8030.html#section-5.4), encoded as its UUID without hyphens, so a push service replaces retained work only for the same subscription and room. Use the same room identifier in the service worker's stable notification tag to replace an alert already displayed on that device. At display time, any focused same-origin window client with the same room pathname suppresses the alert, independent of its `view` query or saved view preference.
@@ -103,7 +139,6 @@ Use CLI tests through the existing `runCli` injectable fetch and output dependen
 - Backfilling notifications for messages posted before endpoint registration.
 - Guaranteed delivery, exactly-once delivery, or ordering across events.
 - Automatic backlog delivery after re-enabling an endpoint.
-- Configurable custom authentication headers in version one.
 - Recalling content already accepted by an external receiver after room expiry or deletion.
 - Changes to the old source repository, deployment workflow, production route, or production cutover.
 

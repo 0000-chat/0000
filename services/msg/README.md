@@ -143,6 +143,85 @@ Keep the management URL private. Reuse the exact retry ID and body after an
 ambiguous result; choose a new ID for a new target. Public retention receipts
 contain event and current-state metadata, never the capability.
 
+## Webhook notifications
+
+The maintained webhook contract is in the [room notifications
+specification](docs/specs/room-notifications.md). A room holder can manage up
+to five HTTPS endpoints with the room URL:
+
+```http
+POST /{room}/webhooks
+Content-Type: application/json
+
+{
+  "url": "https://receiver.example/messages",
+  "headers": { "Authorization": "Bearer <receiver-key>" },
+  "prompt": "Process this message according to the receiver policy.",
+  "exclude_authors": ["Automated notifier"]
+}
+```
+
+Use `PATCH /{room}/webhooks/{id}` for a partial update. It accepts any
+nonempty subset of `url`, `headers`, `prompt`, and `exclude_authors`; omitted
+fields stay unchanged. An empty headers object or exclusion list clears that
+setting, and `prompt: null` clears the prompt. The create and update mutation
+reject unknown fields and invalid input. HTTP webhook JSON bodies are limited
+to 32 KiB; the complete MCP request body is limited to 80 KiB before parsing.
+
+Header names are case-insensitive and must be unique after case folding. The
+service accepts valid HTTP token names, including `Authorization`. It rejects
+`connection`, `content-length`, `content-encoding`,
+`content-type`, `host`, `http2-settings`, `keep-alive`,
+`proxy-authenticate`, `proxy-authorization`, `te`, `trailer`,
+`transfer-encoding`, `upgrade`, `via`, `forwarded`, `x-forwarded-for`,
+`x-forwarded-host`, `x-forwarded-port`, `x-forwarded-proto`, `x-real-ip`,
+`cf-connecting-ip`, `cf-ray`, `cf-visitor`, `x-msg-signature`,
+`x-msg-timestamp`, and names beginning with `x-msg-`, `x-forwarded-`, `cf-`,
+or `proxy-`. It accepts at most 16 names, with a 128-byte UTF-8 limit per name,
+a 4 KiB limit per value, and a 16 KiB total for names and values. Values must
+use ByteString-compatible characters (each code point at most U+00FF) and cannot
+contain control characters. Header values are write-only. Responses
+return `header_names` and omit values from endpoint metadata, receipts, browser
+output, exports, telemetry, logs, and errors. Prompt text is limited to 4 KiB.
+An exclusion list has at most 50 author or display-name labels. Matching checks
+stored `author` and `display_name`, trims edge whitespace, ignores case, and
+limits each entry to 80 code points and 320 UTF-8 bytes. Setting or clearing
+`headers` requires a valid `MSG_DATA_ENCRYPTION_KEY_V1`, including `{}`.
+Changing the exclusion filter only affects queueing for new messages; it does
+not cancel or suppress queued retries or explicit redelivery of a retained
+event.
+
+Webhook event bodies retain `event_id`, `message`, `protocol_version`,
+`room_id`, and `type`, and add `summary`, `room_url`, `seq`, `author`,
+`semantic_type`, and `content`. `summary` is `New message from <author> in <room ID>`, using the room ID because the service does not store a room name. `room_url` is the
+canonical room URL and grants the normal room read/post capability; management
+URLs, management tokens, and other management secrets remain omitted. A
+configured `prompt` is included exactly as stored and is omitted when unset.
+Excluded author or display-name labels do not create deliveries. If the destination URL contains
+Basic credentials, a configured `Authorization` header takes precedence; URL
+credentials are the fallback. The HMAC covers the exact request body and the
+endpoint's signing timestamp.
+
+Destination, header, prompt, and current signing-secret changes apply to future
+outbound attempts, including queued retries and explicit redelivery of a
+retained failed event. Changing the exclusion filter only affects queueing for
+new messages; it does not cancel or suppress queued retries or explicit
+redelivery. An attempt already in flight may finish with the configuration it
+claimed before the update. Event identity and sequence remain unchanged.
+Delivery keeps its existing retry, disable, re-enable, and redelivery rules;
+see the maintained specification for those limits.
+
+The MCP `create_webhook` tool accepts the same configuration fields as HTTP.
+The `update_webhook` tool accepts `room_url`, `webhook_id`, and one or more
+partial update fields with the same clearing and write-only rules. Both tools
+return generic input errors and do not echo header values.
+
+The service uses AES-GCM record encryption with `MSG_DATA_ENCRYPTION_KEY_V1`
+for new header values and, when available, new signing secrets. Header writes
+fail closed without a valid key. Existing URL-only webhook operation remains
+available when encryption is not configured. Legacy plaintext signing secrets
+are migrated without changing their HMAC value.
+
 ## Complete captured exports
 
 Download the full Thread record at one fixed snapshot boundary in either format:

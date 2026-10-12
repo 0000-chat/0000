@@ -1,4 +1,4 @@
-import { readdir, rm, writeFile } from "node:fs/promises";
+import { readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { Buffer } from "node:buffer";
 import { createDecipheriv, createECDH, createHmac, createPublicKey, verify } from "node:crypto";
 import { afterAll, expect, test } from "bun:test";
@@ -67,6 +67,7 @@ async function withRuntime(
   limits?: typeof TEST_ROOM_LIMITS,
   nowMs?: number,
   testMode = true,
+  dataEncryptionKey?: string,
 ) {
   // A Miniflare runtime owns the process-wide workerd test slot. The shared
   // default runtime must close before a test starts with different limits.
@@ -76,7 +77,7 @@ async function withRuntime(
   let failed = false;
   let failure: unknown;
   try {
-    fixture = await startMsgMiniflare(persistenceDirectory, limits, { ...(nowMs === undefined ? {} : { nowMs }), testMode });
+    fixture = await startMsgMiniflare(persistenceDirectory, limits, { ...(dataEncryptionKey === undefined ? {} : { dataEncryptionKey }), ...(nowMs === undefined ? {} : { nowMs }), testMode });
     await run(fixture.miniflare);
   } catch (error) {
     failed = true;
@@ -113,6 +114,7 @@ async function withRestartedRuntime(
   ) => Promise<void>,
   limits: typeof TEST_ROOM_LIMITS = TEST_ROOM_LIMITS,
   nowMs = 4_000_000_000_000,
+  dataEncryptionKey?: string,
 ) {
   await disposeSharedRuntime();
   const persistenceDirectory = await createMsgMiniflareTempDirectory("restart");
@@ -120,11 +122,11 @@ async function withRestartedRuntime(
   let failed = false;
   let failure: unknown;
   try {
-    fixture = await startMsgMiniflare(persistenceDirectory, limits, { nowMs });
+    fixture = await startMsgMiniflare(persistenceDirectory, limits, { dataEncryptionKey, nowMs });
     await run(fixture.miniflare, async (nextNowMs) => {
       await fixture?.dispose();
       fixture = undefined;
-      fixture = await startMsgMiniflare(persistenceDirectory, limits, { nowMs: nextNowMs });
+      fixture = await startMsgMiniflare(persistenceDirectory, limits, { dataEncryptionKey, nowMs: nextNowMs });
       return fixture.miniflare;
     });
   } catch (error) {
@@ -169,14 +171,58 @@ async function post(miniflare: Awaited<ReturnType<typeof startMsgMiniflare>>["mi
   });
 }
 
-async function registerWebhook(miniflare: Awaited<ReturnType<typeof startMsgMiniflare>>["miniflare"], room: string, url: string) {
+async function registerWebhook(
+  miniflare: Awaited<ReturnType<typeof startMsgMiniflare>>["miniflare"],
+  room: string,
+  url: string,
+  options: Record<string, unknown> = {},
+) {
   const response = await miniflare.dispatchFetch(`https://msg.0000.chat/${room}/webhooks`, {
-    body: JSON.stringify({ url }),
+    body: JSON.stringify({ url, ...options }),
     headers: jsonHeaders,
     method: "POST",
   });
   expect(response.status).toBe(201);
-  return await response.json() as { secret: string; webhook: { id: string; url: string } };
+  return await response.json() as { secret: string; webhook: { id: string; url: string; header_names?: string[]; prompt?: string | null; exclude_authors?: string[] } };
+}
+
+async function updateWebhook(
+  miniflare: Awaited<ReturnType<typeof startMsgMiniflare>>["miniflare"],
+  room: string,
+  endpoint: string,
+  input: Record<string, unknown>,
+) {
+  return await miniflare.dispatchFetch(`https://msg.0000.chat/${room}/webhooks/${endpoint}`, {
+    body: JSON.stringify(input),
+    headers: jsonHeaders,
+    method: "PATCH",
+  });
+}
+
+async function postAs(
+  miniflare: Awaited<ReturnType<typeof startMsgMiniflare>>["miniflare"],
+  room: string,
+  input: { readonly author: string; readonly content: string; readonly display_name?: string },
+) {
+  return miniflare.dispatchFetch(`https://msg.0000.chat/${room}`, {
+    body: JSON.stringify({ ...input, display_name: input.display_name ?? input.author, name_password: "test-password", semantic_type: "message" }),
+    headers: jsonHeaders,
+    method: "POST",
+  });
+}
+
+async function mcpCall(
+  miniflare: Awaited<ReturnType<typeof startMsgMiniflare>>["miniflare"],
+  id: number,
+  name: string,
+  argumentsValue: Record<string, unknown>,
+) {
+  const response = await miniflare.dispatchFetch("https://msg.0000.chat/mcp", {
+    body: JSON.stringify({ jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: argumentsValue } }),
+    headers: { accept: "application/json, text/event-stream", "content-type": "application/json" },
+    method: "POST",
+  });
+  return { response, value: JSON.parse(await response.text()) as Record<string, any> };
 }
 
 function socketUrl(server: URL, room: string): string {
@@ -294,10 +340,13 @@ interface TestWebhookDelivery {
 interface TestWebhookEndpoint {
   readonly deliveries: TestWebhookDelivery[];
   readonly disabled_at: string | null;
+  readonly exclude_authors?: readonly string[];
   readonly failure_started_at: string | null;
+  readonly header_names?: readonly string[];
   readonly id: string;
   readonly last_failure_at: string | null;
   readonly last_success_at: string | null;
+  readonly prompt?: string | null;
   readonly recovered_at: string | null;
   readonly status: string;
 }
@@ -1096,7 +1145,8 @@ test.serial("delivers one signed full-message webhook from a durable outbox afte
   let failure: unknown;
   try {
     first = await startMsgMiniflare(persistenceDirectory, TEST_ROOM_LIMITS, { nowMs: fakeNow });
-    const { room } = await createRoom(first.miniflare, "before registration");
+    const createdRoom = await createRoom(first.miniflare, "before registration");
+    const { manage_url: manageUrl, room } = createdRoom;
     const created = await first.miniflare.dispatchFetch(`https://msg.0000.chat/${room.id}/webhooks`, {
       body: JSON.stringify({ url: "https://receiver.example.com/hooks/msg" }),
       headers: jsonHeaders,
@@ -1136,17 +1186,21 @@ test.serial("delivers one signed full-message webhook from a durable outbox afte
       message: { content: string; created_at: string; id: string; sequence: number };
       protocol_version: number;
       room_id: string;
+      room_url: string;
       type: string;
     };
     expect(event).toMatchObject({
       event_id: postedValue.message.id,
       message: { content: "authored <message>\nverbatim", created_at: postedValue.message.created_at, id: postedValue.message.id, sequence: 2 },
       protocol_version: 1,
+      room_url: `https://msg.0000.chat/${room.id}`,
       type: "message.created",
     });
     expect(event.room_id).toMatch(/^[0-9a-f-]{36}$/iu);
     expect(event.room_id).not.toBe(room.id);
-    expect(outbound.body).not.toContain(room.id);
+    expect(event.room_url).toBe(`https://msg.0000.chat/${room.id}`);
+    expect(outbound.body).not.toContain(manageUrl);
+    expect(outbound.body).not.toContain(new URL(manageUrl).pathname);
     expect(outbound.body).not.toContain(registration.secret);
 
     const listed = await second.miniflare.dispatchFetch(`https://msg.0000.chat/${room.id}/webhooks`, { headers: { accept: "application/json" } });
@@ -2455,4 +2509,388 @@ test.serial("room deletion during an outbound await removes notification state a
     const gone = await miniflare.dispatchFetch(`https://msg.0000.chat/${room.id}/webhooks`, { headers: { accept: "application/json" } });
     expect(gone.status).toBe(410);
   }, limits);
+});
+
+test.serial("creates, partially updates, replaces, and clears webhook configuration without exposing values", { timeout: MINIFLARE_TEST_TIMEOUT_MS }, async () => {
+  await withRuntime(async (miniflare) => {
+    const { room } = await createRoom(miniflare, "webhook configuration room");
+    const headerSecret = "synthetic-http-header-value-54ec";
+    const created = await miniflare.dispatchFetch(`https://msg.0000.chat/${room.id}/webhooks`, {
+      body: JSON.stringify({
+        url: "https://receiver.example.com/headers",
+        headers: { Authorization: headerSecret, "X-Vendor-Mode": "compact" },
+        prompt: "Follow this receiver policy exactly.",
+        exclude_authors: [" Alice "],
+      }),
+      headers: jsonHeaders,
+      method: "POST",
+    });
+    expect(created.status).toBe(201);
+    const createdText = await created.text();
+    expect(createdText).not.toContain(headerSecret);
+    const createdValue = JSON.parse(createdText) as { secret: string; webhook: { exclude_authors: string[]; header_names: string[]; id: string; prompt: string | null; url: string } };
+    expect(createdValue.webhook).toMatchObject({
+      exclude_authors: ["alice"],
+      header_names: ["Authorization", "X-Vendor-Mode"],
+      prompt: "Follow this receiver policy exactly.",
+      url: "https://receiver.example.com/headers",
+    });
+    expect(createdValue.secret).toMatch(/^[A-Za-z0-9_-]{43}$/u);
+
+    const prototypeHeaderSecret = "synthetic-prototype-header-value-1e2a";
+    const prototypeHeader = await miniflare.dispatchFetch(`https://msg.0000.chat/${room.id}/webhooks`, {
+      body: `{"url":"https://receiver.example.com/prototype","headers":{"__proto__":"${prototypeHeaderSecret}"}}`,
+      headers: jsonHeaders,
+      method: "POST",
+    });
+    expect(prototypeHeader.status).toBe(201);
+    const prototypeText = await prototypeHeader.text();
+    expect(prototypeText).not.toContain(prototypeHeaderSecret);
+    expect(JSON.parse(prototypeText)).toMatchObject({ webhook: { header_names: ["__proto__"] } });
+
+    const mcpHeaderSecret = "synthetic-mcp-integration-header-6c3a";
+    const mcpCreated = await mcpCall(miniflare, 201, "create_webhook", {
+      room_url: `https://msg.0000.chat/${room.id}`,
+      url: "https://receiver.example.com/mcp",
+      headers: { Authorization: mcpHeaderSecret },
+      prompt: "MCP exact prompt",
+      exclude_authors: ["MCP Agent"],
+    });
+    expect(mcpCreated.response.status).toBe(200);
+    const mcpCreatedText = JSON.stringify(mcpCreated.value);
+    expect(mcpCreatedText).not.toContain(mcpHeaderSecret);
+    expect(mcpCreated.value.result.structuredContent.webhook).toMatchObject({ header_names: ["Authorization"], prompt: "MCP exact prompt", exclude_authors: ["mcp agent"] });
+    const mcpId = mcpCreated.value.result.structuredContent.webhook.id as string;
+    const mcpUpdated = await mcpCall(miniflare, 202, "update_webhook", {
+      room_url: `https://msg.0000.chat/${room.id}`,
+      webhook_id: mcpId,
+      headers: {},
+      prompt: null,
+      exclude_authors: [],
+    });
+    expect(mcpUpdated.response.status).toBe(200);
+    expect(JSON.stringify(mcpUpdated.value)).not.toContain(mcpHeaderSecret);
+    expect(mcpUpdated.value.result.structuredContent.webhook).toMatchObject({ header_names: [], prompt: null, exclude_authors: [] });
+    const mcpListed = await mcpCall(miniflare, 203, "list_webhooks", { room_url: `https://msg.0000.chat/${room.id}` });
+    expect(JSON.stringify(mcpListed.value)).not.toContain(mcpHeaderSecret);
+
+    const preserved = await updateWebhook(miniflare, room.id, createdValue.webhook.id, { prompt: "Updated policy." });
+    expect(preserved.status).toBe(200);
+    const preservedText = await preserved.text();
+    expect(preservedText).not.toContain(headerSecret);
+    expect(JSON.parse(preservedText)).toMatchObject({ webhook: {
+      exclude_authors: ["alice"],
+      header_names: ["Authorization", "X-Vendor-Mode"],
+      prompt: "Updated policy.",
+    } });
+
+    const replaced = await updateWebhook(miniflare, room.id, createdValue.webhook.id, {
+      headers: { Authorization: "synthetic-replacement-header-18b2" },
+      exclude_authors: ["Beta"],
+    });
+    expect(replaced.status).toBe(200);
+    const replacedText = await replaced.text();
+    expect(replacedText).not.toContain("synthetic-replacement-header-18b2");
+    expect(JSON.parse(replacedText)).toMatchObject({ webhook: {
+      exclude_authors: ["beta"],
+      header_names: ["Authorization"],
+      prompt: "Updated policy.",
+    } });
+
+    const cleared = await updateWebhook(miniflare, room.id, createdValue.webhook.id, { headers: {}, exclude_authors: [], prompt: null });
+    expect(cleared.status).toBe(200);
+    expect(await cleared.json()).toMatchObject({ webhook: { exclude_authors: [], header_names: [], prompt: null } });
+
+    for (const input of [
+      {},
+      { unknown_field: headerSecret },
+      { prompt: "valid", unknown_field: headerSecret },
+      { headers: { "Content-Type": headerSecret } },
+      { headers: { Authorization: "bad\u0000value" } },
+      { headers: { Authorization: "x".repeat(4 * 1024 + 1) } },
+      { headers: Object.fromEntries(Array.from({ length: 17 }, (_, index) => [`X-Test-${index}`, "x"])) },
+      { headers: Object.fromEntries(Array.from({ length: 4 }, (_, index) => [`X-Total-${index}`, "x".repeat(4 * 1024)])) },
+    ]) {
+      const invalid = await updateWebhook(miniflare, room.id, createdValue.webhook.id, input);
+      expect(invalid.status).toBe(400);
+      expect(await invalid.text()).not.toContain(headerSecret);
+    }
+    const missing = await updateWebhook(miniflare, room.id, "11111111-1111-4111-8111-111111111111", { prompt: "x" });
+    expect(missing.status).toBe(404);
+
+    for (const path of [
+      `/${room.id}/webhooks/${createdValue.webhook.id}/disable`,
+      `/${room.id}/webhooks/${createdValue.webhook.id}/enable`,
+      `/${room.id}/webhooks/${createdValue.webhook.id}/rotate-secret`,
+    ]) {
+      const managed = await miniflare.dispatchFetch(`https://msg.0000.chat${path}`, { headers: jsonHeaders, method: "POST" });
+      expect(managed.status).toBe(200);
+      expect(await managed.text()).not.toContain(headerSecret);
+    }
+
+    const listed = await readWebhookList(miniflare, room.id);
+    const listedText = JSON.stringify(listed);
+    expect(listedText).not.toContain(headerSecret);
+    expect(listed.webhooks[0]).toMatchObject({ exclude_authors: [], header_names: [], prompt: null });
+
+    for (const path of [`/${room.id}/export.json`, `/${room.id}/export.md`, `/${room.id}?view=agent`, `/${room.id}?view=human`]) {
+      const response = await miniflare.dispatchFetch(`https://msg.0000.chat${path}`, { headers: { accept: path.endsWith(".json") ? "application/json" : "text/html" } });
+      expect(await response.text()).not.toContain(headerSecret);
+    }
+  }, TEST_ROOM_LIMITS, undefined, true, "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
+});
+
+test.serial("rejects webhook header names, values, prompts, exclusions, and complete mutation limits before persistence", { timeout: MINIFLARE_TEST_TIMEOUT_MS }, async () => {
+  await withRuntime(async (miniflare) => {
+    const { room } = await createRoom(miniflare);
+    const secret = "synthetic-limit-header-value-a03f";
+    const invalidInputs: Record<string, unknown>[] = [
+      { url: "https://receiver.example.com/hooks", headers: { "authorization": secret, "Authorization": "second" } },
+      { url: "https://receiver.example.com/hooks", headers: { "Bad Header": secret } },
+      { url: "https://receiver.example.com/hooks", headers: { Connection: secret } },
+      { url: "https://receiver.example.com/hooks", headers: { "X-Msg-Signature": secret } },
+      { url: "https://receiver.example.com/hooks", headers: { Authorization: "π" } },
+      { url: "https://receiver.example.com/hooks", headers: { Authorization: secret }, prompt: "x".repeat(4 * 1024 + 1) },
+      { url: "https://receiver.example.com/hooks", headers: { Authorization: secret }, exclude_authors: Array.from({ length: 51 }, () => "author") },
+      { url: "https://receiver.example.com/hooks", headers: { Authorization: secret }, extra: secret },
+    ];
+    for (const input of invalidInputs) {
+      const response = await miniflare.dispatchFetch(`https://msg.0000.chat/${room.id}/webhooks`, { body: JSON.stringify(input), headers: jsonHeaders, method: "POST" });
+      expect(response.status).toBe(400);
+      expect(await response.text()).not.toContain(secret);
+    }
+    const tooLarge = await miniflare.dispatchFetch(`https://msg.0000.chat/${room.id}/webhooks`, {
+      body: JSON.stringify({ url: "https://receiver.example.com/hooks", headers: { Authorization: secret }, padding: "x".repeat(80 * 1024) }),
+      headers: jsonHeaders,
+      method: "POST",
+    });
+    expect([400, 413]).toContain(tooLarge.status);
+    expect(await tooLarge.text()).not.toContain(secret);
+    const malformed = await miniflare.dispatchFetch(`https://msg.0000.chat/${room.id}/webhooks`, {
+      body: `{"url":"https://receiver.example.com/hooks","headers":{"Authorization":"${secret}"}`,
+      headers: jsonHeaders,
+      method: "POST",
+    });
+    expect(malformed.status).toBe(400);
+    expect(await malformed.text()).not.toContain(secret);
+    expect((await readWebhookList(miniflare, room.id)).webhooks).toEqual([]);
+  }, TEST_ROOM_LIMITS, undefined, true, "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
+});
+
+test.serial("delivers generic fields, exact prompt, configured headers, and a valid HMAC while applying independent normalized author filters", { timeout: MINIFLARE_TEST_TIMEOUT_MS }, async () => {
+  await withRuntime(async (miniflare) => {
+    const { room } = await createRoom(miniflare, "before webhook");
+    const firstSecret = "synthetic-delivery-header-value-1";
+    const secondSecret = "synthetic-independent-header-value-2";
+    const first = await registerWebhook(miniflare, room.id, "https://receiver.example.com/first", {
+      headers: { Authorization: firstSecret, "X-Vendor-Mode": "compact" },
+      prompt: "Process exactly as configured: π.",
+      exclude_authors: ["  Alice  "],
+    });
+    await registerWebhook(miniflare, room.id, "https://receiver.example.com/second", {
+      headers: { Authorization: secondSecret },
+      exclude_authors: ["Beta"],
+    });
+    expect((await postAs(miniflare, room.id, { author: "Alice", content: "excluded from first" })).status).toBe(201);
+    expect((await postAs(miniflare, room.id, { author: "Beta", content: "excluded from second" })).status).toBe(201);
+    const delivered = await postAs(miniflare, room.id, { author: "Gamma", content: "delivered body" });
+    expect(delivered.status).toBe(201);
+    const deliveredValue = await delivered.json() as { message: { author: string; content: string; id: string; semantic_type: string; sequence: number } };
+    const outbound = await waitForOutboundRequests(miniflare, 4);
+    expect(outbound).toHaveLength(4);
+    const firstRequests = outbound.filter(({ url }) => url.endsWith("/first"));
+    const firstRequest = firstRequests.find(({ body }) => (JSON.parse(body) as { content: string }).content === "delivered body");
+    const secondRequests = outbound.filter(({ url }) => url.endsWith("/second"));
+    expect(firstRequests).toHaveLength(2);
+    expect(secondRequests).toHaveLength(2);
+    expect(firstRequests.map((request) => (JSON.parse(request.body) as { author: string }).author).sort()).toEqual(["Beta", "Gamma"]);
+    expect(firstRequest?.headers.authorization).toBe(firstSecret);
+    expect(firstRequest?.headers["x-vendor-mode"]).toBe("compact");
+    expect(secondRequests.every((request) => request.headers.authorization === secondSecret)).toBe(true);
+    expect(firstRequest?.headers["x-msg-signature"]).toMatch(/^v1=[0-9a-f]{64}$/u);
+    expect(firstRequest?.headers["x-msg-timestamp"]).toMatch(/^[0-9]+$/u);
+    const payload = JSON.parse(firstRequest?.body ?? "null") as {
+      author: string;
+      content: string;
+      event_id: string;
+      message: { author: string; content: string; id: string; semantic_type: string; sequence: number };
+      prompt: string;
+      room_id: string;
+      room_url: string;
+      semantic_type: string;
+      seq: number;
+      summary: string;
+      type: string;
+    };
+    expect(payload).toMatchObject({
+      author: "Gamma",
+      content: "delivered body",
+      event_id: deliveredValue.message.id,
+      message: deliveredValue.message,
+      prompt: "Process exactly as configured: π.",
+      room_url: `https://msg.0000.chat/${room.id}`,
+      semantic_type: "message",
+      seq: deliveredValue.message.sequence,
+      summary: `New message from Gamma in ${room.id}`,
+      type: "message.created",
+    });
+    expect(payload.room_id).toMatch(/^[0-9a-f-]{36}$/iu);
+    expect(payload.room_id).not.toBe(room.id);
+    expect(await verifyWebhookSignature(first.secret, firstRequest!.headers["x-msg-timestamp"]!, firstRequest!.body, firstRequest!.headers["x-msg-signature"]!)).toBe(true);
+    expect(firstRequest?.body).not.toContain(firstSecret);
+    expect(secondRequests.every((request) => !request.body.includes(secondSecret))).toBe(true);
+    expect(secondRequests.map((request) => (JSON.parse(request.body) as { author: string }).author).sort()).toEqual(["Alice", "Gamma"]);
+
+    const clearFilter = await updateWebhook(miniflare, room.id, first.webhook.id, { exclude_authors: [] });
+    expect(clearFilter.status).toBe(200);
+    await clearFilter.arrayBuffer();
+    expect((await postAs(miniflare, room.id, { author: "Alice", content: "included after filter clear" })).status).toBe(201);
+    const afterClear = await waitForOutboundRequests(miniflare, 6, 5_000);
+    const newlyIncluded = afterClear.filter(({ url, body }) => url.endsWith("/first") && (JSON.parse(body) as { content: string }).content === "included after filter clear");
+    expect(newlyIncluded).toHaveLength(1);
+    const secondIncluded = afterClear.filter(({ url, body }) => url.endsWith("/second") && (JSON.parse(body) as { content: string }).content === "included after filter clear");
+    expect(secondIncluded).toHaveLength(1);
+
+    await miniflare.setOutboundResponse(500);
+    expect((await postAs(miniflare, room.id, { author: "Delta", content: "receiver failure must stay metadata-only" })).status).toBe(201);
+    const afterFailure = await waitForOutboundRequests(miniflare, 8, 5_000);
+    expect(afterFailure).toHaveLength(8);
+    const failureListing = JSON.stringify(await readWebhookList(miniflare, room.id));
+    expect(failureListing).not.toContain(firstSecret);
+    expect(failureListing).not.toContain(secondSecret);
+  }, { ...TEST_ROOM_LIMITS, maxMessages: 6 }, undefined, true, "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
+});
+
+test.serial("encrypts webhook secrets and header values, scopes them to the endpoint, and reconstructs delivery after restart", { timeout: MINIFLARE_TEST_TIMEOUT_MS }, async () => {
+  const persistenceDirectory = await createMsgMiniflareTempDirectory("webhook-encryption");
+  const encryptionKey = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+  let first: Awaited<ReturnType<typeof startMsgMiniflare>> | undefined;
+  let second: Awaited<ReturnType<typeof startMsgMiniflare>> | undefined;
+  let failed = false;
+  let failure: unknown;
+  try {
+    first = await startMsgMiniflare(persistenceDirectory, TEST_ROOM_LIMITS, { dataEncryptionKey: encryptionKey, nowMs: 4_000_000_000_000 });
+    const { room } = await createRoom(first.miniflare, "before encrypted webhook");
+    const headerSecret = "synthetic-encrypted-header-value-0d11";
+    const registration = await registerWebhook(first.miniflare, room.id, "https://receiver.example.com/encrypted", {
+      headers: { Authorization: headerSecret },
+      prompt: "encrypted prompt",
+    });
+    expect(registration.secret).toMatch(/^[A-Za-z0-9_-]{43}$/u);
+    expect((await post(first.miniflare, room.id, "encrypted payload")).status).toBe(201);
+    await first.miniflare.clearOutboundRequests();
+    await first.dispose();
+    first = undefined;
+
+    const persistedFiles: string[] = [];
+    const collect = async (directory: string): Promise<void> => {
+      for (const entry of await readdir(directory, { withFileTypes: true })) {
+        const path = join(directory, entry.name);
+        if (entry.isDirectory()) await collect(path);
+        else persistedFiles.push(path);
+      }
+    };
+    await collect(persistenceDirectory);
+    const persistedBytes = Buffer.concat(await Promise.all(persistedFiles.map(async (path) => Buffer.from(await readFile(path)))));
+    expect(persistedBytes.includes(Buffer.from(headerSecret))).toBe(false);
+    expect(persistedBytes.includes(Buffer.from(registration.secret))).toBe(false);
+
+    second = await startMsgMiniflare(persistenceDirectory, TEST_ROOM_LIMITS, { dataEncryptionKey: encryptionKey, nowMs: 4_000_000_000_500 });
+    const listed = await readWebhookList(second.miniflare, room.id);
+    expect(listed.webhooks[0]).toMatchObject({ header_names: ["Authorization"], prompt: "encrypted prompt" });
+    await second.miniflare.setOutboundResponse(204);
+    await second.miniflare.triggerAlarm(room.id);
+    const outbound = await waitForOutboundRequests(second.miniflare, 1);
+    expect(outbound).toHaveLength(1);
+    expect(outbound[0]?.headers.authorization).toBe(headerSecret);
+    expect(await verifyWebhookSignature(registration.secret, outbound[0]!.headers["x-msg-timestamp"]!, outbound[0]!.body, outbound[0]!.headers["x-msg-signature"]!)).toBe(true);
+  } catch (error) {
+    failed = true;
+    failure = error;
+  } finally {
+    try {
+      await first?.dispose();
+      await second?.dispose();
+    } catch (error) {
+      if (!failed) {
+        failed = true;
+        failure = error;
+      }
+    }
+    try {
+      await rm(persistenceDirectory, { force: true, recursive: true });
+    } catch (error) {
+      if (!failed) {
+        failed = true;
+        failure = error;
+      }
+    }
+  }
+  if (failed) throw failure;
+});
+
+test.serial("keeps URL-only webhook compatibility while failing closed for header writes without a valid encryption key", { timeout: MINIFLARE_TEST_TIMEOUT_MS }, async () => {
+  await withRuntime(async (miniflare) => {
+    const { room } = await createRoom(miniflare);
+    expect((await registerWebhook(miniflare, room.id, "https://receiver.example.com/url-only")).webhook.url).toBe("https://receiver.example.com/url-only");
+    const secret = "synthetic-missing-key-header-3ac4";
+    const missing = await miniflare.dispatchFetch(`https://msg.0000.chat/${room.id}/webhooks`, {
+      body: JSON.stringify({ url: "https://receiver.example.com/missing-key", headers: { Authorization: secret } }),
+      headers: jsonHeaders,
+      method: "POST",
+    });
+    expect(missing.status).toBe(503);
+    expect(await missing.text()).not.toContain(secret);
+  });
+
+  await withRuntime(async (miniflare) => {
+    const { room } = await createRoom(miniflare);
+    const secret = "synthetic-invalid-key-header-7d9e";
+    const invalid = await miniflare.dispatchFetch(`https://msg.0000.chat/${room.id}/webhooks`, {
+      body: JSON.stringify({ url: "https://receiver.example.com/invalid-key", headers: { Authorization: secret } }),
+      headers: jsonHeaders,
+      method: "POST",
+    });
+    expect(invalid.status).toBe(503);
+    expect(await invalid.text()).not.toContain(secret);
+  }, TEST_ROOM_LIMITS, undefined, true, "invalid");
+});
+
+test.serial("applies endpoint updates to queued retries while retaining event identity, sequence, and signing", { timeout: MINIFLARE_TEST_TIMEOUT_MS }, async () => {
+  const fakeNow = 4_000_000_000_000;
+  const encryptionKey = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+  await withRestartedRuntime(async (first, restart) => {
+    const { room } = await createRoom(first, "before retry update");
+    const oldHeader = "synthetic-old-retry-header-1";
+    const nextHeader = "synthetic-next-retry-header-2";
+    const registration = await registerWebhook(first, room.id, "https://receiver.example.com/retry-old", {
+      headers: { Authorization: oldHeader },
+    });
+    const posted = await post(first, room.id, "retry retains this event");
+    const postedValue = await posted.json() as { message: { id: string; sequence: number } };
+    let runtime = await restart(fakeNow + 251);
+    await runtime.setOutboundResponse(503);
+    await runtime.triggerAlarm(room.id);
+    const firstAttempt = await waitForOutboundRequests(runtime, 1);
+    expect(firstAttempt).toHaveLength(1);
+    expect(firstAttempt[0]).toMatchObject({ url: "https://receiver.example.com/retry-old", headers: { authorization: oldHeader } });
+    const firstPayload = JSON.parse(firstAttempt[0]!.body) as { event_id: string; message: { sequence: number } };
+    expect(firstPayload).toMatchObject({ event_id: postedValue.message.id, message: { sequence: postedValue.message.sequence } });
+
+    const updated = await updateWebhook(runtime, room.id, registration.webhook.id, {
+      url: "https://receiver.example.com/retry-new",
+      headers: { Authorization: nextHeader },
+    });
+    expect(updated.status).toBe(200);
+    await updated.arrayBuffer();
+    runtime = await restart(fakeNow + 30_251);
+    await runtime.setOutboundResponse(204);
+    await runtime.triggerAlarm(room.id);
+    const secondAttempt = await waitForOutboundRequests(runtime, 1);
+    expect(secondAttempt).toHaveLength(1);
+    expect(secondAttempt[0]).toMatchObject({ url: "https://receiver.example.com/retry-new", headers: { authorization: nextHeader } });
+    const secondPayload = JSON.parse(secondAttempt[0]!.body) as { event_id: string; message: { sequence: number } };
+    expect(secondPayload).toMatchObject({ event_id: firstPayload.event_id, message: { sequence: firstPayload.message.sequence } });
+    expect(await verifyWebhookSignature(registration.secret, secondAttempt[0]!.headers["x-msg-timestamp"]!, secondAttempt[0]!.body, secondAttempt[0]!.headers["x-msg-signature"]!)).toBe(true);
+  }, TEST_ROOM_LIMITS, fakeNow, encryptionKey);
 });

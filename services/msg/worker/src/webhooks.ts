@@ -1,4 +1,130 @@
 const MAX_WEBHOOK_URL_BYTES = 2_048;
+export const MAX_WEBHOOK_HEADERS = 16;
+export const MAX_WEBHOOK_HEADER_NAME_BYTES = 128;
+export const MAX_WEBHOOK_HEADER_VALUE_BYTES = 4 * 1024;
+export const MAX_WEBHOOK_HEADER_TOTAL_BYTES = 16 * 1024;
+export const MAX_WEBHOOK_PROMPT_BYTES = 4 * 1024;
+export const MAX_WEBHOOK_EXCLUSIONS = 50;
+const MAX_AUTHOR_CHARS = 80;
+const MAX_AUTHOR_BYTES = 320;
+
+export interface WebhookMutation {
+  readonly url?: string;
+  readonly headers?: Readonly<Record<string, string>>;
+  readonly prompt?: string | null;
+  readonly excludeAuthors?: readonly string[];
+}
+
+export class WebhookInputError extends Error {
+  constructor() {
+    super("The webhook configuration is invalid.");
+  }
+}
+
+const WEBHOOK_CREATE_FIELDS = new Set(["url", "headers", "prompt", "exclude_authors"]);
+const WEBHOOK_UPDATE_FIELDS = WEBHOOK_CREATE_FIELDS;
+const TOKEN = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/u;
+const RESERVED_HEADERS = new Set([
+  "connection", "content-length", "content-type", "host", "keep-alive", "proxy-authenticate",
+  "proxy-authorization", "te", "trailer", "transfer-encoding", "upgrade", "via", "forwarded",
+  "http2-settings", "content-encoding",
+  "x-forwarded-for", "x-forwarded-host", "x-forwarded-port", "x-forwarded-proto", "x-real-ip",
+  "cf-connecting-ip", "cf-ray", "cf-visitor", "x-msg-signature", "x-msg-timestamp",
+]);
+
+export function parseWebhookCreateInput(value: unknown): WebhookMutation & { readonly url: string } {
+  const object = webhookObject(value, WEBHOOK_CREATE_FIELDS);
+  if (!Object.hasOwn(object, "url")) throw new WebhookInputError();
+  const url = normalizeWebhookUrl(object.url);
+  if (url === undefined) throw new WebhookInputError();
+  return { url, ...parseWebhookOptions(object) };
+}
+
+export function parseWebhookUpdateInput(value: unknown): WebhookMutation {
+  const object = webhookObject(value, WEBHOOK_UPDATE_FIELDS);
+  if (Object.keys(object).length === 0) throw new WebhookInputError();
+  const url = Object.hasOwn(object, "url") ? normalizeWebhookUrl(object.url) : undefined;
+  if (Object.hasOwn(object, "url") && url === undefined) throw new WebhookInputError();
+  return { ...(url === undefined ? {} : { url }), ...parseWebhookOptions(object) };
+}
+
+function webhookObject(value: unknown, fields: ReadonlySet<string>): Record<string, unknown> {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) throw new WebhookInputError();
+  const object = Object.fromEntries(Object.entries(value));
+  if (Object.keys(object).some((field) => !fields.has(field))) throw new WebhookInputError();
+  return object;
+}
+
+function parseWebhookOptions(object: Record<string, unknown>): WebhookMutation {
+  const options: { headers?: Readonly<Record<string, string>>; prompt?: string | null; excludeAuthors?: readonly string[] } = {};
+  if (Object.hasOwn(object, "headers")) options.headers = parseWebhookHeaders(object.headers);
+  if (Object.hasOwn(object, "prompt")) options.prompt = parseWebhookPrompt(object.prompt);
+  if (Object.hasOwn(object, "exclude_authors")) options.excludeAuthors = parseWebhookExclusions(object.exclude_authors);
+  return options;
+}
+
+function parseWebhookHeaders(value: unknown): Readonly<Record<string, string>> {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) throw new WebhookInputError();
+  const result: [string, string][] = [];
+  const seen = new Set<string>();
+  let totalBytes = 0;
+  const entries = Object.entries(value);
+  if (entries.length > MAX_WEBHOOK_HEADERS) throw new WebhookInputError();
+  for (const [name, headerValue] of entries) {
+    const normalized = name.toLowerCase();
+    const nameBytes = new TextEncoder().encode(name).byteLength;
+    if (!TOKEN.test(name) || nameBytes > MAX_WEBHOOK_HEADER_NAME_BYTES || seen.has(normalized) || isReservedHeader(normalized)) throw new WebhookInputError();
+    if (typeof headerValue !== "string" || hasControlCharacters(headerValue) || Array.from(headerValue).some((character) => (character.codePointAt(0) ?? 0) > 0xff)) throw new WebhookInputError();
+    const valueBytes = new TextEncoder().encode(headerValue).byteLength;
+    if (valueBytes > MAX_WEBHOOK_HEADER_VALUE_BYTES) throw new WebhookInputError();
+    totalBytes += nameBytes + valueBytes;
+    if (totalBytes > MAX_WEBHOOK_HEADER_TOTAL_BYTES) throw new WebhookInputError();
+    seen.add(normalized);
+    result.push([name, headerValue]);
+  }
+  return Object.fromEntries(result);
+}
+
+function isReservedHeader(normalized: string): boolean {
+  return normalized === "authorization"
+    ? false
+    : RESERVED_HEADERS.has(normalized)
+      || normalized.startsWith("x-msg-")
+      || normalized.startsWith("x-forwarded-")
+      || normalized.startsWith("cf-")
+      || normalized.startsWith("proxy-");
+}
+
+function parseWebhookPrompt(value: unknown): string | null {
+  if (value === null) return null;
+  if (typeof value !== "string" || new TextEncoder().encode(value).byteLength > MAX_WEBHOOK_PROMPT_BYTES) throw new WebhookInputError();
+  return value;
+}
+
+function parseWebhookExclusions(value: unknown): readonly string[] {
+  if (!Array.isArray(value) || value.length > MAX_WEBHOOK_EXCLUSIONS) throw new WebhookInputError();
+  const result: string[] = [];
+  const seen = new Set<string>();
+  for (const entry of value) {
+    if (typeof entry !== "string" || entry.trim().length === 0 || Array.from(entry).length > MAX_AUTHOR_CHARS || new TextEncoder().encode(entry).byteLength > MAX_AUTHOR_BYTES) throw new WebhookInputError();
+    const normalized = normalizeWebhookAuthor(entry);
+    if (!seen.has(normalized)) {
+      seen.add(normalized);
+      result.push(normalized);
+    }
+  }
+  return result;
+}
+
+export function normalizeWebhookAuthor(value: string): string { return value.trim().toLowerCase(); }
+
+function hasControlCharacters(value: string): boolean {
+  for (const character of value) {
+    const codePoint = character.codePointAt(0) ?? 0;
+    if (codePoint <= 0x1f || codePoint === 0x7f) return true;
+  }
+  return false;
+}
 
 export function normalizeWebhookUrl(value: unknown): string | undefined {
   if (typeof value !== "string" || value.length === 0 || value !== value.trim()) return undefined;

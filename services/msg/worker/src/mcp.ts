@@ -4,7 +4,7 @@ import { z } from "zod/v4";
 import { ERROR_CODES, ProtocolError } from "./errors";
 import { byteLength } from "./room-domain";
 import { foregroundWaitForConversation, MCP_READ_BYTE_BUDGET_BYTES, PROTOCOL_VERSION, stripLegacyAbsoluteExpiry, type CreateRoomResponse, type McpPostMessageResponse, type ReadRoomResponse, type RequestBody, type RoomMessage, type RoomService, type RoomStatusResponse } from "./protocol";
-import { normalizeWebhookUrl } from "./webhooks";
+import { parseWebhookCreateInput, parseWebhookUpdateInput, WebhookInputError } from "./webhooks";
 
 const DEFAULT_PUBLIC_ORIGIN = "https://msg.0000.chat";
 const CHATGPT_ORIGINS = ["https://chatgpt.com", "https://chat.openai.com"] as const;
@@ -147,10 +147,13 @@ const ManagementInputSchema = {
 };
 
 const WebhookUrlSchema = z.string().min(1).max(2_048).describe("Public HTTPS webhook destination.");
-const WebhookCreateInputSchema = {
+const WebhookCreateInputSchema = z.object({
   room_url: RoomUrlSchema.describe("The canonical public room URL from the room invitation."),
   url: WebhookUrlSchema,
-};
+  headers: z.unknown().optional().describe("Optional write-only receiver headers; only header names are returned."),
+  prompt: z.unknown().optional().describe("Optional receiver prompt included exactly in future event payloads."),
+  exclude_authors: z.unknown().optional().describe("Optional normalized author labels excluded before queueing."),
+}).strict();
 const WebhookRoomInputSchema = {
   room_url: RoomUrlSchema.describe("The canonical public room URL from the room invitation."),
 };
@@ -158,6 +161,14 @@ const WebhookItemInputSchema = {
   room_url: RoomUrlSchema.describe("The canonical public room URL from the room invitation."),
   webhook_id: WebhookIdSchema.describe("The webhook endpoint UUID."),
 };
+const WebhookUpdateInputSchema = z.object({
+  room_url: RoomUrlSchema.describe("The canonical public room URL from the room invitation."),
+  webhook_id: WebhookIdSchema.describe("The webhook endpoint UUID."),
+  url: WebhookUrlSchema.optional(),
+  headers: z.unknown().optional().describe("Optional replacement write-only receiver headers; only header names are returned."),
+  prompt: z.unknown().optional().describe("Optional exact receiver prompt, or null to clear."),
+  exclude_authors: z.unknown().optional().describe("Optional replacement normalized author exclusion list."),
+}).strict();
 const WebhookRedeliveryInputSchema = {
   room_url: RoomUrlSchema.describe("The canonical public room URL from the room invitation."),
   webhook_id: WebhookIdSchema.describe("The webhook endpoint UUID."),
@@ -624,17 +635,56 @@ function registerWebhookTools(
       outputSchema: WebhookOutputSchema,
       annotations: { title: "Create webhook", readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
     },
-    async ({ room_url, url }) => {
+    async ({ room_url, url, headers, prompt, exclude_authors }) => {
       try {
         const room = parsePublicRoomUrl(room_url, publicOrigin);
-        const normalized = normalizeWebhookUrl(url);
-        if (!normalized) throw new McpInputError("The webhook destination must be a valid public HTTPS URL.");
+        let input: ReturnType<typeof parseWebhookCreateInput>;
+        try {
+          input = parseWebhookCreateInput({
+            url,
+            ...(headers === undefined ? {} : { headers }),
+            ...(prompt === undefined ? {} : { prompt }),
+            ...(exclude_authors === undefined ? {} : { exclude_authors }),
+          });
+        } catch (error) {
+          if (error instanceof WebhookInputError) throw new McpInputError("The webhook configuration is invalid.");
+          throw error;
+        }
         await enforceMcpRateLimit(request, options.rateLimits?.posts);
         if (!service.createWebhook) throw new ProtocolError(ERROR_CODES.serviceUnavailable, "Webhook creation is unavailable.", 503);
-        const output = await service.createWebhook({ room, url: normalized });
+        const output = await service.createWebhook({ room, ...input });
         return { content: [{ type: "text" as const, text: "Webhook created." }], structuredContent: output };
       } catch (error) {
         return mcpToolError(error, "The webhook could not be created.");
+      }
+    },
+  );
+
+  server.registerTool(
+    "update_webhook",
+    {
+      title: "Update webhook",
+      description: "Partially update one webhook destination or receiver configuration. Omitted fields stay unchanged; headers are write-only and only their names are returned.",
+      inputSchema: WebhookUpdateInputSchema,
+      outputSchema: WebhookOutputSchema,
+      annotations: { title: "Update webhook", readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    },
+    async ({ room_url, webhook_id, url, headers, prompt, exclude_authors }) => {
+      try {
+        const room = parsePublicRoomUrl(room_url, publicOrigin);
+        let input: ReturnType<typeof parseWebhookUpdateInput>;
+        try {
+          input = parseWebhookUpdateInput({ ...(url === undefined ? {} : { url }), ...(headers === undefined ? {} : { headers }), ...(prompt === undefined ? {} : { prompt }), ...(exclude_authors === undefined ? {} : { exclude_authors }) });
+        } catch (error) {
+          if (error instanceof WebhookInputError) throw new McpInputError("The webhook configuration is invalid.");
+          throw error;
+        }
+        await enforceMcpRateLimit(request, options.rateLimits?.posts);
+        if (!service.updateWebhook) throw new ProtocolError(ERROR_CODES.serviceUnavailable, "Webhook update is unavailable.", 503);
+        const output = await service.updateWebhook({ id: webhook_id, room, ...input });
+        return { content: [{ type: "text" as const, text: "Webhook updated." }], structuredContent: output };
+      } catch (error) {
+        return mcpToolError(error, "The webhook could not be updated.");
       }
     },
   );

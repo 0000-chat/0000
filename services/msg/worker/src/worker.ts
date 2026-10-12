@@ -31,7 +31,7 @@ import {
 import { applySecurityHeaders } from "./security";
 import { DurableRoomService, type RoomNamespace } from "./room-service";
 import { emitMsgEvent } from "./observability";
-import { normalizeWebhookUrl } from "./webhooks";
+import { parseWebhookCreateInput, parseWebhookUpdateInput, type WebhookMutation } from "./webhooks";
 import { PUSH_SERVICE_WORKER_PATH, pushServiceWorkerResponse } from "./push-service-worker";
 import { parsePushBrowserId, parsePushSubscription } from "./push-subscriptions";
 import { handleMcpRequest } from "./mcp";
@@ -101,7 +101,7 @@ const MAX_CANONICAL_JSON_DEPTH = 32;
 const MAX_REPORT_CAPABILITY_CHARS = 512;
 const MAX_REPORT_DESCRIPTION_BYTES = 4 * 1024;
 const MAX_REPORT_DESCRIPTION_CHARS = 2_000;
-const MAX_WEBHOOK_REQUEST_BYTES = 4 * 1024;
+const MAX_WEBHOOK_REQUEST_BYTES = 32 * 1024;
 const MAX_PUSH_SUBSCRIPTION_REQUEST_BYTES = 4 * 1024;
 const MAX_GET_POST_URL_BYTES = 8 * 1024;
 const MAX_GET_POST_CONTENT_BYTES = 4 * 1024;
@@ -335,10 +335,16 @@ async function route(request: Request, service: RoomService, options: MsgWorkerO
   if (webhookCollectionMatch && request.method === "POST") {
     if (!service.createWebhook) return notFound();
     await enforceRateLimit(request, options.rateLimits?.posts);
-    const destination = parseWebhookDestination(await parseRequestBody(request, { maxBytes: MAX_WEBHOOK_REQUEST_BYTES }));
-    return jsonResponse(await service.createWebhook({ room: webhookCollectionMatch[1]!, url: destination }), 201);
+    const input = parseWebhookDestination(await parseRequestBody(request, { maxBytes: MAX_WEBHOOK_REQUEST_BYTES }));
+    return jsonResponse(await service.createWebhook({ room: webhookCollectionMatch[1]!, ...input }), 201);
   }
   const webhookItemMatch = /^\/([^/]+)\/webhooks\/([0-9a-f-]{36})$/iu.exec(url.pathname);
+  if (webhookItemMatch && request.method === "PATCH") {
+    if (!service.updateWebhook) return notFound();
+    await enforceRateLimit(request, options.rateLimits?.posts);
+    const input = parseWebhookUpdate(await parseRequestBody(request, { maxBytes: MAX_WEBHOOK_REQUEST_BYTES }));
+    return jsonResponse(await service.updateWebhook({ id: webhookItemMatch[2]!, room: webhookItemMatch[1]!, ...input }));
+  }
   if (webhookItemMatch && request.method === "DELETE") {
     if (!service.removeWebhook) return notFound();
     await enforceRateLimit(request, options.rateLimits?.posts);
@@ -985,16 +991,22 @@ function parseReportStatus(body: RequestBody): "closed" | "open" | "reviewed" {
   return status;
 }
 
-function parseWebhookDestination(body: RequestBody): string {
-  if (body.kind !== "json" || body.value === null || Array.isArray(body.value) || typeof body.value !== "object") {
-    throw new ProtocolError(ERROR_CODES.invalidBody, "The webhook request must be a JSON object containing only url.", 400);
+function parseWebhookDestination(body: RequestBody): WebhookMutation & { readonly url: string } {
+  if (body.kind !== "json") throw new ProtocolError(ERROR_CODES.invalidBody, "The webhook configuration is invalid.", 400);
+  try {
+    return parseWebhookCreateInput(body.value);
+  } catch {
+    throw new ProtocolError(ERROR_CODES.invalidBody, "The webhook configuration is invalid.", 400);
   }
-  const fields = Object.keys(body.value);
-  const url = normalizeWebhookUrl(body.value.url);
-  if (fields.length !== 1 || fields[0] !== "url" || url === undefined) {
-    throw new ProtocolError(ERROR_CODES.invalidBody, "The webhook destination must be a valid public HTTPS URL.", 400);
+}
+
+function parseWebhookUpdate(body: RequestBody): WebhookMutation {
+  if (body.kind !== "json") throw new ProtocolError(ERROR_CODES.invalidBody, "The webhook configuration is invalid.", 400);
+  try {
+    return parseWebhookUpdateInput(body.value);
+  } catch {
+    throw new ProtocolError(ERROR_CODES.invalidBody, "The webhook configuration is invalid.", 400);
   }
-  return url;
 }
 
 function policyResponse(path: string): Response {

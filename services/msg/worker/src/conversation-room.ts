@@ -4,9 +4,10 @@ import { ERROR_CODES, isStaleRevisionDetails, isStaleSequenceDetails, ProtocolEr
 import { CLAIM_CORRECTION_KIND, coordinationMutationFingerprint, coordinationStorageBytes, COORDINATION_DEFAULT_LIMIT, COORDINATION_KIND, COORDINATION_MAX_LIMIT, COORDINATION_PANEL_KIND, COORDINATION_PROGRESS_KIND, DECISION_POSITION_KIND, DECISION_PROPOSAL_KIND, DECISION_SUPERSESSION_KIND, DISPUTE_REPORTED_EVENT_KIND, DISPUTE_REVIEWED_EVENT_KIND, MAX_COORDINATION_PAGE_BYTES, parseCoordinationClaimPath, parseCoordinationDispute, parseCoordinationDisputeReview, parseCoordinationListSelectors, parseCoordinationProposal, parseCoordinationPublish, parseCoordinationRevision, RETENTION_EXTENDED_EVENT_KIND, type ClaimCorrectionBody, type CoordinationClaimTarget, type CoordinationDecisionApproval, type CoordinationDisputeInput, type CoordinationDisputeReviewInput, type CoordinationEventKind, type CoordinationKind, type CoordinationPanelBody, type CoordinationProgressBody, type CoordinationProposalBody, type CoordinationProposalInput, type CoordinationPublishInput, type CoordinationRequestBody, type CoordinationStatus, type DecisionPositionBody, type DecisionProposalBody, type DecisionSupersessionBody } from "./coordination-domain";
 import { byteLength, compareCapabilities, DEFAULT_READ_LIMIT, hashCapability, MAX_READ_MESSAGE_BYTES, messageStorageBytes, parseRetentionExtension, retentionMetadata, ROOM_EXPIRY_ENABLED, ROOM_LIMITS, validateBasedOnSequence, validateBoundedCursor, validateCursor, validateReadLimit, validateRequestId, validateThrough } from "./room-domain";
 import type { MessageInput } from "./room-domain";
-import { MCP_READ_BYTE_BUDGET_BYTES, NAME_PASSWORD_NOTICE, PROTOCOL_VERSION, type CoordinationAcceptedRecord, type CoordinationAcceptedRecordAnnotations, type CoordinationCorrection, type CoordinationDecision, type CoordinationDecisionApprovalEvidence, type CoordinationDecisionHistoryEntry, type CoordinationDecisionPosition, type CoordinationDisputeReport, type CoordinationDisputeReview, type CoordinationEvidenceItem, type CoordinationPanel, type CoordinationPanelHistoryEntry, type CoordinationProgress, type CoordinationProposal, type CoordinationProposalSummary, type CoordinationRequest, type CoordinationRequestSummary, type CoordinationSourceMessage, type CoordinationSupersession, type CreateWebhookResponse, type ManageWebhookResponse, type RedeliverWebhookResponse, type RotateWebhookSecretResponse, type WebhookAttemptMetadata, type WebhookDeliveryMetadata, type WebhookSummary } from "./protocol";
+import { MCP_READ_BYTE_BUDGET_BYTES, NAME_PASSWORD_NOTICE, PROTOCOL_VERSION, type CoordinationAcceptedRecord, type CoordinationAcceptedRecordAnnotations, type CoordinationCorrection, type CoordinationDecision, type CoordinationDecisionApprovalEvidence, type CoordinationDecisionHistoryEntry, type CoordinationDecisionPosition, type CoordinationDisputeReport, type CoordinationDisputeReview, type CoordinationEvidenceItem, type CoordinationPanel, type CoordinationPanelHistoryEntry, type CoordinationProgress, type CoordinationProposal, type CoordinationProposalSummary, type CoordinationRequest, type CoordinationRequestSummary, type CoordinationSourceMessage, type CoordinationSupersession, type CreateWebhookResponse, type ManageWebhookResponse, type RedeliverWebhookResponse, type RotateWebhookSecretResponse, type UpdateWebhookResponse, type WebhookAttemptMetadata, type WebhookDeliveryMetadata, type WebhookSummary } from "./protocol";
 import { CURRENT_ROOM_SCHEMA_VERSION, migrateRoomSchema } from "./room-schema";
-import { discardWebhookResponseBody, generateWebhookSecret, normalizeWebhookUrl, redactWebhookUrl, signWebhookPayload, webhookRequestTarget } from "./webhooks";
+import { discardWebhookResponseBody, generateWebhookSecret, normalizeWebhookAuthor, parseWebhookCreateInput, parseWebhookUpdateInput, redactWebhookUrl, signWebhookPayload, webhookRequestTarget, type WebhookMutation } from "./webhooks";
+import { decryptWebhookRecord, encryptWebhookRecord, isWebhookEnvelope } from "./webhook-crypto";
 import { createWebPushRequest } from "./web-push-crypto";
 import { PUSH_DELIVERY_LEASE_MS, PUSH_DELIVERY_TIMEOUT_MS, PUSH_INITIAL_DELAY_MS, PUSH_RETRY_WINDOW_MS, pushRetryDelayMs } from "./push-policy";
 import {
@@ -40,6 +41,7 @@ interface ExportContext {
 }
 
 export interface ConversationRoomEnv {
+  readonly MSG_DATA_ENCRYPTION_KEY_V1?: string;
   readonly MSG_PUBLIC_ORIGIN?: string;
   readonly MSG_POST_DISABLED?: string;
   readonly MSG_TEST_MODE?: string;
@@ -313,10 +315,14 @@ interface StoredWebhookEndpoint {
   readonly disabled_at: number | null;
   readonly failure_started_at: number | null;
   readonly id: string;
+  readonly headers: string;
+  readonly header_names: string;
   readonly last_failure_at: number | null;
   readonly last_success_at: number | null;
   readonly recovered_at: number | null;
   readonly secret: string;
+  readonly prompt: string | null;
+  readonly exclude_authors: string;
   readonly status: "active" | "disabled";
   readonly url: string;
 }
@@ -356,6 +362,22 @@ interface ClaimedWebhookDelivery {
   readonly previousDelivery: StoredWebhookDelivery;
   readonly manualRedelivery: boolean;
   readonly roomId: string;
+}
+
+interface WebhookConfiguration {
+  readonly endpoint: StoredWebhookEndpoint;
+  readonly headers: Readonly<Record<string, string>>;
+  readonly prompt: string | null;
+  readonly excludeAuthors: readonly string[];
+  readonly secret: string;
+}
+
+interface PreparedWebhookConfiguration {
+  readonly secret: string;
+  readonly headers: string;
+  readonly headerNames: string;
+  readonly prompt: string | null;
+  readonly excludeAuthors: string;
 }
 
 interface ClaimedPushDelivery {
@@ -422,6 +444,7 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
       const redeliveryMatch = /^\/webhooks\/([0-9a-f-]{36})\/deliveries\/([0-9a-f-]{36})\/redeliver$/iu.exec(url.pathname);
       if (request.method === "POST" && redeliveryMatch) return await this.redeliverWebhook(redeliveryMatch[1]!, redeliveryMatch[2]!);
       const webhookMatch = /^\/webhooks\/([0-9a-f-]{36})$/iu.exec(url.pathname);
+      if (request.method === "PATCH" && webhookMatch) return await this.updateWebhook(webhookMatch[1]!, request);
       if (request.method === "DELETE" && webhookMatch) return await this.removeWebhook(webhookMatch[1]!);
       if (this.config.MSG_TEST_MODE === "1" && request.method === "POST" && url.pathname === "/__test/mark-webhook-sending") return await this.testMarkWebhookSending(request);
       if (this.config.MSG_TEST_MODE === "1" && request.method === "POST" && url.pathname === "/__test/delete-webhook-source") return await this.testDeleteWebhookSource(request);
@@ -2337,24 +2360,58 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
     return this.json({ protocol_version: PROTOCOL_VERSION, expires_at: iso(result.state.inactivity_expires_at), get_post_enabled: result.state.get_post_enabled === 1 });
   }
 
-  private async createWebhook(request: Request): Promise<Response> {
-    const input: unknown = await request.json();
-    if (!isRecord(input) || Object.keys(input).length !== 1 || !Object.hasOwn(input, "url")) {
-      throw new ProtocolError(ERROR_CODES.invalidBody, "The webhook request must contain only url.", 400);
+  private async prepareWebhookConfiguration(id: string, secret: string, input: WebhookMutation, creating: boolean): Promise<PreparedWebhookConfiguration> {
+    const key = this.config.MSG_DATA_ENCRYPTION_KEY_V1;
+    let preparedSecret = secret;
+    if (key !== undefined && (creating || !isWebhookEnvelope(secret))) {
+      try {
+        const encryptionKey = requireWebhookEncryptionKey(key);
+        preparedSecret = await encryptWebhookRecord(encryptionKey, this.roomCapability(), id, "secret", secret);
+      } catch {
+        if (input.headers !== undefined) throw new ProtocolError(ERROR_CODES.serviceUnavailable, "Webhook header encryption is unavailable.", 503);
+      }
     }
-    const url = normalizeWebhookUrl(input.url);
-    if (!url) throw new ProtocolError(ERROR_CODES.invalidBody, "The webhook destination must be a valid public HTTPS URL.", 400);
+    let headers = "";
+    let headerNames = "[]";
+    if (input.headers !== undefined) {
+      if (key === undefined) throw new ProtocolError(ERROR_CODES.serviceUnavailable, "Webhook header encryption is unavailable.", 503);
+      try {
+        const encryptionKey = requireWebhookEncryptionKey(key);
+        if (Object.keys(input.headers).length > 0) headers = await encryptWebhookRecord(encryptionKey, this.roomCapability(), id, "headers", input.headers);
+        headerNames = JSON.stringify(Object.keys(input.headers));
+        if (Object.keys(input.headers).length === 0) await encryptWebhookRecord(encryptionKey, this.roomCapability(), id, "headers", {});
+      } catch {
+        throw new ProtocolError(ERROR_CODES.serviceUnavailable, "Webhook header encryption is unavailable.", 503);
+      }
+    }
+    return {
+      excludeAuthors: input.excludeAuthors === undefined ? "[]" : JSON.stringify(input.excludeAuthors),
+      headerNames,
+      headers,
+      prompt: input.prompt === undefined ? null : input.prompt,
+      secret: preparedSecret,
+    };
+  }
+
+  private async createWebhook(request: Request): Promise<Response> {
+    let input: WebhookMutation & { readonly url: string };
+    try {
+      input = parseWebhookCreateInput(await request.json());
+    } catch {
+      throw new ProtocolError(ERROR_CODES.invalidBody, "The webhook configuration is invalid.", 400);
+    }
     const now = this.now();
     const id = crypto.randomUUID();
     const secret = generateWebhookSecret();
+    const prepared = await this.prepareWebhookConfiguration(id, secret, input, true);
     const result = this.ctx.storage.transactionSync(() => {
       const state = this.requireState();
       if (state.status !== "active" || this.roomExpired(state, now)) return { kind: "expired" as const };
       const count = rows<{ count: number }>(this.ctx.storage.sql.exec("SELECT COUNT(*) AS count FROM webhook_endpoints"))[0]?.count ?? 0;
       if (count >= MAX_WEBHOOKS_PER_ROOM) return { kind: "limit" as const };
       this.ctx.storage.sql.exec(
-        "INSERT INTO webhook_endpoints (id, url, secret, created_at, status, failure_started_at, last_success_at, last_failure_at, recovered_at, disabled_at) VALUES (?, ?, ?, ?, 'active', NULL, NULL, NULL, NULL, NULL)",
-        id, url, secret, now,
+        "INSERT INTO webhook_endpoints (id, url, secret, headers, header_names, prompt, exclude_authors, created_at, status, failure_started_at, last_success_at, recovered_at, disabled_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', NULL, NULL, NULL, NULL)",
+        id, input.url, prepared.secret, prepared.headers, prepared.headerNames, prepared.prompt, prepared.excludeAuthors, now,
       );
       return { kind: "created" as const };
     });
@@ -2372,11 +2429,54 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
       last_failure_at: null,
       last_success_at: null,
       recovered_at: null,
-      secret,
+      headers: prepared.headers,
+      header_names: prepared.headerNames,
+      prompt: prepared.prompt,
+      exclude_authors: prepared.excludeAuthors,
+      secret: prepared.secret,
       status: "active",
-      url,
+      url: input.url,
     }, now);
     const response: CreateWebhookResponse = { protocol_version: PROTOCOL_VERSION, secret, webhook };
+    return this.json(response);
+  }
+
+  private async updateWebhook(id: string, request: Request): Promise<Response> {
+    let input: WebhookMutation;
+    try {
+      input = parseWebhookUpdateInput(await request.json());
+    } catch {
+      throw new ProtocolError(ERROR_CODES.invalidBody, "The webhook configuration is invalid.", 400);
+    }
+    const now = this.now();
+    const existing = rows<StoredWebhookEndpoint>(this.ctx.storage.sql.exec("SELECT * FROM webhook_endpoints WHERE id = ?", id))[0];
+    if (!existing) throw new ProtocolError(ERROR_CODES.notFound, "The webhook was not found.", 404);
+    const prepared = await this.prepareWebhookConfiguration(id, existing.secret, input, false);
+    const result = this.ctx.storage.transactionSync(() => {
+      const state = this.requireState();
+      if (state.status !== "active" || this.roomExpired(state, now)) return { kind: "expired" as const };
+      const current = rows<StoredWebhookEndpoint>(this.ctx.storage.sql.exec("SELECT * FROM webhook_endpoints WHERE id = ?", id))[0];
+      if (!current) return { kind: "missing" as const };
+      const updates: string[] = [];
+      const values: unknown[] = [];
+      if (prepared.secret !== existing.secret && current.secret === existing.secret) { updates.push("secret = ?"); values.push(prepared.secret); }
+      if (input.url !== undefined) { updates.push("url = ?"); values.push(input.url); }
+      if (input.headers !== undefined) { updates.push("headers = ?", "header_names = ?"); values.push(prepared.headers, prepared.headerNames); }
+      if (input.prompt !== undefined) { updates.push("prompt = ?"); values.push(prepared.prompt); }
+      if (input.excludeAuthors !== undefined) { updates.push("exclude_authors = ?"); values.push(prepared.excludeAuthors); }
+      if (updates.length === 0) return { kind: "missing" as const };
+      this.ctx.storage.sql.exec(`UPDATE webhook_endpoints SET ${updates.join(", ")} WHERE id = ?`, ...values, id);
+      const updated = rows<StoredWebhookEndpoint>(this.ctx.storage.sql.exec("SELECT * FROM webhook_endpoints WHERE id = ?", id))[0];
+      if (!updated) return { kind: "missing" as const };
+      return { kind: "updated" as const, endpoint: updated };
+    });
+    if (result.kind === "expired") {
+      await this.expire(now, "Conversation expired");
+      throw new ProtocolError(ERROR_CODES.gone, "The conversation has expired.", 410);
+    }
+    if (result.kind === "missing") throw new ProtocolError(ERROR_CODES.notFound, "The webhook was not found.", 404);
+    await this.schedule();
+    const response: UpdateWebhookResponse = { protocol_version: PROTOCOL_VERSION, webhook: this.webhookSummary(result.endpoint, now) };
     return this.json(response);
   }
 
@@ -2387,10 +2487,40 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
     this.recoverExpiredWebhookLeases(now);
     this.disableUnhealthyWebhooks(now);
     this.pruneWebhookHistory(now);
+    const storedEndpoints = rows<StoredWebhookEndpoint>(this.ctx.storage.sql.exec("SELECT * FROM webhook_endpoints ORDER BY created_at ASC, id ASC"));
+    for (const endpoint of storedEndpoints) await this.migrateWebhookRecords(endpoint);
     const endpoints = rows<StoredWebhookEndpoint>(this.ctx.storage.sql.exec("SELECT * FROM webhook_endpoints ORDER BY created_at ASC, id ASC"));
     const webhooks = endpoints.map((endpoint) => this.webhookSummary(endpoint, now));
     await this.schedule();
     return this.json({ protocol_version: PROTOCOL_VERSION, webhooks });
+  }
+
+  private async migrateWebhookRecords(endpoint: StoredWebhookEndpoint): Promise<void> {
+    const key = this.config.MSG_DATA_ENCRYPTION_KEY_V1;
+    if (key === undefined) return;
+    let encryptionKey: string;
+    try {
+      encryptionKey = requireWebhookEncryptionKey(key);
+    } catch {
+      return;
+    }
+    if (!isWebhookEnvelope(endpoint.secret)) {
+      try {
+        const encrypted = await encryptWebhookRecord(encryptionKey, this.roomCapability(), endpoint.id, "secret", endpoint.secret);
+        this.ctx.storage.sql.exec("UPDATE webhook_endpoints SET secret = ? WHERE id = ? AND secret = ?", encrypted, endpoint.id, endpoint.secret);
+      } catch {
+        return;
+      }
+    }
+    if (endpoint.headers && !isWebhookEnvelope(endpoint.headers)) {
+      try {
+        const headers: unknown = JSON.parse(endpoint.headers);
+        const encrypted = await encryptWebhookRecord(encryptionKey, this.roomCapability(), endpoint.id, "headers", headers);
+        this.ctx.storage.sql.exec("UPDATE webhook_endpoints SET headers = ? WHERE id = ? AND headers = ?", encrypted, endpoint.id, endpoint.headers);
+      } catch {
+        // Invalid legacy header records remain unavailable to delivery.
+      }
+    }
   }
 
   private async readPushEnrollment(request: Request): Promise<Response> {
@@ -2547,13 +2677,23 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
   private async rotateWebhookSecret(id: string): Promise<Response> {
     const now = this.now();
     const secret = generateWebhookSecret();
+    let storedSecret = secret;
+    const key = this.config.MSG_DATA_ENCRYPTION_KEY_V1;
+    if (key !== undefined) {
+      try {
+        const encryptionKey = requireWebhookEncryptionKey(key);
+        storedSecret = await encryptWebhookRecord(encryptionKey, this.roomCapability(), id, "secret", secret);
+      } catch {
+        storedSecret = secret;
+      }
+    }
     const result = this.ctx.storage.transactionSync(() => {
       const state = this.state();
       if (!state) return { kind: "missing-room" as const };
       if (state.status !== "active" || this.roomExpired(state, now)) return { kind: "expired" as const };
       const endpoint = rows<StoredWebhookEndpoint>(this.ctx.storage.sql.exec("SELECT * FROM webhook_endpoints WHERE id = ?", id))[0];
       if (!endpoint) return { kind: "missing-endpoint" as const };
-      this.ctx.storage.sql.exec("UPDATE webhook_endpoints SET secret = ? WHERE id = ?", secret, id);
+      this.ctx.storage.sql.exec("UPDATE webhook_endpoints SET secret = ? WHERE id = ?", storedSecret, id);
       const updated = rows<StoredWebhookEndpoint>(this.ctx.storage.sql.exec("SELECT * FROM webhook_endpoints WHERE id = ?", id))[0];
       if (!updated) throw new Error("The webhook disappeared during secret rotation.");
       return { kind: "rotated" as const, endpoint: updated };
@@ -3577,8 +3717,10 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
   }
 
   private queueWebhookDeliveries(message: StoredMessage, now: number): void {
-    const endpoints = rows<{ id: string }>(this.ctx.storage.sql.exec("SELECT id FROM webhook_endpoints WHERE status = 'active'"));
+    const endpoints = rows<Pick<StoredWebhookEndpoint, "exclude_authors" | "id">>(this.ctx.storage.sql.exec("SELECT id, exclude_authors FROM webhook_endpoints WHERE status = 'active'"));
     for (const endpoint of endpoints) {
+      const exclusions = parseStoredStringArray(endpoint.exclude_authors);
+      if (exclusions.includes(normalizeWebhookAuthor(message.author)) || exclusions.includes(normalizeWebhookAuthor(message.display_name))) continue;
       this.ctx.storage.sql.exec(
         "INSERT INTO webhook_deliveries (id, endpoint_id, event_id, message_id, message_sequence, created_at, due_at, retry_expires_at, attempted_at, completed_at, lease_expires_at, cancelled_at, status, attempt_count, failure_category) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, 'pending', 0, NULL)",
         crypto.randomUUID(), endpoint.id, message.id, message.id, message.sequence, now, now + WEBHOOK_INITIAL_DELAY_MS, now + WEBHOOK_RETRY_WINDOW_MS,
@@ -3615,7 +3757,10 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
       last_failure_at: endpoint.last_failure_at === null ? null : iso(endpoint.last_failure_at),
       last_success_at: endpoint.last_success_at === null ? null : iso(endpoint.last_success_at),
       recovered_at: endpoint.recovered_at === null ? null : iso(endpoint.recovered_at),
+      exclude_authors: parseStoredStringArray(endpoint.exclude_authors),
+      header_names: parseStoredStringArray(endpoint.header_names),
       status: endpoint.status,
+      prompt: endpoint.prompt,
       deliveries,
     };
   }
@@ -3818,58 +3963,73 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
 
   private async deliverWebhook(claimed: ClaimedWebhookDelivery): Promise<void> {
     const timestamp = String(Math.floor(this.now() / 1_000));
-    const body = JSON.stringify({
+    const publicOrigin = new URL(this.config.MSG_PUBLIC_ORIGIN ?? "https://msg.0000.chat").origin;
+    const payload = {
+      author: claimed.message.author,
+      content: claimed.message.content,
       event_id: claimed.delivery.event_id,
       message: this.toMessage(claimed.message),
       protocol_version: PROTOCOL_VERSION,
       room_id: claimed.roomId,
+      room_url: `${publicOrigin}/${this.roomCapability()}`,
+      semantic_type: claimed.message.semantic_type,
+      seq: claimed.message.sequence,
+      summary: `New message from ${claimed.message.author} in ${this.roomCapability()}`,
       type: "message.created",
-    });
+    };
     let status: "delivered" | "failed" = "failed";
     let failureCategory: string | null = "network_error";
     try {
-      const target = webhookRequestTarget(claimed.endpoint.url);
-      let signature: string | undefined;
+      let configuration: WebhookConfiguration | undefined;
       for (let checks = 0; checks < 8; checks += 1) {
-        const secret = this.webhookClaimSecret(claimed, this.now());
-        if (!secret) {
-          await this.resolveWebhookClaimBeforeSend(claimed, this.now());
+        const candidateConfiguration = await this.webhookClaimConfiguration(claimed, this.now());
+        if (candidateConfiguration === undefined) {
+          await this.resolveWebhookClaimBeforeSend(claimed, this.now(), true);
           return;
         }
-        const candidate = await this.signWebhook(secret, timestamp, body);
+        const body = JSON.stringify({
+          ...payload,
+          ...(candidateConfiguration.prompt === null ? {} : { prompt: candidateConfiguration.prompt }),
+        });
+        const candidate = await this.signWebhook(candidateConfiguration.secret, timestamp, body);
+        const currentConfiguration = await this.webhookClaimConfiguration(claimed, this.now());
+        if (currentConfiguration === undefined) {
+          await this.resolveWebhookClaimBeforeSend(claimed, this.now(), true);
+          return;
+        }
         const sendAt = this.now();
-        const currentSecret = this.webhookClaimSecret(claimed, sendAt);
-        if (!currentSecret) {
-          await this.resolveWebhookClaimBeforeSend(claimed, sendAt);
-          return;
-        }
-        if (currentSecret === secret) {
-          signature = candidate;
+        if (
+          webhookConfigurationFingerprint(currentConfiguration) === webhookConfigurationFingerprint(candidateConfiguration)
+          && this.webhookConfigurationIsCurrent(claimed, candidateConfiguration, sendAt)
+        ) {
+          configuration = candidateConfiguration;
+          const target = webhookRequestTarget(configuration.endpoint.url);
+          const headers = new Headers({
+            "content-type": "application/json; charset=utf-8",
+            "x-msg-signature": candidate,
+            "x-msg-timestamp": timestamp,
+          });
+          for (const [name, value] of Object.entries(configuration.headers)) headers.set(name, value);
+          if (target.authorization && !Object.keys(configuration.headers).some((name) => name.toLowerCase() === "authorization")) headers.set("authorization", target.authorization);
+          const response = await fetch(target.url, {
+            body,
+            headers,
+            method: "POST",
+            redirect: "manual",
+            signal: AbortSignal.timeout(WEBHOOK_REQUEST_TIMEOUT_MS),
+          });
+          await discardWebhookResponseBody(response);
+          if (response.status >= 200 && response.status < 300) {
+            status = "delivered";
+            failureCategory = null;
+          } else failureCategory = response.status >= 300 && response.status < 400 ? "redirect" : "http_status";
           break;
         }
       }
-      if (!signature) {
+      if (configuration === undefined) {
         await this.resolveWebhookClaimBeforeSend(claimed, this.now(), true);
         return;
       }
-      const headers = new Headers({
-        "content-type": "application/json; charset=utf-8",
-        "x-msg-signature": signature,
-        "x-msg-timestamp": timestamp,
-      });
-      if (target.authorization) headers.set("authorization", target.authorization);
-      const response = await fetch(target.url, {
-        body,
-        headers,
-        method: "POST",
-        redirect: "manual",
-        signal: AbortSignal.timeout(WEBHOOK_REQUEST_TIMEOUT_MS),
-      });
-      await discardWebhookResponseBody(response);
-      if (response.status >= 200 && response.status < 300) {
-        status = "delivered";
-        failureCategory = null;
-      } else failureCategory = response.status >= 300 && response.status < 400 ? "redirect" : "http_status";
     } catch (error) {
       failureCategory = error instanceof Error && /timeout/iu.test(error.name) ? "timeout" : "network_error";
     }
@@ -3917,6 +4077,31 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
       }
     });
     await this.schedule();
+  }
+
+  private webhookConfigurationIsCurrent(claimed: ClaimedWebhookDelivery, configuration: WebhookConfiguration, now: number): boolean {
+    const state = this.state();
+    if (!state || state.status !== "active" || this.roomExpired(state, now)) return false;
+    const delivery = rows<{ attempt_count: number; cancelled_at: number | null; manual_redelivery_requested_at: number | null; retry_expires_at: number; status: string }>(this.ctx.storage.sql.exec(
+      "SELECT attempt_count, cancelled_at, manual_redelivery_requested_at, retry_expires_at, status FROM webhook_deliveries WHERE id = ?",
+      claimed.delivery.id,
+    ))[0];
+    if (!delivery || delivery.status !== "sending" || delivery.attempt_count !== claimed.delivery.attempt_count) return false;
+    if ((delivery.manual_redelivery_requested_at !== null) !== claimed.manualRedelivery) return false;
+    if (delivery.cancelled_at !== null || (!claimed.manualRedelivery && now >= delivery.retry_expires_at)) return false;
+    const endpoint = rows<StoredWebhookEndpoint>(this.ctx.storage.sql.exec(
+      "SELECT * FROM webhook_endpoints WHERE id = ?",
+      claimed.endpoint.id,
+    ))[0];
+    if (!endpoint || endpoint.status !== configuration.endpoint.status) return false;
+    return endpoint.id === configuration.endpoint.id
+      && endpoint.url === configuration.endpoint.url
+      && endpoint.secret === configuration.endpoint.secret
+      && endpoint.headers === configuration.endpoint.headers
+      && endpoint.header_names === configuration.endpoint.header_names
+      && endpoint.prompt === configuration.endpoint.prompt
+      && endpoint.exclude_authors === configuration.endpoint.exclude_authors
+      && endpoint.disabled_at === configuration.endpoint.disabled_at;
   }
 
   private claimDuePushDelivery(now: number): ClaimedPushDelivery | undefined {
@@ -4153,7 +4338,7 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
     this.ctx.storage.sql.exec("DELETE FROM push_deliveries WHERE retry_expires_at <= ?", now);
   }
 
-  private webhookClaimSecret(claimed: ClaimedWebhookDelivery, now: number): string | undefined {
+  private async webhookClaimConfiguration(claimed: ClaimedWebhookDelivery, now: number): Promise<WebhookConfiguration | undefined> {
     const state = this.state();
     if (!state || state.status !== "active" || this.roomExpired(state, now)) return undefined;
     const delivery = rows<{ attempt_count: number; cancelled_at: number | null; manual_redelivery_requested_at: number | null; message_id: string; retry_expires_at: number; status: string }>(this.ctx.storage.sql.exec(
@@ -4166,12 +4351,49 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
     if (delivery.cancelled_at !== null || (!manualRedelivery && now >= delivery.retry_expires_at)) return undefined;
     const message = rows<{ id: string }>(this.ctx.storage.sql.exec("SELECT id FROM messages WHERE id = ?", delivery.message_id))[0];
     if (!message) return undefined;
-    const endpoint = rows<{ secret: string; status: string }>(this.ctx.storage.sql.exec(
-      "SELECT secret, status FROM webhook_endpoints WHERE id = ?",
+    const endpoint = rows<StoredWebhookEndpoint>(this.ctx.storage.sql.exec(
+      "SELECT * FROM webhook_endpoints WHERE id = ?",
       claimed.endpoint.id,
     ))[0];
     if (!endpoint || (!manualRedelivery && endpoint.status !== "active")) return undefined;
-    return endpoint.secret;
+    let secret = endpoint.secret;
+    const key = this.config.MSG_DATA_ENCRYPTION_KEY_V1;
+    if (isWebhookEnvelope(secret)) {
+      if (key === undefined) return undefined;
+      try {
+        const encryptionKey = requireWebhookEncryptionKey(key);
+        secret = await decryptWebhookRecord<string>(encryptionKey, this.roomCapability(), endpoint.id, "secret", secret);
+      } catch {
+        return undefined;
+      }
+    } else if (key !== undefined) {
+      try {
+        const encryptionKey = requireWebhookEncryptionKey(key);
+        const encrypted = await encryptWebhookRecord(encryptionKey, this.roomCapability(), endpoint.id, "secret", secret);
+        this.ctx.storage.transactionSync(() => {
+          this.ctx.storage.sql.exec("UPDATE webhook_endpoints SET secret = ? WHERE id = ? AND secret = ?", encrypted, endpoint.id, endpoint.secret);
+        });
+      } catch {
+        // Legacy plaintext secrets remain usable when the optional key is unavailable.
+      }
+    }
+    let headers: Readonly<Record<string, string>> = {};
+    if (endpoint.headers) {
+      if (key === undefined) return undefined;
+      try {
+        const encryptionKey = requireWebhookEncryptionKey(key);
+        headers = await decryptWebhookRecord<Record<string, string>>(encryptionKey, this.roomCapability(), endpoint.id, "headers", endpoint.headers);
+      } catch {
+        return undefined;
+      }
+    }
+    return {
+      endpoint,
+      headers,
+      prompt: endpoint.prompt,
+      excludeAuthors: parseStoredStringArray(endpoint.exclude_authors),
+      secret,
+    };
   }
 
   private async resolveWebhookClaimBeforeSend(claimed: ClaimedWebhookDelivery, now: number, deferUnsentClaim = false): Promise<void> {
@@ -5164,6 +5386,11 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
   private roomExpired(state: Pick<RoomState, "status" | "inactivity_expires_at">, now: number): boolean {
     return this.expiryEnabled && state.status === "active" && now >= state.inactivity_expires_at;
   }
+  private roomCapability(): string {
+    const name = this.ctx.id.name;
+    if (!name) throw new ProtocolError(ERROR_CODES.serviceUnavailable, "The room identity is unavailable.", 503);
+    return name;
+  }
   private requireState(): RoomState { const state = this.state(); if (!state) throw new ProtocolError(ERROR_CODES.notFound, "The requested resource was not found.", 404); return state; }
   private requireActiveState(): RoomState {
     const state = this.requireState();
@@ -5227,6 +5454,31 @@ function exportStatus(value: unknown): CoordinationStatus {
 function exportString(value: unknown): string { return typeof value === "string" ? value : ""; }
 
 function exportNumber(value: unknown): number | undefined { return typeof value === "number" && Number.isSafeInteger(value) ? value : undefined; }
+
+function parseStoredStringArray(value: string): readonly string[] {
+  try {
+    const parsed: unknown = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed.filter((entry): entry is string => typeof entry === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+function requireWebhookEncryptionKey(value: unknown): string {
+  if (typeof value !== "string" || value.length === 0) throw new Error("Webhook encryption is unavailable.");
+  return value;
+}
+
+function webhookConfigurationFingerprint(configuration: WebhookConfiguration): string {
+  return JSON.stringify({
+    exclude_authors: configuration.excludeAuthors,
+    headers: configuration.headers,
+    id: configuration.endpoint.id,
+    prompt: configuration.prompt,
+    secret: configuration.secret,
+    url: configuration.endpoint.url,
+  });
+}
 
 function exportFields(value: unknown, keys: readonly string[]): Record<string, unknown> {
   const input = parseExportRecord(value);
