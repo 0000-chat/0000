@@ -20,6 +20,7 @@ import {
   recoverPendingSocialAccount,
 } from "./social-signup-recovery";
 import { emitPlatformDiagnostic } from "./diagnostics";
+import { configuredSocialProviders } from "./auth-providers";
 
 export const PLATFORM_SESSION_FRESH_AGE_SECONDS = 24 * 60 * 60;
 
@@ -314,20 +315,23 @@ export function createAuth(
     await recoverPendingSocialAccount(env.IDENTITY_DB, binding);
     return {};
   };
+  const configuredProviders = configuredSocialProviders(env);
+  const googleCredentials = configuredProviders.google;
   const google =
-    env.GOOGLE_CLIENT_ID && env.GOOGLE_CLIENT_SECRET
+    googleCredentials
       ? {
-          clientId: env.GOOGLE_CLIENT_ID,
-          clientSecret: env.GOOGLE_CLIENT_SECRET,
+          clientId: googleCredentials.clientId,
+          clientSecret: googleCredentials.clientSecret,
           mapProfileToUser: async (profile: object) =>
             recoverSocialProfile("google", profile),
         }
       : undefined;
+  const githubCredentials = configuredProviders.github;
   const github =
-    env.GITHUB_CLIENT_ID && env.GITHUB_CLIENT_SECRET
+    githubCredentials
       ? {
-          clientId: env.GITHUB_CLIENT_ID,
-          clientSecret: env.GITHUB_CLIENT_SECRET,
+          clientId: githubCredentials.clientId,
+          clientSecret: githubCredentials.clientSecret,
           mapProfileToUser: async (profile: object) =>
             recoverSocialProfile("github", profile),
         }

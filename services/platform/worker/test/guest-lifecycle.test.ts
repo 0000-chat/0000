@@ -137,9 +137,9 @@ describe("T08 persistent guest control and resource grants", () => {
   it("bootstraps a guest without human sign-in providers", async () => {
     const previous = {
       googleId: testEnv.GOOGLE_CLIENT_ID,
-      googleSecret: testEnv.GOOGLE_CLIENT_SECRET,
+      googleSecret: testEnv.GOOGLE_CLIENT_SECRET ?? "",
       githubId: testEnv.GITHUB_CLIENT_ID,
-      githubSecret: testEnv.GITHUB_CLIENT_SECRET,
+      githubSecret: testEnv.GITHUB_CLIENT_SECRET ?? "",
     };
     try {
       (testEnv as unknown as Record<string, string>).GOOGLE_CLIENT_ID = "";
