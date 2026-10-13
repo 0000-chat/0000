@@ -118,6 +118,57 @@
         "compatibility_date": "2026-08-06",
         "compatibility_flags": ["nodejs_compat"]
       }
+    },
+    {
+      "name": "database-worker",
+      "kind": "cloudflare-worker-bundle",
+      "runtime_paths": [
+        "services/database/src/**",
+        "services/database/package.json",
+        "services/database/tsconfig.json",
+        "services/database/wrangler.jsonc"
+      ],
+      "archive_paths": [
+        "services/database/src",
+        "services/database/package.json",
+        "services/database/tsconfig.json",
+        "services/database/wrangler.jsonc"
+      ],
+      "build": {
+        "type": "cloudflare-worker",
+        "config_path": "services/database/wrangler.jsonc",
+        "entrypoint": "worker.js",
+        "config": "wrangler.json",
+        "files": ["worker.js", "wrangler.json", "artifact-manifest.json"],
+        "compatibility_date": "2026-09-11",
+        "compatibility_flags": ["nodejs_compat"],
+        "wrangler": {
+          "durable_objects": {
+            "bindings": [
+              { "name": "DATABASES", "class_name": "DatabaseObject" },
+              { "name": "REGISTRY", "class_name": "DatabaseRegistry" }
+            ]
+          },
+          "migrations": [
+            { "tag": "v1", "new_sqlite_classes": ["DatabaseObject", "DatabaseRegistry"] }
+          ],
+          "observability": { "enabled": false },
+          "vars": {
+            "CAPACITY_POLICY_REVISION": "1",
+            "CAPACITY_MAX_DATABASES": "32",
+            "CAPACITY_MAX_LOGICAL_BYTES": "536870912",
+            "CAPACITY_MAX_REPLAY_BYTES": "1073741824",
+            "CAPACITY_MAX_PHYSICAL_BYTES": "4294967296",
+            "CAPACITY_MAX_PHYSICAL_BYTES_PER_DATABASE": "134217728",
+            "CAPACITY_MAX_DAILY_REQUESTS": "50000",
+            "CAPACITY_MAX_REQUESTS_PER_MINUTE": "1000",
+            "CAPACITY_MAX_DAILY_MUTATIONS": "5000",
+            "CAPACITY_MAX_EXPORT_BYTES": "134217728",
+            "CAPACITY_MAX_CONTROL_BYTES": "67108864",
+            "SERVICE_SUSPENDED": "false"
+          }
+        }
+      }
     }
   ]
 }

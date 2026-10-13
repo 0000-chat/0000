@@ -7,7 +7,7 @@ interface EncryptedEnvelope {
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
-/** Encrypts D1-only records. AAD binds ciphertext to its record type and row key. */
+/** Encrypts shared records. AAD binds ciphertext to its record type and row key. */
 export async function encryptOperationRecord(
   encodedKey: string,
   recordType: string,

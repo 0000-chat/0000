@@ -599,7 +599,7 @@ async function startNodeRuntimeWithConfiguration(configuration: NodeRuntimeConfi
 export async function startMsgMiniflare(
   persistenceDirectory: string,
   limits = TEST_ROOM_LIMITS,
-  extraBindingsOrOptions: Record<string, string> | { readonly nowMs?: number; readonly testMode?: boolean } = {},
+  extraBindingsOrOptions: Record<string, string> | { readonly dataEncryptionKey?: string; readonly nowMs?: number; readonly testMode?: boolean } = {},
   useTestLimits = true,
   useOperations = false,
   rateLimitPolicy: MsgRateLimitPolicy = TEST_MSG_RATE_LIMIT_POLICY,
@@ -616,6 +616,7 @@ export async function startMsgMiniflare(
     const script = await workerScript();
     runtime = await startNodeRuntimeWithConfiguration({
       bindings: {
+        ...(options.dataEncryptionKey === undefined ? {} : { MSG_DATA_ENCRYPTION_KEY_V1: options.dataEncryptionKey }),
         ...(testMode ? { MSG_TEST_MODE: "1", MSG_TEST_ROOM_LIMITS: JSON.stringify(limits) } : {}),
         ...(options.nowMs === undefined ? {} : { MSG_TEST_NOW_MS: String(options.nowMs) }),
         MSG_VAPID_PRIVATE_KEY: TEST_VAPID_PRIVATE_KEY,
@@ -697,6 +698,6 @@ export async function startMsgMiniflare(
   };
 }
 
-function isStartOptions(value: Record<string, string> | { readonly nowMs?: number; readonly testMode?: boolean }): value is { readonly nowMs?: number; readonly testMode?: boolean } {
-  return Object.hasOwn(value, "nowMs") || Object.hasOwn(value, "testMode");
+function isStartOptions(value: Record<string, string> | { readonly dataEncryptionKey?: string; readonly nowMs?: number; readonly testMode?: boolean }): value is { readonly dataEncryptionKey?: string; readonly nowMs?: number; readonly testMode?: boolean } {
+  return Object.hasOwn(value, "dataEncryptionKey") || Object.hasOwn(value, "nowMs") || Object.hasOwn(value, "testMode");
 }

@@ -1,7 +1,7 @@
 import { ROOM_LIMITS } from "./room-domain";
 import { WEBHOOK_RETRY_INITIAL_DELAY_MS, WEBHOOK_RETRY_WINDOW_MS } from "./webhook-policy";
 
-export const CURRENT_ROOM_SCHEMA_VERSION = 17;
+export const CURRENT_ROOM_SCHEMA_VERSION = 18;
 
 interface SqlStorage {
   exec(query: string, ...values: unknown[]): Iterable<unknown>;
@@ -492,6 +492,15 @@ function applyMigration(sql: SqlStorage, version: number, inactivityTtlMs: numbe
     const columns = new Set(rows<{ name: string }>(sql.exec("PRAGMA table_info(room_state)")).map((column) => column.name));
     if (!columns.has("mcp_post_enabled")) sql.exec("ALTER TABLE room_state ADD COLUMN mcp_post_enabled INTEGER NOT NULL DEFAULT 1");
     sql.exec("UPDATE room_state SET mcp_post_enabled = CASE WHEN status = 'active' AND inactivity_expires_at > ? THEN 1 ELSE 0 END WHERE singleton = 1", now);
+    sql.exec("UPDATE room_state SET schema_version = ? WHERE singleton = 1", CURRENT_ROOM_SCHEMA_VERSION);
+    return;
+  }
+  if (version === 18) {
+    const columns = new Set(rows<{ name: string }>(sql.exec("PRAGMA table_info(webhook_endpoints)")).map((column) => column.name));
+    if (!columns.has("headers")) sql.exec("ALTER TABLE webhook_endpoints ADD COLUMN headers TEXT NOT NULL DEFAULT ''");
+    if (!columns.has("header_names")) sql.exec("ALTER TABLE webhook_endpoints ADD COLUMN header_names TEXT NOT NULL DEFAULT '[]'");
+    if (!columns.has("prompt")) sql.exec("ALTER TABLE webhook_endpoints ADD COLUMN prompt TEXT");
+    if (!columns.has("exclude_authors")) sql.exec("ALTER TABLE webhook_endpoints ADD COLUMN exclude_authors TEXT NOT NULL DEFAULT '[]'");
     sql.exec("UPDATE room_state SET schema_version = ? WHERE singleton = 1", CURRENT_ROOM_SCHEMA_VERSION);
     return;
   }

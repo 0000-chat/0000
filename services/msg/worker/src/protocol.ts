@@ -202,6 +202,7 @@ export interface RoomService {
   manage?(input: ManageRoomInput): Promise<ManageRoomResponse>;
   extendRetention?(input: ExtendRetentionInput): Promise<RetentionExtensionResponse>;
   createWebhook?(input: CreateWebhookInput): Promise<CreateWebhookResponse>;
+  updateWebhook?(input: UpdateWebhookInput): Promise<UpdateWebhookResponse>;
   listWebhooks?(input: ListWebhooksInput): Promise<ListWebhooksResponse>;
   removeWebhook?(input: RemoveWebhookInput): Promise<RemoveWebhookResponse>;
   disableWebhook?(input: ManageWebhookInput): Promise<ManageWebhookResponse>;
@@ -1116,6 +1117,18 @@ export interface CreateWebhookInput {
   readonly auth?: RoomAccessContext;
   readonly room: string;
   readonly url: string;
+  readonly headers?: Readonly<Record<string, string>>;
+  readonly prompt?: string | null;
+  readonly excludeAuthors?: readonly string[];
+}
+
+export interface UpdateWebhookInput {
+  readonly id: string;
+  readonly room: string;
+  readonly url?: string;
+  readonly headers?: Readonly<Record<string, string>>;
+  readonly prompt?: string | null;
+  readonly excludeAuthors?: readonly string[];
 }
 
 export interface ListWebhooksInput {
@@ -1169,6 +1182,9 @@ export interface WebhookSummary {
   readonly disabled_at: string | null;
   readonly failure_started_at: string | null;
   readonly id: string;
+  readonly header_names: readonly string[];
+  readonly prompt: string | null;
+  readonly exclude_authors: readonly string[];
   readonly last_failure_at: string | null;
   readonly last_success_at: string | null;
   readonly recovered_at: string | null;
@@ -1179,6 +1195,11 @@ export interface WebhookSummary {
 export interface CreateWebhookResponse {
   readonly protocol_version: typeof PROTOCOL_VERSION;
   readonly secret: string;
+  readonly webhook: WebhookSummary;
+}
+
+export interface UpdateWebhookResponse {
+  readonly protocol_version: typeof PROTOCOL_VERSION;
   readonly webhook: WebhookSummary;
 }
 

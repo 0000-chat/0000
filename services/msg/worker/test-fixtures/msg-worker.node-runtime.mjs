@@ -240,7 +240,7 @@ function parseDescriptor(encoded) {
 function dispatchOverHttp(descriptor, body) {
   if (!workerUrl) throw new Error("Node-owned Miniflare is not ready.");
   const headers = Object.fromEntries(descriptor.headers.map(([name, value]) => [name.toLowerCase(), value]));
-  delete headers.host;
+  headers.host = descriptor.url.host;
   delete headers.connection;
   delete headers["transfer-encoding"];
 

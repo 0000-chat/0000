@@ -10,12 +10,13 @@ a stable entry and adaptation boundary for clients, tools, and services; it
 does not own product data, identity policy, or service behavior.
 
 Gateway's first Cloudflare Worker application provides public liveness through
-`GET /health` and a public stateless MCP endpoint at `/mcp` with only the
-`gateway_info` diagnostic. These are operational probes, not Gateway
-Capabilities. The milestone makes no downstream service calls and has no
-Platform auth middleware, service bindings, database, secret, or selected
-license. `mcp-use` is composed rather than forked or vendored; the Executor SDK
-may be composed later.
+`GET /health` and a public stateless MCP endpoint at `/mcp` with the
+`gateway_info` diagnostic. A configured Worker also provides an authenticated,
+profile-bound MCP boundary with `use`, `tools.search`, explicit D1 grants,
+and service-owned declarations. The checked-in Wrangler config leaves Platform,
+D1, and downstream bindings unset, so protected requests fail closed in the
+default application. `mcp-use` is composed rather than forked or vendored;
+the Executor SDK may be composed later.
 
 Its vocabulary is recorded in the [Gateway glossary](../../CONTEXT.md), its
 superseded historical capability decision in

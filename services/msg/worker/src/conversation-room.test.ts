@@ -2,6 +2,7 @@ import { Database } from "bun:sqlite";
 import { expect, mock, test } from "bun:test";
 
 import { hashCapability, ROOM_LIMITS } from "./room-domain";
+import { isWebhookEnvelope } from "./webhook-crypto";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 type WebhookPayloadSigner = (secret: string, timestamp: string, body: string) => Promise<string>;
@@ -14,6 +15,7 @@ mock.module("cloudflare:workers", () => ({
 }));
 
 class Context {
+  readonly id = { name: "fixture-room" };
   readonly storage: { sql: { exec(query: string, ...values: unknown[]): Iterable<unknown> }; transactionSync<T>(callback: () => T): T; setAlarm(value: number): Promise<void>; deleteAlarm(): Promise<void> };
   alarmAt?: number;
   readonly sockets: FakeSocket[] = [];
@@ -55,7 +57,36 @@ class FakeWebSocketPair {
 async function room(database = new Database(":memory:"), clock: () => number = Date.now, env: Record<string, string> = {}, signWebhook?: WebhookPayloadSigner) {
   const { ConversationRoom } = await import("./conversation-room");
   const context = new Context(database);
-  return { context, room: new ConversationRoom(context as never, env, clock, signWebhook) };
+  return { context, room: new ConversationRoom(context as never, { MSG_TEST_MODE: "1", MSG_TEST_ROOM_LIMITS: "{}", MSG_ROOM_EXPIRY_ENABLED: "1", ...env }, clock, signWebhook) };
+}
+
+async function withPausedFirstWebhookDecrypt<T>(run: (started: Promise<void>, release: () => void) => Promise<T>): Promise<T> {
+  const originalDecrypt = crypto.subtle.decrypt.bind(crypto.subtle);
+  let pause = true;
+  let markStarted!: () => void;
+  let releaseDecrypt!: () => void;
+  const started = new Promise<void>((resolve) => { markStarted = resolve; });
+  const gate = new Promise<void>((resolve) => { releaseDecrypt = resolve; });
+  crypto.subtle.decrypt = (async (...args: Parameters<typeof crypto.subtle.decrypt>) => {
+    if (pause) {
+      pause = false;
+      markStarted();
+      await gate;
+    }
+    return await originalDecrypt(...args);
+  }) as typeof crypto.subtle.decrypt;
+  try {
+    return await run(started, releaseDecrypt);
+  } finally {
+    crypto.subtle.decrypt = originalDecrypt;
+  }
+}
+
+async function expectedWebhookSignature(secret: string, timestamp: string, body: string): Promise<string> {
+  const keyBytes = Uint8Array.from(atob(secret.replaceAll("-", "+").replaceAll("_", "/").padEnd(Math.ceil(secret.length / 4) * 4, "=")), (character) => character.charCodeAt(0));
+  const key = await crypto.subtle.importKey("raw", keyBytes, { hash: "SHA-256", name: "HMAC" }, false, ["sign"]);
+  const digest = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(`${timestamp}.${body}`));
+  return `v1=${Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("")}`;
 }
 
 function request(path: string, value: unknown) {
@@ -494,7 +525,7 @@ test("repairs missing coordination tables when a high-version room is read", asy
 
   expect(response.status).toBe(200);
   expect(await response.json()).toMatchObject({ latest_message: 1, messages: [{ sequence: 1 }] });
-  expect(database.query("SELECT version FROM room_schema WHERE singleton = 1").get()).toEqual({ version: 17 });
+  expect(database.query("SELECT version FROM room_schema WHERE singleton = 1").get()).toEqual({ version: 18 });
   const repairedTables = (database.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name GLOB 'coordination_*' ORDER BY name").all() as { name: string }[]).map(({ name }) => name);
   expect(repairedTables).toEqual(coordinationTables.sort());
   database.close();
@@ -765,6 +796,50 @@ test("checks inactivity inside the claim transaction before a new claim or recei
   }
 });
 
+test("pauses overdue room expiry while preserving the saved deadline and alarm cleanup", async () => {
+  const database = new Database(":memory:");
+  let now = 1_000;
+  const limits = JSON.stringify({ inactivityTtlMs: 1_000 });
+  const enabled = await room(database, () => now, { MSG_TEST_ROOM_LIMITS: limits, MSG_ROOM_EXPIRY_ENABLED: "1" });
+  await enabled.room.fetch(request("/initialize", { management_hash: "hash", initial: { content: "first", author: "a", display_name: "a", semantic_type: "message" } }));
+  const endpoint = await enabled.room.fetch(request("/webhooks", { url: "https://receiver.example.com/pause-expiry" }));
+  expect(endpoint.status).toBe(200);
+  const posted = await enabled.room.fetch(request("/messages", { input: { content: "queued", author: "a", display_name: "a", semantic_type: "message" } }));
+  expect(posted.status).toBe(200);
+  const deadline = new Date(now + 1_000).toISOString();
+  database.query("UPDATE webhook_deliveries SET status = 'delivered', created_at = ?").run(now - 8 * DAY_MS);
+
+  now += 2_000;
+  const paused = await room(database, () => now, { MSG_TEST_ROOM_LIMITS: limits, MSG_ROOM_EXPIRY_ENABLED: "0" });
+  const read = await paused.room.fetch(new Request("https://room/read?after=0"));
+  expect(read.status).toBe(200);
+  expect(await read.json()).toMatchObject({ expires_at: deadline, retention: { expiry_enabled: false, inactivity_window_ms: 1_000 } });
+  await paused.room.alarm();
+  expect(database.query("SELECT status FROM room_state WHERE singleton = 1").get()).toEqual({ status: "active" });
+  expect(database.query("SELECT COUNT(*) AS count FROM webhook_deliveries").get()).toEqual({ count: 0 });
+
+  const deleted = await paused.room.fetch(new Request("https://room/operator-delete", { method: "POST" }));
+  expect(deleted.status).toBe(200);
+  expect(database.query("SELECT status FROM room_state WHERE singleton = 1").get()).toEqual({ status: "deleted" });
+  database.close();
+});
+
+test("restoring expiry enforces an already-passed saved deadline", async () => {
+  const database = new Database(":memory:");
+  let now = 1_000;
+  const limits = JSON.stringify({ inactivityTtlMs: 1_000 });
+  const paused = await room(database, () => now, { MSG_TEST_ROOM_LIMITS: limits, MSG_ROOM_EXPIRY_ENABLED: "0" });
+  await paused.room.fetch(request("/initialize", { management_hash: "hash", initial: { content: "first", author: "a", display_name: "a", semantic_type: "message" } }));
+  const deadline = new Date(now + 1_000).toISOString();
+  now += 2_000;
+  expect((await paused.room.fetch(new Request("https://room/status"))).status).toBe(200);
+  const restored = await room(database, () => now, { MSG_TEST_ROOM_LIMITS: limits, MSG_ROOM_EXPIRY_ENABLED: "1" });
+  expect((await restored.room.fetch(new Request("https://room/read?after=0"))).status).toBe(410);
+  expect(database.query("SELECT status, inactivity_expires_at FROM room_state WHERE singleton = 1").get()).toEqual({ status: "deleted", inactivity_expires_at: 2_000 });
+  expect(deadline).toBe(new Date(2_000).toISOString());
+  database.close();
+});
+
 test("exports a complete ascending transcript with safety warnings", async () => {
   const { room: durable } = await room();
   await durable.fetch(request("/initialize", { management_hash: "hash", initial: { content: "first", author: "a", display_name: "Alpha", semantic_type: "message" } }));
@@ -998,6 +1073,120 @@ test("supports direct MCP posting, status, owner control, and name password repl
     const enabled = await durable.fetch(request(`/manage?token=${management}`, { action: "enable_mcp" }));
     expect(await enabled.json()).toMatchObject({ agent_posting_enabled: true });
   } finally {
+    database.close();
+  }
+});
+
+test("migrates legacy plaintext webhook secrets and header values to endpoint-bound encrypted records", async () => {
+  const database = new Database(":memory:");
+  const encryptionKey = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+  const legacySecret = "synthetic-legacy-signing-secret";
+  const legacyHeader = "synthetic-legacy-header-value";
+  try {
+    const { room: durable } = await room(database, Date.now, { MSG_DATA_ENCRYPTION_KEY_V1: encryptionKey });
+    await durable.fetch(request("/initialize", { management_hash: "hash", initial: { content: "first", author: "a", display_name: "a", semantic_type: "message" } }));
+    database.query("INSERT INTO webhook_endpoints (id, url, secret, headers, header_names, prompt, exclude_authors, created_at, status, failure_started_at, last_success_at, last_failure_at, recovered_at, disabled_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', NULL, NULL, NULL, NULL, NULL)")
+      .run("11111111-1111-4111-8111-111111111111", "https://receiver.example.com/legacy", legacySecret, JSON.stringify({ Authorization: legacyHeader }), JSON.stringify(["Authorization"]), "legacy prompt", JSON.stringify(["legacy-author"]), Date.now());
+
+    const listed = await durable.fetch(new Request("https://room/webhooks"));
+    expect(listed.status).toBe(200);
+    expect(await listed.json()).toMatchObject({ webhooks: [{ header_names: ["Authorization"], prompt: "legacy prompt", exclude_authors: ["legacy-author"] }] });
+    const stored = database.query("SELECT secret, headers FROM webhook_endpoints WHERE id = ?").get("11111111-1111-4111-8111-111111111111") as { headers: string; secret: string };
+    expect(isWebhookEnvelope(stored.secret)).toBe(true);
+    expect(isWebhookEnvelope(stored.headers)).toBe(true);
+    expect(stored.secret).not.toContain(legacySecret);
+    expect(stored.headers).not.toContain(legacyHeader);
+  } finally {
+    database.close();
+  }
+});
+
+test.serial("does not send an encrypted webhook after it is disabled during secret decryption", async () => {
+  const database = new Database(":memory:");
+  const encryptionKey = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+  const originalFetch = globalThis.fetch;
+  const outbound: Request[] = [];
+  let now = 1_000;
+  globalThis.fetch = (async (input, init) => {
+    outbound.push(new Request(input, init));
+    return new Response(null, { status: 204 });
+  }) as typeof fetch;
+  try {
+    const { room: durable } = await room(database, () => now, { MSG_DATA_ENCRYPTION_KEY_V1: encryptionKey });
+    await durable.fetch(request("/initialize", { management_hash: "hash", initial: { content: "first", author: "a", display_name: "a", semantic_type: "message" } }));
+    const created = await durable.fetch(request("/webhooks", {
+      url: "https://receiver.example.com/disable-during-decrypt",
+      headers: { Authorization: "synthetic-disable-header" },
+    }));
+    const endpointId = (await created.json() as { webhook: { id: string } }).webhook.id;
+    await durable.fetch(request("/messages", { input: { content: "queued before disable", author: "b", display_name: "Beta", semantic_type: "message" } }));
+    now = 2_000;
+
+    await withPausedFirstWebhookDecrypt(async (started, release) => {
+      const alarm = durable.alarm();
+      await started;
+      const disabled = await durable.fetch(new Request(`https://room/webhooks/${endpointId}/disable`, { method: "POST" }));
+      expect(disabled.status).toBe(200);
+      release();
+      await alarm;
+    });
+
+    expect(outbound).toHaveLength(0);
+  } finally {
+    globalThis.fetch = originalFetch;
+    database.close();
+  }
+});
+
+test.serial("sends the latest encrypted webhook configuration after an update during decryption", async () => {
+  const database = new Database(":memory:");
+  const encryptionKey = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+  const originalFetch = globalThis.fetch;
+  const outbound: Request[] = [];
+  let now = 1_000;
+  globalThis.fetch = (async (input, init) => {
+    outbound.push(new Request(input, init));
+    return new Response(null, { status: 204 });
+  }) as typeof fetch;
+  try {
+    const { room: durable } = await room(database, () => now, { MSG_DATA_ENCRYPTION_KEY_V1: encryptionKey });
+    await durable.fetch(request("/initialize", { management_hash: "hash", initial: { content: "first", author: "a", display_name: "a", semantic_type: "message" } }));
+    const created = await durable.fetch(request("/webhooks", {
+      url: "https://receiver.example.com/update-during-decrypt-old",
+      headers: { Authorization: "synthetic-old-header" },
+      prompt: "old prompt",
+    }));
+    const registration = await created.json() as { secret: string; webhook: { id: string } };
+    await durable.fetch(request("/messages", { input: { content: "queued before update", author: "b", display_name: "Beta", semantic_type: "message" } }));
+    now = 2_000;
+
+    await withPausedFirstWebhookDecrypt(async (started, release) => {
+      const alarm = durable.alarm();
+      await started;
+      const updated = await durable.fetch(new Request(`https://room/webhooks/${registration.webhook.id}`, {
+        body: JSON.stringify({
+          headers: { Authorization: "synthetic-new-header" },
+          prompt: "new exact prompt",
+          url: "https://receiver.example.com/update-during-decrypt-new",
+        }),
+        headers: { "content-type": "application/json" },
+        method: "PATCH",
+      }));
+      expect(updated.status).toBe(200);
+      release();
+      await alarm;
+    });
+
+    expect(outbound).toHaveLength(1);
+    const requestSent = outbound[0]!;
+    const body = await requestSent.clone().text();
+    const timestamp = requestSent.headers.get("x-msg-timestamp")!;
+    expect(requestSent.url).toBe("https://receiver.example.com/update-during-decrypt-new");
+    expect(requestSent.headers.get("authorization")).toBe("synthetic-new-header");
+    expect(JSON.parse(body)).toMatchObject({ prompt: "new exact prompt" });
+    expect(requestSent.headers.get("x-msg-signature")).toBe(await expectedWebhookSignature(registration.secret, timestamp, body));
+  } finally {
+    globalThis.fetch = originalFetch;
     database.close();
   }
 });

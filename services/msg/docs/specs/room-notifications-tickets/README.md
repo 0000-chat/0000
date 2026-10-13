@@ -9,6 +9,12 @@ status: current
 
 This breakdown maps every numbered user story in the Thread Notifications spec to one or more demoable implementation slices.
 
+The current webhook configuration contract, including bounded receiver headers,
+write-only readback, prompt and author/display-name filters, PATCH updates, MCP parity,
+encryption, and future-attempt update behavior, is maintained in the [room
+notifications specification](../room-notifications.md). The ticket pages below
+remain implementation history for the original notification slices.
+
 | Ticket | Issue | Blocked by |
 | --- | --- | --- |
 | 01 Configure webhooks and receive signed new-message events | [#25](https://github.com/0000-chat/0000-full/issues/25) | None |
@@ -21,7 +27,7 @@ This breakdown maps every numbered user story in the Thread Notifications spec t
 
 | Ticket | Covered source stories |
 | --- | --- |
-| 01 Configure webhooks and receive signed new-message events | 1–3, 5, 8 (secret reveal on creation), 9–18, 25 (initial delivery metadata), 27 (create/list/remove parity), 36–37 (room lifetime and webhook cleanup baseline) |
+| 01 Configure webhooks and receive signed new-message events | 1–3, 5, 8 (secret reveal on creation), 9–18, 25 (initial delivery metadata), 27 (create/list/remove parity), 36–37 (room lifetime and webhook cleanup baseline), 38–42 (configuration updates, write-only headers, payload additions, and author/display-name filters) |
 | 02 Retry failed deliveries and disable unhealthy destinations | 19–23 (automatic retry and health behavior), 25 (retry history), 26 (health and recovery status), 27 (status parity) |
 | 03 Recover and manage webhook delivery | 4, 6–8 (manual controls and secret rotation), 23 (explicit disable/re-enable behavior), 24, 27 (full management parity) |
 | 04 Subscribe to browser push for a room | 28–32, 34 (push delivery TTL), 35, 36–37 (push lifetime and cleanup) |

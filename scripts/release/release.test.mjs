@@ -29,9 +29,9 @@ const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url))
 const releaseWorkflow = fs.readFileSync(path.join(repositoryRoot, ".github/workflows/release.yml"), "utf8");
 const legacyGatewayWorkflow = fs.readFileSync(path.join(repositoryRoot, ".github/workflows/deploy-gateway.yml"), "utf8");
 
-test("release configuration activates the Msg and Gateway Workers", () => {
+test("release configuration activates the Msg, Gateway, and Database Workers", () => {
   assert.doesNotThrow(() => assertReleaseConfig(config));
-  assert.deepEqual(config.units.map((unit) => unit.name), ["msg-worker", "gateway"]);
+  assert.deepEqual(config.units.map((unit) => unit.name), ["msg-worker", "gateway", "database-worker"]);
 
   const msg = config.units[0];
   assert.equal(msg.kind, "cloudflare-worker-bundle");
@@ -119,6 +119,56 @@ test("release configuration activates the Msg and Gateway Workers", () => {
     compatibility_flags: ["nodejs_compat"]
   });
   assert.doesNotThrow(() => assertWorkerBuildConfigMatchesSource(gateway, gateway.build, repositoryRoot));
+
+  const database = config.units.find((unit) => unit.name === "database-worker");
+  assert.equal(database.kind, "cloudflare-worker-bundle");
+  assert.deepEqual(database.runtime_paths, [
+    "services/database/src/**",
+    "services/database/package.json",
+    "services/database/tsconfig.json",
+    "services/database/wrangler.jsonc"
+  ]);
+  assert.deepEqual(database.archive_paths, [
+    "services/database/src",
+    "services/database/package.json",
+    "services/database/tsconfig.json",
+    "services/database/wrangler.jsonc"
+  ]);
+  assert.deepEqual(database.build, {
+    type: "cloudflare-worker",
+    config_path: "services/database/wrangler.jsonc",
+    entrypoint: "worker.js",
+    config: "wrangler.json",
+    files: ["worker.js", "wrangler.json", "artifact-manifest.json"],
+    compatibility_date: "2026-09-11",
+    compatibility_flags: ["nodejs_compat"],
+    wrangler: {
+      durable_objects: {
+        bindings: [
+          { name: "DATABASES", class_name: "DatabaseObject" },
+          { name: "REGISTRY", class_name: "DatabaseRegistry" }
+        ]
+      },
+      migrations: [{ tag: "v1", new_sqlite_classes: ["DatabaseObject", "DatabaseRegistry"] }],
+      observability: { enabled: false },
+      vars: {
+        CAPACITY_POLICY_REVISION: "1",
+        CAPACITY_MAX_DATABASES: "32",
+        CAPACITY_MAX_LOGICAL_BYTES: "536870912",
+        CAPACITY_MAX_REPLAY_BYTES: "1073741824",
+        CAPACITY_MAX_PHYSICAL_BYTES: "4294967296",
+        CAPACITY_MAX_PHYSICAL_BYTES_PER_DATABASE: "134217728",
+        CAPACITY_MAX_DAILY_REQUESTS: "50000",
+        CAPACITY_MAX_REQUESTS_PER_MINUTE: "1000",
+        CAPACITY_MAX_DAILY_MUTATIONS: "5000",
+        CAPACITY_MAX_EXPORT_BYTES: "134217728",
+        CAPACITY_MAX_CONTROL_BYTES: "67108864",
+        SERVICE_SUSPENDED: "false"
+      }
+    }
+  });
+  assert.equal(database.archive_paths.some((entry) => /cli|sdk|cloud/i.test(entry)), false);
+  assert.doesNotThrow(() => assertWorkerBuildConfigMatchesSource(database, database.build, repositoryRoot));
 });
 
 test("Msg bundle manifest carries only public deployment metadata", () => {
@@ -192,6 +242,103 @@ test("Gateway bundle manifest and Wrangler config leave route ownership to Cloud
     compatibility_flags: ["nodejs_compat"],
     workers_dev: false
   });
+});
+
+test("Database bundle manifest preserves public policy and SQLite DO deployment metadata", () => {
+  const database = config.units.find((unit) => unit.name === "database-worker");
+  const plan = makePlan({ config, base: head, head, changedFiles: ["services/database/src/worker.ts"] });
+  const manifest = workerArtifactManifest(database, plan);
+  const wrangler = neutralWranglerConfig(database);
+
+  assert.deepEqual(manifest.durable_objects, database.build.wrangler.durable_objects);
+  assert.deepEqual(manifest.migrations, database.build.wrangler.migrations);
+  assert.deepEqual(manifest.vars, database.build.wrangler.vars);
+  assert.deepEqual(wrangler.durable_objects, database.build.wrangler.durable_objects);
+  assert.deepEqual(wrangler.migrations, database.build.wrangler.migrations);
+  assert.deepEqual(wrangler.vars, database.build.wrangler.vars);
+  assert.equal(manifest.name, "database-worker");
+  assert.equal(manifest.required_secrets, undefined);
+  assert.equal(JSON.stringify(manifest).includes("account_id"), false);
+  assert.equal(JSON.stringify(manifest).includes("database.0000.chat"), false);
+  assert.equal(JSON.stringify(manifest).includes("route"), false);
+  assert.equal(JSON.stringify(manifest).includes("secret"), false);
+});
+
+test("Database public policy values reject missing, malformed, and environment-owned fields", () => {
+  const database = config.units.find((unit) => unit.name === "database-worker");
+  const invalidConfigs = [
+    {
+      ...database,
+      build: {
+        ...database.build,
+        wrangler: {
+          ...database.build.wrangler,
+          vars: { ...database.build.wrangler.vars, SERVICE_SUSPENDED: "enabled" },
+        },
+      },
+    },
+    {
+      ...database,
+      build: {
+        ...database.build,
+        wrangler: {
+          ...database.build.wrangler,
+          vars: { ...database.build.wrangler.vars, CAPACITY_MAX_DATABASES: "0" },
+        },
+      },
+    },
+    {
+      ...database,
+      build: {
+        ...database.build,
+        wrangler: {
+          ...database.build.wrangler,
+          vars: { ...database.build.wrangler.vars, CAPACITY_POLICY_REVISION: "01" },
+        },
+      },
+    },
+    {
+      ...database,
+      build: {
+        ...database.build,
+        wrangler: {
+          ...database.build.wrangler,
+          vars: { ...database.build.wrangler.vars, CAPACITY_MAX_CONTROL_BYTES: "9007199254740992" },
+        },
+      },
+    },
+    {
+      ...database,
+      build: {
+        ...database.build,
+        wrangler: {
+          ...database.build.wrangler,
+          vars: Object.fromEntries(
+            Object.entries(database.build.wrangler.vars).filter(([name]) => name !== "CAPACITY_MAX_DATABASES"),
+          ),
+        },
+      },
+    },
+    {
+      ...database,
+      build: {
+        ...database.build,
+        wrangler: {
+          ...database.build.wrangler,
+          vars: { ...database.build.wrangler.vars, CLOUDFLARE_ACCOUNT_ID: "123" },
+        },
+      },
+    },
+  ];
+
+  for (const unit of invalidConfigs) {
+    assert.throws(() =>
+      assertReleaseConfig({
+        ...config,
+        units: config.units.map((candidate) => candidate.name === unit.name ? unit : candidate),
+      }),
+    );
+  }
 });
 
 test("Msg D1 migration metadata is ordered and content-addressed", () => {
@@ -421,12 +568,13 @@ test("Worker changes select their configured release units", () => {
   );
   assert.deepEqual(affectedUnits(config, ["services/msg/cli/src/cli.ts"]), []);
   assert.deepEqual(affectedUnits(config, ["services/gateway/src/worker.ts"]).map((unit) => unit.name), ["gateway"]);
-  assert.deepEqual(affectedUnits(config, ["bun.lock"]).map((unit) => unit.name), ["gateway", "msg-worker"]);
+  assert.deepEqual(affectedUnits(config, ["services/database/src/worker.ts"]).map((unit) => unit.name), ["database-worker"]);
+  assert.deepEqual(affectedUnits(config, ["bun.lock"]).map((unit) => unit.name), ["database-worker", "gateway", "msg-worker"]);
   assert.deepEqual(affectedUnits(config, [".github/workflows/release.yml"]).map((unit) => unit.name), ["msg-worker"]);
 });
 
-test("an additive release-unit registration publishes only its first artifact", () => {
-  const previousConfig = { ...config, units: config.units.filter((unit) => unit.name === "msg-worker") };
+test("the first Database activation publishes only its new artifact", () => {
+  const previousConfig = { ...config, units: config.units.filter((unit) => unit.name !== "database-worker") };
   const plan = makePlan({
     config,
     previousConfig,
@@ -437,20 +585,20 @@ test("an additive release-unit registration publishes only its first artifact", 
 
   assert.equal(plan.change_class, "runtime");
   assert.equal(plan.runtime_redeployment, true);
-  assert.deepEqual(plan.affected_units, ["gateway"]);
-  assert.deepEqual(plan.artifacts.map((artifact) => artifact.name), ["gateway"]);
+  assert.deepEqual(plan.affected_units, ["database-worker"]);
+  assert.deepEqual(plan.artifacts.map((artifact) => artifact.name), ["database-worker"]);
 });
 
 test("unit registration retains simultaneous runtime and global inputs", () => {
-  const previousConfig = { ...config, units: config.units.filter((unit) => unit.name === "msg-worker") };
+  const previousConfig = { ...config, units: config.units.filter((unit) => unit.name !== "database-worker") };
   assert.deepEqual(
     affectedUnits(config, ["release-units.json", "services/msg/worker/src/worker.ts"], previousConfig)
       .map((unit) => unit.name),
-    ["gateway", "msg-worker"]
+    ["database-worker", "msg-worker"]
   );
   assert.deepEqual(
     affectedUnits(config, ["release-units.json", "bun.lock"], previousConfig).map((unit) => unit.name),
-    ["gateway", "msg-worker"]
+    ["database-worker", "gateway", "msg-worker"]
   );
 });
 
@@ -463,7 +611,7 @@ test("changes to existing unit definitions remain conservative", () => {
   };
   assert.deepEqual(
     affectedUnits(config, ["release-units.json"], previousConfig).map((unit) => unit.name),
-    ["gateway", "msg-worker"]
+    ["database-worker", "gateway", "msg-worker"]
   );
 });
 
@@ -471,11 +619,11 @@ test("a release contract change alongside a new unit remains conservative", () =
   const previousConfig = {
     ...config,
     release: { ...config.release, compatibility: { api: "v0", config: "v1" } },
-    units: config.units.filter((unit) => unit.name === "msg-worker")
+    units: config.units.filter((unit) => unit.name !== "database-worker")
   };
   assert.deepEqual(
     affectedUnits(config, ["release-units.json"], previousConfig).map((unit) => unit.name),
-    ["gateway", "msg-worker"]
+    ["database-worker", "gateway", "msg-worker"]
   );
 });
 
@@ -506,7 +654,7 @@ test("Git changed path discovery includes deletions", () => {
 
 test("release planner reads the unit map from the push base commit", () => {
   let received;
-  const previousConfig = { ...config, units: config.units.filter((unit) => unit.name === "msg-worker") };
+  const previousConfig = { ...config, units: config.units.filter((unit) => unit.name !== "database-worker") };
   const result = readBaseReleaseConfig(head, (...args) => {
     received = args;
     return JSON.stringify(previousConfig);
@@ -521,7 +669,7 @@ test("release planner reads the unit map from the push base commit", () => {
   assert.deepEqual(
     affectedUnits(config, ["release-units.json"], readBaseReleaseConfig(head, () => "not json"))
       .map((unit) => unit.name),
-    ["gateway", "msg-worker"]
+    ["database-worker", "gateway", "msg-worker"]
   );
 });
 
@@ -575,7 +723,8 @@ test("validation-only service changes create a record without Cloud dispatch", (
   for (const changedFile of [
     "services/brain/0000-product.json",
     "services/platform/scripts/check",
-    "services/database/package.json",
+    "services/database/scripts/check",
+    "services/database/test/durable.spec.ts",
     "services/platform/docs/README.md"
   ]) {
     const plan = makePlan({ config, base: head, head, changedFiles: [changedFile] });
@@ -586,8 +735,8 @@ test("validation-only service changes create a record without Cloud dispatch", (
   }
 });
 
-test("unmapped scaffold and app runtime changes fail closed", () => {
-  for (const service of ["platform", "database", "brain"]) {
+test("unmapped service and app runtime changes fail closed", () => {
+  for (const service of ["platform", "brain"]) {
     for (const runtimePath of ["src/index.ts", "config/runtime.json", "migrations/0001_init.sql"]) {
       assert.throws(
         () => makePlan({ config, base: head, head, changedFiles: [`services/${service}/${runtimePath}`] }),
@@ -595,6 +744,16 @@ test("unmapped scaffold and app runtime changes fail closed", () => {
       );
     }
   }
+  for (const runtimePath of ["config/runtime.json", "migrations/0001_init.sql"]) {
+    assert.throws(
+      () => makePlan({ config, base: head, head, changedFiles: [`services/database/${runtimePath}`] }),
+      /unmapped runtime changes require an explicit release unit before merge/
+    );
+  }
+  assert.deepEqual(
+    makePlan({ config, base: head, head, changedFiles: ["services/database/src/index.ts"] }).affected_units,
+    ["database-worker"]
+  );
   assert.throws(
     () => makePlan({ config, base: head, head, changedFiles: ["apps/0000/src/index.ts"] }),
     /unmapped runtime changes require an explicit release unit before merge/
@@ -840,6 +999,36 @@ test("release records retain exact Msg artifact and Cloud selection", () => {
     { name: "hashed-icon.svg", type: "Text", digest: `sha256:${"m".repeat(64)}` }
   ]);
   assert.equal(record.publication_policy.production_deployment, false);
+});
+
+test("Database release records carry only finite public capacity policy", () => {
+  const database = config.units.find((unit) => unit.name === "database-worker");
+  const plan = makePlan({ config, base: head, head, changedFiles: ["services/database/src/worker.ts"] });
+  const vars = database.build.wrangler.vars;
+  const record = createReleaseRecord(plan, [{
+    name: database.name,
+    version: plan.release_version,
+    kind: database.kind,
+    media_type: "application/gzip",
+    asset_name: `database-worker-${plan.release_version}.tar.gz`,
+    digest: `sha256:${"d".repeat(64)}`,
+    compatibility: config.release.compatibility,
+    source_commit: head,
+    archive_paths: database.archive_paths,
+    artifact_format: "0000-cloudflare-worker-bundle-v1",
+    entrypoint: "worker.js",
+    config: "wrangler.json",
+    files: ["worker.js", "wrangler.json", "artifact-manifest.json"],
+    vars
+  }]);
+
+  assert.deepEqual(record.artifacts[0].vars, vars);
+  assert.equal(Object.keys(vars).some((name) => /account|domain|secret|token|route/i.test(name)), false);
+  assert.equal(Object.values(vars).every((value) => typeof value === "string"), true);
+  for (const [name, value] of Object.entries(vars)) {
+    if (name !== "SERVICE_SUSPENDED") assert.match(value, /^[1-9][0-9]*$/);
+  }
+  assert.equal(vars.SERVICE_SUSPENDED, "false");
 });
 
 test("Cloud event carries exact Msg artifact and attestation provenance", () => {

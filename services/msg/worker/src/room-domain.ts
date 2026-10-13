@@ -11,6 +11,9 @@ export const ROOM_LIMITS = {
   tombstoneTtlMs: 24 * 60 * 60 * 1000,
 } as const;
 
+/** Temporary operational switch; the seven-day deadline remains recorded while disabled. */
+export const ROOM_EXPIRY_ENABLED = false;
+
 /** Permits JSON field overhead while the normalized content stays at 64 KiB. */
 export const MAX_ROOM_REQUEST_BYTES = ROOM_LIMITS.maxMessageBytes + 8 * 1024;
 export const MAX_READ_MESSAGE_BYTES = 128 * 1024;
@@ -29,6 +32,7 @@ export const RETENTION_POLICY = "sliding_inactivity" as const;
 
 export interface RetentionMetadata {
   readonly expires_at: string;
+  readonly expiry_enabled: boolean;
   readonly inactivity_window_ms: number;
   readonly mode: typeof RETENTION_MODE;
   readonly policy: typeof RETENTION_POLICY;
@@ -204,9 +208,10 @@ export function parseRetentionExtension(value: unknown): RetentionExtensionInput
   return { client_retry_id: clientRetryId, expires_at: new Date(expiresAtMs).toISOString(), expires_at_ms: expiresAtMs };
 }
 
-export function retentionMetadata(expiresAt: number | string, inactivityWindowMs: number): RetentionMetadata {
+export function retentionMetadata(expiresAt: number | string, inactivityWindowMs: number, expiryEnabled = ROOM_EXPIRY_ENABLED): RetentionMetadata {
   return {
     expires_at: typeof expiresAt === "number" ? new Date(expiresAt).toISOString() : expiresAt,
+    expiry_enabled: expiryEnabled,
     inactivity_window_ms: inactivityWindowMs,
     mode: RETENTION_MODE,
     policy: RETENTION_POLICY,
