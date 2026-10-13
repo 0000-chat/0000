@@ -1,6 +1,9 @@
 import { Hono } from "hono";
 import { describe, expect, it } from "vitest";
-import { dispatchClaimHandlerAt } from "../../outbound/dispatch-claim-route";
+import {
+  dispatchClaimHandler,
+  dispatchClaimHandlerAt,
+} from "../../outbound/dispatch-claim-route";
 
 const secret = "dispatch-claim-test-secret-012345";
 const workerNow = new Date("2026-09-14T00:00:00.000Z");
@@ -12,8 +15,15 @@ const environment = {
 
 const app = new Hono<{ Bindings: typeof environment }>();
 app.post("/claims", (context) =>
-  dispatchClaimHandlerAt(context, () => workerNow),
+  dispatchClaimHandlerAt(context, () => workerNow, {
+    // This direct component fixture intentionally opts into the retired
+    // transport-secret branch; the exported deployed handler never does.
+    allowLegacyGatewaySecret: true,
+  }),
 );
+
+const deployedApp = new Hono<{ Bindings: typeof environment }>();
+deployedApp.post("/claims", dispatchClaimHandler);
 
 const messageClaim = (overrides: Record<string, unknown> = {}) => ({
   schema_version: 1,
@@ -58,6 +68,25 @@ const request = (body: BodyInit, headers: Record<string, string> = {}) =>
   );
 
 describe("private dispatch claim route", () => {
+  it("does not revive the retired transport-secret inbound path", async () => {
+    const response = await deployedApp.request(
+      "https://control-plane.test/claims",
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${secret}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(messageClaim()),
+      },
+      environment,
+    );
+    expect(response.status).toBe(503);
+    await expect(response.json()).resolves.toEqual({
+      error: "service_unavailable",
+    });
+  });
+
   it("anchors the requested claim window to the Worker clock", async () => {
     const stale = await request(
       JSON.stringify(

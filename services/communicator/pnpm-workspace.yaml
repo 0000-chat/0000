@@ -3,3 +3,5 @@ packages:
   - 'packages/*'
   - 'workers/*'
   - 'services/*'
+  - '../../packages/contracts'
+  - '../../packages/platform-client'

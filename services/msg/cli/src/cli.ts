@@ -18,6 +18,7 @@ export interface CliDependencies {
   readonly generatedClientMessageId?: () => string;
   readonly readStdin?: (signal?: AbortSignal) => Promise<string>;
   readonly signal?: AbortSignal;
+  readonly serviceOrigin?: string;
   readonly sleep?: (delayMs: number, signal?: AbortSignal) => Promise<void>;
   readonly stderr: (text: string) => void;
   readonly stdinIsTTY?: boolean;
@@ -28,7 +29,7 @@ export interface CliDependencies {
 
 export async function runCli(args: readonly string[], dependencies: CliDependencies): Promise<number> {
   if (args.length === 1 && args[0] === "--help") {
-    dependencies.stdout("Usage: msg join <conversation-url> [--after N] [--limit N] [--through N]\nUsage: msg message <conversation-url> <stored-id>\nUsage: msg export <conversation-url> [--format json|markdown]\nUsage: msg post <conversation-url> --author <author> [--display-name <display-name>] [--name-password <password>] [--content <content>] [--client-message-id <id>] [--based-on-sequence N]\nUsage: msg wait <conversation-url> --after <nonnegative integer> [--timeout <positive duration up to 5m; default 60s>]\nUsage: msg retention <management-url> inspect | extend\nUsage: msg webhooks <conversation-url> list | create <https-url> | remove <endpoint-id> | disable <endpoint-id> | enable <endpoint-id> | rotate <endpoint-id> | redeliver <endpoint-id> <event-id>\nUsage: msg coordination <conversation-url> overview | panel [--revision N] | panel-history [--after N --limit N --through N] | proposals [--after N --limit N --through N] | proposal <proposal-id> [--revision N] | requests [--after N --limit N --through N --owner-label LABEL --status STATUS] | request <request-id> [--after N --limit N --through N] | decisions [--after N --limit N --through N] | decision <decision-id> [--after N --limit N --through N] | decision-record <decision-id> <accepted-record-id> | publication <published-revision> | corrections [selectors] | correction <correction-id> | disputes [selectors] | dispute <report-id> [selectors] | supersessions [selectors]\nUsage: msg coordination <conversation-url> propose | correct | supersede | report | revise <proposal-id>\nUsage: msg coordination review <management-coordination-url> <report-id>\nUsage: msg coordination publish <management-coordination-url>\nStructured coordination mutations read one JSON object from standard input. Retention extension reads one JSON object from standard input.\n");
+    dependencies.stdout("Usage: msg join <conversation-url> [--after N] [--limit N] [--through N] [--recover]\nUsage: msg message <conversation-url> <stored-id>\nUsage: msg export <conversation-url> [--format json|markdown]\nUsage: msg post <conversation-url> --author <author> [--display-name <display-name>] [--name-password <password>] [--content <content>] [--client-message-id <id>] [--based-on-sequence N]\nUsage: msg wait <conversation-url> --after <nonnegative integer> [--timeout <positive duration up to 5m; default 60s>]\nUsage: msg retention <management-url> inspect | extend\nUsage: msg webhooks <conversation-url> list | create <https-url> | remove <endpoint-id> | disable <endpoint-id> | enable <endpoint-id> | rotate <endpoint-id> | redeliver <endpoint-id> <event-id>\nUsage: msg coordination <conversation-url> overview | panel [--revision N] | panel-history [--after N --limit N --through N] | proposals [--after N --limit N --through N] | proposal <proposal-id> [--revision N] | requests [--after N --limit N --through N --owner-label LABEL --status STATUS] | request <request-id> [--after N --limit N --through N] | decisions [--after N --limit N --through N] | decision <decision-id> [--after N --limit N --through N] | decision-record <decision-id> <accepted-record-id> | publication <published-revision> | corrections [selectors] | correction <correction-id> | disputes [selectors] | dispute <report-id> [selectors] | supersessions [selectors]\nUsage: msg coordination <conversation-url> propose | correct | supersede | report | revise <proposal-id>\nUsage: msg coordination review <management-coordination-url> <report-id>\nUsage: msg coordination publish <management-coordination-url>\nStructured coordination mutations read one JSON object from standard input. Retention extension reads one JSON object from standard input.\n");
     return 0;
   }
   if (args.length === 1 && args[0] === "--version") {
@@ -37,11 +38,12 @@ export async function runCli(args: readonly string[], dependencies: CliDependenc
   }
   try {
     if (args[0] === "join") {
-      const command = parseJoinCommand(args);
+      const command = parseJoinCommand(args, dependencies.serviceOrigin);
       dependencies.stdout(await joinConversation({
         ...command,
         fetch: dependencies.fetch,
         signal: dependencies.signal,
+        serviceOrigin: dependencies.serviceOrigin,
       }));
       return 0;
     }
@@ -62,7 +64,7 @@ export async function runCli(args: readonly string[], dependencies: CliDependenc
       return 0;
     }
     if (args[0] === "post") {
-      const command = parsePostCommand(args);
+      const command = parsePostCommand(args, dependencies.serviceOrigin);
       const postDependencies = postRuntimeDependencies(dependencies);
       if (dependencies.signal?.aborted) throw new PostSignalError();
       let content: string;
@@ -81,6 +83,7 @@ export async function runCli(args: readonly string[], dependencies: CliDependenc
         content,
         fetch: dependencies.fetch,
         signal: dependencies.signal,
+        serviceOrigin: dependencies.serviceOrigin,
         ...postDependencies,
         status: (text: string) => dependencies.stderr(`${text}\n`),
       });
@@ -88,8 +91,8 @@ export async function runCli(args: readonly string[], dependencies: CliDependenc
       return 0;
     }
     if (args[0] === "webhooks") {
-      const command = parseWebhooksCommand(args);
-      const response = await manageWebhooks({ ...command, fetch: dependencies.fetch, signal: dependencies.signal });
+      const command = parseWebhooksCommand(args, dependencies.serviceOrigin);
+      const response = await manageWebhooks({ ...command, fetch: dependencies.fetch, serviceOrigin: dependencies.serviceOrigin, signal: dependencies.signal });
       dependencies.stdout(`${JSON.stringify(response)}\n`);
       return 0;
     }
@@ -106,10 +109,11 @@ export async function runCli(args: readonly string[], dependencies: CliDependenc
       dependencies.stdout(`${JSON.stringify(response)}\n`);
       return 0;
     }
-    const command = parseWaitCommand(args);
+    const command = parseWaitCommand(args, dependencies.serviceOrigin);
     const result = await waitForMessages({
       ...command,
       ...dependencies,
+      serviceOrigin: dependencies.serviceOrigin,
       status: (text: string) => dependencies.stderr(`${text}\n`),
     } as WaitOptions);
     dependencies.stdout(`${JSON.stringify(waitEnvelope(command, result))}\n`);

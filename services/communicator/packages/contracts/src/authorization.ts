@@ -36,6 +36,16 @@ export const AuthorizedIdentitySchema = z
 
 export const SessionResponseSchema = z
   .object({
+    /**
+     * Service-owned immutable bridge to the currently verified Platform
+     * principal.  It is safe to expose to the browser because it identifies
+     * an authorization context and never carries credential material.
+     *
+     * Optional for the legacy fixture resolver so imported component tests can
+     * continue to exercise local directory behavior in isolation.  All
+     * Platform-backed sessions populated by the Worker include it.
+     */
+    binding_id: CommunicatorIdSchema.optional(),
     tenant: z
       .object({
         id: CommunicatorIdSchema,

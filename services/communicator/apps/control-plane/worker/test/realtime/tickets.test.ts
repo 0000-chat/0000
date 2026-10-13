@@ -184,6 +184,7 @@ describe("digest-only realtime ticket storage", () => {
       "expires_at",
       "expires_at_ms",
       "membership_id",
+      "platform_json",
       "principal_id",
       "resume_json",
       "subscriptions_json",

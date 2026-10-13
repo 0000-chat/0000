@@ -33,11 +33,13 @@ export interface JoinCommand {
   readonly after?: number;
   readonly conversationUrl: string;
   readonly limit?: number;
+  readonly recover?: true;
   readonly through?: number;
 }
 
 export interface JoinOptions extends JoinCommand {
   readonly fetch: typeof globalThis.fetch;
+  readonly serviceOrigin?: string;
   readonly signal?: AbortSignal;
 }
 
@@ -45,14 +47,21 @@ export class JoinSignalError extends Error {
   constructor() { super("The msg join was interrupted."); }
 }
 
-export function parseJoinCommand(args: readonly string[]): JoinCommand {
+export function parseJoinCommand(args: readonly string[], serviceOrigin?: string): JoinCommand {
   if (args.length < 2 || args[0] !== "join") throw new Error(joinUsage());
-  const command: { after?: number; conversationUrl: string; limit?: number; through?: number } = {
-    conversationUrl: validateConversationUrl(args[1] ?? ""),
+  const command: { after?: number; conversationUrl: string; limit?: number; recover?: true; through?: number } = {
+    conversationUrl: validateConversationUrl(args[1] ?? "", serviceOrigin),
   };
   const seen = new Set<string>();
-  for (let index = 2; index < args.length; index += 2) {
+  for (let index = 2; index < args.length;) {
     const name = args[index];
+    if (name === "--recover") {
+      if (seen.has(name)) throw new Error(joinUsage());
+      seen.add(name);
+      command.recover = true;
+      index += 1;
+      continue;
+    }
     const value = args[index + 1];
     if ((name !== "--after" && name !== "--limit" && name !== "--through") || value === undefined || seen.has(name)) {
       throw new Error(joinUsage());
@@ -61,15 +70,17 @@ export function parseJoinCommand(args: readonly string[]): JoinCommand {
     if (name === "--after") command.after = parseNonnegativeInteger(value, "--after");
     else if (name === "--limit") command.limit = parseLimit(value);
     else command.through = parseNonnegativeInteger(value, "--through");
+    index += 2;
   }
   return command;
 }
 
 export async function joinConversation(options: JoinOptions): Promise<string> {
-  const conversationUrl = validateConversationUrl(options.conversationUrl);
+  const conversationUrl = validateConversationUrl(options.conversationUrl, options.serviceOrigin);
   if (options.signal?.aborted) throw new JoinSignalError();
   const endpoint = new URL(conversationUrl);
   endpoint.pathname = `${endpoint.pathname}/agent`;
+  if (options.recover) endpoint.searchParams.set("recover", "1");
   if (options.after !== undefined) endpoint.searchParams.set("after", String(options.after));
   endpoint.searchParams.set("limit", String(options.limit ?? DEFAULT_JOIN_LIMIT));
   if (options.through !== undefined) endpoint.searchParams.set("through", String(options.through));
@@ -219,7 +230,7 @@ function renderJoin(value: AgentRepresentation, command: JoinCommand): string {
 }
 
 function joinUsage(): string {
-  return "Usage: msg join <conversation-url> [--after N] [--limit N] [--through N]";
+  return "Usage: msg join <conversation-url> [--after N] [--limit N] [--through N] [--recover]";
 }
 
 function parseNonnegativeInteger(value: string, flag: string): number {

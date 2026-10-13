@@ -6,6 +6,7 @@ pub mod authority;
 pub mod batch;
 pub mod canonical;
 pub mod config;
+pub mod credentials;
 pub mod crypto;
 pub mod crypto_outbox;
 pub mod health;

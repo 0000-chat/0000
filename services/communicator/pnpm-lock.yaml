@@ -8,8 +8,30 @@ importers:
 
   .: {}
 
+  ../../packages/contracts:
+    devDependencies:
+      typescript:
+        specifier: 7.0.2
+        version: 7.0.2
+
+  ../../packages/platform-client:
+    dependencies:
+      '@0000/contracts':
+        specifier: workspace:*
+        version: link:../contracts
+    devDependencies:
+      typescript:
+        specifier: 7.0.2
+        version: 7.0.2
+
   apps/control-plane:
     dependencies:
+      '@0000/contracts':
+        specifier: workspace:*
+        version: link:../../../../packages/contracts
+      '@0000/platform-client':
+        specifier: workspace:*
+        version: link:../../../../packages/platform-client
       '@communicator/contracts':
         specifier: workspace:*
         version: link:../../packages/contracts
