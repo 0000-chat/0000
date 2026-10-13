@@ -13,7 +13,8 @@ const simulatedBuild = runtimeRealtimeClient !== null;
 
 export function SystemPage() {
   const queryClient = useQueryClient();
-  const { session, activeIdentity } = useIdentityContext();
+  const { session, activeIdentity, authStatus } = useIdentityContext();
+  const protectedApiReady = authStatus === "authenticated";
   const realtime = runtimeRealtimeClient;
   const [realtimeStatus, setRealtimeStatus] = useState<RealtimeStatus>(
     realtime?.status ?? "idle",
@@ -29,11 +30,16 @@ export function SystemPage() {
   const connectionsQuery = useQuery({
     queryKey: queryKeys.connections(identityId),
     queryFn: () => apiClient.getConnections(identityId),
-    enabled: Boolean(identityId),
+    enabled: Boolean(identityId && protectedApiReady),
   });
 
   useEffect(() => {
-    if (!realtime || !session || !activeIdentity) {
+    if (
+      !realtime ||
+      !session ||
+      !activeIdentity ||
+      authStatus !== "authenticated"
+    ) {
       realtime?.close();
       setRealtimeStatus("idle");
       return;
@@ -56,7 +62,13 @@ export function SystemPage() {
       unsubscribeStatus();
       realtime.close();
     };
-  }, [activeIdentity?.id, realtime, session?.principal.id, session?.tenant.id]);
+  }, [
+    activeIdentity?.id,
+    authStatus,
+    realtime,
+    session?.principal.id,
+    session?.tenant.id,
+  ]);
 
   const resetScenario = async () => {
     const resetResponse = await apiClient.resetSimulation();
@@ -114,6 +126,7 @@ export function SystemPage() {
           <Button
             type="button"
             className="mt-3"
+            disabled={authStatus !== "authenticated"}
             onClick={() => void resetScenario()}
           >
             Reset simulated scenario

@@ -52,13 +52,6 @@ pub const PRODUCER_VERSION: &str = concat!("matrix-gateway/", env!("CARGO_PKG_VE
 
 const CONFIG_INVALID: &str = "config_invalid";
 
-/// The OAuth client authentication method accepted by the gateway.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum OAuthClientAuthMethod {
-    Basic,
-    Post,
-}
-
 /// Parsed and semantically validated gateway configuration.
 ///
 /// Values are private so callers cannot construct an unchecked configuration
@@ -71,13 +64,10 @@ pub struct GatewayConfig {
     matrix_store_dir: PathBuf,
     state_db_path: PathBuf,
     ingestion_base_url: String,
-    oauth_token_url: String,
-    oauth_client_id: String,
-    oauth_client_auth_method: OAuthClientAuthMethod,
+    ingestion_service_credential_file: PathBuf,
     matrix_password_file: PathBuf,
     matrix_store_passphrase_file: PathBuf,
     state_key_file: PathBuf,
-    oauth_client_secret_file: PathBuf,
     request_timeout_secs: u64,
     sync_timeout_secs: u64,
     provisioning: Option<ProvisioningConfig>,
@@ -91,6 +81,7 @@ pub struct ProvisioningConfig {
     listen_addr: SocketAddr,
     bridge_url: String,
     authority_base_url: String,
+    authority_service_credential_file: PathBuf,
     bridge_shared_secret_file: PathBuf,
     gateway_shared_secret_file: PathBuf,
     matrix_user_id: String,
@@ -112,24 +103,6 @@ impl fmt::Debug for GatewayConfig {
 }
 
 #[derive(Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum RawOAuthClientAuthMethod {
-    #[serde(rename = "client_secret_basic")]
-    Basic,
-    #[serde(rename = "client_secret_post")]
-    Post,
-}
-
-impl From<RawOAuthClientAuthMethod> for OAuthClientAuthMethod {
-    fn from(method: RawOAuthClientAuthMethod) -> Self {
-        match method {
-            RawOAuthClientAuthMethod::Basic => Self::Basic,
-            RawOAuthClientAuthMethod::Post => Self::Post,
-        }
-    }
-}
-
-#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawGatewayConfig {
     homeserver_url: String,
@@ -137,13 +110,10 @@ struct RawGatewayConfig {
     matrix_store_dir: PathBuf,
     state_db_path: PathBuf,
     ingestion_base_url: String,
-    oauth_token_url: String,
-    oauth_client_id: String,
-    oauth_client_auth_method: RawOAuthClientAuthMethod,
+    ingestion_service_credential_file: PathBuf,
     matrix_password_file: PathBuf,
     matrix_store_passphrase_file: PathBuf,
     state_key_file: PathBuf,
-    oauth_client_secret_file: PathBuf,
     request_timeout_secs: u64,
     sync_timeout_secs: u64,
     #[serde(default)]
@@ -156,6 +126,7 @@ struct RawProvisioningConfig {
     listen_addr: String,
     bridge_url: String,
     authority_base_url: String,
+    authority_service_credential_file: PathBuf,
     bridge_shared_secret_file: PathBuf,
     gateway_shared_secret_file: PathBuf,
     matrix_user_id: String,
@@ -224,13 +195,10 @@ impl GatewayConfig {
             matrix_store_dir: raw.matrix_store_dir,
             state_db_path: raw.state_db_path,
             ingestion_base_url: raw.ingestion_base_url,
-            oauth_token_url: raw.oauth_token_url,
-            oauth_client_id: raw.oauth_client_id,
-            oauth_client_auth_method: raw.oauth_client_auth_method.into(),
+            ingestion_service_credential_file: raw.ingestion_service_credential_file,
             matrix_password_file: raw.matrix_password_file,
             matrix_store_passphrase_file: raw.matrix_store_passphrase_file,
             state_key_file: raw.state_key_file,
-            oauth_client_secret_file: raw.oauth_client_secret_file,
             request_timeout_secs: raw.request_timeout_secs,
             sync_timeout_secs: raw.sync_timeout_secs,
             provisioning: raw
@@ -246,15 +214,13 @@ impl GatewayConfig {
     pub fn validate(&self) -> Result<(), ConfigError> {
         validate_internal_homeserver(&self.homeserver_url)?;
         validate_https_endpoint(&self.ingestion_base_url)?;
-        validate_https_endpoint(&self.oauth_token_url)?;
         validate_matrix_user_id(&self.matrix_user_id)?;
         validate_path(&self.matrix_store_dir)?;
         validate_path(&self.state_db_path)?;
         validate_path(&self.matrix_password_file)?;
         validate_path(&self.matrix_store_passphrase_file)?;
         validate_path(&self.state_key_file)?;
-        validate_path(&self.oauth_client_secret_file)?;
-        validate_text(&self.oauth_client_id)?;
+        validate_path(&self.ingestion_service_credential_file)?;
         if self.request_timeout_secs == 0 || self.request_timeout_secs > MAX_REQUEST_TIMEOUT_SECS {
             return Err(ConfigError::invalid());
         }
@@ -292,19 +258,10 @@ impl GatewayConfig {
         &self.ingestion_base_url
     }
 
-    /// Return the OAuth token URL.
-    pub fn oauth_token_url(&self) -> &str {
-        &self.oauth_token_url
-    }
-
-    /// Return the OAuth client ID.
-    pub fn oauth_client_id(&self) -> &str {
-        &self.oauth_client_id
-    }
-
-    /// Return the OAuth client authentication method.
-    pub const fn oauth_client_auth_method(&self) -> OAuthClientAuthMethod {
-        self.oauth_client_auth_method
+    /// Return the protected file containing the provisioned ingestion
+    /// service credential.
+    pub fn ingestion_service_credential_file(&self) -> &Path {
+        &self.ingestion_service_credential_file
     }
 
     /// Return the Matrix password file path.
@@ -320,11 +277,6 @@ impl GatewayConfig {
     /// Return the gateway state-key file path.
     pub fn state_key_file(&self) -> &Path {
         &self.state_key_file
-    }
-
-    /// Return the OAuth client-secret file path.
-    pub fn oauth_client_secret_file(&self) -> &Path {
-        &self.oauth_client_secret_file
     }
 
     /// Return the request timeout in seconds.
@@ -363,6 +315,7 @@ impl ProvisioningConfig {
             listen_addr,
             bridge_url: raw.bridge_url,
             authority_base_url: raw.authority_base_url,
+            authority_service_credential_file: raw.authority_service_credential_file,
             bridge_shared_secret_file: raw.bridge_shared_secret_file,
             gateway_shared_secret_file: raw.gateway_shared_secret_file,
             matrix_user_id: raw.matrix_user_id,
@@ -380,6 +333,7 @@ impl ProvisioningConfig {
         }
         validate_https_root_endpoint(&self.bridge_url)?;
         validate_https_root_endpoint(&self.authority_base_url)?;
+        validate_path(&self.authority_service_credential_file)?;
         validate_path(&self.bridge_shared_secret_file)?;
         validate_path(&self.gateway_shared_secret_file)?;
         validate_matrix_user_id(&self.matrix_user_id)?;
@@ -402,6 +356,12 @@ impl ProvisioningConfig {
     /// Return the HTTPS root URL for the private Worker authority endpoint.
     pub fn authority_base_url(&self) -> &str {
         &self.authority_base_url
+    }
+
+    /// Return the protected file containing the provisioned outbound claim
+    /// service credential.
+    pub fn authority_service_credential_file(&self) -> &Path {
+        &self.authority_service_credential_file
     }
 
     /// Return the protected bridge shared-secret path.

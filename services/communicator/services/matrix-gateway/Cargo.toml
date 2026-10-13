@@ -6,6 +6,10 @@ edition = "2024"
 [lib]
 path = "src/lib.rs"
 
+[features]
+default = []
+loopback-test = []
+
 [[bin]]
 name = "communicator-matrix-gateway"
 path = "src/main.rs"

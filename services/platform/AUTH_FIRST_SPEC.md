@@ -5,13 +5,86 @@ status: current
 
 # Platform authentication MVP
 
-Date: 2026-09-18. Status: agreed MVP design, not implemented.
+Date: 2026-09-20. Status: agreed MVP design; T01 through T05 reviewed and verified
+on the aggregate; T14 reconnect fixture reviewed and verified at `166e54d`;
+T05 verified at `10d31c8`; T07 refresh and installation controls reviewed and
+verified at `1d519cd`; full MVP not accepted.
+
+The bounded T11 service-principal runtime prerequisite is reviewed and verified
+at aggregate `cb89383` on the existing organization-owned machine lifecycle, recorded in
+[T11_SERVICE_PRINCIPAL_REPORT.md](T11_SERVICE_PRINCIPAL_REPORT.md). Its
+immutable machine kind, fixed-kind management routes, current verification,
+and shared-client evidence pass thirteen Worker/D1 files and fifty-two tests,
+persistence/refresh restart and the actual Platform-to-msg boundary. The
+[T11 browser report](T11_BROWSER_REPORT.md) records the separate first-party
+human browser purpose and shared transport proof through a real Worker/D1
+consumer fixture and Chromium. Communicator adoption, deployment provisioning
+and full T11 consumer acceptance remain open.
+
+The Communicator local-binding prerequisite is reviewed and verified with
+actual D1, including immutable history under replacement and exact current
+local-state resolution. [T11_BINDINGS_REPORT.md](T11_BINDINGS_REPORT.md) records
+the bounded evidence; registered consumer routes and full adoption remain open.
+
+The Matrix gateway caller prerequisite now uses protected finite ingestion and
+claim credentials with separate transport secrets. A 401 stops automatic
+delivery and preserves the pending batch for explicit credential replacement
+and restart. [T11_MATRIX_CALLER_REPORT.md](T11_MATRIX_CALLER_REPORT.md) records
+the reviewed coordinator/store/protected-file evidence and its limits; actual
+Rust-to-Platform-to-Communicator acceptance is still required.
 
 [README.md](README.md) defines Platform's ownership. This specification records
-the agreed product and security decisions for the first implementation.
+the agreed product and security decisions for the implementation.
 Implementation details marked for validation must be proven against the selected
-Better Auth version and Workers/D1 runtime. The current Platform, contracts and
-client are scaffolds; the design below is not a claim of working authentication.
+Better Auth version and Workers/D1 runtime. [T01_RUNTIME_REPORT.md](T01_RUNTIME_REPORT.md)
+records the T01 investigation; [T02_ACCOUNT_REPORT.md](T02_ACCOUNT_REPORT.md)
+records local evidence for the initial account slice. [T03_ORGANIZATION_REPORT.md](T03_ORGANIZATION_REPORT.md)
+records the organization and lifecycle slice, reviewed and verified on the
+aggregate at `c51d285`. [T04_CREDENTIAL_REPORT.md](T04_CREDENTIAL_REPORT.md)
+records the bounded human credential, service registration and two-audience
+fixture evidence, reviewed and verified at aggregate `dc30cd4`. [T05_AGENT_REPORT.md](T05_AGENT_REPORT.md)
+records the local organization-owned agent and per-audience grant evidence,
+reviewed and independently verified at aggregate `10d31c8`. The evidence
+does not complete the design's acceptance gates
+or establish production authentication.
+
+[SIGNUP_RECOVERY_REPORT.md](SIGNUP_RECOVERY_REPORT.md) records the reviewed
+interrupted-signup repair, integrated and independently verified at `54fc212`.
+Combined checks pass eight Worker/D1 files/twenty tests and both guest/resource
+and actual human runtime restart probes with simulated provider HTTP.
+
+[T08_GUEST_REPORT.md](T08_GUEST_REPORT.md) and
+[GUEST_PERMISSION_REPORT.md](GUEST_PERMISSION_REPORT.md) record the reviewed
+guest lifecycle and independent resource permissions, integrated at `ddf93ad`.
+The integrated tree matches the independently tested checkpoint: ten Worker/D1
+files, twenty-seven tests, format/typecheck and restart persistence pass.
+Native reviews and a bounded Grok adversarial review found no confirmed defect.
+Msg adoption, management access and exact grant-to-local-permission binding are
+reviewed and verified at `be5b001`; [the msg report](../msg/T09_PLATFORM_AUTH_REPORT.md)
+records the actual Worker/D1-to-Worker/DO evidence. Parent combined checks pass
+59 boundary assertions, the full msg package and Platform's 32 tests plus
+restart. Independent Chromium flows pass. Final review's CLI recovery,
+credential-persistence race and live-socket corrections are verified.
+Atomic ownership claims are reviewed and integrated at `c54d884`;
+[the claim report](../msg/T10_CLAIM_REPORT.md) records 83 actual boundary
+assertions, deterministic expiry and claim/renewal race evidence, and the
+explicitly local Database-style contract fixture. Parent full msg checks pass;
+native and bounded adversarial reviews found no remaining confirmed defect.
+Msg quota configuration and enforcement are reviewed and integrated at `4242217`;
+[the quota report](../msg/T13_QUOTA_REPORT.md) records actual managed/self-host
+binding thresholds and fresh Platform guest non-reset evidence. Parent combined
+checks pass 198 Worker tests, 20 tooling tests, 66 CLI tests and build/pack,
+including executed missing/failed production binding checks. Private Cloud
+configuration publication and Communicator adoption remain separate gates.
+
+The shared-client transport portion of T12 is integrated at `82e6181` with
+independently verified deadlines, late-result suppression and redirect refusal.
+Twelve client tests and twenty-seven Worker/D1 tests plus restart pass; native
+and bounded adversarial reviews accepted this slice. The [T12 server safeguards
+report](T12_SERVER_SAFEGUARDS_REPORT.md) records the native endpoint policy,
+finite protected-request deadline and allowlisted diagnostics implemented in
+Platform. The actual Communicator consumer boundary and full T12 acceptance
+remain required.
 
 ## MVP outcome and deployment
 
@@ -21,11 +94,34 @@ harnesses, CLI or MCP clients without requiring Spaces or the full product UI.
 The managed full product uses the same Platform accounts and organizations, and
 adds its own Spaces, threads, agent control and application UI.
 
+A standalone product composition runs its own Platform with the selected
+service. The service keeps its direct API and may publish its own MCP tools at
+its service-owned `/mcp` path. The public topology contract uses
+`https://<service>.0000.chat/mcp` for first-party service surfaces. Gateway is
+an optional common entry for callers that want one catalog across services;
+its target addresses are `https://0000.chat/mcp` and
+`https://gateway.0000.chat/mcp`. It does not replace Platform identity or the
+service's resource authorization. Gateway applies its own Access Profile and
+Connection grants in addition to the target service's resource ACL. An
+external MCP client can use a service directly when that service offers MCP,
+or use Gateway when its tools are available there. Platform owns identity and
+credential authority and does not expose a Platform-owned MCP endpoint. This
+MVP does not make Gateway integration an acceptance gate. Gateway's approved
+connected-tool design is separate planned work, not behavior implemented by
+this Platform specification. See the [MCP topology contract](../../docs/architecture/mcp-topology.md)
+for the maintained cross-service addresses and maturity boundary.
+
 The initial runtime is Cloudflare Workers with D1. Local development is in scope;
 Docker is not part of this MVP. Platform owns its identity database directly and
 does not depend on the public Database service to start or authenticate users.
 A self-hosted operator needs no 0000 Cloud account and supplies their own Google
 and GitHub OAuth provider credentials.
+Public setup material may include generic self-hosting examples and validated
+policy schemas. Private Cloud owns hosted provider credentials, production
+configuration, fleet provisioning and managed deployment inputs. The public
+product must build, test and run without that private repository or a
+request-time Cloud authorization call. The public `services/cloud` scaffold
+is not the owner of hosted production configuration.
 
 Managed signup is open by default and creates a default organization.
 Self-hosted signup is configurable as open or invitation-only. This setting is
@@ -47,8 +143,12 @@ and CSRF checks. Do not distribute session cookies to services or put long-lived
 credentials in URLs or browser local storage.
 
 Platform owns the account experience for profile, organizations, memberships,
-organization-owned agent identities, consent and credentials. It includes the
-identity administration needed by service-only customers. Product Spaces,
+organization-owned agent identities, consent and credentials. The current T03
+slice adds explicit organization selection, member and invitation management,
+atomic owner protection and configured operator lifecycle recovery. It includes
+the identity administration needed by service-only customers. T05 adds
+organization-owned agent creation, lifecycle, per-service grants and opaque
+agent credentials to the Platform account UI. Product Spaces,
 threads, agent execution and full-product agent control remain with the product
 UI. Integrate a full application's login only where that application exists;
 no apps/0000 implementation was found. Building full-product login or offline
@@ -131,6 +231,16 @@ Gateway or caller-provided header does not establish identity. Services never
 forward a credential to another audience or retry a failed verification through
 another issuer or identity path. In particular, a rejected delegated or
 installation token must not be retried through a human-session verifier.
+
+For a future Gateway path, Gateway verifies the caller's Platform credential,
+binds its credential ID to one organization-owned Access Profile, and checks
+tool and Connection grants on each invocation. That Gateway grant is additional
+to the target service's resource ACL. The Gateway credential cannot simply be
+forwarded to a different service audience. A verifiable downstream delegation
+or service-specific credential contract must be settled and tested with Gateway
+before claiming authenticated cross-service tool execution. Native service MCP
+surfaces use the same Platform principal, audience and service-owned resource
+checks as their direct APIs; they do not create another identity issuer.
 
 Invalid, expired or revoked credentials return HTTP 401. An authenticated
 principal without resource permission is denied with HTTP 403 or a documented
@@ -216,6 +326,13 @@ If access was revoked, preserve unsynced local work for the user to resolve;
 Platform cannot remotely retract data already cached on a device.
 Building an offline-sync product flow is deferred.
 
+[T14_RECONNECT_REPORT.md](T14_RECONNECT_REPORT.md) records the reviewed fixture
+at aggregate `166e54d`: actual social reauthentication with simulated provider
+HTTP, current membership/credential checks, conditional resource ownership at
+write, and local queue retention after denial. Aggregate checks pass. This is
+session re-establishment, not proof of sliding renewal or a production sync
+engine; no application or Database adoption is claimed.
+
 ## Adoption scope and acceptance
 
 This is a bounded monorepo integration: implement Platform and its shared
@@ -230,16 +347,18 @@ Use a focused, clearly labeled contract fixture with stored tenant ownership and
 a resource action to test the shared path and claim rules. Such a fixture is not
 production Database adoption and must not be reported as an actual Database
 operation. Track Database adoption for when its consumer implementation exists.
-Put managed deployment configuration in its real owning workspace; do not
-invent a substitute Cloud service or workspace. Full-product login is integrated
+Put managed deployment configuration with the private Cloud operations owner;
+keep generic self-hosting examples public. Do not invent a substitute Cloud
+service or workspace. Full-product login is integrated
 only where a product implementation exists.
 
 The MVP is accepted when all of the following are demonstrated:
 
 - Google and GitHub sign-in, account linking with proof of both accounts,
   retry-safe default-organization creation with owner membership, self-hosted
-  open/invitation-only configuration, origin/CSRF protections and the
-  Platform-owned account controls work in the selected Workers/D1 runtime.
+  open/invitation-only configuration, origin/CSRF protections, organization and
+  invitation administration, final-owner protection, and Platform-owned
+  operator lifecycle controls work in the selected Workers/D1 runtime.
 - Shared contracts, client and middleware validate authority, principal kind,
   audience, expiry, membership/grant and failure results. Existing Communicator
   and message-service consumers use this path; a fixture is reported only as a
@@ -274,24 +393,93 @@ No user/org import, dual-trust period, historical session cutover, full
 apps/0000 integration or offline-sync build is an acceptance gate. Database
 production adoption is tracked separately and cannot be claimed from a fixture.
 
-## Technical validation still required
+## Technical validation and remaining gates
 
-The product decisions above are settled. The following implementation details
-must be selected and verified rather than inferred from documentation alone:
+The product decisions above are settled. [T01_RUNTIME_REPORT.md](T01_RUNTIME_REPORT.md)
+records the pinned versions and the flows exercised in Workers/D1. The following
+items distinguish completed local evidence from remaining acceptance work:
 
-- Pin compatible Better Auth, social-provider, OAuth-provider and D1 adapter
-  versions. Prove the selected OAuth implementation can meet the required
-  PKCE, consent, refresh-reuse and revocation behavior; choose another standard
-  OAuth server component if it cannot.
-- Run against the actual Workers/D1 runtime. Verify transaction/atomicity and
-  authoritative-read behavior for default organizations, final-owner protection
-  and refresh rotation. The system SQLite API alone is not proof of D1 behavior.
-- Define the wire schema, exact route and transport details, service-verifier
-  bootstrap process, OAuth token lifetimes, and guest-proof/grant exchange based
-  on those tests. Preserve the requirements above without freezing speculative
-  endpoint names or accepting caller-supplied authority.
+- T06 code-only OAuth and T07 refresh/installation controls are reviewed and
+  integrated at `86324b0` and `1d519cd`. Platform owns durable installation
+  authority, current membership/grants, pending consumption, retained hashed
+  lineage and guarded publication. The pinned provider's broad user/client
+  cleanup is confined by a request-scoped adapter to the successfully prepared
+  installation, including transaction callbacks. Actual pre-provider ancestor
+  replay now preserves the healthy sibling. Parent combined checks pass twelve
+  Worker/D1 files/forty-nine tests, persistence and refresh restart probes,
+  Chromium installation controls, and 142 Platform-to-msg assertions. Native
+  and bounded Grok review findings are closed. External provider HTTP is
+  simulated; live client acceptance remains separate.
+- The earlier isolated consent probe `41cd96f` is historical feasibility
+  evidence. Integrated T06/T07 now exercise exact organization-selection
+  outcomes, current-authority write guards and production Worker response
+  wrapping for code exchange and refresh. A scaffold or provider hook alone
+  is not the acceptance evidence; see the T06/T07 reports.
+- The first-party human browser prerequisite now has immutable purpose and
+  human-principal binding, host-only cookie transport, an atomic D1 consumer
+  transaction adapter and a real Chromium/local-HTTP proof. See
+  [T11_BROWSER_REPORT.md](T11_BROWSER_REPORT.md). Its provider is simulated,
+  the consumer is an explicitly labelled fixture, and Communicator adoption,
+  deployment provisioning and full T11 acceptance remain separate gates.
+- A real Miniflare runtime restart preserves a bounded guest grant and resource
+  fixture in persistent D1. Human login/session and social linking work across
+  local Worker requests with simulated provider HTTP. T03's local Worker/D1
+  tests exercise final-owner and invitation races and pass on the reviewed
+  aggregate at `c51d285`. The interrupted-signup defect reproduced at `e32e821`
+  is repaired and verified at aggregate `54fc212`: exact provider-subject
+  recovery, pending-owner constraints, denied-link preservation, concurrent
+  retry convergence and positive Google/GitHub callback recovery are covered.
+  Deterministic D1 assertions prove the owner constraint; callback races are
+  bounded overlap tests, not every possible database interleaving. Actual human
+  signup/session/key persistence across a fresh runtime, independent revocation
+  and logout pass without migration replay. A losing concurrent link may return
+  a provider callback error while preserving recoverability. OAuth lifecycle
+  acceptance remains separate.
+- The versioned principal, verification route, service registration fixture,
+  service-verifier bootstrap and guest-grant exchange are candidate T01
+  contracts. T04 now exercises local trusted service registration, human
+  credential lifecycle and two exact service audiences through the shared
+  client and Worker/D1 fixture; [T04_CREDENTIAL_REPORT.md](T04_CREDENTIAL_REPORT.md)
+  records the evidence and its local-only limits. Better Auth encrypts stored Google/GitHub access and refresh
+  tokens. The pinned callback assigns `idToken` directly, and T02's test
+  asserts only that the stored Google access token differs from its synthetic
+  raw value. OAuth server access tokens are configured as opaque and hashed,
+  and T06 now normalizes code-issued access through `/internal/v1/authenticate`
+  with an exact Platform installation and provider-row binding. Current
+  membership, client, service, catalog and consent are checked without
+  caller-supplied authority. T07 now adds a bounded trusted-client refresh
+  lifecycle with hash-only lineage, replay fencing and account installation
+  revoke; [T07_OAUTH_REPORT.md](T07_OAUTH_REPORT.md) records the local evidence
+  and its limits.
+- T05 exercises organization-owned agent creation, stable identity across two
+  service audiences, live grant and agent lifecycle checks, one-time opaque
+  credential issue/rotation/revocation and creator-departure administration in
+  local Worker/D1 tests, including controlled narrowing races, coherent live
+  verification snapshots and replacement-insert rollback. Aggregate checks pass
+  seven Worker/D1 files/ten tests plus restart at `10d31c8`; independent review
+  and combined browser controls pass. Service/resource checks remain fixtures,
+  not production consumer adoption.
 - Confirm managed configuration's real owning workspace and keep runtime
   anonymous enforcement independent of a Cloud network call.
 
-Until those checks and acceptance gates pass, Platform authentication remains
-unimplemented.
+T02 login, account and signup-policy behavior is reviewed and verified on the
+aggregate at `7152bcd`, with provider HTTP simulated in Worker/D1 tests. T03
+organization, invitation and operator behavior and review fixes are integrated
+and independently verified at `c51d285` with real Worker/D1 route tests and
+Chromium organization flows. T04 is reviewed, integrated and independently
+verified at `dc30cd4`, including credential and organization browser flows. T05
+is reviewed, integrated and independently verified at `10d31c8`, with bounded
+Worker/D1 agent lifecycle, two-audience and coherent verification evidence.
+T06 is reviewed and integrated at `86324b0`: combined checks pass eleven
+Worker/D1 files/thirty-two tests plus restart persistence. Native Chromium
+approve/deny navigation, real CLI transaction rollback and failed-login retry
+are independently verified. The bounded adversarial review found no confirmed
+exploitable defect; its login retry regression was corrected and reviewed.
+Refresh issuance is enabled only for explicitly provisioned trusted clients with
+the T07 refresh gate. T07 is reviewed, integrated and independently verified at
+`1d519cd`; live external-client acceptance remains separate.
+This local credential and registration evidence does not establish deployed
+provisioning, live provider behavior or consumer
+adoption. The full Platform authentication MVP remains unimplemented until
+every acceptance gate passes. Each report limits its claims to the named flows
+and fixtures.

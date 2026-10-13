@@ -24,8 +24,14 @@ export function GroupManagementPage() {
   const [evidenceOperationId, setEvidenceOperationId] = useState<string | null>(
     null,
   );
-  const { session, isLoading: identityLoading } = useIdentityContext();
+  const {
+    session,
+    isLoading: identityLoading,
+    authStatus,
+  } = useIdentityContext();
+  const protectedApiReady = authStatus === "authenticated";
   const isAdministrator =
+    protectedApiReady &&
     (session?.membership.role === "owner" ||
       session?.membership.role === "admin") &&
     (session?.principal.type === "human" ||

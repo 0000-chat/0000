@@ -73,7 +73,8 @@
           "secrets": {
             "required": [
               "MSG_DATA_ENCRYPTION_KEY_V1",
-              "MSG_OPERATOR_TOKEN",
+              "MSG_PLATFORM_SERVICE_VERIFIER",
+              "MSG_PLATFORM_GUEST_GRANT_ISSUER",
               "MSG_VAPID_PUBLIC_KEY",
               "MSG_VAPID_PRIVATE_KEY",
               "MSG_VAPID_SUBJECT"

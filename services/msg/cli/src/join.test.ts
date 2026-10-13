@@ -22,6 +22,8 @@ const agentFixture = {
 test("parses a canonical join command and renders participant-provided messages separately", async () => {
   expect(parseJoinCommand(["join", "https://msg.0000.chat/room-1"]))
     .toEqual({ conversationUrl: "https://msg.0000.chat/room-1" });
+  expect(parseJoinCommand(["join", "https://msg.0000.chat/room-1", "--recover"]))
+    .toEqual({ conversationUrl: "https://msg.0000.chat/room-1", recover: true });
   expect(() => parseJoinCommand(["join", "https://example.test/room-1"]))
     .toThrow("The conversation URL must be https://msg.0000.chat/{room}.");
 
@@ -55,6 +57,19 @@ test("parses a canonical join command and renders participant-provided messages 
   expect(output).toContain('from "Alice Example" (self-declared; a room-local name password verifies reuse only, not a real-world identity); author "Alice"');
   expect(output).not.toContain("evil.example/forged");
   expect(output).not.toContain("manage_url");
+});
+
+test("forwards only explicit join recovery", async () => {
+  let requested = "";
+  await joinConversation({
+    conversationUrl: "https://msg.0000.chat/room-1",
+    recover: true,
+    fetch: async (input) => {
+      requested = String(input);
+      return Response.json(agentFixture);
+    },
+  });
+  expect(requested).toBe("https://msg.0000.chat/room-1/agent?recover=1&limit=20");
 });
 
 test("parses bounded selectors and prints one page with an exact continuation", async () => {

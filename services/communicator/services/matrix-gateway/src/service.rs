@@ -995,6 +995,13 @@ where
                     Err(error) => Err(SafeError::new(error.code())),
                 }
             }
+            Err(error) if error.class() == crate::ingestion::DeliveryErrorClass::Paused => {
+                // Authentication failures stop the coordinator.  The outbox
+                // row and its exact bytes remain pending for an explicit
+                // credential replacement and process restart; treating this
+                // as an ordinary attempted action would schedule a replay.
+                Err(SafeError::new(error.code()))
+            }
             Err(error) if error.class() == crate::ingestion::DeliveryErrorClass::Terminal => {
                 let reason = ReasonCode::new(error.code().to_owned())
                     .map_err(|_| SafeError::new(SERVICE_PROJECTION_BLOCKED))?;

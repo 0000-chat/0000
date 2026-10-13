@@ -5,6 +5,10 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 
+import {
+  buildMsgMiniflareRateLimits,
+  type MsgMiniflareRateLimitBinding,
+} from "../../msg/scripts/msg-rate-limit-policy";
 import { buildWorkerScript } from "./build-worker";
 
 const msgWorkerEntry = fileURLToPath(
@@ -73,6 +77,7 @@ interface RuntimeConfiguration {
   readonly gatewaySetup: readonly string[];
   readonly migrations: readonly string[];
   readonly persistenceDirectory: string;
+  readonly ratelimits: Readonly<Record<string, MsgMiniflareRateLimitBinding>>;
   readonly script: string;
   readonly scriptPath: string;
 }
@@ -212,6 +217,12 @@ export async function startRealMsgWorker(): Promise<RealMsgWorker> {
     ];
     const configuration: RuntimeConfiguration = {
       bindings: {
+        // Gateway identity/profile checks use the synthetic Platform verifier
+        // above. Keep Msg in its explicit fixture mode here: this composition
+        // proves Gateway's real Msg transport and resource boundary, while
+        // Platform-to-Msg credential verification is covered by T09/T10.
+        MSG_TEST_MODE: "1",
+        MSG_TEST_ROOM_LIMITS: "{}",
         MSG_DATA_ENCRYPTION_KEY_V1: TEST_ENCRYPTION_KEY,
         MSG_PUBLIC_ORIGIN: "https://msg.0000.chat",
         MSG_VAPID_PRIVATE_KEY: TEST_VAPID_PRIVATE_KEY,
@@ -230,6 +241,7 @@ export async function startRealMsgWorker(): Promise<RealMsgWorker> {
       gatewaySetup,
       migrations,
       persistenceDirectory: join(directory, "durable-objects"),
+      ratelimits: buildMsgMiniflareRateLimits(),
       script,
       scriptPath: join(directory, "msg.js"),
     };

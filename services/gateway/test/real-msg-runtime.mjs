@@ -208,7 +208,8 @@ async function start(configurationPath) {
       !Array.isArray(configuration.gatewaySetup) ||
       typeof configuration.script !== "string" ||
       typeof configuration.scriptPath !== "string" ||
-      !Array.isArray(configuration.migrations)
+      !Array.isArray(configuration.migrations) ||
+      !isRecord(configuration.ratelimits)
     ) {
       throw new Error("Invalid real Msg Worker startup configuration.");
     }
@@ -237,6 +238,7 @@ async function start(configurationPath) {
           modules: true,
           modulesRoot: "/",
           name: "msg",
+          ratelimits: configuration.ratelimits,
           script: configuration.script,
           scriptPath: configuration.scriptPath,
         },

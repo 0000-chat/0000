@@ -47,6 +47,9 @@ jobs:
           else
             base="$PUSH_BEFORE"
           fi
+          if ! git cat-file -e "$base^{commit}" 2>/dev/null; then
+            base=origin/main
+          fi
           node packages/documentation-tools/cli.mjs --repo 0000-chat/0000 --mode published --base-ref "$base" --head "$GITHUB_SHA"
   check:
     runs-on: ubuntu-latest

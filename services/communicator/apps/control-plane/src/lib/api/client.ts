@@ -120,6 +120,13 @@ export class ApiError extends Error {
   }
 }
 
+export type ApiAuthFailure = {
+  status: 401 | 503;
+  error: ApiError;
+};
+
+export type ApiAuthFailureListener = (failure: ApiAuthFailure) => void;
+
 export function isDefinitiveRequestRejection(error: unknown) {
   if (!(error instanceof ApiError)) return false;
   return (
@@ -131,10 +138,28 @@ export function isDefinitiveRequestRejection(error: unknown) {
 }
 
 export class ApiClient {
+  private readonly authFailureListeners = new Set<ApiAuthFailureListener>();
+
   constructor(
     private readonly fetcher?: typeof fetch,
     private readonly baseUrl = "",
   ) {}
+
+  subscribeAuthFailures(listener: ApiAuthFailureListener) {
+    this.authFailureListeners.add(listener);
+    return () => this.authFailureListeners.delete(listener);
+  }
+
+  private notifyAuthFailure(error: ApiError) {
+    if (error.status !== 401 && error.status !== 503) return;
+    for (const listener of this.authFailureListeners) {
+      try {
+        listener({ status: error.status, error });
+      } catch {
+        // A UI observer must not change the API request's failure semantics.
+      }
+    }
+  }
 
   private async request<T>(
     path: string,
@@ -147,7 +172,10 @@ export class ApiClient {
           path,
           globalThis.location?.origin ?? "http://example.test",
         ).toString();
-    const response = await (this.fetcher ?? globalThis.fetch)(url, init);
+    const response = await (this.fetcher ?? globalThis.fetch)(url, {
+      credentials: "include",
+      ...init,
+    });
     if (!response.ok) {
       let code: string | undefined;
       let message = `Communicator API request failed with ${response.status}`;
@@ -160,7 +188,9 @@ export class ApiClient {
       } catch {
         // Keep the generic status message for non-contract failures.
       }
-      throw new ApiError(response.status, message, code);
+      const error = new ApiError(response.status, message, code);
+      this.notifyAuthFailure(error);
+      throw error;
     }
     let body: unknown;
     try {

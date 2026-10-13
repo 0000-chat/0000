@@ -137,6 +137,30 @@ const RealtimePositionArraySchema = strictArray(
   1,
 );
 
+/**
+ * The persisted/serialized realtime authority tuple. It contains only values
+ * needed to compare a reconnect with the credential that created the ticket;
+ * the opaque credential itself is deliberately absent.
+ */
+export const RealtimePlatformContextSchema = z
+  .object({
+    binding_id: RealtimeIdSchema,
+    authority: z.string().min(1).max(512),
+    kind: z.enum(["human", "agent", "service"]),
+    // Platform identifiers are opaque values. They are not local realtime
+    // resource IDs and may contain characters such as hyphens or colons.
+    subject_id: z.string().min(1).max(512),
+    organization_id: z.string().min(1).max(512),
+    membership_id: z.string().min(1).max(512).nullable(),
+    grant_id: z.string().min(1).max(512).nullable(),
+    credential_id: z.string().min(1).max(512),
+    expires_at: RealtimeTimestampSchema,
+  })
+  .strict();
+export type RealtimePlatformContext = z.infer<
+  typeof RealtimePlatformContextSchema
+>;
+
 const RealtimeUpgradeContextObjectSchema = z
   .object({
     schema_version: z.literal(1),
@@ -147,6 +171,7 @@ const RealtimeUpgradeContextObjectSchema = z
     resume: RealtimeResumeArraySchema,
     issued_at: RealtimeTimestampSchema,
     expires_at: RealtimeTimestampSchema,
+    platform: RealtimePlatformContextSchema.optional(),
   })
   .strict()
   .superRefine((value, context) => {
@@ -201,6 +226,7 @@ const RealtimeSocketAttachmentObjectSchema = z
     positions: RealtimePositionArraySchema,
     lease_expires_at: RealtimeTimestampSchema,
     resumed: z.boolean(),
+    platform: RealtimePlatformContextSchema.optional(),
   })
   .strict()
   .superRefine((value, context) => {

@@ -512,14 +512,17 @@ export function ConnectionsPage() {
     activeIdentity,
     session,
     isLoading: identitiesLoading,
+    authStatus,
   } = useIdentityContext();
   const identityId = activeIdentity?.id ?? "";
+  const protectedApiReady = authStatus === "authenticated";
   const connectionsQuery = useQuery({
     queryKey: queryKeys.connections(identityId),
     queryFn: () => apiClient.getConnections(identityId),
-    enabled: Boolean(identityId),
+    enabled: Boolean(identityId && protectedApiReady),
   });
   const isAdministrator =
+    protectedApiReady &&
     (session?.membership.role === "owner" ||
       session?.membership.role === "admin") &&
     (session?.principal.type === "human" ||

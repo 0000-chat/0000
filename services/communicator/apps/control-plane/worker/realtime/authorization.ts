@@ -7,6 +7,7 @@ import {
 } from "@communicator/contracts";
 import {
   RealtimeUpgradeContextSchema,
+  type RealtimePlatformContext,
   type RealtimeUpgradeContext,
 } from "./contracts";
 
@@ -17,6 +18,7 @@ export type AuthorizedRealtimeRequest = {
   membership_id: string;
   subscriptions: RealtimeSubscription[];
   resume: RealtimeResumePosition[];
+  platform?: RealtimePlatformContext;
 };
 
 export type RealtimeAuthorizationErrorCode = "invalid_request" | "not_found";
@@ -59,17 +61,22 @@ export const getRealtimeAuthorizationErrorCause = (
 
 /**
  * Realtime subscriptions currently carry identity-level positions and cannot
- * express the account/chat predicate used by stored reads. Keep the existing
- * stream available only to a tenant owner/admin human or operator with an
- * explicit identity read grant; delegated principals must wait for an
- * account-aware subscription protocol.
+ * express the account/chat predicate used by stored reads. Platform-backed
+ * requests therefore require an active account grant for every subscribed
+ * identity; the legacy fixture path retains its historical tenant-admin
+ * behavior.
  */
 export async function realtimeReadScopeSupported(
   db: D1DatabaseSession,
   authorization: Pick<
     RealtimeUpgradeContext,
-    "tenant_id" | "principal_id" | "membership_id" | "subscriptions"
+    | "tenant_id"
+    | "principal_id"
+    | "membership_id"
+    | "subscriptions"
+    | "platform"
   >,
+  options: { allowMachine?: boolean } = {},
 ): Promise<boolean> {
   const identityIds = [
     ...new Set(
@@ -101,12 +108,16 @@ export async function realtimeReadScopeSupported(
       authorization.principal_id,
     )
     .first<{ principal_type: string; role: string }>();
-  if (
-    principal === null ||
-    (principal.principal_type !== "human" &&
-      principal.principal_type !== "operator") ||
-    (principal.role !== "owner" && principal.role !== "admin")
-  ) {
+  const machine =
+    options.allowMachine === true &&
+    (principal?.principal_type === "agent" ||
+      principal?.principal_type === "service");
+  const humanOperator =
+    principal !== null &&
+    (principal.principal_type === "human" ||
+      principal.principal_type === "operator") &&
+    (principal.role === "owner" || principal.role === "admin");
+  if (principal === null || (!machine && !humanOperator)) {
     return false;
   }
   const placeholders = identityIds.map(() => "?").join(", ");
@@ -126,15 +137,48 @@ export async function realtimeReadScopeSupported(
     .bind(authorization.tenant_id, authorization.membership_id, ...identityIds)
     .all<{ identity_id: string }>();
   const granted = new Set(grants.results.map((row) => row.identity_id));
-  return (
+  const identityGrantIsComplete =
     granted.size === identityIds.length &&
-    identityIds.every((identityId) => granted.has(identityId))
+    identityIds.every((identityId) => granted.has(identityId));
+  if (!identityGrantIsComplete) return false;
+
+  // A Platform machine credential can use realtime only when the service
+  // owned account registry grants the subscribed identity access to at least
+  // one active account. Identity grants alone never create account access.
+  // Keep the historical human fixture seam's tenant-admin behavior while
+  // applying the full account ACL to Platform requests and machines.
+  if (!machine && authorization.platform === undefined) return true;
+  const accountGrants = await db
+    .prepare(
+      `SELECT DISTINCT g.identity_id
+     FROM account_grants AS g
+     JOIN connection_accounts AS ca
+       ON ca.account_id = g.account_id
+        AND ca.status = 'active'
+     JOIN connections AS c
+       ON c.id = ca.connection_id
+      AND c.tenant_id = g.tenant_id
+     WHERE g.tenant_id = ?
+         AND g.membership_id = ?
+         AND g.operation_scope = 'conversation.read'
+         AND g.status = 'active'
+         AND g.identity_id IN (${placeholders})`,
+    )
+    .bind(authorization.tenant_id, authorization.membership_id, ...identityIds)
+    .all<{ identity_id: string }>();
+  const accountGranted = new Set(
+    accountGrants.results.map((row) => row.identity_id),
+  );
+  return (
+    accountGranted.size === identityIds.length &&
+    identityIds.every((identityId) => accountGranted.has(identityId))
   );
 }
 
 export function authorizeRealtimeRequest(
   session: SessionResponse,
   request: unknown,
+  platform?: RealtimePlatformContext,
 ): AuthorizedRealtimeRequest {
   const parsedSession = SessionResponseSchema.safeParse(session);
   if (!parsedSession.success) {
@@ -178,6 +222,7 @@ export function authorizeRealtimeRequest(
       generation: position.generation,
       after_sequence: position.after_sequence,
     })),
+    ...(platform === undefined ? {} : { platform }),
   };
 }
 
@@ -247,7 +292,11 @@ export async function revalidateRealtimeAuthorization(
     grants.results.length === identityIds.length &&
     grantedIdentityIds.size === identityIds.length &&
     identityIds.every((identityId) => grantedIdentityIds.has(identityId)) &&
-    (await realtimeReadScopeSupported(db, parsed.data))
+    (await realtimeReadScopeSupported(db, parsed.data, {
+      allowMachine:
+        parsed.data.platform?.kind === "agent" ||
+        parsed.data.platform?.kind === "service",
+    }))
   );
 }
 
@@ -256,7 +305,7 @@ export async function revalidateRealtimeSocketAuthorization(
   db: D1DatabaseSession,
   authorization: Pick<
     RealtimeUpgradeContext,
-    "tenant_id" | "principal_id" | "subscriptions"
+    "tenant_id" | "principal_id" | "subscriptions" | "platform"
   > & { readonly membership_id?: string | undefined },
 ): Promise<boolean> {
   if (authorization.membership_id === undefined) return false;
@@ -267,6 +316,9 @@ export async function revalidateRealtimeSocketAuthorization(
     membership_id: authorization.membership_id,
     subscriptions: authorization.subscriptions,
     resume: [],
+    ...(authorization.platform === undefined
+      ? {}
+      : { platform: authorization.platform }),
     issued_at: new Date(0).toISOString(),
     expires_at: new Date(1_000).toISOString(),
   });

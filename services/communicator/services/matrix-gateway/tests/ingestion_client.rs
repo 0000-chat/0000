@@ -1,21 +1,14 @@
 use std::{
-    collections::HashMap,
     sync::{
-        Arc, Mutex,
+        Arc,
         atomic::{AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
 };
 
-use async_trait::async_trait;
-use base64::{Engine as _, engine::general_purpose::STANDARD};
-use communicator_matrix_gateway::{
-    config::OAuthClientAuthMethod,
-    ingestion::{
-        BatchSink, Delivery, DeliveryErrorClass, IngestionClient, OAuthTokenProvider, PendingBatch,
-        RetryPolicy, SecretString, TokenProvider,
-    },
-    secret::SafeError,
+use communicator_matrix_gateway::ingestion::{
+    BatchSink, CredentialSource, Delivery, DeliveryErrorClass, IngestionClient, PendingBatch,
+    RetryPolicy, SecretString,
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -27,49 +20,31 @@ const TENANT_ID: &str = "tenant_demo";
 const BATCH_ID: &str = "batch_demo";
 const REQUEST_BODY: &[u8] = b"{\"body\":\"exact-outbox-bytes\",\"order\":[3,1,2]}";
 const TOKEN_CANARY: &str = "token-canary-never-print";
-const SECRET_CANARY: &str = "client-secret-canary-never-print";
 const BODY_CANARY: &str = "request-body-canary-never-print";
 const UPSTREAM_CANARY: &str = "upstream-error-body-canary-never-print";
 
-#[derive(Debug, Default)]
-struct FakeTokenProvider {
-    tokens: Mutex<Vec<SecretString>>,
-    calls: Mutex<Vec<bool>>,
+struct FixedTestCredentialSource {
+    credential: SecretString,
+    calls: AtomicUsize,
 }
 
-impl FakeTokenProvider {
-    fn new(tokens: &[&str]) -> Self {
+impl FixedTestCredentialSource {
+    fn new(credential: &str) -> Self {
         Self {
-            tokens: Mutex::new(
-                tokens
-                    .iter()
-                    .map(|token| SecretString::new(*token))
-                    .collect(),
-            ),
-            calls: Mutex::new(Vec::new()),
+            credential: SecretString::new(credential),
+            calls: AtomicUsize::new(0),
         }
     }
 
-    fn calls(&self) -> Vec<bool> {
-        self.calls.lock().expect("fake calls lock").clone()
+    fn calls(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
     }
 }
 
-#[async_trait]
-impl TokenProvider for FakeTokenProvider {
-    async fn bearer(&self, force_refresh: bool) -> Result<SecretString, SafeError> {
-        self.calls
-            .lock()
-            .expect("fake calls lock")
-            .push(force_refresh);
-        let mut tokens = self.tokens.lock().expect("fake tokens lock");
-        if tokens.is_empty() {
-            return Err(SafeError::new("test_token_missing"));
-        }
-        if force_refresh && tokens.len() == 1 {
-            return Ok(tokens[0].clone());
-        }
-        Ok(tokens.remove(0))
+impl CredentialSource for FixedTestCredentialSource {
+    fn bearer(&self) -> &SecretString {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        &self.credential
     }
 }
 
@@ -115,251 +90,26 @@ fn header(request: &Request, name: &str) -> String {
         .to_owned()
 }
 
-fn form_fields(request: &Request) -> HashMap<String, String> {
-    url::form_urlencoded::parse(&request.body)
-        .map(|(key, value)| (key.into_owned(), value.into_owned()))
-        .collect()
-}
-
-fn test_client(
-    server_uri: &str,
-    provider: Arc<dyn TokenProvider>,
-    timeout: Duration,
-) -> IngestionClient {
-    IngestionClient::new_for_test(server_uri, provider, timeout)
+fn test_client(server_uri: &str, credential: &str, timeout: Duration) -> IngestionClient {
+    IngestionClient::new_for_test(server_uri, SecretString::new(credential), timeout)
         .expect("loopback ingestion client")
         .with_retry_policy(fast_retry_policy(2))
 }
 
 #[tokio::test]
-async fn oauth_basic_auth_uses_form_encoding_without_secret_in_body() {
-    let server = MockServer::start().await;
-    Mock::given(matchers::method("POST"))
-        .and(matchers::path("/token"))
-        .respond_with(|request: &Request| {
-            assert_eq!(header(request, "accept"), "application/json");
-            assert_eq!(
-                header(request, "content-type"),
-                "application/x-www-form-urlencoded"
-            );
-            assert_eq!(
-                header(request, "authorization"),
-                format!("Basic {}", STANDARD.encode("client id:client/secret"))
-            );
-            assert_eq!(
-                form_fields(request),
-                HashMap::from([(
-                    String::from("grant_type"),
-                    String::from("client_credentials")
-                )])
-            );
-            ResponseTemplate::new(200).set_body_raw(
-                format!(
-                    "{{\"access_token\":\"{TOKEN_CANARY}\",\"token_type\":\"Bearer\",\"expires_in\":300,\"scope\":\"ingestion\",\"provider_extension\":{{\"regional\":true}}}}"
-                ),
-                "application/json",
-            )
-        })
-        .mount(&server)
-        .await;
-
-    let provider = OAuthTokenProvider::new_for_test(
-        format!("{}/token", server.uri()),
-        "client id",
-        SecretString::new("client/secret"),
-        OAuthClientAuthMethod::Basic,
-        Duration::from_secs(1),
-        Duration::from_secs(30),
-    )
-    .expect("OAuth provider");
-    let token = provider.bearer(false).await.expect("bearer token");
-    assert_eq!(token.as_str(), TOKEN_CANARY);
-}
-
-#[tokio::test]
-async fn oauth_body_auth_uses_percent_encoded_client_credentials() {
-    let server = MockServer::start().await;
-    Mock::given(matchers::method("POST"))
-        .and(matchers::path("/token"))
-        .respond_with(|request: &Request| {
-            assert!(request.headers.get("authorization").is_none());
-            assert_eq!(header(request, "accept"), "application/json");
-            assert_eq!(
-                header(request, "content-type"),
-                "application/x-www-form-urlencoded"
-            );
-            assert_eq!(
-                form_fields(request),
-                HashMap::from([
-                    (
-                        String::from("grant_type"),
-                        String::from("client_credentials")
-                    ),
-                    (String::from("client_id"), String::from("client id/+")),
-                    (String::from("client_secret"), String::from("secret & = +")),
-                ])
-            );
-            ResponseTemplate::new(200).set_body_raw(
-                "{\"access_token\":\"body-token\",\"token_type\":\"Bearer\",\"expires_in\":300}",
-                "application/json",
-            )
-        })
-        .mount(&server)
-        .await;
-
-    let provider = OAuthTokenProvider::new_for_test(
-        format!("{}/token", server.uri()),
-        "client id/+",
-        SecretString::new("secret & = +"),
-        OAuthClientAuthMethod::Post,
-        Duration::from_secs(1),
-        Duration::from_secs(30),
-    )
-    .expect("OAuth provider");
-    assert_eq!(
-        provider.bearer(false).await.expect("bearer token").as_str(),
-        "body-token"
-    );
-}
-
-#[tokio::test]
-async fn oauth_tokens_cache_in_memory_and_refresh_inside_configured_skew() {
-    let server = MockServer::start().await;
-    let calls = Arc::new(AtomicUsize::new(0));
-    let responder_calls = Arc::clone(&calls);
-    Mock::given(matchers::path("/token"))
-        .respond_with(move |_request: &Request| {
-            let number = responder_calls.fetch_add(1, Ordering::SeqCst);
-            let expires_in = if number == 1 { 1 } else { 300 };
-            ResponseTemplate::new(200).set_body_raw(
-                format!(
-                    "{{\"access_token\":\"cached-token-{number}\",\"token_type\":\"Bearer\",\"expires_in\":{expires_in}}}"
-                ),
-                "application/json",
-            )
-        })
-        .mount(&server)
-        .await;
-    let provider = OAuthTokenProvider::new_for_test(
-        format!("{}/token", server.uri()),
-        "client",
-        SecretString::new(SECRET_CANARY),
-        OAuthClientAuthMethod::Post,
-        Duration::from_secs(1),
-        Duration::from_secs(30),
-    )
-    .expect("OAuth provider");
-
-    let first = provider.bearer(false).await.expect("first token");
-    let second = provider.bearer(false).await.expect("cached token");
-    assert_eq!(first.as_str(), second.as_str());
-    assert_eq!(calls.load(Ordering::SeqCst), 1);
-    assert!(!format!("{provider:?}").contains(SECRET_CANARY));
-    assert!(!format!("{first:?}").contains(first.as_str()));
-
-    let skewed = OAuthTokenProvider::new_for_test(
-        format!("{}/token", server.uri()),
-        "client",
-        SecretString::new(SECRET_CANARY),
-        OAuthClientAuthMethod::Post,
-        Duration::from_secs(1),
-        Duration::from_secs(2),
-    )
-    .expect("OAuth provider");
-    let _ = skewed.bearer(false).await.expect("skewed first token");
-    let _ = skewed.bearer(false).await.expect("skewed refresh");
-    assert_eq!(calls.load(Ordering::SeqCst), 3);
-}
-
-#[tokio::test]
-async fn oauth_rejects_token_lifetime_above_worker_limit() {
-    let server = MockServer::start().await;
-    Mock::given(matchers::path("/token"))
-        .respond_with(ResponseTemplate::new(200).set_body_raw(
-            "{\"access_token\":\"long-lived-token\",\"token_type\":\"Bearer\",\"expires_in\":301}",
-            "application/json",
-        ))
-        .mount(&server)
-        .await;
-
-    let provider = OAuthTokenProvider::new_for_test(
-        format!("{}/token", server.uri()),
-        "client",
-        SecretString::new(SECRET_CANARY),
-        OAuthClientAuthMethod::Post,
-        Duration::from_secs(1),
-        Duration::from_secs(30),
-    )
-    .expect("OAuth provider");
-    let error = provider
-        .bearer(false)
-        .await
-        .expect_err("OAuth lifetime above worker limit");
-    assert_eq!(error.code(), "oauth_token_invalid");
-}
-
-#[tokio::test]
-async fn oauth_requires_bearer_type_json_and_a_bounded_response() {
-    let server = MockServer::start().await;
-    Mock::given(matchers::path("/wrong-type"))
-        .respond_with(ResponseTemplate::new(200).set_body_raw(
-            "{\"access_token\":\"opaque\",\"token_type\":\"MAC\",\"expires_in\":60}",
-            "application/json",
-        ))
-        .mount(&server)
-        .await;
-    Mock::given(matchers::path("/too-large"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_raw(vec![b'x'; 64 * 1024 + 1], "application/json"),
-        )
-        .mount(&server)
-        .await;
-    Mock::given(matchers::path("/wrong-content-type"))
-        .respond_with(ResponseTemplate::new(200).set_body_string("{}"))
-        .mount(&server)
-        .await;
-
-    for path in ["wrong-type", "too-large", "wrong-content-type"] {
-        let provider = OAuthTokenProvider::new_for_test(
-            format!("{}/{path}", server.uri()),
-            "client",
-            SecretString::new(SECRET_CANARY),
-            OAuthClientAuthMethod::Post,
-            Duration::from_secs(1),
-            Duration::from_secs(30),
-        )
-        .expect("OAuth provider");
-        let error = provider
-            .bearer(false)
-            .await
-            .expect_err("invalid OAuth response");
-        assert!(!format!("{error:?}").contains(SECRET_CANARY));
-        assert!(!error.to_string().contains(SECRET_CANARY));
-    }
-}
-
-#[tokio::test]
 async fn production_urls_are_https_only_and_test_urls_are_loopback_only() {
     let server = MockServer::start().await;
-    let error = OAuthTokenProvider::new(
-        format!("{}/token", server.uri()),
-        "client",
-        SecretString::new(SECRET_CANARY),
-        OAuthClientAuthMethod::Post,
+    let error = IngestionClient::new(
+        server.uri(),
+        SecretString::new("token"),
         Duration::from_secs(1),
-        Duration::from_secs(30),
     )
-    .expect_err("production OAuth must reject HTTP");
-    assert!(!format!("{error:?}").contains(SECRET_CANARY));
-
-    let provider = Arc::new(FakeTokenProvider::new(&["token"]));
-    let error = IngestionClient::new(server.uri(), provider, Duration::from_secs(1))
-        .expect_err("production ingestion must reject HTTP");
+    .expect_err("production ingestion must reject HTTP");
     assert_eq!(error.class(), DeliveryErrorClass::Terminal);
 
     let error = IngestionClient::new_for_test(
         "http://192.0.2.1:8080",
-        Arc::new(FakeTokenProvider::new(&["token"])),
+        SecretString::new("token"),
         Duration::from_secs(1),
     )
     .expect_err("test client must reject non-loopback HTTP");
@@ -374,11 +124,7 @@ async fn ingestion_sets_worker_compatible_json_headers_and_sends_exact_bytes() {
         .respond_with(accepted_response("created"))
         .mount(&server)
         .await;
-    let client = test_client(
-        &server.uri(),
-        Arc::new(FakeTokenProvider::new(&["bearer-token"])),
-        Duration::from_secs(1),
-    );
+    let client = test_client(&server.uri(), "bearer-token", Duration::from_secs(1));
 
     assert_eq!(
         client.deliver(&pending_batch()).await.expect("accepted"),
@@ -386,6 +132,12 @@ async fn ingestion_sets_worker_compatible_json_headers_and_sends_exact_bytes() {
     );
     let requests = server.received_requests().await.expect("recorded requests");
     assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].url.path(), "/internal/v1/ingestion/batches");
+    assert!(
+        requests
+            .iter()
+            .all(|request| request.url.path() != "/token")
+    );
     assert_eq!(requests[0].body, REQUEST_BODY);
     assert_eq!(header(&requests[0], "accept"), "application/json");
     assert_eq!(header(&requests[0], "authorization"), "Bearer bearer-token");
@@ -403,11 +155,7 @@ async fn created_and_already_committed_are_accepted() {
             .respond_with(accepted_response(archive_status))
             .mount(&server)
             .await;
-        let client = test_client(
-            &server.uri(),
-            Arc::new(FakeTokenProvider::new(&["token"])),
-            Duration::from_secs(1),
-        );
+        let client = test_client(&server.uri(), "token", Duration::from_secs(1));
         assert_eq!(
             client.deliver(&pending_batch()).await.expect("accepted"),
             Delivery::Accepted
@@ -418,11 +166,7 @@ async fn created_and_already_committed_are_accepted() {
 #[tokio::test]
 async fn response_loss_retries_the_same_pending_outbox_bytes() {
     let (uri, server_task) = spawn_response_loss_server().await;
-    let client = test_client(
-        &uri,
-        Arc::new(FakeTokenProvider::new(&["token"])),
-        Duration::from_secs(1),
-    );
+    let client = test_client(&uri, "token", Duration::from_secs(1));
     assert_eq!(
         client
             .deliver(&pending_batch())
@@ -437,11 +181,7 @@ async fn response_loss_retries_the_same_pending_outbox_bytes() {
 #[tokio::test]
 async fn truncated_202_response_retries_the_same_pending_outbox_bytes() {
     let (uri, server_task) = spawn_truncated_accepted_server().await;
-    let client = test_client(
-        &uri,
-        Arc::new(FakeTokenProvider::new(&["token"])),
-        Duration::from_secs(1),
-    );
+    let client = test_client(&uri, "token", Duration::from_secs(1));
     assert_eq!(
         client
             .deliver(&pending_batch())
@@ -454,7 +194,7 @@ async fn truncated_202_response_retries_the_same_pending_outbox_bytes() {
 }
 
 #[tokio::test]
-async fn one_401_forces_one_refresh_and_repeated_401_pauses() {
+async fn a_401_pauses_without_refresh_or_automatic_replay() {
     let server = MockServer::start().await;
     Mock::given(matchers::path("/internal/v1/ingestion/batches"))
         .respond_with(sequence(vec![
@@ -463,37 +203,65 @@ async fn one_401_forces_one_refresh_and_repeated_401_pauses() {
         ]))
         .mount(&server)
         .await;
-    let provider = Arc::new(FakeTokenProvider::new(&["old-token", "new-token"]));
-    let client = test_client(&server.uri(), provider.clone(), Duration::from_secs(1));
+    let source = Arc::new(FixedTestCredentialSource::new("old-token"));
+    let client = IngestionClient::new_with_credential_source_for_test(
+        server.uri(),
+        source.clone(),
+        Duration::from_secs(1),
+    )
+    .expect("loopback ingestion client")
+    .with_retry_policy(fast_retry_policy(2));
+    let error = client
+        .deliver(&pending_batch())
+        .await
+        .expect_err("unauthorized delivery pauses");
+    assert_eq!(error.class(), DeliveryErrorClass::Paused);
+    assert_eq!(error.code(), "ingestion_unauthorized");
+    assert_eq!(source.calls(), 1);
+    let requests = server.received_requests().await.expect("recorded requests");
+    assert_eq!(requests.len(), 1);
+    assert_eq!(header(&requests[0], "authorization"), "Bearer old-token");
+    assert_eq!(requests[0].body, REQUEST_BODY);
+
     assert_eq!(
         client
             .deliver(&pending_batch())
             .await
-            .expect("refresh then accept"),
+            .expect("explicit recovery retry uses the same fixed credential"),
         Delivery::Accepted
     );
-    assert_eq!(provider.calls(), vec![false, true]);
+    assert_eq!(source.calls(), 2);
     let requests = server.received_requests().await.expect("recorded requests");
-    assert_eq!(header(&requests[0], "authorization"), "Bearer old-token");
-    assert_eq!(header(&requests[1], "authorization"), "Bearer new-token");
-    assert_eq!(requests[0].body, requests[1].body);
+    assert_eq!(requests.len(), 2);
+    assert_eq!(header(&requests[1], "authorization"), "Bearer old-token");
+    assert_eq!(requests[1].body, REQUEST_BODY);
+}
 
+#[tokio::test]
+async fn a_restarted_client_uses_the_replacement_credential() {
     let server = MockServer::start().await;
     Mock::given(matchers::path("/internal/v1/ingestion/batches"))
-        .respond_with(sequence(vec![
-            ResponseTemplate::new(401),
-            ResponseTemplate::new(401),
-        ]))
+        .respond_with(accepted_response("created"))
         .mount(&server)
         .await;
-    let provider = Arc::new(FakeTokenProvider::new(&["old-token", "new-token"]));
-    let client = test_client(&server.uri(), provider.clone(), Duration::from_secs(1));
-    let error = client
+    let old_client = test_client(&server.uri(), "old-token", Duration::from_secs(1));
+    old_client
         .deliver(&pending_batch())
         .await
-        .expect_err("repeated 401 pauses");
-    assert_eq!(error.class(), DeliveryErrorClass::Paused);
-    assert_eq!(provider.calls(), vec![false, true]);
+        .expect("old credential delivery");
+    let replacement_client =
+        test_client(&server.uri(), "replacement-token", Duration::from_secs(1));
+    replacement_client
+        .deliver(&pending_batch())
+        .await
+        .expect("replacement credential delivery");
+    let requests = server.received_requests().await.expect("recorded requests");
+    assert_eq!(requests.len(), 2);
+    assert_eq!(header(&requests[0], "authorization"), "Bearer old-token");
+    assert_eq!(
+        header(&requests[1], "authorization"),
+        "Bearer replacement-token"
+    );
 }
 
 #[tokio::test]
@@ -512,11 +280,7 @@ async fn mismatched_202_fields_and_terminal_statuses_stop_without_retry() {
             .respond_with(ResponseTemplate::new(202).set_body_raw(body, "application/json"))
             .mount(&server)
             .await;
-        let client = test_client(
-            &server.uri(),
-            Arc::new(FakeTokenProvider::new(&["token"])),
-            Duration::from_secs(1),
-        );
+        let client = test_client(&server.uri(), "token", Duration::from_secs(1));
         let error = client
             .deliver(&pending_batch())
             .await
@@ -538,11 +302,7 @@ async fn mismatched_202_fields_and_terminal_statuses_stop_without_retry() {
             .respond_with(ResponseTemplate::new(status).set_body_string(UPSTREAM_CANARY))
             .mount(&server)
             .await;
-        let client = test_client(
-            &server.uri(),
-            Arc::new(FakeTokenProvider::new(&["token"])),
-            Duration::from_secs(1),
-        );
+        let client = test_client(&server.uri(), "token", Duration::from_secs(1));
         let error = client
             .deliver(&pending_batch())
             .await
@@ -570,11 +330,7 @@ async fn bounded_429_retry_after_and_5xx_are_retryable() {
         ]))
         .mount(&server)
         .await;
-    let client = test_client(
-        &server.uri(),
-        Arc::new(FakeTokenProvider::new(&["token"])),
-        Duration::from_secs(1),
-    );
+    let client = test_client(&server.uri(), "token", Duration::from_secs(1));
     assert_eq!(
         client.deliver(&pending_batch()).await.expect("429 retry"),
         Delivery::Accepted
@@ -596,11 +352,7 @@ async fn bounded_429_retry_after_and_5xx_are_retryable() {
         ]))
         .mount(&server)
         .await;
-    let client = test_client(
-        &server.uri(),
-        Arc::new(FakeTokenProvider::new(&["token"])),
-        Duration::from_secs(1),
-    );
+    let client = test_client(&server.uri(), "token", Duration::from_secs(1));
     let started = Instant::now();
     let error = client
         .deliver(&pending_batch())
@@ -622,11 +374,7 @@ async fn bounded_429_retry_after_and_5xx_are_retryable() {
         ]))
         .mount(&server)
         .await;
-    let client = test_client(
-        &server.uri(),
-        Arc::new(FakeTokenProvider::new(&["token"])),
-        Duration::from_secs(1),
-    );
+    let client = test_client(&server.uri(), "token", Duration::from_secs(1));
     assert_eq!(
         client.deliver(&pending_batch()).await.expect("5xx retry"),
         Delivery::Accepted
@@ -645,7 +393,7 @@ async fn five_hundred_retry_after_is_honored_before_retrying() {
         .await;
     let client = IngestionClient::new_for_test(
         server.uri(),
-        Arc::new(FakeTokenProvider::new(&["token"])),
+        SecretString::new("token"),
         Duration::from_secs(1),
     )
     .expect("loopback ingestion client")
@@ -679,11 +427,7 @@ async fn malformed_and_oversized_5xx_retry_after_values_stay_bounded_and_redacte
             ]))
             .mount(&server)
             .await;
-        let client = test_client(
-            &server.uri(),
-            Arc::new(FakeTokenProvider::new(&["token"])),
-            Duration::from_secs(1),
-        );
+        let client = test_client(&server.uri(), "token", Duration::from_secs(1));
 
         let error = client
             .deliver(&pending_batch())
@@ -714,11 +458,7 @@ async fn redirects_are_rejected_and_ingestion_responses_are_bounded_json() {
         )
         .mount(&server)
         .await;
-    let client = test_client(
-        &server.uri(),
-        Arc::new(FakeTokenProvider::new(&["token"])),
-        Duration::from_secs(1),
-    );
+    let client = test_client(&server.uri(), "token", Duration::from_secs(1));
     let error = client
         .deliver(&pending_batch())
         .await
@@ -743,11 +483,7 @@ async fn redirects_are_rejected_and_ingestion_responses_are_bounded_json() {
         )
         .mount(&server)
         .await;
-    let client = test_client(
-        &server.uri(),
-        Arc::new(FakeTokenProvider::new(&["token"])),
-        Duration::from_secs(1),
-    );
+    let client = test_client(&server.uri(), "token", Duration::from_secs(1));
     let error = client
         .deliver(&pending_batch())
         .await
@@ -765,7 +501,7 @@ async fn network_failures_and_timeouts_remain_retryable_without_upstream_text() 
     drop(listener);
     let client = IngestionClient::new_for_test(
         format!("http://127.0.0.1:{port}"),
-        Arc::new(FakeTokenProvider::new(&["token"])),
+        SecretString::new("token"),
         Duration::from_millis(40),
     )
     .expect("closed loopback client")
@@ -787,7 +523,7 @@ async fn network_failures_and_timeouts_remain_retryable_without_upstream_text() 
         .await;
     let client = IngestionClient::new_for_test(
         server.uri(),
-        Arc::new(FakeTokenProvider::new(&["token"])),
+        SecretString::new("token"),
         Duration::from_millis(20),
     )
     .expect("timeout client")
@@ -806,8 +542,7 @@ async fn diagnostics_redact_tokens_credentials_request_bodies_urls_and_upstream_
         .respond_with(ResponseTemplate::new(400).set_body_string(UPSTREAM_CANARY))
         .mount(&server)
         .await;
-    let provider = Arc::new(FakeTokenProvider::new(&[TOKEN_CANARY]));
-    let client = test_client(&server.uri(), provider.clone(), Duration::from_secs(1));
+    let client = test_client(&server.uri(), TOKEN_CANARY, Duration::from_secs(1));
     let batch = PendingBatch::new(TENANT_ID, BATCH_ID, BODY_CANARY.as_bytes().to_vec());
     let error = client
         .deliver(&batch)
@@ -815,13 +550,11 @@ async fn diagnostics_redact_tokens_credentials_request_bodies_urls_and_upstream_
         .expect_err("terminal canary response");
     for diagnostic in [
         format!("{client:?}"),
-        format!("{provider:?}"),
         format!("{batch:?}"),
         format!("{error:?}"),
         error.to_string(),
     ] {
         assert!(!diagnostic.contains(TOKEN_CANARY));
-        assert!(!diagnostic.contains(SECRET_CANARY));
         assert!(!diagnostic.contains(BODY_CANARY));
         assert!(!diagnostic.contains(UPSTREAM_CANARY));
     }

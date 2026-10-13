@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "gateway_route_id": "gateway_route_t11_rust",
+  "tenant_id": "tenant_t11_rust",
+  "archived_at": "2026-09-07T02:03:04.000+00:00",
+  "producer_version": "t11-rust-issued-2",
+  "source_checkpoint": {
+    "kind": "matrix_sync_token_sha256",
+    "value": "sha256:0000000000000000000000000000000000000000000000000000000000000002"
+  },
+  "events": [
+    {
+      "schema_version": 1,
+      "event_id": "$t11-rust-event-2:server",
+      "event_type": "message.created",
+      "event_source": "live",
+      "tenant_id": "tenant_t11_rust",
+      "identity_id": "identity_t11_rust",
+      "platform": "whatsapp",
+      "account_id": "account_t11_rust",
+      "conversation_id": "conversation_t11_rust",
+      "matrix_room_id": "!room:server",
+      "matrix_event_id": "$t11-rust-matrix-2:server",
+      "remote_message_id": "t11-rust-remote-2",
+      "occurred_at": "2026-09-07T01:00:01.000Z",
+      "observed_at": "2026-09-07T01:00:01.500Z",
+      "payload": {
+        "message_id": "message_t11_rust_ingest_2",
+        "direction": "inbound",
+        "sender_participant_id": null,
+        "sender_label": "Ingestion fixture",
+        "body": "",
+        "reply_to_message_id": null,
+        "delivery_status": "unknown",
+        "unread": true
+      }
+    }
+  ],
+  "batch_id": "batch_b15346da0ace0c047ea49ac874629a980561f077ef75e08f6764b963ddd87410"
+}
