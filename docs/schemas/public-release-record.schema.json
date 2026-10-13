@@ -155,6 +155,19 @@
             }
           }
         },
+        "helpers": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name", "digest"],
+            "properties": {
+              "name": { "type": "string", "pattern": "^[A-Za-z0-9._-]+$" },
+              "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
+            }
+          }
+        },
         "entrypoint_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
         "runtime": {
           "type": "object",

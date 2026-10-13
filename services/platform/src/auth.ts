@@ -314,6 +314,24 @@ export function createAuth(
     await recoverPendingSocialAccount(env.IDENTITY_DB, binding);
     return {};
   };
+  const google =
+    env.GOOGLE_CLIENT_ID && env.GOOGLE_CLIENT_SECRET
+      ? {
+          clientId: env.GOOGLE_CLIENT_ID,
+          clientSecret: env.GOOGLE_CLIENT_SECRET,
+          mapProfileToUser: async (profile: object) =>
+            recoverSocialProfile("google", profile),
+        }
+      : undefined;
+  const github =
+    env.GITHUB_CLIENT_ID && env.GITHUB_CLIENT_SECRET
+      ? {
+          clientId: env.GITHUB_CLIENT_ID,
+          clientSecret: env.GITHUB_CLIENT_SECRET,
+          mapProfileToUser: async (profile: object) =>
+            recoverSocialProfile("github", profile),
+        }
+      : undefined;
   return betterAuth({
     appName: "0000 Platform",
     baseURL: env.PLATFORM_BASE_URL,
@@ -464,18 +482,8 @@ export function createAuth(
       },
     },
     socialProviders: {
-      google: {
-        clientId: env.GOOGLE_CLIENT_ID,
-        clientSecret: env.GOOGLE_CLIENT_SECRET,
-        mapProfileToUser: async (profile) =>
-          recoverSocialProfile("google", profile),
-      },
-      github: {
-        clientId: env.GITHUB_CLIENT_ID,
-        clientSecret: env.GITHUB_CLIENT_SECRET,
-        mapProfileToUser: async (profile) =>
-          recoverSocialProfile("github", profile),
-      },
+      ...(google ? { google } : {}),
+      ...(github ? { github } : {}),
     },
     plugins: createAuthPlugins(
       options.oauthPlatform

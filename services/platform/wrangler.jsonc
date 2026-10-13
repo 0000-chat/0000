@@ -53,8 +53,6 @@
   },
   "secrets": {
     "required": [
-      "GOOGLE_CLIENT_SECRET",
-      "GITHUB_CLIENT_SECRET",
       "BETTER_AUTH_SECRET"
     ]
   }

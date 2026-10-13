@@ -7,8 +7,8 @@ status: current
 
 This document records the public release workflow boundary. Every push to
 `main` publishes an immutable release record. The active release map contains
-the Gateway, Msg Worker, Database Worker, and Msg webhook dispatcher bundles;
-Streams and Communicator remain outside this activation.
+the Gateway, Msg Worker, Database Worker, Platform Worker, and Msg webhook
+dispatcher bundles; Streams and Communicator remain outside this activation.
 
 The release planner compares the unit map at the push base with the current
 map. An additive registration selects only the newly registered unit for its
@@ -18,9 +18,10 @@ manifests and lockfiles also select all configured units. A later Gateway or
 Msg runtime-path change selects its own unit; a Msg release-workflow change
 selects Msg.
 
-The Database registration is additive: the first release plan containing the
-new `database-worker` unit selects only that unit when the existing Gateway
-and Msg definitions are unchanged. The Msg Worker bundle contains the
+The Database and Platform registrations are additive: the first release plan
+containing the new `database-worker` unit selects only that unit when the
+existing Gateway and Msg definitions are unchanged. The first plan containing
+the new `platform-worker` unit likewise selects only Platform. The Msg Worker bundle contains the
 generated Worker, its emitted runtime modules, static assets, and ordered D1
 migrations. The Database bundle contains its generated Worker and the
 `DATABASES`/`REGISTRY` SQLite Durable Object migration contract. These are
@@ -37,8 +38,10 @@ The workflow and tests prove this sequence:
 3. A Gateway source or build-input change selects only `gateway`; a Msg Worker
    source or build-input change selects only `msg-worker`; a Database source
    or build-input change selects only `database-worker`.
-4. A dispatcher source change selects only `msg-webhook-dispatcher`.
-5. A shared runtime input selects all configured units.
+4. A Platform source, migration, or build-input change selects only
+   `platform-worker`.
+5. A dispatcher source change selects only `msg-webhook-dispatcher`.
+6. A shared runtime input selects all configured units.
 
 Each runtime artifact is built in public CI and accompanied by an immutable
 release record and artifact attestation. Worker artifacts are consumed by

@@ -196,6 +196,31 @@ function assertWorkerBuildConfig(unit, build) {
     }
   }
 
+  if (build.helpers !== undefined) {
+    if (!Array.isArray(build.helpers) || build.helpers.length === 0) {
+      throw new Error(`release unit build.helpers must be non-empty: ${unit.name}`);
+    }
+    const helperEntrypoints = new Set([build.entrypoint, build.config, "artifact-manifest.json"]);
+    for (const helper of build.helpers) {
+      if (
+        !helper ||
+        typeof helper !== "object" ||
+        Array.isArray(helper) ||
+        typeof helper.source !== "string" ||
+        !helper.source.startsWith("services/") ||
+        normalisePath(helper.source) !== helper.source ||
+        typeof helper.entrypoint !== "string" ||
+        helper.entrypoint.length === 0 ||
+        helper.entrypoint.includes("/") ||
+        normalisePath(helper.entrypoint) !== helper.entrypoint ||
+        helperEntrypoints.has(helper.entrypoint)
+      ) {
+        throw new Error(`release unit build.helpers is invalid: ${unit.name}`);
+      }
+      helperEntrypoints.add(helper.entrypoint);
+    }
+  }
+
   if (build.runtime !== undefined) {
     const runtime = build.runtime;
     if (!runtime || typeof runtime !== "object" || Array.isArray(runtime)) {
@@ -416,14 +441,20 @@ function assertWorkerBuildConfig(unit, build) {
     }
     if (build.wrangler.secrets !== undefined) {
       const required = build.wrangler.secrets?.required;
+      const optional = build.wrangler.secrets?.optional;
       if (
         !build.wrangler.secrets ||
         typeof build.wrangler.secrets !== "object" ||
         Array.isArray(build.wrangler.secrets) ||
         !Array.isArray(required) ||
-        !required.every((secret) => typeof secret === "string" && NAME_RE.test(secret))
+        !required.every((secret) => typeof secret === "string" && NAME_RE.test(secret)) ||
+        (optional !== undefined &&
+          (!Array.isArray(optional) ||
+            !optional.every((secret) => typeof secret === "string" && NAME_RE.test(secret)))) ||
+        (optional !== undefined &&
+          new Set([...required, ...optional]).size !== required.length + optional.length)
       ) {
-        throw new Error(`release unit build.wrangler.secrets.required is invalid: ${unit.name}`);
+        throw new Error(`release unit build.wrangler.secrets is invalid: ${unit.name}`);
       }
     }
     if (build.wrangler.observability !== undefined) {
@@ -706,7 +737,12 @@ export function assertWorkerBuildConfigMatchesSource(unit, build, root = reposit
     durable_objects: releaseContract.durable_objects,
     migrations: releaseContract.migrations,
     d1_databases: releaseContract.d1_databases,
-    secrets: releaseContract.secrets,
+    // Wrangler accepts only the required secret declaration. Optional
+    // provider secrets remain an artifact contract and are omitted from the
+    // generated neutral config.
+    secrets: releaseContract.secrets
+      ? { required: releaseContract.secrets.required }
+      : undefined,
     observability: releaseContract.observability,
     assets: build.assets
       ? {

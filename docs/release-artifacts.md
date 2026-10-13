@@ -11,18 +11,20 @@ point at another source revision. The record carries the exact source commit,
 affected runtime units, artifact digests, and the `api/config` compatibility
 pair consumed by private Cloud promotion.
 
-This activation publishes four runtime units:
+This activation publishes five runtime units:
 
 - `gateway`, a deterministic, prebuilt Cloudflare Worker bundle.
 - `msg-worker`, a deterministic, prebuilt Cloudflare Worker bundle.
 - `database-worker`, a deterministic, prebuilt Cloudflare Worker bundle with
   its SQLite Durable Object contract.
+- `platform-worker`, a deterministic, prebuilt Cloudflare Worker bundle with
+  the public identity authority, D1 migration ledger, and rate-limit contract.
 - `msg-webhook-dispatcher`, a deterministic, prebuilt Bun runtime bundle for
   self-hosted secure MCP Events delivery.
 
-Streams and Communicator remain outside this activation. Platform and Brain
-remain validation-only until their own runtime artifacts and staging
-consumers are reviewed. The SDK placeholder and the `@0000chat/msg` CLI remain
+Streams and Communicator remain outside this activation. Brain remains
+validation-only until its own runtime artifact and staging consumer are
+reviewed. The SDK placeholder and the `@0000chat/msg` CLI remain
 checks-only and are never release artifacts. Private Cloud content is never
 included.
 
@@ -96,6 +98,53 @@ the release base, verifies the ordered migration ledger, applies the D1
 migrations in numeric order, then deploys the prebuilt Worker with
 `--no-bundle`. It owns staging, canary, production, and rollback promotion;
 this repository does not deploy or claim live staging health.
+
+## Platform Worker bundle
+
+`platform-worker-<version>.tar.gz` is a deterministic, prebuilt Cloudflare
+Worker bundle for the public identity authority. Its root-level files and
+directories are:
+
+```text
+worker.js
+wrangler.json
+artifact-manifest.json
+provision-service.js
+migrations/0001_better_auth.sql
+...
+migrations/0012_browser_purpose.sql
+```
+
+The route-free `wrangler.json` declares the `IDENTITY_DB` D1 binding and the
+ordered migration directory. The embedded manifest declares all five
+Platform rate-limit bindings without their environment-owned namespace IDs.
+Neither file contains a Worker name, route, custom domain, account ID,
+database ID, rate-limit namespace ID, provider ID, or secret value. The release manifest
+records the same D1 and rate-limit contract, the required
+`BETTER_AUTH_SECRET`, optional provider secret names, ordered migration
+digests, and the SHA-256 digest of the bundled `provision-service.js` helper.
+
+`BETTER_AUTH_SECRET` is required for the authority. Google and GitHub OAuth
+credentials are optional: the Worker registers a provider only when both its
+client ID and secret are present. A self-hosted deployment can therefore run
+the anonymous guest authority and service-to-service flows without human OAuth
+credentials; its human login endpoints remain unavailable until an operator
+configures a real provider client ID and secret. Provider secrets are never
+embedded in the artifact.
+
+The bundled `provision-service.js` helper registers and manages service and
+guest-issuer rows in the `IDENTITY_DB` binding. It accepts explicit
+`--config PATH` and `--wrangler PATH` options so an extracted artifact can use
+its neutral `wrangler.json` and an operator-selected Wrangler executable; its
+default invocation remains compatible with the source checkout. It prints
+one-time verifier or issuer values only on successful registration, so capture
+those values in a protected environment.
+
+Cloud supplies the Worker name, route, custom domain, account and database
+IDs, rate-limit namespace IDs, authority URL, non-secret public policy vars,
+and any optional OAuth provider configuration. The public release workflow
+builds and attests this artifact; it does not deploy Platform or claim live
+staging health.
 
 ## Msg webhook dispatcher bundle
 

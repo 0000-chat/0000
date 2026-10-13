@@ -147,6 +147,19 @@ function buildWorkerUnit(unit, plan) {
     }
     const workerBytes = fs.readFileSync(generatedWorker);
     fs.writeFileSync(path.join(artifactRoot, unit.build.entrypoint), workerBytes);
+    const helperArtifacts = [];
+    for (const helper of unit.build.helpers ?? []) {
+      const helperPath = path.join(artifactRoot, helper.entrypoint);
+      run(
+        "bun",
+        ["build", repositoryPath(helper.source, `${unit.name} build helper source`), "--target=bun", "--sourcemap=none", "--outfile", helperPath],
+        { maxBuffer: 128 * 1024 * 1024 },
+      );
+      helperArtifacts.push({
+        name: helper.entrypoint,
+        digest: `sha256:${sha256(fs.readFileSync(helperPath))}`,
+      });
+    }
     fs.writeFileSync(
       path.join(artifactRoot, unit.build.config),
       stableJson(neutralWranglerConfig(unit)),
@@ -167,7 +180,8 @@ function buildWorkerUnit(unit, plan) {
     );
     const manifest = workerArtifactManifest(unit, plan, {
       ...(migrationFiles.length > 0 ? { migration_files: migrationFiles } : {}),
-      ...(modules.length > 0 ? { modules } : {})
+      ...(modules.length > 0 ? { modules } : {}),
+      ...(helperArtifacts.length > 0 ? { helpers: helperArtifacts } : {})
     });
     fs.writeFileSync(path.join(artifactRoot, "artifact-manifest.json"), stableJson(manifest), "utf8");
 
@@ -209,6 +223,7 @@ function buildWorkerUnit(unit, plan) {
         ...(unit.build.wrangler?.vars ? { vars: unit.build.wrangler.vars } : {}),
         migration_files: migrationFiles,
         modules,
+        ...(helperArtifacts.length > 0 ? { helpers: helperArtifacts } : {}),
         entrypoint_digest: `sha256:${sha256(workerBytes)}`,
         deployment: {
           tool: "wrangler",

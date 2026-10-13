@@ -1,4 +1,6 @@
 import { spawn } from "node:child_process";
+import { readFileSync } from "node:fs";
+import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   guestIssuerDisableSql,
@@ -32,11 +34,13 @@ type Arguments = {
     | "disable-guest-issuer";
   values: Map<string, string[]>;
   remote: boolean;
+  configPath?: string;
+  wranglerPath?: string;
 };
 
 function usage(): never {
   throw new Error(
-    "Usage: bun scripts/provision-service.ts [--local|--remote] <register|update|rotate-verifier|disable|register-guest-issuer|rotate-guest-issuer|disable-guest-issuer> --service-id ID [options]",
+    "Usage: bun scripts/provision-service.ts [--local|--remote] [--config PATH] [--wrangler PATH] <register|update|rotate-verifier|disable|register-guest-issuer|rotate-guest-issuer|disable-guest-issuer> --service-id ID [options]",
   );
 }
 
@@ -44,6 +48,8 @@ function parseArguments(argv: string[]): Arguments {
   let operation: Arguments["operation"] | undefined;
   let local = false;
   let remote = false;
+  let configPath: string | undefined;
+  let wranglerPath: string | undefined;
   const values = new Map<string, string[]>();
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
@@ -53,6 +59,14 @@ function parseArguments(argv: string[]): Arguments {
     }
     if (arg === "--remote") {
       remote = true;
+      continue;
+    }
+    if (arg === "--config" || arg === "--wrangler") {
+      const value = argv[index + 1];
+      if (!value || value.startsWith("--")) usage();
+      if (arg === "--config") configPath = value;
+      else wranglerPath = value;
+      index += 1;
       continue;
     }
     if (!arg) continue;
@@ -82,7 +96,7 @@ function parseArguments(argv: string[]): Arguments {
       "Choose exactly one provisioning target: --local or --remote.",
     );
   }
-  return { operation, values, remote };
+  return { operation, values, remote, configPath, wranglerPath };
 }
 
 function one(args: Arguments, name: string): string | undefined {
@@ -113,23 +127,80 @@ function sqlString(value: string): string {
   return `'${value.replaceAll("'", "''")}'`;
 }
 
-async function runWrangler(sql: string, remote: boolean): Promise<string> {
-  const scope = remote ? "--remote" : "--local";
-  const child = spawn(
-    "bun",
-    [
-      "x",
-      "wrangler",
-      "d1",
-      "execute",
-      databaseName,
-      scope,
-      "--command",
-      sql,
-      "--json",
-    ],
-    { cwd: platformRoot, stdio: ["ignore", "pipe", "pipe"] },
+function parseConfig(source: string): unknown {
+  let withoutComments = "";
+  let inString = false;
+  let escaped = false;
+  for (let index = 0; index < source.length; index += 1) {
+    const character = source[index];
+    const next = source[index + 1];
+    if (inString) {
+      withoutComments += character;
+      if (escaped) escaped = false;
+      else if (character === "\\") escaped = true;
+      else if (character === '"') inString = false;
+      continue;
+    }
+    if (character === '"') {
+      inString = true;
+      withoutComments += character;
+      continue;
+    }
+    if (character === "/" && next === "/") {
+      withoutComments += "  ";
+      index += 1;
+      while (index + 1 < source.length && source[index + 1] !== "\n" && source[index + 1] !== "\r") {
+        withoutComments += " ";
+        index += 1;
+      }
+      continue;
+    }
+    withoutComments += character;
+  }
+  const parsed: unknown = JSON.parse(withoutComments.replace(/,\s*([}\]])/gu, "$1"));
+  return parsed;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function configuredDatabaseName(configPath: string | undefined): string {
+  if (!configPath) return databaseName;
+  let source = readFileSync(path.resolve(configPath), "utf8");
+  const config = parseConfig(source);
+  if (!isRecord(config)) {
+    throw new Error("Wrangler config must contain an object.");
+  }
+  const databases = config.d1_databases;
+  if (!Array.isArray(databases)) {
+    throw new Error("Wrangler config must define the IDENTITY_DB D1 binding.");
+  }
+  const database = databases.find(
+    (candidate): candidate is Record<string, unknown> =>
+      isRecord(candidate) && candidate.binding === "IDENTITY_DB",
   );
+  const selectedName = database?.database_name;
+  if (typeof selectedName !== "string" || selectedName.length === 0) {
+    throw new Error("Wrangler config must define the IDENTITY_DB D1 binding.");
+  }
+  return selectedName;
+}
+
+async function runWrangler(sql: string, args: Arguments): Promise<string> {
+  const scope = args.remote ? "--remote" : "--local";
+  const configPath = args.configPath ? path.resolve(args.configPath) : undefined;
+  const selectedDatabase = configuredDatabaseName(configPath);
+  const command = args.wranglerPath ? args.wranglerPath : "bun";
+  const commandArgs = args.wranglerPath
+    ? ["d1", "execute", selectedDatabase, scope, "--command", sql, "--json"]
+    : ["x", "wrangler", "d1", "execute", selectedDatabase, scope, "--command", sql, "--json"];
+  if (configPath) commandArgs.push("--config", configPath);
+  const cwd = configPath ? path.dirname(configPath) : platformRoot;
+  const child = spawn(command, commandArgs, {
+    cwd,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
   let stdout = "";
   let stderr = "";
   child.stdout.on("data", (chunk) => {
@@ -191,7 +262,7 @@ async function main(): Promise<void> {
     const existing = parseWranglerResults(
       await runWrangler(
         `SELECT service_id FROM platform_service WHERE service_id = ${sqlString(input.serviceId)} OR audience = ${sqlString(input.audience)};`,
-        args.remote,
+        args,
       ),
     ).at(-1)?.results;
     if (existing && existing.length > 0) {
@@ -202,7 +273,7 @@ async function main(): Promise<void> {
     const verifier = opaqueSecret("service_verify_");
     await runWrangler(
       serviceRegistrationSql(input, await hashOpaque(verifier), Date.now()),
-      args.remote,
+      args,
     );
     // This is the only successful operation that prints the new verifier.
     process.stdout.write(
@@ -219,7 +290,7 @@ async function main(): Promise<void> {
         { serviceId, capabilities: nextCapabilities, displayName: name },
         Date.now(),
       )} SELECT changes() AS changed;`,
-      args.remote,
+      args,
     );
     assertChanged(output, "update");
     process.stdout.write(`updated ${serviceId}\n`);
@@ -234,7 +305,7 @@ async function main(): Promise<void> {
         await hashOpaque(verifier),
         Date.now(),
       )} SELECT changes() AS changed;`,
-      args.remote,
+      args,
     );
     assertChanged(output, "rotate-verifier");
     process.stdout.write(`rotated ${serviceId}\nverifier=${verifier}\n`);
@@ -249,7 +320,7 @@ async function main(): Promise<void> {
         await hashOpaque(issuer),
         Date.now(),
       )} SELECT changes() AS changed;`,
-      args.remote,
+      args,
     );
     assertChanged(output, "register-guest-issuer");
     process.stdout.write(
@@ -262,7 +333,7 @@ async function main(): Promise<void> {
     const current = parseWranglerResults(
       await runWrangler(
         `SELECT service_id FROM platform_service WHERE service_id = ${sqlString(serviceId)} AND disabled = 0; SELECT credential_hash FROM platform_service_grant_issuer WHERE service_id = ${sqlString(serviceId)} AND disabled = 0;`,
-        args.remote,
+        args,
       ),
     );
     if ((current.at(-2)?.results?.length ?? 0) === 0) {
@@ -289,7 +360,7 @@ async function main(): Promise<void> {
         Date.now(),
         priorIssuerHash,
       )} SELECT changes() AS changed;`,
-      args.remote,
+      args,
     );
     assertChanged(output, "rotate-guest-issuer");
     process.stdout.write(
@@ -301,7 +372,7 @@ async function main(): Promise<void> {
   if (args.operation === "disable-guest-issuer") {
     const output = await runWrangler(
       `${guestIssuerDisableSql(serviceId, Date.now())} SELECT changes() AS changed; SELECT service_id FROM platform_service WHERE service_id = ${sqlString(serviceId)};`,
-      args.remote,
+      args,
     );
     const results = parseWranglerResults(output);
     if ((results.at(-1)?.results?.length ?? 0) === 0) {
@@ -318,7 +389,7 @@ async function main(): Promise<void> {
 
   const output = await runWrangler(
     `${serviceDisableSql(serviceId, Date.now())} SELECT changes() AS changed; SELECT service_id, disabled FROM platform_service WHERE service_id = ${sqlString(serviceId)};`,
-    args.remote,
+    args,
   );
   const results = parseWranglerResults(output);
   const changed = results.at(-2)?.results?.[0]?.changed === 1;
