@@ -911,12 +911,6 @@ const FAIL_CLOSED_SERVICE_ROOTS = [
   "services/brain"
 ];
 
-// Platform is deliberately validation-only while its Worker artifact and
-// staging consumer remain unreviewed. Keep it out of the fail-closed roots so
-// source, configuration, and migration changes produce a zero-artifact record
-// instead of being mistaken for an undeclared deployable runtime.
-const VALIDATION_ONLY_SERVICE_ROOTS = ["services/platform"];
-
 const VALIDATION_ONLY_FILE_NAMES = new Set([
   ".env.example",
   ".gitignore",
@@ -941,8 +935,6 @@ function pathInside(file, root) {
 
 function isValidationOnlyPath(file) {
   if (isDocumentationPath(file)) return true;
-
-  if (VALIDATION_ONLY_SERVICE_ROOTS.some((root) => pathInside(file, root))) return true;
 
   const failClosedRoot = FAIL_CLOSED_SERVICE_ROOTS.find((root) => pathInside(file, root));
   if (failClosedRoot) {

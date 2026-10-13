@@ -870,20 +870,30 @@ test("validation-only service changes create a record without Cloud dispatch", (
   }
 });
 
-test("Platform runtime changes remain validation-only and mix with released units", () => {
+test("Platform runtime changes select the released unit and mix with other units", () => {
   for (const changedFile of [
     "services/platform/src/worker.ts",
     "services/platform/migrations/0001_better_auth.sql",
     "services/platform/wrangler.jsonc",
     "services/platform/scripts/wrangler-config.ts",
-    "services/platform/.dev.vars.example"
   ]) {
     const plan = makePlan({ config, base: head, head, changedFiles: [changedFile] });
-    assert.equal(plan.change_class, "non-runtime");
-    assert.equal(plan.runtime_redeployment, false);
-    assert.deepEqual(plan.affected_units, []);
-    assert.deepEqual(plan.artifacts, []);
+    assert.equal(plan.change_class, "runtime");
+    assert.equal(plan.runtime_redeployment, true);
+    assert.deepEqual(plan.affected_units, ["platform-worker"]);
+    assert.deepEqual(plan.artifacts.map((artifact) => artifact.name), ["platform-worker"]);
   }
+
+  const validationOnlyPlan = makePlan({
+    config,
+    base: head,
+    head,
+    changedFiles: ["services/platform/.dev.vars.example"]
+  });
+  assert.equal(validationOnlyPlan.change_class, "non-runtime");
+  assert.equal(validationOnlyPlan.runtime_redeployment, false);
+  assert.deepEqual(validationOnlyPlan.affected_units, []);
+  assert.deepEqual(validationOnlyPlan.artifacts, []);
 
   const mixedPlan = makePlan({
     config,
@@ -893,8 +903,8 @@ test("Platform runtime changes remain validation-only and mix with released unit
   });
   assert.equal(mixedPlan.change_class, "runtime");
   assert.equal(mixedPlan.runtime_redeployment, true);
-  assert.deepEqual(mixedPlan.affected_units, ["msg-worker"]);
-  assert.deepEqual(mixedPlan.artifacts.map((artifact) => artifact.name), ["msg-worker"]);
+  assert.deepEqual(mixedPlan.affected_units, ["msg-worker", "platform-worker"]);
+  assert.deepEqual(mixedPlan.artifacts.map((artifact) => artifact.name), ["msg-worker", "platform-worker"]);
 });
 
 test("unmapped service and app runtime changes fail closed", () => {
