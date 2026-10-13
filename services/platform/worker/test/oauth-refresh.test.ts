@@ -456,6 +456,40 @@ function workerRefreshPhaseEnv(
   }) as Cloudflare.Env;
 }
 
+type AuthorityMutationPhase = "read" | "pending" | "provider" | "publication";
+type AuthorityMutationName =
+  | "organization suspension"
+  | "service catalog narrowing"
+  | "installation-scoped consent deletion"
+  | "subject disablement"
+  | "original membership removal and rejoin";
+
+const AUTHORITY_MUTATION_SCENARIOS: readonly [
+  AuthorityMutationPhase,
+  AuthorityMutationName,
+][] = [
+  ["read", "organization suspension"],
+  ["read", "service catalog narrowing"],
+  ["read", "installation-scoped consent deletion"],
+  ["read", "subject disablement"],
+  ["read", "original membership removal and rejoin"],
+  ["pending", "organization suspension"],
+  ["pending", "service catalog narrowing"],
+  ["pending", "installation-scoped consent deletion"],
+  ["pending", "subject disablement"],
+  ["pending", "original membership removal and rejoin"],
+  ["provider", "organization suspension"],
+  ["provider", "service catalog narrowing"],
+  ["provider", "installation-scoped consent deletion"],
+  ["provider", "subject disablement"],
+  ["provider", "original membership removal and rejoin"],
+  ["publication", "organization suspension"],
+  ["publication", "service catalog narrowing"],
+  ["publication", "installation-scoped consent deletion"],
+  ["publication", "subject disablement"],
+  ["publication", "original membership removal and rejoin"],
+];
+
 describe("T07 production OAuth refresh lineage", () => {
   beforeEach(() => {
     vi.stubGlobal(
@@ -3157,338 +3191,341 @@ describe("T07 production OAuth refresh lineage", () => {
     });
   });
 
-  it("holds organization authority mutations across consume and publication", async () => {
-    const suffix = crypto.randomUUID().slice(0, 8);
-    const service = await registerService(testEnv.IDENTITY_DB, {
-      serviceId: `t07-late-authority-service-${suffix}`,
-      audience: `https://t07-late-authority-${suffix}.0000.test`,
-      capabilities: ["resource:read", "resource:write"],
-    });
-    const client = await provisionTrustedOAuthClient(
-      testEnv.IDENTITY_DB,
-      testEnv.BETTER_AUTH_SECRET,
-      {
-        serviceId: service.serviceId,
-        clientId: `t07-late-authority-client-${suffix}`,
-        redirectUri: `https://t07-late-authority-client-${suffix}.example.test/callback`,
+  it.each(AUTHORITY_MUTATION_SCENARIOS)(
+    "holds %s across %s",
+    async (phase, mutationName) => {
+      const suffix = crypto.randomUUID().slice(0, 8);
+      const service = await registerService(testEnv.IDENTITY_DB, {
+        serviceId: `t07-late-authority-service-${suffix}`,
+        audience: `https://t07-late-authority-${suffix}.0000.test`,
         capabilities: ["resource:read", "resource:write"],
-        authMethod: "none",
-        refreshEnabled: true,
-      },
-    );
-    type Context = {
-      userId: string;
-      organizationId: string;
-      installationId: string;
-      familyId: string;
-      tokenId: string;
-      membershipId: string;
-      membershipRole: string;
-      membershipCreatedAt: number;
-      consent: {
-        id: string;
-        clientId: string;
+      });
+      const client = await provisionTrustedOAuthClient(
+        testEnv.IDENTITY_DB,
+        testEnv.BETTER_AUTH_SECRET,
+        {
+          serviceId: service.serviceId,
+          clientId: `t07-late-authority-client-${suffix}`,
+          redirectUri: `https://t07-late-authority-client-${suffix}.example.test/callback`,
+          capabilities: ["resource:read", "resource:write"],
+          authMethod: "none",
+          refreshEnabled: true,
+        },
+      );
+      type Context = {
         userId: string;
-        referenceId: string;
-        resources: string | null;
-        requestedUserInfoClaims: string | null;
-        scopes: string;
-        createdAt: number | null;
-        updatedAt: number | null;
+        organizationId: string;
+        installationId: string;
+        familyId: string;
+        tokenId: string;
+        membershipId: string;
+        membershipRole: string;
+        membershipCreatedAt: number;
+        consent: {
+          id: string;
+          clientId: string;
+          userId: string;
+          referenceId: string;
+          resources: string | null;
+          requestedUserInfoClaims: string | null;
+          scopes: string;
+          createdAt: number | null;
+          updatedAt: number | null;
+        };
+        refreshToken: string;
+        replacementMembershipId?: string;
       };
-      refreshToken: string;
-      replacementMembershipId?: string;
-    };
-    type Mutation = {
-      name: string;
-      apply: (context: Context) => Promise<void>;
-      assert: (context: Context) => Promise<void>;
-      restore?: (context: Context) => Promise<void>;
-    };
-    const mutations: Mutation[] = [
-      {
-        name: "organization suspension",
-        apply: async (context) => {
-          const result = await testEnv.IDENTITY_DB.prepare(
-            "UPDATE organization SET suspendedAt = ? WHERE id = ?",
-          )
-            .bind(Date.now(), context.organizationId)
-            .run();
-          expect(result.meta.changes).toBe(1);
+      type Mutation = {
+        name: string;
+        apply: (context: Context) => Promise<void>;
+        assert: (context: Context) => Promise<void>;
+        restore?: (context: Context) => Promise<void>;
+      };
+      const mutations: Mutation[] = [
+        {
+          name: "organization suspension",
+          apply: async (context) => {
+            const result = await testEnv.IDENTITY_DB.prepare(
+              "UPDATE organization SET suspendedAt = ? WHERE id = ?",
+            )
+              .bind(Date.now(), context.organizationId)
+              .run();
+            expect(result.meta.changes).toBe(1);
+          },
+          assert: async (context) => {
+            const row = await testEnv.IDENTITY_DB.prepare(
+              "SELECT suspendedAt FROM organization WHERE id = ?",
+            )
+              .bind(context.organizationId)
+              .first<{ suspendedAt: number | null }>();
+            expect(row?.suspendedAt).toEqual(expect.any(Number));
+          },
+          restore: async (context) => {
+            await testEnv.IDENTITY_DB.prepare(
+              "UPDATE organization SET suspendedAt = NULL WHERE id = ?",
+            )
+              .bind(context.organizationId)
+              .run();
+          },
         },
-        assert: async (context) => {
-          const row = await testEnv.IDENTITY_DB.prepare(
-            "SELECT suspendedAt FROM organization WHERE id = ?",
-          )
-            .bind(context.organizationId)
-            .first<{ suspendedAt: number | null }>();
-          expect(row?.suspendedAt).toEqual(expect.any(Number));
+        {
+          name: "service catalog narrowing",
+          apply: async () => {
+            const result = await testEnv.IDENTITY_DB.prepare(
+              "UPDATE platform_service SET allowed_capabilities = '[]' WHERE service_id = ?",
+            )
+              .bind(service.serviceId)
+              .run();
+            expect(result.meta.changes).toBe(1);
+          },
+          assert: async () => {
+            const row = await testEnv.IDENTITY_DB.prepare(
+              "SELECT allowed_capabilities FROM platform_service WHERE service_id = ?",
+            )
+              .bind(service.serviceId)
+              .first<{ allowed_capabilities: string }>();
+            expect(row).toEqual({ allowed_capabilities: "[]" });
+          },
+          restore: async () => {
+            await testEnv.IDENTITY_DB.prepare(
+              "UPDATE platform_service SET allowed_capabilities = ? WHERE service_id = ?",
+            )
+              .bind(JSON.stringify(service.capabilities), service.serviceId)
+              .run();
+          },
         },
-        restore: async (context) => {
-          await testEnv.IDENTITY_DB.prepare(
-            "UPDATE organization SET suspendedAt = NULL WHERE id = ?",
-          )
-            .bind(context.organizationId)
-            .run();
-        },
-      },
-      {
-        name: "service catalog narrowing",
-        apply: async () => {
-          const result = await testEnv.IDENTITY_DB.prepare(
-            "UPDATE platform_service SET allowed_capabilities = '[]' WHERE service_id = ?",
-          )
-            .bind(service.serviceId)
-            .run();
-          expect(result.meta.changes).toBe(1);
-        },
-        assert: async () => {
-          const row = await testEnv.IDENTITY_DB.prepare(
-            "SELECT allowed_capabilities FROM platform_service WHERE service_id = ?",
-          )
-            .bind(service.serviceId)
-            .first<{ allowed_capabilities: string }>();
-          expect(row).toEqual({ allowed_capabilities: "[]" });
-        },
-        restore: async () => {
-          await testEnv.IDENTITY_DB.prepare(
-            "UPDATE platform_service SET allowed_capabilities = ? WHERE service_id = ?",
-          )
-            .bind(JSON.stringify(service.capabilities), service.serviceId)
-            .run();
-        },
-      },
-      {
-        name: "installation-scoped consent deletion",
-        apply: async (context) => {
-          const result = await testEnv.IDENTITY_DB.prepare(
-            "DELETE FROM oauthConsent WHERE referenceId = ?",
-          )
-            .bind(context.installationId)
-            .run();
-          expect(result.meta.changes).toBe(1);
-        },
-        assert: async (context) => {
-          const row = await testEnv.IDENTITY_DB.prepare(
-            "SELECT id FROM oauthConsent WHERE referenceId = ?",
-          )
-            .bind(context.installationId)
-            .first<{ id: string }>();
-          expect(row).toBeNull();
-        },
-        restore: async (context) => {
-          const consent = context.consent;
-          await testEnv.IDENTITY_DB.prepare(
-            `INSERT INTO oauthConsent
+        {
+          name: "installation-scoped consent deletion",
+          apply: async (context) => {
+            const result = await testEnv.IDENTITY_DB.prepare(
+              "DELETE FROM oauthConsent WHERE referenceId = ?",
+            )
+              .bind(context.installationId)
+              .run();
+            expect(result.meta.changes).toBe(1);
+          },
+          assert: async (context) => {
+            const row = await testEnv.IDENTITY_DB.prepare(
+              "SELECT id FROM oauthConsent WHERE referenceId = ?",
+            )
+              .bind(context.installationId)
+              .first<{ id: string }>();
+            expect(row).toBeNull();
+          },
+          restore: async (context) => {
+            const consent = context.consent;
+            await testEnv.IDENTITY_DB.prepare(
+              `INSERT INTO oauthConsent
                (id, clientId, userId, referenceId, resources,
                 requestedUserInfoClaims, scopes, createdAt, updatedAt)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          )
-            .bind(
-              consent.id,
-              consent.clientId,
-              consent.userId,
-              consent.referenceId,
-              consent.resources,
-              consent.requestedUserInfoClaims,
-              consent.scopes,
-              consent.createdAt,
-              consent.updatedAt,
             )
-            .run();
+              .bind(
+                consent.id,
+                consent.clientId,
+                consent.userId,
+                consent.referenceId,
+                consent.resources,
+                consent.requestedUserInfoClaims,
+                consent.scopes,
+                consent.createdAt,
+                consent.updatedAt,
+              )
+              .run();
+          },
         },
-      },
-      {
-        name: "subject disablement",
-        apply: async (context) => {
-          const result = await testEnv.IDENTITY_DB.prepare(
-            'UPDATE "user" SET disabledAt = ? WHERE id = ?',
-          )
-            .bind(Date.now(), context.userId)
-            .run();
-          expect(result.meta.changes).toBe(1);
+        {
+          name: "subject disablement",
+          apply: async (context) => {
+            const result = await testEnv.IDENTITY_DB.prepare(
+              'UPDATE "user" SET disabledAt = ? WHERE id = ?',
+            )
+              .bind(Date.now(), context.userId)
+              .run();
+            expect(result.meta.changes).toBe(1);
+          },
+          assert: async (context) => {
+            const row = await testEnv.IDENTITY_DB.prepare(
+              'SELECT disabledAt FROM "user" WHERE id = ?',
+            )
+              .bind(context.userId)
+              .first<{ disabledAt: number | null }>();
+            expect(row?.disabledAt).toEqual(expect.any(Number));
+          },
+          restore: async (context) => {
+            await testEnv.IDENTITY_DB.prepare(
+              'UPDATE "user" SET disabledAt = NULL WHERE id = ?',
+            )
+              .bind(context.userId)
+              .run();
+          },
         },
-        assert: async (context) => {
-          const row = await testEnv.IDENTITY_DB.prepare(
-            'SELECT disabledAt FROM "user" WHERE id = ?',
-          )
-            .bind(context.userId)
-            .first<{ disabledAt: number | null }>();
-          expect(row?.disabledAt).toEqual(expect.any(Number));
-        },
-        restore: async (context) => {
-          await testEnv.IDENTITY_DB.prepare(
-            'UPDATE "user" SET disabledAt = NULL WHERE id = ?',
-          )
-            .bind(context.userId)
-            .run();
-        },
-      },
-      {
-        name: "original membership removal and rejoin",
-        apply: async (context) => {
-          const deleted = await testEnv.IDENTITY_DB.prepare(
-            "DELETE FROM member WHERE id = ?",
-          )
-            .bind(context.membershipId)
-            .run();
-          expect(deleted.meta.changes).toBe(1);
-          context.replacementMembershipId = crypto.randomUUID();
-          const rejoined = await testEnv.IDENTITY_DB.prepare(
-            `INSERT INTO member (id, organizationId, userId, role, createdAt)
+        {
+          name: "original membership removal and rejoin",
+          apply: async (context) => {
+            const deleted = await testEnv.IDENTITY_DB.prepare(
+              "DELETE FROM member WHERE id = ?",
+            )
+              .bind(context.membershipId)
+              .run();
+            expect(deleted.meta.changes).toBe(1);
+            context.replacementMembershipId = crypto.randomUUID();
+            const rejoined = await testEnv.IDENTITY_DB.prepare(
+              `INSERT INTO member (id, organizationId, userId, role, createdAt)
              VALUES (?, ?, ?, ?, ?)`,
-          )
-            .bind(
-              context.replacementMembershipId,
-              context.organizationId,
-              context.userId,
-              context.membershipRole,
-              context.membershipCreatedAt,
             )
-            .run();
-          expect(rejoined.meta.changes).toBe(1);
-        },
-        assert: async (context) => {
-          const rows = await testEnv.IDENTITY_DB.prepare(
-            "SELECT id FROM member WHERE id IN (?, ?)",
-          )
-            .bind(context.membershipId, context.replacementMembershipId)
-            .all<{ id: string }>();
-          expect(rows.results).toEqual([
-            { id: context.replacementMembershipId },
-          ]);
-        },
-        restore: async (context) => {
-          await testEnv.IDENTITY_DB.prepare("DELETE FROM member WHERE id = ?")
-            .bind(context.replacementMembershipId)
-            .run();
-          await testEnv.IDENTITY_DB.prepare(
-            `INSERT INTO member (id, organizationId, userId, role, createdAt)
+              .bind(
+                context.replacementMembershipId,
+                context.organizationId,
+                context.userId,
+                context.membershipRole,
+                context.membershipCreatedAt,
+              )
+              .run();
+            expect(rejoined.meta.changes).toBe(1);
+          },
+          assert: async (context) => {
+            const rows = await testEnv.IDENTITY_DB.prepare(
+              "SELECT id FROM member WHERE id IN (?, ?)",
+            )
+              .bind(context.membershipId, context.replacementMembershipId)
+              .all<{ id: string }>();
+            expect(rows.results).toEqual([
+              { id: context.replacementMembershipId },
+            ]);
+          },
+          restore: async (context) => {
+            await testEnv.IDENTITY_DB.prepare("DELETE FROM member WHERE id = ?")
+              .bind(context.replacementMembershipId)
+              .run();
+            await testEnv.IDENTITY_DB.prepare(
+              `INSERT INTO member (id, organizationId, userId, role, createdAt)
              VALUES (?, ?, ?, ?, ?)`,
-          )
-            .bind(
-              context.membershipId,
-              context.organizationId,
-              context.userId,
-              context.membershipRole,
-              context.membershipCreatedAt,
             )
-            .run();
+              .bind(
+                context.membershipId,
+                context.organizationId,
+                context.userId,
+                context.membershipRole,
+                context.membershipCreatedAt,
+              )
+              .run();
+          },
         },
-      },
-    ];
-    const refreshRequest = (context: Context) =>
-      new Request("http://localhost/api/auth/oauth2/token", {
-        method: "POST",
-        headers: { "content-type": "application/x-www-form-urlencoded" },
-        body: new URLSearchParams({
-          grant_type: "refresh_token",
-          client_id: client.clientId,
-          refresh_token: context.refreshToken,
-          resource: service.audience,
-        }),
-      });
-    const runPhase = async (
-      phase: "read" | "pending" | "provider" | "publication",
-    ) => {
-      for (const mutation of mutations) {
-        const user = await signIn();
-        const organization = await organizationId(user.cookies);
-        const positive = await issueHarnessFlow({
-          cookies: user.cookies,
-          userId: user.userId,
-          organizationId: organization,
-          client,
-          audience: service.audience,
-          offline: true,
-        });
-        const positiveRefresh = await SELF.fetch(
-          new Request("http://localhost/api/auth/oauth2/token", {
-            method: "POST",
-            headers: { "content-type": "application/x-www-form-urlencoded" },
-            body: new URLSearchParams({
-              grant_type: "refresh_token",
-              client_id: client.clientId,
-              refresh_token: positive.refreshToken!,
-              resource: service.audience,
-            }),
+      ];
+      const refreshRequest = (context: Context) =>
+        new Request("http://localhost/api/auth/oauth2/token", {
+          method: "POST",
+          headers: { "content-type": "application/x-www-form-urlencoded" },
+          body: new URLSearchParams({
+            grant_type: "refresh_token",
+            client_id: client.clientId,
+            refresh_token: context.refreshToken,
+            resource: service.audience,
           }),
-        );
-        expect(
-          positiveRefresh.status,
-          await positiveRefresh.clone().text(),
-        ).toBe(200);
-        const issued = await issueHarnessFlow({
-          cookies: user.cookies,
-          userId: user.userId,
-          organizationId: organization,
-          client,
-          audience: service.audience,
-          offline: true,
         });
-        const root = await testEnv.IDENTITY_DB.prepare(
-          `SELECT f.id AS family_id, t.id AS token_id, f.membership_id,
+      const mutation = mutations.find(
+        (candidate) => candidate.name === mutationName,
+      );
+      if (!mutation) {
+        throw new Error(`Unknown authority mutation: ${mutationName}`);
+      }
+      const user = await signIn();
+      const organization = await organizationId(user.cookies);
+      const positive = await issueHarnessFlow({
+        cookies: user.cookies,
+        userId: user.userId,
+        organizationId: organization,
+        client,
+        audience: service.audience,
+        offline: true,
+      });
+      const positiveRefresh = await SELF.fetch(
+        new Request("http://localhost/api/auth/oauth2/token", {
+          method: "POST",
+          headers: { "content-type": "application/x-www-form-urlencoded" },
+          body: new URLSearchParams({
+            grant_type: "refresh_token",
+            client_id: client.clientId,
+            refresh_token: positive.refreshToken!,
+            resource: service.audience,
+          }),
+        }),
+      );
+      expect(positiveRefresh.status, await positiveRefresh.clone().text()).toBe(
+        200,
+      );
+      const issued = await issueHarnessFlow({
+        cookies: user.cookies,
+        userId: user.userId,
+        organizationId: organization,
+        client,
+        audience: service.audience,
+        offline: true,
+      });
+      const root = await testEnv.IDENTITY_DB.prepare(
+        `SELECT f.id AS family_id, t.id AS token_id, f.membership_id,
                   m.role, m.createdAt AS membership_created_at
            FROM platform_oauth_refresh_family AS f
            JOIN platform_oauth_refresh_token AS t
              ON t.family_id = f.id AND t.sequence = 0
            JOIN member AS m ON m.id = f.membership_id
            WHERE f.installation_id = ?`,
-        )
-          .bind(issued.installationId)
-          .first<{
-            family_id: string;
-            token_id: string;
-            membership_id: string;
-            role: string;
-            membership_created_at: number;
-          }>();
-        expect(root).toBeTruthy();
-        const consent = await testEnv.IDENTITY_DB.prepare(
-          `SELECT id, clientId, userId, referenceId, resources,
+      )
+        .bind(issued.installationId)
+        .first<{
+          family_id: string;
+          token_id: string;
+          membership_id: string;
+          role: string;
+          membership_created_at: number;
+        }>();
+      expect(root).toBeTruthy();
+      const consent = await testEnv.IDENTITY_DB.prepare(
+        `SELECT id, clientId, userId, referenceId, resources,
                   requestedUserInfoClaims, scopes, createdAt, updatedAt
            FROM oauthConsent WHERE referenceId = ?`,
-        )
-          .bind(issued.installationId)
-          .first<Context["consent"]>();
-        expect(consent).toBeTruthy();
-        const context: Context = {
-          userId: user.userId,
-          organizationId: organization,
-          installationId: issued.installationId,
-          familyId: root!.family_id,
-          tokenId: root!.token_id,
-          membershipId: root!.membership_id,
-          membershipRole: root!.role,
-          membershipCreatedAt: root!.membership_created_at,
-          consent: consent!,
-          refreshToken: issued.refreshToken!,
-        };
-        const callback = async () => mutation.apply(context);
-        const phaseCallbacks: RefreshPhaseCallbacks =
-          phase === "read"
-            ? { onCurrentRead: callback }
-            : phase === "pending"
-              ? { onPendingFence: callback }
-              : phase === "provider"
-                ? { onProviderRowsRead: callback }
-                : { onPublicationRead: callback };
-        const response = await platformWorker.fetch(
-          refreshRequest(context),
-          workerRefreshPhaseEnv(phaseCallbacks),
-        );
-        expect(response.status, `${phase}: ${mutation.name}`).toBe(503);
-        const body = (await response.json()) as Record<string, unknown>;
-        expect(body).toMatchObject({
-          status: "authority_unavailable",
-          error: "temporarily_unavailable",
-        });
-        expect(body.access_token).toBeUndefined();
-        expect(body.refresh_token).toBeUndefined();
-        await mutation.assert(context);
-        if (phase === "read") {
-          const unchanged = await testEnv.IDENTITY_DB.prepare(
-            `SELECT f.state AS family_state, t.state AS token_state,
+      )
+        .bind(issued.installationId)
+        .first<Context["consent"]>();
+      expect(consent).toBeTruthy();
+      const context: Context = {
+        userId: user.userId,
+        organizationId: organization,
+        installationId: issued.installationId,
+        familyId: root!.family_id,
+        tokenId: root!.token_id,
+        membershipId: root!.membership_id,
+        membershipRole: root!.role,
+        membershipCreatedAt: root!.membership_created_at,
+        consent: consent!,
+        refreshToken: issued.refreshToken!,
+      };
+      const callback = async () => mutation.apply(context);
+      const phaseCallbacks: RefreshPhaseCallbacks =
+        phase === "read"
+          ? { onCurrentRead: callback }
+          : phase === "pending"
+            ? { onPendingFence: callback }
+            : phase === "provider"
+              ? { onProviderRowsRead: callback }
+              : { onPublicationRead: callback };
+      const response = await platformWorker.fetch(
+        refreshRequest(context),
+        workerRefreshPhaseEnv(phaseCallbacks),
+      );
+      expect(response.status, `${phase}: ${mutation.name}`).toBe(503);
+      const body = (await response.json()) as Record<string, unknown>;
+      expect(body).toMatchObject({
+        status: "authority_unavailable",
+        error: "temporarily_unavailable",
+      });
+      expect(body.access_token).toBeUndefined();
+      expect(body.refresh_token).toBeUndefined();
+      await mutation.assert(context);
+      if (phase === "read") {
+        const unchanged = await testEnv.IDENTITY_DB.prepare(
+          `SELECT f.state AS family_state, t.state AS token_state,
                     access.revoked AS access_revoked,
                     refresh.revoked AS refresh_revoked
              FROM platform_oauth_refresh_family AS f
@@ -3496,23 +3533,23 @@ describe("T07 production OAuth refresh lineage", () => {
              JOIN oauthAccessToken AS access ON access.id = t.provider_access_row_id
              JOIN oauthRefreshToken AS refresh ON refresh.id = t.provider_refresh_row_id
              WHERE f.id = ?`,
-          )
-            .bind(context.tokenId, context.familyId)
-            .first<{
-              family_state: string;
-              token_state: string;
-              access_revoked: number | null;
-              refresh_revoked: number | null;
-            }>();
-          expect(unchanged).toEqual({
-            family_state: "active",
-            token_state: "issued",
-            access_revoked: null,
-            refresh_revoked: null,
-          });
-        } else {
-          const terminal = await testEnv.IDENTITY_DB.prepare(
-            `SELECT f.state AS family_state, i.active,
+        )
+          .bind(context.tokenId, context.familyId)
+          .first<{
+            family_state: string;
+            token_state: string;
+            access_revoked: number | null;
+            refresh_revoked: number | null;
+          }>();
+        expect(unchanged).toEqual({
+          family_state: "active",
+          token_state: "issued",
+          access_revoked: null,
+          refresh_revoked: null,
+        });
+      } else {
+        const terminal = await testEnv.IDENTITY_DB.prepare(
+          `SELECT f.state AS family_state, i.active,
                     root.state AS root_state, successor.state AS successor_state
              FROM platform_oauth_refresh_family AS f
              JOIN platform_oauth_installation AS i ON i.id = f.installation_id
@@ -3521,41 +3558,35 @@ describe("T07 production OAuth refresh lineage", () => {
              LEFT JOIN platform_oauth_refresh_token AS successor
                ON successor.family_id = f.id AND successor.sequence = 1
              WHERE f.id = ?`,
-          )
-            .bind(context.familyId)
-            .first<{
-              family_state: string;
-              active: number;
-              root_state: string;
-              successor_state: string | null;
-            }>();
-          expect(terminal, `${phase}: ${mutation.name}`).toBeTruthy();
-          if (!terminal) {
-            throw new Error(
-              `${phase}: ${mutation.name} terminal state missing`,
-            );
-          }
-          expect(terminal.family_state).toBe("quarantined");
-          expect(terminal.active).toBe(0);
-          if (terminal.successor_state === null) {
-            expect(terminal.root_state).toBe("quarantined");
-          } else {
-            expect(terminal.root_state, `${phase}: ${mutation.name}`).toBe(
-              "consumed",
-            );
-            expect(["quarantined", "revoked"]).toContain(
-              terminal.successor_state,
-            );
-          }
+        )
+          .bind(context.familyId)
+          .first<{
+            family_state: string;
+            active: number;
+            root_state: string;
+            successor_state: string | null;
+          }>();
+        expect(terminal, `${phase}: ${mutation.name}`).toBeTruthy();
+        if (!terminal) {
+          throw new Error(`${phase}: ${mutation.name} terminal state missing`);
         }
-        await mutation.restore?.(context);
+        expect(terminal.family_state).toBe("quarantined");
+        expect(terminal.active).toBe(0);
+        if (terminal.successor_state === null) {
+          expect(terminal.root_state).toBe("quarantined");
+        } else {
+          expect(terminal.root_state, `${phase}: ${mutation.name}`).toBe(
+            "consumed",
+          );
+          expect(["quarantined", "revoked"]).toContain(
+            terminal.successor_state,
+          );
+        }
       }
-    };
-    await runPhase("read");
-    await runPhase("pending");
-    await runPhase("provider");
-    await runPhase("publication");
-  }, 30_000);
+      await mutation.restore?.(context);
+    },
+    30_000,
+  );
 
   it("denies refresh after each current-authority change without revoking the issued predecessor", async () => {
     const suffix = crypto.randomUUID().slice(0, 8);

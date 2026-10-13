@@ -67,7 +67,7 @@ async function withRuntime(
   limits?: typeof TEST_ROOM_LIMITS,
   nowMs?: number,
   testMode = true,
-  rateLimitPolicy = TEST_MSG_RATE_LIMIT_POLICY,
+  rateLimitPolicyOrDataEncryptionKey: typeof TEST_MSG_RATE_LIMIT_POLICY | string = TEST_MSG_RATE_LIMIT_POLICY,
 ) {
   // A Miniflare runtime owns the process-wide workerd test slot. The shared
   // default runtime must close before a test starts with different limits.
@@ -77,7 +77,9 @@ async function withRuntime(
   let failed = false;
   let failure: unknown;
   try {
-    fixture = await startMsgMiniflare(persistenceDirectory, limits, { ...(nowMs === undefined ? {} : { nowMs }), testMode }, true, false, rateLimitPolicy);
+    const dataEncryptionKey = typeof rateLimitPolicyOrDataEncryptionKey === "string" ? rateLimitPolicyOrDataEncryptionKey : undefined;
+    const rateLimitPolicy = typeof rateLimitPolicyOrDataEncryptionKey === "string" ? TEST_MSG_RATE_LIMIT_POLICY : rateLimitPolicyOrDataEncryptionKey;
+    fixture = await startMsgMiniflare(persistenceDirectory, limits, { ...(dataEncryptionKey === undefined ? {} : { dataEncryptionKey }), ...(nowMs === undefined ? {} : { nowMs }), testMode }, true, false, rateLimitPolicy);
     await run(fixture.miniflare);
   } catch (error) {
     failed = true;
