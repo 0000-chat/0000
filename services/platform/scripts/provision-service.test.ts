@@ -1,17 +1,9 @@
 import { spawnSync } from "node:child_process";
-import {
-  existsSync,
-  mkdtempSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, test } from "bun:test";
-import {
-  hashOpaque,
-  opaqueSecret,
-} from "../src/platform-state";
+import { hashOpaque, opaqueSecret } from "../src/platform-state";
 import {
   isValidOpaqueCredential,
   validateOpaqueCredential,
@@ -58,12 +50,25 @@ describe("provision-service credential handoff", () => {
     expect(isValidOpaqueCredential(verifier, servicePrefix)).toBe(true);
     expect(isValidOpaqueCredential(issuer, guestPrefix)).toBe(true);
     expect(isValidOpaqueCredential(verifier, guestPrefix)).toBe(false);
-    expect(isValidOpaqueCredential(`${servicePrefix}${"A".repeat(42)}B`, servicePrefix)).toBe(false);
-    expect(() => validateOpaqueCredential("service_verify_bad", servicePrefix, "Service verifier")).toThrow();
+    expect(
+      isValidOpaqueCredential(
+        `${servicePrefix}${"A".repeat(42)}B`,
+        servicePrefix,
+      ),
+    ).toBe(false);
+    expect(() =>
+      validateOpaqueCredential(
+        "service_verify_bad",
+        servicePrefix,
+        "Service verifier",
+      ),
+    ).toThrow();
   });
 
   test("generate-only does not invoke D1 and emits one capture line", () => {
-    const directory = mkdtempSync(path.join(os.tmpdir(), "platform-provision-"));
+    const directory = mkdtempSync(
+      path.join(os.tmpdir(), "platform-provision-"),
+    );
     const marker = path.join(directory, "invoked");
     const wrapper = makeFakeWrangler(
       directory,
@@ -83,7 +88,9 @@ describe("provision-service credential handoff", () => {
         "msg:read",
       ]);
       expect(result.status).toBe(0);
-      expect(result.stdout).toMatch(/^generated verifier=service_verify_[A-Za-z0-9_-]{43}\n$/);
+      expect(result.stdout).toMatch(
+        /^generated verifier=service_verify_[A-Za-z0-9_-]{43}\n$/,
+      );
       expect(existsSync(marker)).toBe(false);
     } finally {
       rmSync(directory, { recursive: true, force: true });
@@ -91,7 +98,9 @@ describe("provision-service credential handoff", () => {
   });
 
   test("stdin registration adopts a hash-matching row without echoing the credential", async () => {
-    const directory = mkdtempSync(path.join(os.tmpdir(), "platform-provision-"));
+    const directory = mkdtempSync(
+      path.join(os.tmpdir(), "platform-provision-"),
+    );
     const marker = path.join(directory, "inserted");
     const verifier = opaqueSecret(servicePrefix);
     const verifierHash = await hashOpaque(verifier);
@@ -105,18 +114,21 @@ describe("provision-service credential handoff", () => {
 }`,
     );
     try {
-      const result = runProvision([
-        "--credential-stdin",
-        "--wrangler",
-        wrapper,
-        "register",
-        "--service-id",
-        "msg",
-        "--audience",
-        "https://msg.example/mcp",
-        "--capability",
-        "msg:read",
-      ], `${verifier}\n`);
+      const result = runProvision(
+        [
+          "--credential-stdin",
+          "--wrangler",
+          wrapper,
+          "register",
+          "--service-id",
+          "msg",
+          "--audience",
+          "https://msg.example/mcp",
+          "--capability",
+          "msg:read",
+        ],
+        `${verifier}\n`,
+      );
       expect(result.status).toBe(0);
       expect(result.stdout).toBe("registered msg\n");
       expect(result.stdout).not.toContain(verifier);
@@ -127,7 +139,9 @@ describe("provision-service credential handoff", () => {
   });
 
   test("guest issuer stdin registration does not echo the issuer", () => {
-    const directory = mkdtempSync(path.join(os.tmpdir(), "platform-provision-"));
+    const directory = mkdtempSync(
+      path.join(os.tmpdir(), "platform-provision-"),
+    );
     const wrapper = makeFakeWrangler(
       directory,
       `if (sql.startsWith("SELECT")) process.stdout.write(JSON.stringify([{ results: [] }]));
@@ -135,14 +149,17 @@ else process.stdout.write(JSON.stringify([{ results: [] }, { results: [{ changed
     );
     const issuer = opaqueSecret(guestPrefix);
     try {
-      const result = runProvision([
-        "--credential-stdin",
-        "--wrangler",
-        wrapper,
-        "register-guest-issuer",
-        "--service-id",
-        "msg",
-      ], `${issuer}\n`);
+      const result = runProvision(
+        [
+          "--credential-stdin",
+          "--wrangler",
+          wrapper,
+          "register-guest-issuer",
+          "--service-id",
+          "msg",
+        ],
+        `${issuer}\n`,
+      );
       expect(result.status).toBe(0);
       expect(result.stdout).toBe("registered-guest-issuer msg\n");
       expect(result.stdout).not.toContain(issuer);

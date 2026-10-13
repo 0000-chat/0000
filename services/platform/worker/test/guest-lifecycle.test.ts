@@ -146,15 +146,22 @@ describe("T08 persistent guest control and resource grants", () => {
       (testEnv as unknown as Record<string, string>).GOOGLE_CLIENT_SECRET = "";
       (testEnv as unknown as Record<string, string>).GITHUB_CLIENT_ID = "";
       (testEnv as unknown as Record<string, string>).GITHUB_CLIENT_SECRET = "";
-      const guestService = service("providerless", "https://t08-providerless.0000.test");
+      const guestService = service(
+        "providerless",
+        "https://t08-providerless.0000.test",
+      );
       await registerTestService(testEnv.IDENTITY_DB, guestService);
       const guest = await guestClient(guestService).createGuest();
       expect(guest.status).toBe("success");
     } finally {
-      (testEnv as unknown as Record<string, string>).GOOGLE_CLIENT_ID = previous.googleId;
-      (testEnv as unknown as Record<string, string>).GOOGLE_CLIENT_SECRET = previous.googleSecret;
-      (testEnv as unknown as Record<string, string>).GITHUB_CLIENT_ID = previous.githubId;
-      (testEnv as unknown as Record<string, string>).GITHUB_CLIENT_SECRET = previous.githubSecret;
+      (testEnv as unknown as Record<string, string>).GOOGLE_CLIENT_ID =
+        previous.googleId;
+      (testEnv as unknown as Record<string, string>).GOOGLE_CLIENT_SECRET =
+        previous.googleSecret;
+      (testEnv as unknown as Record<string, string>).GITHUB_CLIENT_ID =
+        previous.githubId;
+      (testEnv as unknown as Record<string, string>).GITHUB_CLIENT_SECRET =
+        previous.githubSecret;
     }
   });
 

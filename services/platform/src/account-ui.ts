@@ -204,18 +204,13 @@ export function htmlResponse(
   });
 }
 
-function providerNames(
-  providers: SocialProviderAvailability,
-): string {
-  return SOCIAL_PROVIDER_IDS
-    .filter((providerId) => providers[providerId])
+function providerNames(providers: SocialProviderAvailability): string {
+  return SOCIAL_PROVIDER_IDS.filter((providerId) => providers[providerId])
     .map(providerLabel)
     .join(" or ");
 }
 
-function providerLoginMarkup(
-  providers: SocialProviderAvailability,
-): string {
+function providerLoginMarkup(providers: SocialProviderAvailability): string {
   const ids = SOCIAL_PROVIDER_IDS.filter((providerId) => providers[providerId]);
   if (ids.length === 0) {
     return `<p class="notice" role="status">Human sign-in is not configured for this deployment. An operator must configure Google or GitHub before Platform accounts are available. Anonymous guest access remains available for services that support it.</p>`;
@@ -555,8 +550,9 @@ export function accountPage(view: AccountView): Response {
         provider.providerId === "google" || provider.providerId === "github",
     )
     .map(linkedProviderMarkup);
-  const missing = SOCIAL_PROVIDER_IDS
-    .filter((providerId) => view.configuredProviders[providerId])
+  const missing = SOCIAL_PROVIDER_IDS.filter(
+    (providerId) => view.configuredProviders[providerId],
+  )
     .filter((providerId) => !providers.has(providerId))
     .map(availableProviderMarkup);
   const providerList = [...linked, ...missing].join("");

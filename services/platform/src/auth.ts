@@ -317,25 +317,23 @@ export function createAuth(
   };
   const configuredProviders = configuredSocialProviders(env);
   const googleCredentials = configuredProviders.google;
-  const google =
-    googleCredentials
-      ? {
-          clientId: googleCredentials.clientId,
-          clientSecret: googleCredentials.clientSecret,
-          mapProfileToUser: async (profile: object) =>
-            recoverSocialProfile("google", profile),
-        }
-      : undefined;
+  const google = googleCredentials
+    ? {
+        clientId: googleCredentials.clientId,
+        clientSecret: googleCredentials.clientSecret,
+        mapProfileToUser: async (profile: object) =>
+          recoverSocialProfile("google", profile),
+      }
+    : undefined;
   const githubCredentials = configuredProviders.github;
-  const github =
-    githubCredentials
-      ? {
-          clientId: githubCredentials.clientId,
-          clientSecret: githubCredentials.clientSecret,
-          mapProfileToUser: async (profile: object) =>
-            recoverSocialProfile("github", profile),
-        }
-      : undefined;
+  const github = githubCredentials
+    ? {
+        clientId: githubCredentials.clientId,
+        clientSecret: githubCredentials.clientSecret,
+        mapProfileToUser: async (profile: object) =>
+          recoverSocialProfile("github", profile),
+      }
+    : undefined;
   return betterAuth({
     appName: "0000 Platform",
     baseURL: env.PLATFORM_BASE_URL,

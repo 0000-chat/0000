@@ -1552,7 +1552,8 @@ describe("Platform human account providers", () => {
     };
     try {
       mutableTestEnv.GOOGLE_CLIENT_ID = "platform-providerless-google-id";
-      mutableTestEnv.GOOGLE_CLIENT_SECRET = "platform-providerless-google-secret";
+      mutableTestEnv.GOOGLE_CLIENT_SECRET =
+        "platform-providerless-google-secret";
       mutableTestEnv.GITHUB_CLIENT_ID = "";
       mutableTestEnv.GITHUB_CLIENT_SECRET = "";
       const oneProviderPage = await SELF.fetch("http://localhost/login");

@@ -52,8 +52,6 @@
     "GITHUB_CLIENT_ID": "platform-t01-probe"
   },
   "secrets": {
-    "required": [
-      "BETTER_AUTH_SECRET"
-    ]
+    "required": ["BETTER_AUTH_SECRET"]
   }
 }

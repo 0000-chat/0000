@@ -153,7 +153,9 @@ function credentialMode(args: Arguments): CredentialMode {
   const generateOnly = hasFlag(args, "generate-only");
   const credentialStdin = hasFlag(args, "credential-stdin");
   if (generateOnly && credentialStdin) {
-    throw new Error("Choose one credential mode: --generate-only or --credential-stdin.");
+    throw new Error(
+      "Choose one credential mode: --generate-only or --credential-stdin.",
+    );
   }
   if (generateOnly || credentialStdin) {
     if (
@@ -251,7 +253,11 @@ function parseConfig(source: string): unknown {
     if (character === "/" && next === "/") {
       withoutComments += "  ";
       index += 1;
-      while (index + 1 < source.length && source[index + 1] !== "\n" && source[index + 1] !== "\r") {
+      while (
+        index + 1 < source.length &&
+        source[index + 1] !== "\n" &&
+        source[index + 1] !== "\r"
+      ) {
         withoutComments += " ";
         index += 1;
       }
@@ -259,7 +265,9 @@ function parseConfig(source: string): unknown {
     }
     withoutComments += character;
   }
-  const parsed: unknown = JSON.parse(withoutComments.replace(/,\s*([}\]])/gu, "$1"));
+  const parsed: unknown = JSON.parse(
+    withoutComments.replace(/,\s*([}\]])/gu, "$1"),
+  );
   return parsed;
 }
 
@@ -291,12 +299,24 @@ function configuredDatabaseName(configPath: string | undefined): string {
 
 async function runWrangler(sql: string, args: Arguments): Promise<string> {
   const scope = args.remote ? "--remote" : "--local";
-  const configPath = args.configPath ? path.resolve(args.configPath) : undefined;
+  const configPath = args.configPath
+    ? path.resolve(args.configPath)
+    : undefined;
   const selectedDatabase = configuredDatabaseName(configPath);
   const command = args.wranglerPath ? args.wranglerPath : "bun";
   const commandArgs = args.wranglerPath
     ? ["d1", "execute", selectedDatabase, scope, "--command", sql, "--json"]
-    : ["x", "wrangler", "d1", "execute", selectedDatabase, scope, "--command", sql, "--json"];
+    : [
+        "x",
+        "wrangler",
+        "d1",
+        "execute",
+        selectedDatabase,
+        scope,
+        "--command",
+        sql,
+        "--json",
+      ];
   if (configPath) commandArgs.push("--config", configPath);
   const cwd = configPath ? path.dirname(configPath) : platformRoot;
   const child = spawn(command, commandArgs, {
@@ -394,11 +414,7 @@ async function main(): Promise<void> {
     }
     const newVerifier = verifier ?? opaqueSecret(SERVICE_VERIFIER_PREFIX);
     await runWrangler(
-      serviceRegistrationSql(
-        input,
-        await hashOpaque(newVerifier),
-        Date.now(),
-      ),
+      serviceRegistrationSql(input, await hashOpaque(newVerifier), Date.now()),
       args,
     );
     if (mode === "stdin") {
@@ -450,11 +466,7 @@ async function main(): Promise<void> {
     }
     const issuer =
       mode === "stdin"
-        ? credentialForMode(
-            mode,
-            GUEST_ISSUER_PREFIX,
-            "Guest grant issuer",
-          )
+        ? credentialForMode(mode, GUEST_ISSUER_PREFIX, "Guest grant issuer")
         : undefined;
     const issuerHash = issuer ? await hashOpaque(issuer) : undefined;
     if (mode === "stdin" && issuerHash) {
@@ -469,10 +481,7 @@ async function main(): Promise<void> {
         ),
       ).at(-1)?.results;
       if (active && active.length > 0) {
-        if (
-          active.length === 1 &&
-          matchingGuestIssuer(active[0], issuerHash)
-        ) {
+        if (active.length === 1 && matchingGuestIssuer(active[0], issuerHash)) {
           process.stdout.write(`registered-guest-issuer ${serviceId}\n`);
           return;
         }
