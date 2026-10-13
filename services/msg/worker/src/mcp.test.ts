@@ -144,7 +144,7 @@ describe("stateless MCP endpoint", () => {
 
     const listed = await handleMcpRequest(rpcRequest({ id: 2, method: "tools/list", params: {} }), baseService());
     const tools = (await json(listed)).result.tools;
-    expect(tools.map((tool: { name: string }) => tool.name)).toEqual(["create_room", "read_room", "wait_for_messages", "get_room_status", "post_message", "export_room", "manage_room", "list_webhooks", "create_webhook", "remove_webhook", "disable_webhook", "enable_webhook", "rotate_webhook_secret", "redeliver_webhook"]);
+    expect(tools.map((tool: { name: string }) => tool.name)).toEqual(["create_room", "read_room", "wait_for_messages", "get_room_status", "post_message", "export_room", "manage_room", "list_webhooks", "create_webhook", "update_webhook", "remove_webhook", "disable_webhook", "enable_webhook", "rotate_webhook_secret", "redeliver_webhook"]);
     const createTool = tools.find((tool: { name: string }) => tool.name === "create_room");
     const postTool = tools.find((tool: { name: string }) => tool.name === "post_message");
     expect(createTool.inputSchema.required).toEqual(["content", "author", "idempotency_key"]);
@@ -277,7 +277,25 @@ describe("stateless MCP endpoint", () => {
       },
       createWebhook: async (input) => {
         calls.push({ operation: "create-webhook", input });
-        return { protocol_version: 1, secret: "secret", webhook: { id: "webhook", url: input.url } } as never;
+        return {
+          protocol_version: 1,
+          secret: "secret",
+          webhook: {
+            created_at: "2026-10-12T00:00:00.000Z",
+            deliveries: [],
+            disabled_at: null,
+            exclude_authors: [],
+            failure_started_at: null,
+            header_names: [],
+            id: "11111111-1111-4111-8111-111111111111",
+            last_failure_at: null,
+            last_success_at: null,
+            prompt: null,
+            recovered_at: null,
+            status: "active",
+            url: input.url,
+          },
+        } as never;
       },
     };
     const exported = await handleMcpRequest(rpcRequest({ id: 36, method: "tools/call", params: { name: "export_room", arguments: { room_url: roomUrl, format: "json" } } }), service);
@@ -327,7 +345,7 @@ describe("stateless MCP endpoint", () => {
       await client.connect(transport);
       expect(client.getProtocolEra()).toBe("modern");
       const tools = await client.listTools();
-      expect(tools.tools.map((tool) => tool.name)).toEqual(["create_room", "read_room", "wait_for_messages", "get_room_status", "post_message", "export_room", "manage_room", "list_webhooks", "create_webhook", "remove_webhook", "disable_webhook", "enable_webhook", "rotate_webhook_secret", "redeliver_webhook"]);
+      expect(tools.tools.map((tool) => tool.name)).toEqual(["create_room", "read_room", "wait_for_messages", "get_room_status", "post_message", "export_room", "manage_room", "list_webhooks", "create_webhook", "update_webhook", "remove_webhook", "disable_webhook", "enable_webhook", "rotate_webhook_secret", "redeliver_webhook"]);
       const read = await client.callTool({ name: "read_room", arguments: { room_url: roomUrl, limit: 2 } });
       expect(read.structuredContent).toMatchObject({ messages, has_more: false, truncated: false });
       const waited = await client.callTool({ name: "wait_for_messages", arguments: { room_url: roomUrl, after: 1, limit: 2 } });
@@ -567,5 +585,191 @@ describe("stateless MCP endpoint", () => {
     expect(session.status).toBe(200);
     expect(session.headers.get("mcp-session-id")).toBeNull();
     expect(await session.text()).not.toContain("session-secret");
+  });
+
+  test("exposes webhook header, prompt, and author-filter schemas and forwards update fields", async () => {
+    const calls: Array<{ operation: string; input: unknown }> = [];
+    const service: RoomService = {
+      ...baseService(),
+      createWebhook: async (input) => {
+        calls.push({ operation: "create", input });
+        return {
+          protocol_version: 1,
+          secret: "synthetic-signing-secret",
+          webhook: {
+            created_at: "2026-10-12T00:00:00.000Z",
+            deliveries: [],
+            disabled_at: null,
+            failure_started_at: null,
+            header_names: ["Authorization", "X-Vendor-Mode"],
+            id: "11111111-1111-4111-8111-111111111111",
+            last_failure_at: null,
+            last_success_at: null,
+            prompt: "exact prompt",
+            recovered_at: null,
+            status: "active",
+            url: "https://hooks.example.com/msg",
+          },
+        } as never;
+      },
+      updateWebhook: async (input) => {
+        calls.push({ operation: "update", input });
+        return {
+          protocol_version: 1,
+          webhook: {
+            created_at: "2026-10-12T00:00:00.000Z",
+            deliveries: [],
+            disabled_at: null,
+            failure_started_at: null,
+            header_names: ["Authorization"],
+            id: "11111111-1111-4111-8111-111111111111",
+            last_failure_at: null,
+            last_success_at: null,
+            prompt: null,
+            recovered_at: null,
+            status: "active",
+            url: "https://hooks.example.com/new",
+          },
+        } as never;
+      },
+    };
+    const listed = await handleMcpRequest(rpcRequest({ id: 60, method: "tools/list", params: {} }), service);
+    const tools = (await json(listed)).result.tools as Array<{ inputSchema: { properties: Record<string, unknown>; required?: string[] }; name: string }>;
+    const create = tools.find((tool) => tool.name === "create_webhook");
+    const update = tools.find((tool) => tool.name === "update_webhook");
+    expect(create?.inputSchema.properties.headers).toBeDefined();
+    expect(create?.inputSchema.properties.prompt).toBeDefined();
+    expect(create?.inputSchema.properties.exclude_authors).toBeDefined();
+    expect(update?.inputSchema.required).toEqual(["room_url", "webhook_id"]);
+    expect(update?.inputSchema.properties.headers).toBeDefined();
+    expect(update?.inputSchema.properties.prompt).toBeDefined();
+    expect(update?.inputSchema.properties.exclude_authors).toBeDefined();
+
+    const headerSecret = "synthetic-mcp-header-value-7f4c";
+    const created = await handleMcpRequest(rpcRequest({
+      id: 61,
+      method: "tools/call",
+      params: {
+        name: "create_webhook",
+        arguments: {
+          room_url: roomUrl,
+          url: "https://hooks.example.com/msg",
+          headers: { Authorization: headerSecret, "X-Vendor-Mode": "compact" },
+          prompt: "exact prompt",
+          exclude_authors: ["Alice"],
+        },
+      },
+    }), service);
+    const createdBody = await json(created);
+    expect(createdBody.result.structuredContent.webhook).toMatchObject({ header_names: ["Authorization", "X-Vendor-Mode"], prompt: "exact prompt" });
+
+    const updated = await handleMcpRequest(rpcRequest({
+      id: 62,
+      method: "tools/call",
+      params: {
+        name: "update_webhook",
+        arguments: {
+          room_url: roomUrl,
+          webhook_id: "11111111-1111-4111-8111-111111111111",
+          headers: { Authorization: headerSecret },
+          prompt: null,
+          exclude_authors: [],
+        },
+      },
+    }), service);
+    const updatedBody = await json(updated);
+    expect(updatedBody.result.structuredContent.webhook).toMatchObject({ header_names: ["Authorization"], prompt: null });
+    expect(calls).toContainEqual({
+      operation: "create",
+      input: {
+        room: "room-capability",
+        url: "https://hooks.example.com/msg",
+        headers: { Authorization: headerSecret, "X-Vendor-Mode": "compact" },
+        prompt: "exact prompt",
+        excludeAuthors: ["alice"],
+      },
+    });
+    expect(calls).toContainEqual({
+      operation: "update",
+      input: {
+        room: "room-capability",
+        id: "11111111-1111-4111-8111-111111111111",
+        headers: { Authorization: headerSecret },
+        prompt: null,
+        excludeAuthors: [],
+      },
+    });
+    expect(JSON.stringify(createdBody)).not.toContain(headerSecret);
+    expect(JSON.stringify(updatedBody)).not.toContain(headerSecret);
+  });
+
+  test("bounds malformed MCP webhook input before validation errors can echo values", async () => {
+    const headerSecret = "synthetic-malformed-header-value-b9d1";
+    const invalidArguments = await handleMcpRequest(rpcRequest({
+      id: 63,
+      method: "tools/call",
+      params: {
+        name: "create_webhook",
+        arguments: {
+          room_url: roomUrl,
+          url: "https://hooks.example.com/msg",
+          headers: { Authorization: 42, "X-Invalid\u0000": headerSecret },
+          unknown_field: headerSecret,
+        },
+      },
+    }), baseService());
+    expect(invalidArguments.status).toBe(200);
+    const invalidText = await invalidArguments.text();
+    expect(invalidText).not.toContain(headerSecret);
+
+    const strictCalls = { create: 0, update: 0 };
+    const strictService: RoomService = {
+      ...baseService(),
+      createWebhook: async () => {
+        strictCalls.create += 1;
+        throw new Error("unexpected webhook create");
+      },
+      updateWebhook: async () => {
+        strictCalls.update += 1;
+        throw new Error("unexpected webhook update");
+      },
+    };
+    const unknownCreate = await handleMcpRequest(rpcRequest({
+      id: 66,
+      method: "tools/call",
+      params: {
+        name: "create_webhook",
+        arguments: { room_url: roomUrl, url: "https://hooks.example.com/msg", headers: { Authorization: "valid-value" }, unknown_field: headerSecret },
+      },
+    }), strictService);
+    expect(unknownCreate.status).toBe(200);
+    expect(await unknownCreate.text()).not.toContain(headerSecret);
+    const unknownUpdate = await handleMcpRequest(rpcRequest({
+      id: 67,
+      method: "tools/call",
+      params: {
+        name: "update_webhook",
+        arguments: { room_url: roomUrl, webhook_id: "11111111-1111-4111-8111-111111111111", prompt: null, unknown_field: headerSecret },
+      },
+    }), strictService);
+    expect(unknownUpdate.status).toBe(200);
+    expect(await unknownUpdate.text()).not.toContain(headerSecret);
+    expect(strictCalls).toEqual({ create: 0, update: 0 });
+
+    const malformed = await handleMcpRequest(new Request(`${origin}/mcp`, {
+      method: "POST",
+      headers: { accept, "content-type": "application/json" },
+      body: `{"jsonrpc":"2.0","id":64,"method":"tools/call","params":{"name":"create_webhook","arguments":{"headers":{"Authorization":"${headerSecret}"}}`,
+    }), baseService());
+    expect(malformed.status).toBe(400);
+    expect(await malformed.text()).not.toContain(headerSecret);
+
+    const oversized = await handleMcpRequest(new Request(`${origin}/mcp`, {
+      method: "POST",
+      headers: { accept, "content-type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 65, method: "tools/call", params: { name: "create_webhook", arguments: { room_url: roomUrl, url: "https://hooks.example.com/msg", headers: { Authorization: headerSecret }, padding: "x".repeat(90 * 1024) } } }),
+    }), baseService());
+    expect(oversized.status).toBe(413);
+    expect(await oversized.text()).not.toContain(headerSecret);
   });
 });

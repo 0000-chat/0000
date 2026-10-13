@@ -79,6 +79,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 interface NodeRuntimeConfiguration {
   bindings: {
+    MSG_DATA_ENCRYPTION_KEY_V1?: string;
     MSG_TEST_MODE?: string;
     MSG_TEST_NOW_MS?: string;
     MSG_TEST_ROOM_LIMITS?: string;
@@ -368,7 +369,7 @@ async function startNodeRuntimeWithConfiguration(configuration: NodeRuntimeConfi
 export async function startMsgMiniflare(
   persistenceDirectory: string,
   limits = TEST_ROOM_LIMITS,
-  options: { readonly nowMs?: number; readonly testMode?: boolean } = {},
+  options: { readonly dataEncryptionKey?: string; readonly nowMs?: number; readonly testMode?: boolean } = {},
 ): Promise<MsgMiniflareFixture> {
   const testMode = options.testMode !== false;
   if (!testMode && options.nowMs !== undefined) throw new Error("The test clock requires explicit test mode.");
@@ -380,6 +381,7 @@ export async function startMsgMiniflare(
     const script = await workerScript();
     runtime = await startNodeRuntimeWithConfiguration({
       bindings: {
+        ...(options.dataEncryptionKey === undefined ? {} : { MSG_DATA_ENCRYPTION_KEY_V1: options.dataEncryptionKey }),
         ...(testMode ? { MSG_TEST_MODE: "1", MSG_TEST_ROOM_LIMITS: JSON.stringify(limits) } : {}),
         ...(options.nowMs === undefined ? {} : { MSG_TEST_NOW_MS: String(options.nowMs) }),
         MSG_VAPID_PRIVATE_KEY: TEST_VAPID_PRIVATE_KEY,

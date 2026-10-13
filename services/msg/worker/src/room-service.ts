@@ -1,7 +1,7 @@
 import { ERROR_CODES, isStaleRevisionDetails, isStaleSequenceDetails, ProtocolError } from "./errors";
 import { parseCoordinationDispute, parseCoordinationDisputeReview, parseCoordinationProposal, parseCoordinationPublish, parseCoordinationRevision } from "./coordination-domain";
 import { hashCapability, parseBasedOnSequence, parseMessageInput, parseRetentionExtension, randomCapability, validateIdempotencyKey, validateRequestId } from "./room-domain";
-import { buildShareMessage, foregroundWait, PROTOCOL_VERSION, stripLegacyAbsoluteExpiry, type CoordinationAcceptedRecordInput, type CoordinationAcceptedRecordResponse, type CoordinationCorrectionDetailInput, type CoordinationCorrectionListInput, type CoordinationCorrectionListResponse, type CoordinationCorrectionResponse, type CoordinationDecisionDetailInput, type CoordinationDecisionListInput, type CoordinationDecisionListResponse, type CoordinationDecisionResponse, type CoordinationDisputeDetailInput, type CoordinationDisputeInput, type CoordinationDisputeListInput, type CoordinationDisputeListResponse, type CoordinationDisputeResponse, type CoordinationDisputeReviewInput, type CoordinationDisputeReviewResponse, type CoordinationListInput, type CoordinationOverviewResponse, type CoordinationPanelDetailInput, type CoordinationPanelHistoryInput, type CoordinationPanelHistoryResponse, type CoordinationPanelResponse, type CoordinationProposalDetailInput, type CoordinationProposalInput, type CoordinationProposalResponse, type CoordinationProposalRevisionInput, type CoordinationProposalListResponse, type CoordinationPublishInput, type CoordinationPublishResponse, type CoordinationPublicationInput, type CoordinationPublicationResponse, type CoordinationRequestDetailInput, type CoordinationRequestListResponse, type CoordinationRequestResponse, type CoordinationSupersessionListInput, type CoordinationSupersessionListResponse, type CreateRoomInput, type CreateRoomResponse, type CreateWebhookInput, type CreateWebhookResponse, type EnrollPushInput, type ExportRoomInput, type ExtendRetentionInput, type GetPostMessageInput, type GetPostMessageResponse, type ListWebhooksInput, type ListWebhooksResponse, type LiveRoomInput, type ManageRoomInput, type ManageRoomResponse, type ManageWebhookInput, type ManageWebhookResponse, type McpPostMessageInput, type McpPostMessageResponse, type PostMessageInput, type PostMessageResponse, type PushEnrollmentInput, type PushEnrollmentResponse, type ReadMessageInput, type ReadMessageResponse, type ReadRoomInput, type ReadRoomResponse, type RedeliverWebhookInput, type RedeliverWebhookResponse, type RemovePushEnrollmentResponse, type RemoveWebhookInput, type RemoveWebhookResponse, type RetentionExtensionResponse, type RotateWebhookSecretResponse, type RoomService, type RoomStatusInput, type RoomStatusResponse } from "./protocol";
+import { buildShareMessage, foregroundWait, PROTOCOL_VERSION, stripLegacyAbsoluteExpiry, type CoordinationAcceptedRecordInput, type CoordinationAcceptedRecordResponse, type CoordinationCorrectionDetailInput, type CoordinationCorrectionListInput, type CoordinationCorrectionListResponse, type CoordinationCorrectionResponse, type CoordinationDecisionDetailInput, type CoordinationDecisionListInput, type CoordinationDecisionListResponse, type CoordinationDecisionResponse, type CoordinationDisputeDetailInput, type CoordinationDisputeInput, type CoordinationDisputeListInput, type CoordinationDisputeListResponse, type CoordinationDisputeResponse, type CoordinationDisputeReviewInput, type CoordinationDisputeReviewResponse, type CoordinationListInput, type CoordinationOverviewResponse, type CoordinationPanelDetailInput, type CoordinationPanelHistoryInput, type CoordinationPanelHistoryResponse, type CoordinationPanelResponse, type CoordinationProposalDetailInput, type CoordinationProposalInput, type CoordinationProposalResponse, type CoordinationProposalRevisionInput, type CoordinationProposalListResponse, type CoordinationPublishInput, type CoordinationPublishResponse, type CoordinationPublicationInput, type CoordinationPublicationResponse, type CoordinationRequestDetailInput, type CoordinationRequestListResponse, type CoordinationRequestResponse, type CoordinationSupersessionListInput, type CoordinationSupersessionListResponse, type CreateRoomInput, type CreateRoomResponse, type CreateWebhookInput, type CreateWebhookResponse, type EnrollPushInput, type ExportRoomInput, type ExtendRetentionInput, type GetPostMessageInput, type GetPostMessageResponse, type ListWebhooksInput, type ListWebhooksResponse, type LiveRoomInput, type ManageRoomInput, type ManageRoomResponse, type ManageWebhookInput, type ManageWebhookResponse, type McpPostMessageInput, type McpPostMessageResponse, type PostMessageInput, type PostMessageResponse, type PushEnrollmentInput, type PushEnrollmentResponse, type ReadMessageInput, type ReadMessageResponse, type ReadRoomInput, type ReadRoomResponse, type RedeliverWebhookInput, type RedeliverWebhookResponse, type RemovePushEnrollmentResponse, type RemoveWebhookInput, type RemoveWebhookResponse, type RetentionExtensionResponse, type RotateWebhookSecretResponse, type RoomService, type RoomStatusInput, type RoomStatusResponse, type UpdateWebhookInput, type UpdateWebhookResponse } from "./protocol";
 
 export interface RoomStub { fetch(request: Request): Promise<Response>; }
 export interface RoomNamespace { getByName(name: string): RoomStub; }
@@ -159,7 +159,21 @@ export class DurableRoomService implements RoomService {
   }
 
   async createWebhook(input: CreateWebhookInput): Promise<CreateWebhookResponse> {
-    return responseJson(await this.room(input.room).fetch(jsonRequest("/webhooks", { url: input.url }))) as unknown as CreateWebhookResponse;
+    return responseJson(await this.room(input.room).fetch(jsonRequest("/webhooks", {
+      url: input.url,
+      ...(input.headers === undefined ? {} : { headers: input.headers }),
+      ...(input.prompt === undefined ? {} : { prompt: input.prompt }),
+      ...(input.excludeAuthors === undefined ? {} : { exclude_authors: input.excludeAuthors }),
+    }))) as unknown as CreateWebhookResponse;
+  }
+
+  async updateWebhook(input: UpdateWebhookInput): Promise<UpdateWebhookResponse> {
+    return responseJson(await this.room(input.room).fetch(jsonPatchRequest(`/webhooks/${encodeURIComponent(input.id)}`, {
+      ...(input.url === undefined ? {} : { url: input.url }),
+      ...(input.headers === undefined ? {} : { headers: input.headers }),
+      ...(input.prompt === undefined ? {} : { prompt: input.prompt }),
+      ...(input.excludeAuthors === undefined ? {} : { exclude_authors: input.excludeAuthors }),
+    }))) as unknown as UpdateWebhookResponse;
   }
 
   async listWebhooks(input: ListWebhooksInput): Promise<ListWebhooksResponse> {
@@ -329,6 +343,10 @@ const GET_POST_URL_WARNING = "This URL is a write capability. URL previews can s
 
 function jsonRequest(path: string, value: unknown): Request {
   return new Request(`https://room${path}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(value) });
+}
+
+function jsonPatchRequest(path: string, value: unknown): Request {
+  return new Request(`https://room${path}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(value) });
 }
 
 async function responseJson(response: Response): Promise<Record<string, unknown>> {
