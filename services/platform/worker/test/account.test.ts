@@ -1,6 +1,7 @@
 import { createPlatformGuestClient } from "@0000/platform-client";
 import { SELF, env } from "cloudflare:test";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { accountPage } from "../../src/account-ui";
 import { createAuth, PLATFORM_SESSION_FRESH_AGE_SECONDS } from "../../src/auth";
 import { opaqueSecret } from "../../src/platform-state";
 import { registerTestService, type TestService } from "./fixtures/provision";
@@ -1540,5 +1541,65 @@ describe("Platform human account providers", () => {
       },
     );
     expect(disabledLogout.status).toBe(200);
+  });
+
+  it("only advertises configured providers and explains providerless human access", async () => {
+    const previous = {
+      googleId: mutableTestEnv.GOOGLE_CLIENT_ID,
+      googleSecret: mutableTestEnv.GOOGLE_CLIENT_SECRET,
+      githubId: mutableTestEnv.GITHUB_CLIENT_ID,
+      githubSecret: mutableTestEnv.GITHUB_CLIENT_SECRET,
+    };
+    try {
+      mutableTestEnv.GOOGLE_CLIENT_ID = "platform-providerless-google-id";
+      mutableTestEnv.GOOGLE_CLIENT_SECRET = "platform-providerless-google-secret";
+      mutableTestEnv.GITHUB_CLIENT_ID = "";
+      mutableTestEnv.GITHUB_CLIENT_SECRET = "";
+      const oneProviderPage = await SELF.fetch("http://localhost/login");
+      const oneProviderHtml = await oneProviderPage.text();
+      expect(oneProviderHtml).toContain('data-auth-provider="google"');
+      expect(oneProviderHtml).not.toContain('data-auth-provider="github"');
+
+      mutableTestEnv.GOOGLE_CLIENT_ID = "";
+      mutableTestEnv.GOOGLE_CLIENT_SECRET = "";
+      const providerlessPage = await SELF.fetch("http://localhost/login");
+      const providerlessHtml = await providerlessPage.text();
+      expect(providerlessHtml).toContain(
+        "Human sign-in is not configured for this deployment.",
+      );
+      expect(providerlessHtml).not.toContain("data-auth-provider=");
+
+      const accountHtml = await accountPage({
+        name: "Providerless User",
+        email: "providerless@example.test",
+        image: null,
+        providers: [],
+        configuredProviders: { google: false, github: false },
+        defaultOrganization: { name: null, role: null, suspended: false },
+        organizations: [],
+        selectedOrganizationId: null,
+        selectedOrganization: null,
+        invitations: [],
+        isOperator: false,
+        credentialOrganizationId: null,
+        credentialServices: [],
+        credentials: [],
+        credentialMaxLifetimeDays: null,
+        agentOrganizationId: null,
+        agentServices: [],
+        agents: [],
+        oauthInstallations: [],
+      });
+      const accountBody = await accountHtml.text();
+      expect(accountBody).toContain(
+        "No human sign-in providers are configured for this deployment.",
+      );
+      expect(accountBody).not.toContain("data-link-provider=");
+    } finally {
+      mutableTestEnv.GOOGLE_CLIENT_ID = previous.googleId;
+      mutableTestEnv.GOOGLE_CLIENT_SECRET = previous.googleSecret;
+      mutableTestEnv.GITHUB_CLIENT_ID = previous.githubId;
+      mutableTestEnv.GITHUB_CLIENT_SECRET = previous.githubSecret;
+    }
   });
 });

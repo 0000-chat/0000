@@ -134,6 +134,30 @@ async function readResource(
 }
 
 describe("T08 persistent guest control and resource grants", () => {
+  it("bootstraps a guest without human sign-in providers", async () => {
+    const previous = {
+      googleId: testEnv.GOOGLE_CLIENT_ID,
+      googleSecret: testEnv.GOOGLE_CLIENT_SECRET,
+      githubId: testEnv.GITHUB_CLIENT_ID,
+      githubSecret: testEnv.GITHUB_CLIENT_SECRET,
+    };
+    try {
+      (testEnv as unknown as Record<string, string>).GOOGLE_CLIENT_ID = "";
+      (testEnv as unknown as Record<string, string>).GOOGLE_CLIENT_SECRET = "";
+      (testEnv as unknown as Record<string, string>).GITHUB_CLIENT_ID = "";
+      (testEnv as unknown as Record<string, string>).GITHUB_CLIENT_SECRET = "";
+      const guestService = service("providerless", "https://t08-providerless.0000.test");
+      await registerTestService(testEnv.IDENTITY_DB, guestService);
+      const guest = await guestClient(guestService).createGuest();
+      expect(guest.status).toBe("success");
+    } finally {
+      (testEnv as unknown as Record<string, string>).GOOGLE_CLIENT_ID = previous.googleId;
+      (testEnv as unknown as Record<string, string>).GOOGLE_CLIENT_SECRET = previous.googleSecret;
+      (testEnv as unknown as Record<string, string>).GITHUB_CLIENT_ID = previous.githubId;
+      (testEnv as unknown as Record<string, string>).GITHUB_CLIENT_SECRET = previous.githubSecret;
+    }
+  });
+
   it("keeps guest control, ACL proof, renewal, rollback, and revocation service-scoped", async () => {
     const first = service("first", "https://t08-first.0000.test");
     const second = service("second", "https://t08-second.0000.test");

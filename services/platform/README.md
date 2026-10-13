@@ -120,7 +120,7 @@ The same Platform supports these deployment shapes:
 
 | Deployment | How Platform is used |
 | --- | --- |
-| OSS self-hosted services | The operator runs the open-source Platform with selected services, using its own Google/GitHub provider credentials. The MVP target is Workers and D1, with local development; Docker is outside the MVP. No 0000 Cloud account is required. |
+| OSS self-hosted services | The operator runs the open-source Platform with selected services. Anonymous guest features need no human account or Google/GitHub provider; configure at least one provider only when human account management is needed. The MVP target is Workers and D1, with local development; Docker is outside the MVP. No 0000 Cloud account is required. |
 | Managed standalone services and external harnesses | Managed Platform serves service-only customers and external clients such as CLI, harness and MCP integrations. Spaces and the full product UI are not prerequisites. |
 | Managed full 0000 product | The product uses the same Platform accounts and organizations, then adds its Spaces, threads, agent control and product UI. |
 
@@ -262,22 +262,24 @@ Turborepo tooling does not select the production runtime.
 Install the monorepo dependencies with `bun install --frozen-lockfile` from the
 repository root. From `services/platform`, initialize the local identity schema
 with `bun x wrangler d1 migrations apply platform-identity --local`, then start
-Wrangler with `bun run dev`. It serves `http://localhost:8787`. Copy
-`.dev.vars.example` to `.dev.vars` and replace its Google/GitHub client IDs and
-secrets plus `BETTER_AUTH_SECRET`. Register these local callback URLs with the
-provider applications:
-`http://localhost:8787/api/auth/callback/google` and
+Wrangler with `bun run dev`. It serves `http://localhost:8787`. For anonymous-only
+guest features, configure `BETTER_AUTH_SECRET` and leave the provider settings
+empty; no human account or provider signup is required. To enable the Platform
+account UI, copy `.dev.vars.example` to `.dev.vars` and replace the settings for
+at least one Google or GitHub provider plus `BETTER_AUTH_SECRET`. Register the
+matching local callback URL with that provider application: Google uses
+`http://localhost:8787/api/auth/callback/google`, and GitHub uses
 `http://localhost:8787/api/auth/callback/github`. If the local port or public
 Worker URL changes, set `PLATFORM_BASE_URL` to that exact origin and update the
-provider callback URLs to match.
+configured provider callback URL to match.
 
 Wrangler configuration contains only example IDs and no provider or Better Auth
-secret values. Deployed operators set `GOOGLE_CLIENT_ID` and `GITHUB_CLIENT_ID`
-as Worker variables and provide `GOOGLE_CLIENT_SECRET`, `GITHUB_CLIENT_SECRET`
-and `BETTER_AUTH_SECRET` with Wrangler secrets in the target environment. The
-Better Auth secret also protects its encrypted social-provider access and
-refresh tokens. Example values are placeholders and must not be used as
-deployment credentials.
+secret values. Deployed operators set the ID and secret pair for each human
+provider they choose, plus `BETTER_AUTH_SECRET`, in the target environment. The
+provider pairs are optional for anonymous-only guest features; the Better Auth
+secret remains required and also protects encrypted social-provider access and
+refresh tokens when human providers are enabled. Example values are placeholders
+and must not be used as deployment credentials.
 
 Operator lifecycle controls are disabled unless the Worker variable
 `PLATFORM_OPERATOR_USER_ID` names an existing Better Auth user ID. An operator
