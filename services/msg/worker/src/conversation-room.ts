@@ -745,6 +745,7 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
     return this.json({
       active: state.status === "active",
       agent_posting_enabled: state.mcp_post_enabled === 1 && this.config.MSG_POST_DISABLED !== "1",
+      public_grants_allowed: state.links_revoked !== 1,
       expires_at: iso(state.inactivity_expires_at),
       latest_message: state.next_sequence - 1,
       protocol_version: PROTOCOL_VERSION,
@@ -4688,14 +4689,21 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
       ? (argumentsValue as Record<string, unknown>).room_url
       : undefined;
     if (typeof threadUrl !== "string" || threadUrl.length === 0) return false;
-    if (this.mcpGrantCheck) return this.mcpGrantCheck({ grantId: subscription.grant_id, principalId: subscription.principal_id, scope: "monitor", threadUrl });
+    const state = this.state();
+    if (!state || state.status !== "active") return false;
+    if (this.mcpGrantCheck) {
+      // The injected checker has no grant provenance. Test and local callers
+      // use it for public-link grants, which must stop at link revocation.
+      if (state.links_revoked === 1) return false;
+      return this.mcpGrantCheck({ grantId: subscription.grant_id, principalId: subscription.principal_id, scope: "monitor", threadUrl });
+    }
     const database = this.config.MSG_DB;
     if (!database) return false;
     try {
       const row = await database.prepare(
-        "SELECT principals.revoked_at AS principal_revoked_at, grants.revoked_at AS grant_revoked_at FROM mcp_oauth_principals AS principals JOIN mcp_oauth_grants AS grants ON grants.principal_id = principals.principal_id AND grants.thread_url = ? WHERE principals.principal_id = ? AND instr(' ' || grants.scope || ' ', ' threads:monitor ') > 0",
-      ).bind(threadUrl, subscription.principal_id).first<{ principal_revoked_at: number | null; grant_revoked_at: number | null }>();
-      return row !== null && row.principal_revoked_at === null && row.grant_revoked_at === null;
+        "SELECT principals.revoked_at AS principal_revoked_at, grants.revoked_at AS grant_revoked_at, grants.grant_source AS grant_source FROM mcp_oauth_principals AS principals JOIN mcp_oauth_grants AS grants ON grants.principal_id = principals.principal_id AND grants.thread_url = ? WHERE principals.principal_id = ? AND instr(' ' || grants.scope || ' ', ' threads:monitor ') > 0",
+      ).bind(threadUrl, subscription.principal_id).first<{ principal_revoked_at: number | null; grant_revoked_at: number | null; grant_source: "public" | "explicit" | null }>();
+      return row !== null && row.principal_revoked_at === null && row.grant_revoked_at === null && (state.links_revoked !== 1 || row.grant_source === "explicit");
     } catch { return false; }
   }
 

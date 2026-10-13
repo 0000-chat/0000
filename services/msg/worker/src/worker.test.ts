@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 
 import { ERROR_CODES, ProtocolError } from "./errors";
+import type { MsgAuthenticator } from "./auth";
 import { buildShareMessage, type CreateRoomResponse, type PostMessageResponse } from "./protocol";
 import { createWorker, type MsgRateLimit } from "./worker";
 
@@ -1186,6 +1187,44 @@ test("routes the delegated GET posting capability with strict query and preview 
   const oversized = await worker.fetch(new Request(`https://msg.0000.chat/example/post?token=delegated-token&request_id=request-2&content=${"x".repeat(4 * 1024 + 1)}`));
   expect(oversized.status).toBe(413);
   expect(received).toHaveLength(1);
+});
+
+test("gates coordination, delegated posting, and retention through Platform resource authorization", async () => {
+  const calls: Array<{ room: string; source: string; action: string }> = [];
+  const auth = {
+    async authorizeResource(_request: Request, input: { room: string; source: "public" | "management"; action: "read" | "write" | "manage"; token?: string }) {
+      calls.push({ room: input.room, source: input.source, action: input.action });
+      if (input.room === "denied") throw new ProtocolError(ERROR_CODES.forbidden, "The room access is not authorized.", 403);
+      return {
+        context: { kind: "guest" as const, credential: "guest-credential", guestId: "guest-1", source: input.source },
+        setCookies: ["msg_resource=guest-proof; Path=/; HttpOnly"],
+      };
+    },
+  } as unknown as MsgAuthenticator;
+  const worker = createWorker({
+    create: async () => createdRoom,
+    coordinationOverview: async () => ({ coordination_cursor: 0, expires_at: "2026-08-16T00:00:00.000Z", latest_message: 1, pending_proposal_count: 0, protocol_version: 1 as const, published_revision: 0 }),
+    getPost: async ({ requestId }) => ({ accepted: true, message: { created_at: "2026-08-10T00:00:00.000Z", id: "message-2", sequence: 2 }, protocol_version: 1, replayed: false, request_id: requestId, sequence: 2 }),
+    extendRetention: async () => { throw new Error("must not reach retention service"); },
+  }, { auth });
+
+  const coordination = await worker.fetch(new Request("https://msg.0000.chat/room/coordination"));
+  expect(coordination.status).toBe(200);
+  expect(coordination.headers.get("set-cookie")).toContain("msg_resource=guest-proof");
+  const delegated = await worker.fetch(new Request("https://msg.0000.chat/room/post?token=delegated-token&request_id=request-1&content=hello"));
+  expect(delegated.status).toBe(200);
+  expect(delegated.headers.get("set-cookie")).toContain("msg_resource=guest-proof");
+
+  const deniedCoordination = await worker.fetch(new Request("https://msg.0000.chat/denied/coordination"));
+  const deniedRetention = await worker.fetch(new Request("https://msg.0000.chat/manage/denied/token/retention", { method: "POST", body: JSON.stringify({ client_retry_id: "retry-1", expires_at: "2026-08-11T00:00:00.000Z" }), headers: { "content-type": "application/json" } }));
+  expect(deniedCoordination.status).toBe(403);
+  expect(deniedRetention.status).toBe(403);
+  expect(calls).toEqual([
+    { room: "room", source: "public", action: "read" },
+    { room: "room", source: "public", action: "write" },
+    { room: "denied", source: "public", action: "read" },
+    { room: "denied", source: "management", action: "manage" },
+  ]);
 });
 
 test("rejects an empty idempotency key", async () => {

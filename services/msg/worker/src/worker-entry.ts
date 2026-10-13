@@ -39,7 +39,7 @@ export interface MsgProductionEnvironment extends MsgEnvironment {
  * request boundary. The DO stores the principal and grant identifiers with
  * each subscription; grant checks remain server-side for every operation.
  */
-export function createMcpAuthenticator(auth: McpAuthService, origin: string): McpAuthenticator {
+export function createMcpAuthenticator(auth: McpAuthService, origin: string, roomService?: RoomService): McpAuthenticator {
   return {
     async authenticate(request) {
       let principal;
@@ -55,7 +55,22 @@ export function createMcpAuthenticator(auth: McpAuthService, origin: string): Mc
         scopes: principal.scopes,
         authorize: async (room: string, capability: McpThreadCapability) => {
           if (room === "*") return principal.scopes.includes("threads:monitor");
-          return (await auth.validateGrant(principal.principalId, `${origin}/${room}`, capability)) !== null;
+          let grant;
+          try {
+            grant = await auth.validateGrant(principal.principalId, `${origin}/${room}`, capability);
+          } catch {
+            return false;
+          }
+          if (!grant) return false;
+          if (roomService?.roomStatus) {
+            try {
+              const status = await roomService.roomStatus({ room });
+              if (!status.active || (status.public_grants_allowed === false && grant.source !== "explicit")) return false;
+            } catch {
+              return false;
+            }
+          }
+          return true;
         },
       };
     },
@@ -83,7 +98,7 @@ async function routeMcpAuthorization(request: Request, auth: McpAuthService, roo
           const thread = new URL(threadUrl);
           if (thread.origin !== url.origin || !/^\/[^/]+$/u.test(thread.pathname) || !roomService.roomStatus) return null;
           const status = await roomService.roomStatus({ room: thread.pathname.slice(1) });
-          return status.active ? { canonicalUrl: `${thread.origin}${thread.pathname}` } : null;
+          return status.active && status.public_grants_allowed !== false ? { canonicalUrl: `${thread.origin}${thread.pathname}` } : null;
         } catch { return null; }
       },
     });
@@ -199,7 +214,7 @@ function routeMsgRequest(
       auth: providedPlatformAuth,
       createDisabled: env.MSG_CREATE_DISABLED === "1",
       operations,
-      mcpAuth: mcpAuth ? createMcpAuthenticator(mcpAuth, publicOrigin) : undefined,
+      mcpAuth: mcpAuth ? createMcpAuthenticator(mcpAuth, publicOrigin, roomService) : undefined,
       mcpCallbackFetch,
       mcpOrigin: publicOrigin,
       mcpRateLimit: env.MSG_RATE_LIMIT_READS,

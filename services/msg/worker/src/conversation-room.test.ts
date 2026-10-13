@@ -1167,6 +1167,45 @@ test("binds retained MCP events to an existing Thread subscription when room_id 
   }
 });
 
+test("stops public MCP delivery after Thread links are revoked", async () => {
+  const database = new Database(":memory:");
+  let now = 1_000;
+  let callbackCount = 0;
+  const secret = `whsec_${btoa("c".repeat(32))}`;
+  const callbackFetch = async (): Promise<Response> => {
+    callbackCount += 1;
+    return new Response(null, { status: 204 });
+  };
+  const { room: durable } = await room(database, () => now, {}, undefined, callbackFetch, () => true);
+  try {
+    await durable.fetch(request("/initialize", { management_hash: "hash", initial: { content: "first", author: "a", display_name: "a", semantic_type: "message" } }));
+    const argumentsJson = JSON.stringify({ room_url: "https://msg.example.test/revoked-thread" });
+    await durable.fetch(request("/mcp/subscribe", {
+      id: "sub_revoked",
+      principal_id: "principal-1",
+      grant_id: "grant-1",
+      arguments_json: argumentsJson,
+      callback_url: "https://receiver.example.test/revoked",
+      secret,
+      cursor: null,
+    }));
+    now += 1;
+    await durable.fetch(request("/messages", { input: { content: "before revoke", author: "a", display_name: "a", semantic_type: "message" } }));
+    await durable.alarm();
+    expect(callbackCount).toBe(1);
+
+    database.query("UPDATE room_state SET links_revoked = 1 WHERE singleton = 1").run();
+    expect(await (await durable.fetch(new Request("https://room/mcp/status"))).json()).toMatchObject({ public_grants_allowed: false });
+    now += 1;
+    await durable.fetch(request("/messages", { input: { content: "after revoke", author: "a", display_name: "a", semantic_type: "message" } }));
+    await durable.alarm();
+    expect(callbackCount).toBe(1);
+    expect(database.query("SELECT status FROM mcp_subscriptions WHERE id = ?").get("sub_revoked")).toMatchObject({ status: "stopped" });
+  } finally {
+    database.close();
+  }
+});
+
 test("keeps the MCP cursor contiguous when a newer event succeeds before an older retry", async () => {
   const database = new Database(":memory:");
   let now = 1_000;

@@ -40,6 +40,7 @@ CREATE TABLE IF NOT EXISTS mcp_oauth_grants (
   scope TEXT NOT NULL,
   created_at INTEGER NOT NULL,
   revoked_at INTEGER,
+  grant_source TEXT NOT NULL DEFAULT 'public' CHECK (grant_source IN ('public', 'explicit')),
   PRIMARY KEY (principal_id, thread_url)
 );
 CREATE INDEX IF NOT EXISTS mcp_oauth_grants_thread ON mcp_oauth_grants(thread_url, revoked_at);

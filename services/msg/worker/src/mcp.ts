@@ -183,6 +183,7 @@ const WebhookRedeliveryInputSchema = {
 const RoomStatusOutputSchema = z.object({
   active: z.boolean(),
   agent_posting_enabled: z.boolean(),
+  public_grants_allowed: z.boolean().optional(),
   expires_at: z.string(),
   latest_message: z.number().int().nonnegative(),
   protocol_version: z.number().int().positive(),
@@ -287,7 +288,7 @@ function buildMcpServer(
     "create_room",
     {
       title: "Create room",
-      description: "Create a temporary room directly with an initial message. The result contains the public conversation URL and share instructions plus the private owner management URL for the tool caller; never copy that private URL into room content or public messages. Supply a stable idempotency_key to safely retry the same creation request.",
+      description: "Create a temporary room directly with an initial message. MCP room creation is account-free: the returned private management URL is the explicit owner capability, while opening or sharing the public URL can establish an automatic Platform guest for ordinary room access. The result contains the public conversation URL and share instructions plus the private owner management URL for the tool caller; never copy that private URL into room content or public messages. Supply a stable idempotency_key to safely retry the same creation request.",
       inputSchema: CreateRoomInputSchema,
       outputSchema: CreateRoomOutputSchema,
       annotations: {

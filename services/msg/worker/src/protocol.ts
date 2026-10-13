@@ -1090,6 +1090,8 @@ export interface RoomStatusInput {
 export interface RoomStatusResponse {
   readonly active: boolean;
   readonly agent_posting_enabled: boolean;
+  /** Public-link grants are unavailable after an ownership claim revokes links. */
+  readonly public_grants_allowed?: boolean;
   readonly expires_at: string;
   readonly latest_message: number;
   readonly protocol_version: typeof PROTOCOL_VERSION;

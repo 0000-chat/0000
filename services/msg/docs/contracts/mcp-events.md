@@ -36,7 +36,11 @@ this integration includes:
 
 - `worker/migrations/0005_mcp_oauth.sql` for the MCP integration's public OAuth
   clients, authorization requests and codes, account-free principals,
-  per-Thread grants, access tokens, and rotating refresh-token families.
+  per-Thread grants, access tokens, rotating refresh-token families, and grant
+  provenance.
+- Its `grant_source` column records whether a grant was issued from a public
+  Thread link or an explicit management/admin path. The current consent flow
+  issues public-link grants.
 
 OAuth and event signing values are high-entropy opaque values. The OAuth store
 keeps hashes of bearer, authorization-code, and refresh-token values. A
@@ -103,6 +107,14 @@ one hour; refresh tokens last 30 days and rotate. Reuse of a refresh token
 revokes its family. An access-token expiry uses the normal refresh flow. A
 revoked principal or Thread grant cannot recover retained events through the
 public MCP surface and requires a new explicit grant.
+
+When a Thread owner claims a room with `revoke_links: true`, new public-link
+MCP grants are rejected and existing public-link subscriptions stop before
+their next callback. An explicit management/admin grant, when established by
+an authorized integration, remains governed by its own grant and is not
+treated as a public link. MCP `create_room` remains account-free: its returned
+management URL is the explicit owner capability; ordinary access can establish
+an anonymous Platform guest later.
 
 Client registration accepts JSON with `client_name` and `redirect_uris`.
 Authorization requires `response_type=code`, the registered redirect URI,

@@ -66,6 +66,8 @@ export interface McpGrant {
   readonly principalId: string;
   readonly threadUrl: string;
   readonly scope: string;
+  /** Public-link grants stop when the owner revokes links; explicit grants may survive. */
+  readonly source?: "public" | "explicit";
   readonly createdAt: number;
   readonly revokedAt: number | null;
 }
@@ -160,6 +162,7 @@ interface GrantRow {
   readonly principal_id: string;
   readonly thread_url: string;
   readonly scope: string;
+  readonly grant_source?: "public" | "explicit";
   readonly created_at: number;
   readonly revoked_at: number | null;
 }
@@ -213,14 +216,14 @@ export class D1McpAuthStore implements McpAuthStore {
   }
 
   async upsertGrant(grant: McpGrant): Promise<void> {
-    await this.d1.prepare("INSERT INTO mcp_oauth_grants (principal_id, thread_url, scope, created_at, revoked_at) VALUES (?, ?, ?, ?, NULL) ON CONFLICT(principal_id, thread_url) DO UPDATE SET scope = excluded.scope, revoked_at = NULL")
-      .bind(grant.principalId, grant.threadUrl, grant.scope, grant.createdAt).run();
+    await this.d1.prepare("INSERT INTO mcp_oauth_grants (principal_id, thread_url, scope, created_at, revoked_at, grant_source) VALUES (?, ?, ?, ?, NULL, ?) ON CONFLICT(principal_id, thread_url) DO UPDATE SET scope = excluded.scope, revoked_at = NULL")
+      .bind(grant.principalId, grant.threadUrl, grant.scope, grant.createdAt, grant.source ?? "public").run();
   }
 
   async getGrant(principalId: string, threadUrl: string): Promise<McpGrant | null> {
-    const row = await this.d1.prepare("SELECT principal_id, thread_url, scope, created_at, revoked_at FROM mcp_oauth_grants WHERE principal_id = ? AND thread_url = ? AND revoked_at IS NULL")
+    const row = await this.d1.prepare("SELECT principal_id, thread_url, scope, created_at, revoked_at, grant_source FROM mcp_oauth_grants WHERE principal_id = ? AND thread_url = ? AND revoked_at IS NULL")
       .bind(principalId, threadUrl).first<GrantRow>();
-    return row ? { principalId: row.principal_id, threadUrl: row.thread_url, scope: row.scope, createdAt: row.created_at, revokedAt: row.revoked_at } : null;
+    return row ? { principalId: row.principal_id, threadUrl: row.thread_url, scope: row.scope, source: row.grant_source ?? "public", createdAt: row.created_at, revokedAt: row.revoked_at } : null;
   }
 
   async createAuthorizationCode(code: McpAuthorizationCode): Promise<void> {

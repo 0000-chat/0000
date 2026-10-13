@@ -155,7 +155,7 @@ export class McpAuthService {
     const code = randomOpaque(32);
     await this.config.store.createPrincipal(principalId, now);
     for (const grant of grants) {
-      await this.config.store.upsertGrant({ principalId, threadUrl: grant.threadUrl, scope: joinScopes(grant.scopes), createdAt: now, revokedAt: null });
+      await this.config.store.upsertGrant({ principalId, threadUrl: grant.threadUrl, scope: joinScopes(grant.scopes), source: "public", createdAt: now, revokedAt: null });
     }
     await this.config.store.createAuthorizationCode({
       codeHash: await sha256(code),
