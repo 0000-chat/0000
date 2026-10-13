@@ -1,7 +1,7 @@
 import { ERROR_CODES, isStaleRevisionDetails, isStaleSequenceDetails, ProtocolError } from "./errors";
 import { parseCoordinationDispute, parseCoordinationDisputeReview, parseCoordinationProposal, parseCoordinationPublish, parseCoordinationRevision } from "./coordination-domain";
 import { hashCapability, parseBasedOnSequence, parseMessageInput, parseRetentionExtension, randomCapability, validateIdempotencyKey, validateRequestId } from "./room-domain";
-import { buildShareMessage, foregroundWait, PROTOCOL_VERSION, stripLegacyAbsoluteExpiry, type CoordinationAcceptedRecordInput, type CoordinationAcceptedRecordResponse, type CoordinationCorrectionDetailInput, type CoordinationCorrectionListInput, type CoordinationCorrectionListResponse, type CoordinationCorrectionResponse, type CoordinationDecisionDetailInput, type CoordinationDecisionListInput, type CoordinationDecisionListResponse, type CoordinationDecisionResponse, type CoordinationDisputeDetailInput, type CoordinationDisputeInput, type CoordinationDisputeListInput, type CoordinationDisputeListResponse, type CoordinationDisputeResponse, type CoordinationDisputeReviewInput, type CoordinationDisputeReviewResponse, type CoordinationListInput, type CoordinationOverviewResponse, type CoordinationPanelDetailInput, type CoordinationPanelHistoryInput, type CoordinationPanelHistoryResponse, type CoordinationPanelResponse, type CoordinationProposalDetailInput, type CoordinationProposalInput, type CoordinationProposalResponse, type CoordinationProposalRevisionInput, type CoordinationProposalListResponse, type CoordinationPublishInput, type CoordinationPublishResponse, type CoordinationPublicationInput, type CoordinationPublicationResponse, type CoordinationRequestDetailInput, type CoordinationRequestListResponse, type CoordinationRequestResponse, type CoordinationSupersessionListInput, type CoordinationSupersessionListResponse, type CreateRoomInput, type CreateRoomResponse, type CreateWebhookInput, type CreateWebhookResponse, type EnrollPushInput, type ExportRoomInput, type ExtendRetentionInput, type GetPostMessageInput, type GetPostMessageResponse, type ListWebhooksInput, type ListWebhooksResponse, type LiveRoomInput, type ManageRoomInput, type ManageRoomResponse, type ManageWebhookInput, type ManageWebhookResponse, type McpPostMessageInput, type McpPostMessageResponse, type PostMessageInput, type PostMessageResponse, type PushEnrollmentInput, type PushEnrollmentResponse, type ReadMessageInput, type ReadMessageResponse, type ReadRoomInput, type ReadRoomResponse, type RedeliverWebhookInput, type RedeliverWebhookResponse, type RemovePushEnrollmentResponse, type RemoveWebhookInput, type RemoveWebhookResponse, type RetentionExtensionResponse, type RotateWebhookSecretResponse, type RoomService, type RoomStatusInput, type RoomStatusResponse, type UpdateWebhookInput, type UpdateWebhookResponse } from "./protocol";
+import { buildShareMessage, foregroundWait, PROTOCOL_VERSION, stripLegacyAbsoluteExpiry, type CoordinationAcceptedRecordInput, type CoordinationAcceptedRecordResponse, type CoordinationCorrectionDetailInput, type CoordinationCorrectionListInput, type CoordinationCorrectionListResponse, type CoordinationCorrectionResponse, type CoordinationDecisionDetailInput, type CoordinationDecisionListInput, type CoordinationDecisionListResponse, type CoordinationDecisionResponse, type CoordinationDisputeDetailInput, type CoordinationDisputeInput, type CoordinationDisputeListInput, type CoordinationDisputeListResponse, type CoordinationDisputeResponse, type CoordinationDisputeReviewInput, type CoordinationDisputeReviewResponse, type CoordinationListInput, type CoordinationOverviewResponse, type CoordinationPanelDetailInput, type CoordinationPanelHistoryInput, type CoordinationPanelHistoryResponse, type CoordinationPanelResponse, type CoordinationProposalDetailInput, type CoordinationProposalInput, type CoordinationProposalResponse, type CoordinationProposalRevisionInput, type CoordinationProposalListResponse, type CoordinationPublishInput, type CoordinationPublishResponse, type CoordinationPublicationInput, type CoordinationPublicationResponse, type CoordinationRequestDetailInput, type CoordinationRequestListResponse, type CoordinationRequestResponse, type CoordinationSupersessionListInput, type CoordinationSupersessionListResponse, type CreateRoomInput, type CreateRoomResponse, type CreateWebhookInput, type CreateWebhookResponse, type EnrollPushInput, type ExportRoomInput, type ExtendRetentionInput, type GetPostMessageInput, type GetPostMessageResponse, type ListWebhooksInput, type ListWebhooksResponse, type LiveRoomInput, type ManageRoomInput, type ManageRoomResponse, type ManageWebhookInput, type ManageWebhookResponse, type McpPostMessageInput, type McpPostMessageResponse, type McpReadMessageInput, type McpReadMessageResponse, type McpReadThreadInput, type McpReadThreadResponse, type McpResponseOrigin, type McpSubscribeInput, type McpSubscribeResponse, type McpUnsubscribeInput, type McpUnsubscribeResponse, type PostMessageInput, type PostMessageResponse, type PushEnrollmentInput, type PushEnrollmentResponse, type ReadMessageInput, type ReadMessageResponse, type ReadRoomInput, type ReadRoomResponse, type RedeliverWebhookInput, type RedeliverWebhookResponse, type RemovePushEnrollmentResponse, type RemoveWebhookInput, type RemoveWebhookResponse, type RetentionExtensionResponse, type RotateWebhookSecretResponse, type RoomService, type RoomStatusInput, type RoomStatusResponse, type UpdateWebhookInput, type UpdateWebhookResponse } from "./protocol";
 
 export interface RoomStub { fetch(request: Request): Promise<Response>; }
 export interface RoomNamespace { getByName(name: string): RoomStub; }
@@ -25,6 +25,7 @@ export class DurableRoomService implements RoomService {
     const response = await this.room(room).fetch(jsonRequest("/initialize", {
       initial,
       management_hash: await hashCapability(management),
+      room_id: room,
     }));
     const value = stripLegacyAbsoluteExpiry(await responseJson(response));
     const conversation_url = `${this.origin}/${room}`;
@@ -84,6 +85,42 @@ export class DurableRoomService implements RoomService {
       input: parseMessageInput(input.body),
     })));
     return value as unknown as McpPostMessageResponse;
+  }
+
+  async mcpReadThread(input: McpReadThreadInput): Promise<McpReadThreadResponse> {
+    const endpoint = new URL("https://room/mcp/read");
+    endpoint.searchParams.set("after", String(input.after));
+    if (input.limit !== undefined) endpoint.searchParams.set("limit", String(input.limit));
+    if (input.through !== undefined) endpoint.searchParams.set("through", String(input.through));
+    const value = hydrateCoordination(stripLegacyAbsoluteExpiry(await responseJson(await this.room(input.room).fetch(new Request(endpoint)))), this.origin, input.room) as Record<string, unknown>;
+    return { ...value, conversation_url: `${this.origin}/${input.room}`, share_message: buildShareMessage(`${this.origin}/${input.room}`), wait: foregroundWait(this.origin, input.room, typeof value.next_after === "number" ? value.next_after : Number(value.latest_message ?? input.after)) } as unknown as McpReadThreadResponse;
+  }
+
+  async mcpReadMessage(input: McpReadMessageInput): Promise<McpReadMessageResponse> {
+    return this.readMessage(input) as Promise<McpReadMessageResponse>;
+  }
+
+  async mcpPostMessage(input: McpPostMessageInput & { readonly origin?: McpResponseOrigin; readonly principal_id?: string }): Promise<McpPostMessageResponse> {
+    const value = stripLegacyAbsoluteExpiry(await responseJson(await this.room(input.room).fetch(jsonRequest("/mcp/post", {
+      input: parseMessageInput(input.body),
+      ...(input.origin === undefined ? {} : { origin: input.origin }),
+      ...(input.principal_id === undefined ? {} : { principal_id: input.principal_id }),
+    }))));
+    const message = value.message as { sequence: number };
+    return { ...value, wait: foregroundWait(this.origin, input.room, message.sequence) } as unknown as McpPostMessageResponse;
+  }
+
+  async mcpSubscribe(input: McpSubscribeInput): Promise<McpSubscribeResponse> {
+    return responseJson(await this.room(input.room).fetch(jsonRequest("/mcp/subscribe", input))) as unknown as McpSubscribeResponse;
+  }
+
+  async mcpUnsubscribe(input: McpUnsubscribeInput): Promise<McpUnsubscribeResponse> {
+    return responseJson(await this.room(input.room).fetch(jsonRequest("/mcp/unsubscribe", input))) as unknown as McpUnsubscribeResponse;
+  }
+
+  async mcpValidateResponseContext(input: { readonly event_id: string; readonly principal_id: string; readonly room: string; readonly subscription_id: string }): Promise<boolean> {
+    const value = await responseJson(await this.room(input.room).fetch(jsonRequest("/mcp/validate-response", input))) as { valid?: boolean };
+    return value.valid === true;
   }
 
   async roomStatus(input: RoomStatusInput): Promise<RoomStatusResponse> {

@@ -168,6 +168,39 @@
           }
         }
       }
+    },
+    {
+      "name": "msg-webhook-dispatcher",
+      "kind": "bun-runtime-bundle",
+      "runtime_paths": [
+        "services/msg/scripts/mcp-webhook-dispatcher.ts",
+        "services/msg/worker/src/mcp-webhook-transport.ts",
+        "services/msg/package.json"
+      ],
+      "archive_paths": [
+        "services/msg/scripts/mcp-webhook-dispatcher.ts",
+        "services/msg/worker/src/mcp-webhook-transport.ts",
+        "services/msg/package.json"
+      ],
+      "build": {
+        "type": "bun-runtime",
+        "source": "services/msg/scripts/mcp-webhook-dispatcher.ts",
+        "entrypoint": "mcp-webhook-dispatcher.js",
+        "files": ["mcp-webhook-dispatcher.js", "artifact-manifest.json"],
+        "runtime": {
+          "engine": "bun",
+          "version": "1.3.14",
+          "command": ["bun", "mcp-webhook-dispatcher.js"],
+          "required_env": ["MSG_MCP_WEBHOOK_DISPATCH_TOKEN"],
+          "optional_env": [
+            "MSG_MCP_WEBHOOK_DISPATCH_HOST",
+            "MSG_MCP_WEBHOOK_DISPATCH_PORT",
+            "MSG_MCP_WEBHOOK_DISPATCH_TLS_CERT_FILE",
+            "MSG_MCP_WEBHOOK_DISPATCH_TLS_KEY_FILE",
+            "MSG_MCP_WEBHOOK_DISPATCH_TRUSTED_INTERNAL_PROXY"
+          ]
+        }
+      }
     }
   ]
 }

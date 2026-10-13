@@ -35,6 +35,7 @@ import { parseWebhookCreateInput, parseWebhookUpdateInput, type WebhookMutation 
 import { PUSH_SERVICE_WORKER_PATH, pushServiceWorkerResponse } from "./push-service-worker";
 import { parsePushBrowserId, parsePushSubscription } from "./push-subscriptions";
 import { handleMcpRequest } from "./mcp";
+import type { McpAuthenticator } from "./mcp-events-handler";
 
 export interface MsgWorker {
   fetch(request: Request): Promise<Response>;
@@ -65,6 +66,10 @@ export interface MsgWorkerOptions {
   readonly pushConfigured?: boolean;
   readonly pushVapidPublicKey?: string;
   readonly rateLimits?: MsgRateLimits;
+  readonly mcpAuth?: McpAuthenticator;
+  readonly mcpCallbackFetch?: typeof fetch;
+  readonly mcpOrigin?: string;
+  readonly mcpRateLimit?: MsgRateLimit;
 }
 
 export type CreationClaim =
@@ -209,6 +214,10 @@ async function route(request: Request, service: RoomService, options: MsgWorkerO
       postDisabled: options.postDisabled,
       publicOrigin: options.publicOrigin,
       rateLimits: options.rateLimits,
+      auth: options.mcpAuth,
+      callbackFetch: options.mcpCallbackFetch,
+      mcpOrigin: options.mcpOrigin ?? options.publicOrigin,
+      mcpRateLimit: options.mcpRateLimit,
     });
   }
   if (request.method !== "GET" && request.method !== "HEAD" && !isSameOrigin(request, url)) {

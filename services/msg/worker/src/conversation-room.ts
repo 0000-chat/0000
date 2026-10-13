@@ -1,11 +1,16 @@
 import { DurableObject } from "cloudflare:workers";
 
+import type { D1DatabaseLike } from "./operations";
+
 import { ERROR_CODES, isStaleRevisionDetails, isStaleSequenceDetails, ProtocolError, type StaleRevisionDetails, type StaleSequenceDetails } from "./errors";
 import { CLAIM_CORRECTION_KIND, coordinationMutationFingerprint, coordinationStorageBytes, COORDINATION_DEFAULT_LIMIT, COORDINATION_KIND, COORDINATION_MAX_LIMIT, COORDINATION_PANEL_KIND, COORDINATION_PROGRESS_KIND, DECISION_POSITION_KIND, DECISION_PROPOSAL_KIND, DECISION_SUPERSESSION_KIND, DISPUTE_REPORTED_EVENT_KIND, DISPUTE_REVIEWED_EVENT_KIND, MAX_COORDINATION_PAGE_BYTES, parseCoordinationClaimPath, parseCoordinationDispute, parseCoordinationDisputeReview, parseCoordinationListSelectors, parseCoordinationProposal, parseCoordinationPublish, parseCoordinationRevision, RETENTION_EXTENDED_EVENT_KIND, type ClaimCorrectionBody, type CoordinationClaimTarget, type CoordinationDecisionApproval, type CoordinationDisputeInput, type CoordinationDisputeReviewInput, type CoordinationEventKind, type CoordinationKind, type CoordinationPanelBody, type CoordinationProgressBody, type CoordinationProposalBody, type CoordinationProposalInput, type CoordinationPublishInput, type CoordinationRequestBody, type CoordinationStatus, type DecisionPositionBody, type DecisionProposalBody, type DecisionSupersessionBody } from "./coordination-domain";
 import { byteLength, compareCapabilities, DEFAULT_READ_LIMIT, hashCapability, MAX_READ_MESSAGE_BYTES, messageStorageBytes, parseRetentionExtension, retentionMetadata, ROOM_EXPIRY_ENABLED, ROOM_LIMITS, validateBasedOnSequence, validateBoundedCursor, validateCursor, validateReadLimit, validateRequestId, validateThrough } from "./room-domain";
 import type { MessageInput } from "./room-domain";
 import { MCP_READ_BYTE_BUDGET_BYTES, NAME_PASSWORD_NOTICE, PROTOCOL_VERSION, type CoordinationAcceptedRecord, type CoordinationAcceptedRecordAnnotations, type CoordinationCorrection, type CoordinationDecision, type CoordinationDecisionApprovalEvidence, type CoordinationDecisionHistoryEntry, type CoordinationDecisionPosition, type CoordinationDisputeReport, type CoordinationDisputeReview, type CoordinationEvidenceItem, type CoordinationPanel, type CoordinationPanelHistoryEntry, type CoordinationProgress, type CoordinationProposal, type CoordinationProposalSummary, type CoordinationRequest, type CoordinationRequestSummary, type CoordinationSourceMessage, type CoordinationSupersession, type CreateWebhookResponse, type ManageWebhookResponse, type RedeliverWebhookResponse, type RotateWebhookSecretResponse, type UpdateWebhookResponse, type WebhookAttemptMetadata, type WebhookDeliveryMetadata, type WebhookSummary } from "./protocol";
 import { CURRENT_ROOM_SCHEMA_VERSION, migrateRoomSchema } from "./room-schema";
+import { boundedPreview, MCP_DELIVERY_RETRY_WINDOW_MS, MCP_DELIVERY_TIMEOUT_MS, MCP_EVENT_MAX_BYTES, MCP_MAX_ACTIVE_SUBSCRIPTIONS_PER_PRINCIPAL_THREAD, MCP_MAX_ACTIVE_SUBSCRIPTIONS_PER_THREAD, MCP_MESSAGE_EVENT, MCP_SECRET_ROTATION_WINDOW_MS, standardWebhookSignature } from "./mcp-events";
+import { createMcpWebhookDispatcherClient } from "./mcp-webhook-dispatcher-client";
+import type { McpSubscribeInput, McpUnsubscribeInput } from "./protocol";
 import { discardWebhookResponseBody, generateWebhookSecret, normalizeWebhookAuthor, parseWebhookCreateInput, parseWebhookUpdateInput, redactWebhookUrl, signWebhookPayload, webhookRequestTarget, type WebhookMutation } from "./webhooks";
 import { decryptWebhookRecord, encryptWebhookRecord, isWebhookEnvelope } from "./webhook-crypto";
 import { createWebPushRequest } from "./web-push-crypto";
@@ -42,6 +47,9 @@ interface ExportContext {
 
 export interface ConversationRoomEnv {
   readonly MSG_DATA_ENCRYPTION_KEY_V1?: string;
+  readonly MSG_DB?: D1DatabaseLike;
+  readonly MSG_MCP_WEBHOOK_DISPATCH_TOKEN?: string;
+  readonly MSG_MCP_WEBHOOK_DISPATCH_URL?: string;
   readonly MSG_PUBLIC_ORIGIN?: string;
   readonly MSG_POST_DISABLED?: string;
   readonly MSG_TEST_MODE?: string;
@@ -52,6 +60,15 @@ export interface ConversationRoomEnv {
   readonly MSG_VAPID_PUBLIC_KEY?: string;
   readonly MSG_VAPID_SUBJECT?: string;
 }
+
+export interface McpSubscriptionAuthorizationInput {
+  readonly grantId: string;
+  readonly principalId: string;
+  readonly scope: "monitor";
+  readonly threadUrl: string;
+}
+
+export type McpSubscriptionAuthorization = (input: McpSubscriptionAuthorizationInput) => Promise<boolean> | boolean;
 
 type RoomLimits = { -readonly [Key in keyof typeof ROOM_LIMITS]: number };
 
@@ -68,6 +85,7 @@ interface RoomState {
   readonly message_count: number;
   readonly next_sequence: number;
   readonly notification_id: string;
+  readonly room_id: string | null;
   readonly status: "active" | "deleted";
   readonly tombstone_expires_at: number | null;
   readonly total_bytes: number;
@@ -270,6 +288,54 @@ interface StoredMessage extends MessageInput {
   readonly idempotency_key?: string;
   readonly sequence: number;
   readonly source_browser_id: string | null;
+  readonly mcp_origin_subscription_id?: string | null;
+  readonly mcp_origin_event_id?: string | null;
+}
+
+interface StoredMcpSubscription {
+  readonly id: string;
+  readonly principal_id: string;
+  readonly grant_id: string;
+  readonly event_name: string;
+  readonly arguments_json: string;
+  readonly callback_url: string;
+  readonly signing_secret: string;
+  readonly previous_signing_secret: string | null;
+  readonly rotation_until: number | null;
+  readonly created_at: number;
+  readonly updated_at: number;
+  readonly expires_at: number;
+  readonly cursor: number;
+  readonly status: "active" | "stopped";
+}
+
+interface StoredMcpDelivery {
+  readonly id: string;
+  readonly subscription_id: string;
+  readonly event_id: string;
+  readonly created_at: number;
+  readonly due_at: number;
+  readonly retry_expires_at: number;
+  readonly attempt_count: number;
+  readonly attempted_at: number | null;
+  readonly completed_at: number | null;
+  readonly lease_expires_at: number | null;
+  readonly status: "pending" | "sending" | "retrying" | "delivered" | "failed" | "cancelled";
+  readonly failure_category: string | null;
+}
+
+interface StoredMcpEvent {
+  readonly event_id: string;
+  readonly sequence: number;
+  readonly message_id: string;
+  readonly created_at: number;
+  readonly payload: string;
+}
+
+interface ClaimedMcpDelivery {
+  readonly delivery: StoredMcpDelivery;
+  readonly subscription: StoredMcpSubscription;
+  readonly event: StoredMcpEvent;
 }
 
 interface StoredNameClaim {
@@ -410,19 +476,23 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
   private readonly expiryEnabled: boolean;
   private readonly now: () => number;
   private readonly signWebhook: typeof signWebhookPayload;
+  private readonly callbackFetch: typeof fetch | undefined;
+  private readonly mcpGrantCheck: McpSubscriptionAuthorization | undefined;
   private testNowOverride: number | undefined;
   private scheduleRevision = 0;
   private scheduledRevision = 0;
   private schedulePromise: Promise<void> | undefined;
   private testPushSendGate: TestPushSendGate | undefined;
 
-  constructor(ctx: DurableObjectState, env: ConversationRoomEnv, now?: () => number, signWebhook: typeof signWebhookPayload = signWebhookPayload) {
+  constructor(ctx: DurableObjectState, env: ConversationRoomEnv, now?: () => number, signWebhook: typeof signWebhookPayload = signWebhookPayload, callbackFetch?: typeof fetch, mcpGrantCheck?: McpSubscriptionAuthorization) {
     super(ctx, env);
     this.config = env;
     this.limits = resolveRoomLimits(env);
     this.expiryEnabled = resolveRoomExpiryEnabled(env);
     this.now = now ?? (() => this.testNowOverride ?? resolveNow(env));
     this.signWebhook = signWebhook;
+    this.callbackFetch = callbackFetch ?? createDispatcherFetch(env);
+    this.mcpGrantCheck = mcpGrantCheck;
     migrateRoomSchema(this.ctx.storage, this.limits.inactivityTtlMs, this.now());
   }
 
@@ -455,6 +525,14 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
       }
       const messageMatch = /^\/messages\/([^/]+)$/u.exec(url.pathname);
       if (request.method === "GET" && messageMatch) return await this.readMessage(decodePathSegment(messageMatch[1]!));
+      if (request.method === "GET" && url.pathname === "/mcp/status") return await this.mcpStatus();
+      if (request.method === "GET" && url.pathname === "/mcp/read") return await this.mcpRead(url);
+      if (request.method === "GET" && url.pathname === "/mcp/read-message") return await this.mcpReadMessage(url);
+      if (request.method === "POST" && url.pathname === "/mcp/post") return await this.mcpPost(request);
+      if (request.method === "POST" && url.pathname === "/mcp-post") return await this.legacyMcpPost(request);
+      if (request.method === "POST" && url.pathname === "/mcp/subscribe") return await this.mcpSubscribe(request);
+      if (request.method === "POST" && url.pathname === "/mcp/unsubscribe") return await this.mcpUnsubscribe(request);
+      if (request.method === "POST" && url.pathname === "/mcp/validate-response") return await this.mcpValidateResponse(request);
       if (request.method === "GET" && url.pathname === "/read") return await this.read(url);
       if (request.method === "GET" && url.pathname === "/status") return await this.status();
       if (request.method === "GET" && url.pathname === "/coordination") return await this.readCoordinationOverview();
@@ -533,6 +611,10 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
           this.ctx.storage.sql.exec("DELETE FROM coordination_supersessions");
           this.ctx.storage.sql.exec("DELETE FROM name_claims");
           this.ctx.storage.sql.exec("DELETE FROM legacy_names");
+          this.ctx.storage.sql.exec("DELETE FROM mcp_event_deliveries");
+          this.ctx.storage.sql.exec("DELETE FROM mcp_subscriptions");
+          this.ctx.storage.sql.exec("DELETE FROM mcp_events");
+          this.ctx.storage.sql.exec("DELETE FROM mcp_response_dedup");
           this.ctx.storage.sql.exec("DELETE FROM room_state");
         });
         await this.ctx.storage.deleteAlarm();
@@ -578,6 +660,16 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
         return;
       }
     }
+    this.finishExpiredMcpDeliveries(this.now());
+    this.recoverExpiredMcpLeases(this.now());
+    for (let batch = 0; batch < MAX_WEBHOOKS_PER_ROOM * 2; batch += 1) {
+      const claimed = this.claimDueMcpDelivery(this.now());
+      if (!claimed) break;
+      await this.deliverMcp(claimed);
+      const current = this.state();
+      if (!current || current.status === "deleted") return;
+      if (this.roomExpired(current, this.now())) { await this.expire(this.now(), "Conversation expired"); return; }
+    }
     await this.schedule();
   }
 
@@ -587,8 +679,150 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
 
   async webSocketClose(): Promise<void> {}
 
+  private async mcpRead(url: URL): Promise<Response> {
+    await this.requireActive(this.now());
+    return this.read(url);
+  }
+
+  private async mcpStatus(): Promise<Response> {
+    const state = await this.requireActive(this.now());
+    return this.json({
+      active: state.status === "active",
+      agent_posting_enabled: state.mcp_post_enabled === 1 && this.config.MSG_POST_DISABLED !== "1",
+      expires_at: iso(state.inactivity_expires_at),
+      latest_message: state.next_sequence - 1,
+      protocol_version: PROTOCOL_VERSION,
+    });
+  }
+
+  private async mcpReadMessage(url: URL): Promise<Response> {
+    await this.requireActive(this.now());
+    const id = url.searchParams.get("id");
+    if (!id) throw new ProtocolError(ERROR_CODES.invalidBody, "A message id is required.", 400);
+    return this.readMessage(decodePathSegment(id));
+  }
+
+  private async mcpSubscribe(request: Request): Promise<Response> {
+    const input = await request.json() as McpSubscribeInput;
+    const state = await this.requireActive(this.now());
+    const now = this.now();
+    const requestedTtl = input.ttl_ms === undefined || input.ttl_ms === null ? MCP_DELIVERY_RETRY_WINDOW_MS : Math.min(Math.max(1, input.ttl_ms), MCP_DELIVERY_RETRY_WINDOW_MS);
+    const expiresAt = now + requestedTtl;
+    const result = this.ctx.storage.transactionSync(() => {
+      this.pruneMcpSubscriptionMetadata(now);
+      const requestedIdentity = mcpThreadIdentity(input.arguments_json);
+      if (state.room_id === null && requestedIdentity !== undefined) this.rewriteMcpEventThreadIdentity(requestedIdentity);
+      const existing = rows<StoredMcpSubscription>(this.ctx.storage.sql.exec("SELECT * FROM mcp_subscriptions WHERE principal_id = ? AND event_name = ? AND arguments_json = ? AND callback_url = ?", input.principal_id, MCP_MESSAGE_EVENT, input.arguments_json, input.callback_url))[0];
+      const reusable = existing?.status === "active" && existing.expires_at > now ? existing : undefined;
+      if (reusable === undefined) {
+        const threadCount = Number(rows<{ count: number }>(this.ctx.storage.sql.exec("SELECT COUNT(*) AS count FROM mcp_subscriptions WHERE event_name = ? AND arguments_json = ? AND status = 'active' AND expires_at > ?", MCP_MESSAGE_EVENT, input.arguments_json, now))[0]?.count ?? 0);
+        if (threadCount >= MCP_MAX_ACTIVE_SUBSCRIPTIONS_PER_THREAD) throw new ProtocolError(ERROR_CODES.rateLimited, "The Thread has reached its MCP subscription limit.", 429, 60);
+        const principalCount = Number(rows<{ count: number }>(this.ctx.storage.sql.exec("SELECT COUNT(*) AS count FROM mcp_subscriptions WHERE event_name = ? AND arguments_json = ? AND principal_id = ? AND status = 'active' AND expires_at > ?", MCP_MESSAGE_EVENT, input.arguments_json, input.principal_id, now))[0]?.count ?? 0);
+        if (principalCount >= MCP_MAX_ACTIVE_SUBSCRIPTIONS_PER_PRINCIPAL_THREAD) throw new ProtocolError(ERROR_CODES.rateLimited, "This principal has reached its MCP subscription limit for the Thread.", 429, 60);
+      }
+      const id = input.id ?? existing?.id ?? `sub_${crypto.randomUUID()}`;
+      const latest = state.next_sequence - 1;
+      let cursor = input.cursor === null || input.cursor === undefined
+        ? reusable?.cursor ?? latest
+        : parseMcpCursor(input.cursor);
+      if (cursor > latest) throw new ProtocolError(ERROR_CODES.invalidBody, "The MCP cursor is in the future.", 400);
+      const oldest = rows<{ sequence: number }>(this.ctx.storage.sql.exec("SELECT MIN(sequence) AS sequence FROM mcp_events"))[0]?.sequence;
+      const truncated = oldest !== undefined && oldest !== null && cursor + 1 < oldest;
+      if (truncated) cursor = oldest - 1;
+      const keyChanged = reusable !== undefined && reusable.signing_secret !== input.secret;
+      const previousSecret = keyChanged ? reusable.signing_secret : reusable?.previous_signing_secret ?? null;
+      const rotationUntil = keyChanged ? now + MCP_SECRET_ROTATION_WINDOW_MS : reusable?.rotation_until ?? null;
+      this.ctx.storage.sql.exec("INSERT INTO mcp_subscriptions (id, principal_id, grant_id, event_name, arguments_json, callback_url, signing_secret, previous_signing_secret, rotation_until, created_at, updated_at, expires_at, cursor, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active') ON CONFLICT(principal_id, event_name, arguments_json, callback_url) DO UPDATE SET id = excluded.id, grant_id = excluded.grant_id, signing_secret = excluded.signing_secret, previous_signing_secret = excluded.previous_signing_secret, rotation_until = excluded.rotation_until, updated_at = excluded.updated_at, expires_at = excluded.expires_at, cursor = excluded.cursor, status = 'active'", id, input.principal_id, input.grant_id, MCP_MESSAGE_EVENT, input.arguments_json, input.callback_url, input.secret, previousSecret, rotationUntil, reusable?.created_at ?? now, now, expiresAt, cursor);
+      const subscription = rows<StoredMcpSubscription>(this.ctx.storage.sql.exec("SELECT * FROM mcp_subscriptions WHERE id = ?", id))[0]!;
+      // A delivered event may sit beyond the contiguous cursor while an older
+      // delivery is retrying. Preserve that durable success so a refresh does
+      // not send it twice; failed and cancelled rows are eligible for replay.
+      this.ctx.storage.sql.exec("DELETE FROM mcp_event_deliveries WHERE subscription_id = ? AND event_id IN (SELECT event_id FROM mcp_events WHERE sequence > ?) AND status IN ('failed', 'cancelled')", id, cursor);
+      this.queueMcpReplay(subscription, cursor, now);
+      return { id, expiresAt, cursor, truncated };
+    });
+    await this.schedule();
+    return this.json({ id: result.id, refreshBefore: iso(result.expiresAt), cursor: String(result.cursor), truncated: result.truncated });
+  }
+
+  private async mcpUnsubscribe(request: Request): Promise<Response> {
+    const input = await request.json() as McpUnsubscribeInput;
+    const removed = this.ctx.storage.transactionSync(() => {
+      const subscriptions = rows<StoredMcpSubscription>(this.ctx.storage.sql.exec("SELECT id FROM mcp_subscriptions WHERE principal_id = ? AND grant_id = ? AND event_name = ? AND arguments_json = ? AND callback_url = ? AND status = 'active'", input.principal_id, input.grant_id, MCP_MESSAGE_EVENT, input.arguments_json, input.callback_url));
+      for (const subscription of subscriptions) this.stopMcpSubscription(subscription.id, this.now(), "unsubscribed");
+      return subscriptions.length > 0;
+    });
+    await this.schedule();
+    return this.json({ removed });
+  }
+
+  private async mcpValidateResponse(request: Request): Promise<Response> {
+    const input = await request.json() as { event_id: string; principal_id: string; subscription_id: string };
+    const row = rows<{ id: string; principal_id: string; event_id: string; message_id: string; sequence: number }>(this.ctx.storage.sql.exec("SELECT subscriptions.id, subscriptions.principal_id, events.event_id, events.message_id, events.sequence FROM mcp_subscriptions AS subscriptions JOIN mcp_event_deliveries AS deliveries ON deliveries.subscription_id = subscriptions.id JOIN mcp_events AS events ON events.event_id = deliveries.event_id WHERE subscriptions.id = ? AND subscriptions.principal_id = ? AND subscriptions.status = 'active' AND subscriptions.expires_at > ? AND events.event_id = ?", input.subscription_id, input.principal_id, this.now(), input.event_id))[0];
+    return this.json({ valid: row !== undefined });
+  }
+
+  private queueMcpReplay(subscription: StoredMcpSubscription, cursor: number, now: number): void {
+    const events = rows<StoredMcpEvent & { origin_subscription_id: string | null }>(this.ctx.storage.sql.exec("SELECT events.*, messages.mcp_origin_subscription_id AS origin_subscription_id FROM mcp_events AS events JOIN messages ON messages.id = events.message_id WHERE events.sequence > ? ORDER BY events.sequence ASC LIMIT 1000", cursor));
+    for (const event of events) {
+      if (event.origin_subscription_id === subscription.id) continue;
+      this.ctx.storage.sql.exec("INSERT OR IGNORE INTO mcp_event_deliveries (id, subscription_id, event_id, created_at, due_at, retry_expires_at, attempt_count, attempted_at, completed_at, lease_expires_at, status, failure_category) VALUES (?, ?, ?, ?, ?, ?, 0, NULL, NULL, NULL, 'pending', NULL)", crypto.randomUUID(), subscription.id, event.event_id, now, now, now + MCP_DELIVERY_RETRY_WINDOW_MS);
+    }
+  }
+
+  private rewriteMcpEventThreadIdentity(identity: McpThreadIdentity): void {
+    const events = rows<{ event_id: string; payload: string }>(this.ctx.storage.sql.exec("SELECT event_id, payload FROM mcp_events"));
+    for (const event of events) {
+      try {
+        const value: unknown = JSON.parse(event.payload);
+        if (!isRecord(value) || !isRecord(value.data)) continue;
+        const payload = JSON.stringify({ ...value, data: { ...value.data, thread_id: identity.threadId, thread_url: identity.threadUrl } });
+        if (new TextEncoder().encode(payload).byteLength <= MCP_EVENT_MAX_BYTES) this.ctx.storage.sql.exec("UPDATE mcp_events SET payload = ? WHERE event_id = ?", payload, event.event_id);
+      } catch {
+        // A malformed retained event remains bounded and is skipped.
+      }
+    }
+  }
+
+  private pruneMcpSubscriptionMetadata(now: number): void {
+    const expired = rows<{ id: string }>(this.ctx.storage.sql.exec("SELECT id FROM mcp_subscriptions WHERE status = 'stopped' OR expires_at <= ?", now));
+    for (const subscription of expired) {
+      this.ctx.storage.sql.exec("DELETE FROM mcp_event_deliveries WHERE subscription_id = ?", subscription.id);
+      const referenced = rows<{ subscription_id: string }>(this.ctx.storage.sql.exec(
+        "SELECT subscription_id FROM mcp_response_dedup WHERE subscription_id = ? LIMIT 1",
+        subscription.id,
+      ))[0] !== undefined || rows<{ id: string }>(this.ctx.storage.sql.exec(
+        "SELECT id FROM messages WHERE mcp_origin_subscription_id = ? LIMIT 1",
+        subscription.id,
+      ))[0] !== undefined;
+      if (!referenced) this.ctx.storage.sql.exec("DELETE FROM mcp_subscriptions WHERE id = ?", subscription.id);
+    }
+  }
+
+  private mcpContiguousCursor(subscriptionId: string, treatAsDeliveredEventId?: string): number {
+    const subscription = rows<{ cursor: number }>(this.ctx.storage.sql.exec("SELECT cursor FROM mcp_subscriptions WHERE id = ?", subscriptionId))[0];
+    if (!subscription) return 0;
+    let cursor = subscription.cursor;
+    const events = rows<{ sequence: number; event_id: string; delivery_status: string | null; origin_subscription_id: string | null }>(this.ctx.storage.sql.exec(
+      "SELECT events.sequence, events.event_id, deliveries.status AS delivery_status, messages.mcp_origin_subscription_id AS origin_subscription_id FROM mcp_events AS events JOIN messages ON messages.id = events.message_id LEFT JOIN mcp_event_deliveries AS deliveries ON deliveries.subscription_id = ? AND deliveries.event_id = events.event_id WHERE events.sequence > ? ORDER BY events.sequence ASC",
+      subscriptionId, cursor,
+    ));
+    for (const event of events) {
+      const delivered = event.event_id === treatAsDeliveredEventId || event.delivery_status === "delivered";
+      const suppressed = event.delivery_status === null && event.origin_subscription_id === subscriptionId;
+      if (!delivered && !suppressed) break;
+      cursor = event.sequence;
+    }
+    return cursor;
+  }
+
+  private stopMcpSubscription(id: string, now: number, reason: string): void {
+    this.ctx.storage.sql.exec("UPDATE mcp_subscriptions SET status = 'stopped', updated_at = ? WHERE id = ?", now, id);
+    this.ctx.storage.sql.exec("UPDATE mcp_event_deliveries SET status = 'cancelled', completed_at = ?, failure_category = ? WHERE subscription_id = ? AND status IN ('pending', 'retrying')", now, reason, id);
+  }
+
   private async initialize(request: Request): Promise<Response> {
-    const input = await request.json() as { initial: NameAwareMessageInput; management_hash: string };
+    const input = await request.json() as { initial: NameAwareMessageInput; management_hash: string; room_id?: string };
     const password = await prepareNamePassword(input.initial);
     const now = this.now();
     const result = this.ctx.storage.transactionSync(() => {
@@ -607,8 +841,8 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
       const bytes = messageStorageBytes(messageInput, undefined, id);
       const inactivity = now + this.limits.inactivityTtlMs;
       this.ctx.storage.sql.exec(
-        "INSERT INTO room_state (singleton, schema_version, protocol_version, created_at, last_message_at, inactivity_expires_at, absolute_expires_at, next_sequence, message_count, total_bytes, status, tombstone_expires_at, management_hash, notification_id, get_post_hash, get_post_enabled, mcp_post_enabled, coordination_cursor, published_revision) VALUES (1, ?, ?, ?, ?, ?, ?, 2, 1, ?, 'active', NULL, ?, ?, NULL, 0, 1, 0, 0)",
-        CURRENT_ROOM_SCHEMA_VERSION, PROTOCOL_VERSION, now, now, inactivity, inactivity, bytes, input.management_hash, notificationId,
+        "INSERT INTO room_state (singleton, schema_version, protocol_version, created_at, last_message_at, inactivity_expires_at, absolute_expires_at, next_sequence, message_count, total_bytes, status, tombstone_expires_at, management_hash, notification_id, get_post_hash, get_post_enabled, mcp_post_enabled, coordination_cursor, published_revision, room_id) VALUES (1, ?, ?, ?, ?, ?, ?, 2, 1, ?, 'active', NULL, ?, ?, NULL, 0, 1, 0, 0, ?)",
+        CURRENT_ROOM_SCHEMA_VERSION, PROTOCOL_VERSION, now, now, inactivity, inactivity, bytes, input.management_hash, notificationId, input.room_id ?? null,
       );
       this.insertMessage({ ...messageInput, byte_count: bytes, created_at: now, id, sequence: 1, source_browser_id: null });
       return { created: true, generatedPassword: claim.generatedPassword, message: this.messageBySequence(1), state: this.requireState() };
@@ -1957,6 +2191,40 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
   }
 
   private async mcpPost(request: Request): Promise<Response> {
+    if (this.config.MSG_POST_DISABLED === "1") throw new ProtocolError(ERROR_CODES.serviceUnavailable, "New messages are temporarily unavailable.", 503);
+    const input = await request.json() as { based_on_sequence?: unknown; browser_id?: string; input: NameAwareMessageInput; idempotency_key?: string; origin?: { event_id: string; subscription_id: string }; principal_id?: string };
+    const password = await prepareNamePassword(input.input);
+    const now = this.now();
+    const result = this.commitMessage(input.input, {
+      basedOnSequence: input.based_on_sequence,
+      idempotencyKey: input.idempotency_key,
+      namePassword: password,
+      sourceBrowserId: input.browser_id ?? null,
+      authorize: (state) => {
+        if (state.mcp_post_enabled !== 1) throw new ProtocolError(ERROR_CODES.notFound, "The requested resource was not found.", 404);
+      },
+      origin: input.origin,
+      principalId: input.principal_id,
+    }, now);
+    if (result.expired) { await this.expire(now, "Conversation expired"); throw new ProtocolError(ERROR_CODES.gone, "The conversation has expired.", 410); }
+    await this.schedule();
+    if (!result.replayed) this.broadcast({ protocol_version: PROTOCOL_VERSION, type: "message.created", sequence: result.message.sequence, latest_message: result.state.next_sequence - 1, expires_at: iso(result.state.inactivity_expires_at) });
+    const clientMessageId = typeof input.input.client_message_id === "string" ? input.input.client_message_id : undefined;
+    return this.json({
+      accepted: true,
+      protocol_version: PROTOCOL_VERSION,
+      request_id: input.idempotency_key ?? clientMessageId ?? result.message.id,
+      sequence: result.message.sequence,
+      message: this.toMessage(result.message),
+      expires_at: iso(result.state.inactivity_expires_at),
+      ...(clientMessageId === undefined ? {} : { client_message_id: clientMessageId }),
+      ...(result.generatedPassword === undefined ? {} : { name_password: result.generatedPassword, name_password_notice: NAME_PASSWORD_NOTICE }),
+      replayed: result.replayed,
+    });
+  }
+
+  /** Preserve the original room-local MCP posting contract for existing clients. */
+  private async legacyMcpPost(request: Request): Promise<Response> {
     if (this.config.MSG_POST_DISABLED === "1") {
       throw new ProtocolError(ERROR_CODES.serviceUnavailable, "New messages are temporarily unavailable.", 503);
     }
@@ -1973,9 +2241,7 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
       namePassword: password,
       sourceBrowserId: null,
       authorize: (state) => {
-        if (state.mcp_post_enabled !== 1) {
-          throw new ProtocolError(ERROR_CODES.notFound, "The requested resource was not found.", 404);
-        }
+        if (state.mcp_post_enabled !== 1) throw new ProtocolError(ERROR_CODES.notFound, "The requested resource was not found.", 404);
       },
     }, now);
     if (result.expired) {
@@ -2052,12 +2318,14 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
   private commitMessage(
     input: NameAwareMessageInput,
     options: {
-      readonly authorize?: (state: RoomState) => void;
       readonly basedOnSequence?: unknown;
-      /** An explicitly supplied idempotency key, such as a POST header or GET request ID. */
+      /** An explicitly supplied idempotency key from the HTTP header. */
       readonly idempotencyKey?: string;
       readonly namePassword: NamePasswordMaterial;
       readonly sourceBrowserId: string | null;
+      readonly authorize?: (state: RoomState) => void;
+      readonly origin?: { readonly event_id: string; readonly subscription_id: string };
+      readonly principalId?: string;
     },
     now: number,
   ) {
@@ -2068,6 +2336,23 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
       }
       options.authorize?.(state);
       if (state.status !== "active" || this.roomExpired(state, now)) return { expired: true as const };
+
+      if (options.origin !== undefined) {
+        if (options.principalId === undefined) throw new ProtocolError(ERROR_CODES.forbidden, "A validated MCP response context is required.", 403);
+        const validContext = rows<{ event_id: string }>(this.ctx.storage.sql.exec(
+          "SELECT events.event_id FROM mcp_subscriptions AS subscriptions JOIN mcp_event_deliveries AS deliveries ON deliveries.subscription_id = subscriptions.id JOIN mcp_events AS events ON events.event_id = deliveries.event_id WHERE subscriptions.id = ? AND subscriptions.principal_id = ? AND subscriptions.status = 'active' AND subscriptions.expires_at > ? AND events.event_id = ?",
+          options.origin.subscription_id, options.principalId, now, options.origin.event_id,
+        ))[0];
+        if (!validContext) throw new ProtocolError(ERROR_CODES.forbidden, "The MCP response context is invalid or expired.", 403);
+        const context = rows<{ message_id: string }>(this.ctx.storage.sql.exec(
+          "SELECT message_id FROM mcp_response_dedup WHERE subscription_id = ? AND event_id = ?",
+          options.origin.subscription_id, options.origin.event_id,
+        ))[0];
+        if (context) {
+          const prior = rows<StoredMessage>(this.ctx.storage.sql.exec("SELECT * FROM messages WHERE id = ?", context.message_id))[0];
+          if (prior) return { expired: false as const, generatedPassword: undefined, message: prior, state, replayed: true };
+        }
+      }
 
       // Header and client IDs are independent retry namespaces. A client ID is
       // also retained as the legacy idempotency_key value when no header was
@@ -2108,10 +2393,21 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
       if (state.message_count >= this.limits.maxMessages || state.total_bytes + bytes > this.limits.maxRoomBytes) {
         throw new ProtocolError(ERROR_CODES.rateLimited, "The room storage limit is reached.", 429);
       }
-      const message: StoredMessage = { ...messageInput, ...(key ? { idempotency_key: key } : {}), byte_count: bytes, created_at: now, id, sequence: state.next_sequence, source_browser_id: options.sourceBrowserId };
+      const message: StoredMessage = {
+        ...messageInput,
+        ...(key ? { idempotency_key: key } : {}),
+        byte_count: bytes,
+        created_at: now,
+        id,
+        sequence: state.next_sequence,
+        source_browser_id: options.sourceBrowserId,
+        ...(options.origin === undefined ? {} : { mcp_origin_subscription_id: options.origin.subscription_id, mcp_origin_event_id: options.origin.event_id }),
+      };
       this.insertMessage(message);
       this.queueWebhookDeliveries(message, now);
       this.queuePushDeliveries(message, now);
+      this.appendMcpEvent(message, now);
+      if (options.origin !== undefined) this.ctx.storage.sql.exec("INSERT OR IGNORE INTO mcp_response_dedup (subscription_id, event_id, message_id, created_at) VALUES (?, ?, ?, ?)", options.origin.subscription_id, options.origin.event_id, id, now);
       const inactivity = now + this.limits.inactivityTtlMs;
       this.ctx.storage.sql.exec("UPDATE room_state SET last_message_at = ?, inactivity_expires_at = ?, next_sequence = ?, message_count = ?, total_bytes = ? WHERE singleton = 1", now, inactivity, state.next_sequence + 1, state.message_count + 1, state.total_bytes + bytes);
       return { expired: false as const, generatedPassword: claim.generatedPassword, message, replayed: false, state: this.requireState() };
@@ -3743,6 +4039,37 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
     }
   }
 
+  private appendMcpEvent(message: StoredMessage, now: number): void {
+    const state = this.requireState();
+    const subscriptions = rows<StoredMcpSubscription>(this.ctx.storage.sql.exec("SELECT * FROM mcp_subscriptions WHERE event_name = ? AND status = 'active' AND expires_at > ? ORDER BY created_at ASC, id ASC", MCP_MESSAGE_EVENT, now));
+    const subscriptionIdentity = subscriptions.length === 0 ? undefined : mcpThreadIdentity(subscriptions[0]!.arguments_json);
+    const threadId = state.room_id ?? subscriptionIdentity?.threadId ?? null;
+    const threadUrl = state.room_id === null ? subscriptionIdentity?.threadUrl ?? null : `${this.config.MSG_PUBLIC_ORIGIN ?? "https://msg.0000.chat"}/${threadId}`;
+    const eventId = crypto.randomUUID();
+    const event = {
+      eventId,
+      name: MCP_MESSAGE_EVENT,
+      timestamp: iso(message.created_at),
+      data: {
+        thread_id: threadId,
+        thread_url: threadUrl,
+        message_id: message.id,
+        sequence: message.sequence,
+        author: message.author,
+        ...(message.display_name ? { display_name: message.display_name } : {}),
+        preview: boundedPreview(message.content),
+      },
+      cursor: String(message.sequence),
+    };
+    const payload = JSON.stringify(event);
+    if (new TextEncoder().encode(payload).byteLength > MCP_EVENT_MAX_BYTES) return;
+    this.ctx.storage.sql.exec("INSERT INTO mcp_events (event_id, sequence, message_id, created_at, payload) VALUES (?, ?, ?, ?, ?)", eventId, message.sequence, message.id, now, payload);
+    for (const subscription of subscriptions) {
+      if (message.mcp_origin_subscription_id === subscription.id) continue;
+      this.ctx.storage.sql.exec("INSERT OR IGNORE INTO mcp_event_deliveries (id, subscription_id, event_id, created_at, due_at, retry_expires_at, attempt_count, attempted_at, completed_at, lease_expires_at, status, failure_category) VALUES (?, ?, ?, ?, ?, ?, 0, NULL, NULL, NULL, 'pending', NULL)", crypto.randomUUID(), subscription.id, eventId, now, now, now + MCP_DELIVERY_RETRY_WINDOW_MS);
+    }
+  }
+
   private webhookSummary(endpoint: StoredWebhookEndpoint, now: number): WebhookSummary {
     const deliveries = rows<StoredWebhookDelivery>(this.ctx.storage.sql.exec(
       "SELECT * FROM webhook_deliveries WHERE endpoint_id = ? AND created_at > ? ORDER BY created_at DESC, id DESC LIMIT ?",
@@ -3959,6 +4286,106 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
         roomId: state.notification_id,
       };
     });
+  }
+
+  private finishExpiredMcpDeliveries(now: number): void {
+    this.ctx.storage.sql.exec("UPDATE mcp_event_deliveries SET status = 'failed', completed_at = retry_expires_at, failure_category = 'retry_window_expired', lease_expires_at = NULL WHERE status IN ('pending', 'retrying') AND retry_expires_at <= ?", now);
+    this.ctx.storage.sql.exec("UPDATE mcp_subscriptions SET status = 'stopped', updated_at = ? WHERE status = 'active' AND expires_at <= ?", now, now);
+    this.ctx.storage.sql.exec("UPDATE mcp_event_deliveries SET status = 'cancelled', completed_at = ?, failure_category = 'subscription_expired' WHERE subscription_id IN (SELECT id FROM mcp_subscriptions WHERE status = 'stopped') AND status IN ('pending', 'retrying')", now);
+    this.pruneMcpSubscriptionMetadata(now);
+  }
+
+  private recoverExpiredMcpLeases(now: number): void {
+    this.ctx.storage.sql.exec("UPDATE mcp_event_deliveries SET status = CASE WHEN retry_expires_at > ? THEN 'retrying' ELSE 'failed' END, due_at = ?, completed_at = CASE WHEN retry_expires_at > ? THEN NULL ELSE retry_expires_at END, lease_expires_at = NULL, failure_category = CASE WHEN retry_expires_at > ? THEN 'timeout' ELSE 'retry_window_expired' END WHERE status = 'sending' AND lease_expires_at <= ?", now, now + 1_000, now, now, now);
+  }
+
+  private claimDueMcpDelivery(now: number): ClaimedMcpDelivery | undefined {
+    return this.ctx.storage.transactionSync(() => {
+      this.ctx.storage.sql.exec("UPDATE mcp_subscriptions SET previous_signing_secret = NULL, rotation_until = NULL WHERE rotation_until IS NOT NULL AND rotation_until <= ?", now);
+      const state = this.state();
+      if (!state || state.status !== "active" || this.roomExpired(state, now)) return undefined;
+      const delivery = rows<StoredMcpDelivery>(this.ctx.storage.sql.exec("SELECT * FROM mcp_event_deliveries WHERE status IN ('pending', 'retrying') AND due_at <= ? AND retry_expires_at > ? ORDER BY due_at ASC, created_at ASC, id ASC LIMIT 1", now, now))[0];
+      if (!delivery) return undefined;
+      const subscription = rows<StoredMcpSubscription>(this.ctx.storage.sql.exec("SELECT * FROM mcp_subscriptions WHERE id = ?", delivery.subscription_id))[0];
+      const event = rows<StoredMcpEvent>(this.ctx.storage.sql.exec("SELECT * FROM mcp_events WHERE event_id = ?", delivery.event_id))[0];
+      if (!subscription || !event || subscription.status !== "active" || subscription.expires_at <= now) {
+        this.ctx.storage.sql.exec("UPDATE mcp_event_deliveries SET status = 'cancelled', completed_at = ?, failure_category = 'subscription_expired' WHERE id = ?", now, delivery.id);
+        return undefined;
+      }
+      const attemptCount = delivery.attempt_count + 1;
+      const leaseExpiresAt = now + MCP_DELIVERY_TIMEOUT_MS + 2_000;
+      this.ctx.storage.sql.exec("UPDATE mcp_event_deliveries SET status = 'sending', attempt_count = ?, attempted_at = ?, completed_at = NULL, lease_expires_at = ?, failure_category = NULL WHERE id = ?", attemptCount, now, leaseExpiresAt, delivery.id);
+      return { delivery: { ...delivery, status: "sending", attempt_count: attemptCount, attempted_at: now, completed_at: null, lease_expires_at: leaseExpiresAt, failure_category: null }, subscription, event };
+    });
+  }
+
+  private async deliverMcp(claimed: ClaimedMcpDelivery): Promise<void> {
+    if (!await this.mcpSubscriptionAuthorized(claimed.subscription)) {
+      this.ctx.storage.transactionSync(() => this.stopMcpSubscription(claimed.subscription.id, this.now(), "grant_revoked"));
+      return;
+    }
+    let status: "delivered" | "failed" | "retrying" = "failed";
+    let failure = "network_error";
+    try {
+      const eventValue = JSON.parse(claimed.event.payload) as Record<string, unknown>;
+      const eventData = eventValue.data !== null && typeof eventValue.data === "object" ? { ...(eventValue.data as Record<string, unknown>), response_context: { subscription_id: claimed.subscription.id, event_id: claimed.event.event_id } } : eventValue.data;
+      const body = JSON.stringify({ ...eventValue, cursor: String(this.mcpContiguousCursor(claimed.subscription.id, claimed.event.event_id)), data: eventData });
+      if (new TextEncoder().encode(body).byteLength > MCP_EVENT_MAX_BYTES) {
+        failure = "payload_too_large";
+      } else {
+        if (!this.callbackFetch) {
+          failure = "dispatcher_not_configured";
+        } else {
+          const timestamp = Math.floor(this.now() / 1_000);
+          const currentSignature = await standardWebhookSignature(claimed.subscription.signing_secret, claimed.event.event_id, timestamp, body);
+          const previousSignature = claimed.subscription.previous_signing_secret !== null && claimed.subscription.rotation_until !== null && claimed.subscription.rotation_until > this.now()
+            ? await standardWebhookSignature(claimed.subscription.previous_signing_secret, claimed.event.event_id, timestamp, body)
+            : undefined;
+          const signature = previousSignature === undefined ? currentSignature : `${currentSignature} ${previousSignature}`;
+          const response = await this.callbackFetch(claimed.subscription.callback_url, { method: "POST", redirect: "error", signal: AbortSignal.timeout(MCP_DELIVERY_TIMEOUT_MS), body, headers: { "content-type": "application/json", "webhook-id": claimed.event.event_id, "webhook-timestamp": String(timestamp), "webhook-signature": signature, "X-MCP-Subscription-Id": claimed.subscription.id } });
+          await response.arrayBuffer().catch(() => undefined);
+          if (response.status >= 200 && response.status < 300) { status = "delivered"; failure = ""; }
+          else if (response.status === 410 || response.status === 413) { failure = response.status === 410 ? "gone" : "payload_too_large"; }
+          else { status = "retrying"; failure = `http_${response.status}`; }
+        }
+      }
+    } catch (error) { failure = error instanceof Error && /timeout/iu.test(error.name) ? "timeout" : "network_error"; status = "retrying"; }
+    const now = this.now();
+    this.ctx.storage.transactionSync(() => {
+      const current = rows<StoredMcpDelivery>(this.ctx.storage.sql.exec("SELECT * FROM mcp_event_deliveries WHERE id = ?", claimed.delivery.id))[0];
+      if (!current) return;
+      const subscription = rows<StoredMcpSubscription>(this.ctx.storage.sql.exec("SELECT * FROM mcp_subscriptions WHERE id = ?", current.subscription_id))[0];
+      if (!subscription || subscription.status !== "active" || subscription.expires_at <= now) {
+        this.ctx.storage.sql.exec("UPDATE mcp_event_deliveries SET status = 'cancelled', completed_at = ?, lease_expires_at = NULL, failure_category = 'subscription_expired' WHERE id = ?", now, current.id);
+        return;
+      }
+      const retryAt = now + Math.min(60_000, 1_000 * (2 ** Math.min(current.attempt_count, 6)));
+      if (status === "delivered") {
+        this.ctx.storage.sql.exec("UPDATE mcp_event_deliveries SET status = 'delivered', completed_at = ?, lease_expires_at = NULL, failure_category = NULL WHERE id = ?", now, current.id);
+        const cursor = this.mcpContiguousCursor(current.subscription_id);
+        this.ctx.storage.sql.exec("UPDATE mcp_subscriptions SET cursor = MAX(cursor, ?), updated_at = ? WHERE id = ?", cursor, now, current.subscription_id);
+      } else if (status === "retrying" && retryAt < current.retry_expires_at) {
+        this.ctx.storage.sql.exec("UPDATE mcp_event_deliveries SET status = 'retrying', due_at = ?, completed_at = ?, lease_expires_at = NULL, failure_category = ? WHERE id = ?", retryAt, now, failure, current.id);
+      } else this.ctx.storage.sql.exec("UPDATE mcp_event_deliveries SET status = 'failed', completed_at = ?, lease_expires_at = NULL, failure_category = ? WHERE id = ?", now, failure, current.id);
+    });
+  }
+
+  private async mcpSubscriptionAuthorized(subscription: StoredMcpSubscription): Promise<boolean> {
+    let argumentsValue: unknown;
+    try { argumentsValue = JSON.parse(subscription.arguments_json); } catch { return false; }
+    const threadUrl = argumentsValue && typeof argumentsValue === "object" && !Array.isArray(argumentsValue)
+      ? (argumentsValue as Record<string, unknown>).room_url
+      : undefined;
+    if (typeof threadUrl !== "string" || threadUrl.length === 0) return false;
+    if (this.mcpGrantCheck) return this.mcpGrantCheck({ grantId: subscription.grant_id, principalId: subscription.principal_id, scope: "monitor", threadUrl });
+    const database = this.config.MSG_DB;
+    if (!database) return false;
+    try {
+      const row = await database.prepare(
+        "SELECT principals.revoked_at AS principal_revoked_at, grants.revoked_at AS grant_revoked_at FROM mcp_oauth_principals AS principals JOIN mcp_oauth_grants AS grants ON grants.principal_id = principals.principal_id AND grants.thread_url = ? WHERE principals.principal_id = ? AND instr(' ' || grants.scope || ' ', ' threads:monitor ') > 0",
+      ).bind(threadUrl, subscription.principal_id).first<{ principal_revoked_at: number | null; grant_revoked_at: number | null }>();
+      return row !== null && row.principal_revoked_at === null && row.grant_revoked_at === null;
+    } catch { return false; }
   }
 
   private async deliverWebhook(claimed: ClaimedWebhookDelivery): Promise<void> {
@@ -4524,7 +4951,7 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
   }
 
   private insertMessage(message: StoredMessage): void {
-    this.ctx.storage.sql.exec("INSERT INTO messages (sequence, id, content, author, display_name, client, semantic_type, reply_to, created_at, client_message_id, byte_count, idempotency_key, source_browser_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", message.sequence, message.id, message.content, message.author, message.display_name, message.client ?? null, message.semantic_type, message.reply_to ?? null, message.created_at, message.client_message_id ?? null, message.byte_count, message.idempotency_key ?? null, message.source_browser_id);
+    this.ctx.storage.sql.exec("INSERT INTO messages (sequence, id, content, author, display_name, client, semantic_type, reply_to, created_at, client_message_id, byte_count, idempotency_key, source_browser_id, mcp_origin_subscription_id, mcp_origin_event_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", message.sequence, message.id, message.content, message.author, message.display_name, message.client ?? null, message.semantic_type, message.reply_to ?? null, message.created_at, message.client_message_id ?? null, message.byte_count, message.idempotency_key ?? null, message.source_browser_id, message.mcp_origin_subscription_id ?? null, message.mcp_origin_event_id ?? null);
   }
 
   private hasDecisionRecommendation(decisionId: string, revision: number): boolean {
@@ -5746,6 +6173,32 @@ function parseReadByteBudget(value: string): number {
   if (!Number.isSafeInteger(parsed)) throw new ProtocolError(ERROR_CODES.invalidBody, "The read byte budget is invalid.", 400);
   return Math.min(parsed, MCP_READ_BYTE_BUDGET_BYTES);
 }
+function parseMcpCursor(value: string): number {
+  if (!/^(?:0|[1-9][0-9]*)$/u.test(value)) throw new ProtocolError(ERROR_CODES.invalidBody, "The MCP cursor is invalid.", 400);
+  const cursor = Number(value);
+  if (!Number.isSafeInteger(cursor)) throw new ProtocolError(ERROR_CODES.invalidBody, "The MCP cursor is invalid.", 400);
+  return cursor;
+}
+
+interface McpThreadIdentity {
+  readonly threadId: string;
+  readonly threadUrl: string;
+}
+
+function mcpThreadIdentity(argumentsJson: string): McpThreadIdentity | undefined {
+  try {
+    const value: unknown = JSON.parse(argumentsJson);
+    if (!isRecord(value) || typeof value.room_url !== "string") return undefined;
+    const url = new URL(value.room_url);
+    if (url.search || url.hash || !/^\/[^/]+$/u.test(url.pathname)) return undefined;
+    const threadId = decodeURIComponent(url.pathname.slice(1));
+    if (!threadId || threadId.includes("/")) return undefined;
+    return { threadId, threadUrl: url.toString() };
+  } catch {
+    return undefined;
+  }
+}
+
 function normalizedNames(input: Pick<MessageInput, "author" | "display_name">): readonly string[] {
   return [...new Set([normalizeName(input.author), normalizeName(input.display_name)])];
 }
@@ -5799,4 +6252,11 @@ function resolveRoomExpiryEnabled(env: ConversationRoomEnv): boolean {
   if (env.MSG_TEST_MODE === "1") return env.MSG_ROOM_EXPIRY_ENABLED === undefined ? true : env.MSG_ROOM_EXPIRY_ENABLED === "1";
   return ROOM_EXPIRY_ENABLED;
 }
+function createDispatcherFetch(env: ConversationRoomEnv): typeof fetch | undefined {
+  if (!env.MSG_MCP_WEBHOOK_DISPATCH_URL || !env.MSG_MCP_WEBHOOK_DISPATCH_TOKEN) return undefined;
+  try {
+    return createMcpWebhookDispatcherClient({ endpoint: env.MSG_MCP_WEBHOOK_DISPATCH_URL, token: env.MSG_MCP_WEBHOOK_DISPATCH_TOKEN });
+  } catch { return undefined; }
+}
+
 async function hashToken(token: string): Promise<string> { const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(token)); let value = ""; for (const byte of new Uint8Array(digest)) value += String.fromCharCode(byte); return btoa(value).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/u, ""); }

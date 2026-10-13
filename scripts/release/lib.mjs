@@ -440,6 +440,86 @@ function assertWorkerBuildConfig(unit, build) {
   assertWorkerBuildConfigMatchesSource(unit, build);
 }
 
+function assertBunRuntimeBuildConfig(unit, build) {
+  if (!build || typeof build !== "object" || Array.isArray(build)) {
+    throw new Error(`release unit build configuration must be an object: ${unit.name}`);
+  }
+  if (build.type !== "bun-runtime") {
+    throw new Error(`unsupported release build type: ${unit.name}`);
+  }
+  if (unit.kind !== "bun-runtime-bundle") {
+    throw new Error(`Bun runtime build requires bun-runtime-bundle kind: ${unit.name}`);
+  }
+  if (
+    typeof build.source !== "string" ||
+    !build.source.startsWith("services/") ||
+    normalisePath(build.source) !== build.source
+  ) {
+    throw new Error(`release unit Bun build.source must be a normalized services path: ${unit.name}`);
+  }
+  const entrypoint = build.entrypoint;
+  if (
+    typeof entrypoint !== "string" ||
+    entrypoint.length === 0 ||
+    entrypoint.includes("/") ||
+    normalisePath(entrypoint) !== entrypoint
+  ) {
+    throw new Error(`release unit Bun build.entrypoint must be a root-level artifact file: ${unit.name}`);
+  }
+  if (
+    !Array.isArray(build.files) ||
+    build.files.length === 0 ||
+    new Set(build.files).size !== build.files.length ||
+    !build.files.every(
+      (file) => typeof file === "string" && !file.includes("/") && normalisePath(file) === file,
+    ) ||
+    !build.files.includes(entrypoint) ||
+    !build.files.includes("artifact-manifest.json")
+  ) {
+    throw new Error(`release unit Bun build.files must contain unique root-level files and artifact-manifest.json: ${unit.name}`);
+  }
+  const runtime = build.runtime;
+  if (!runtime || typeof runtime !== "object" || Array.isArray(runtime)) {
+    throw new Error(`release unit Bun build.runtime must be an object: ${unit.name}`);
+  }
+  const unsupported = Object.keys(runtime).filter(
+    (key) => !["engine", "version", "command", "required_env", "optional_env"].includes(key),
+  );
+  if (
+    unsupported.length > 0 ||
+    runtime.engine !== "bun" ||
+    typeof runtime.version !== "string" ||
+    !/^\d+\.\d+\.\d+$/.test(runtime.version)
+  ) {
+    throw new Error(`release unit Bun build.runtime contract is invalid: ${unit.name}`);
+  }
+  if (
+    !Array.isArray(runtime.command) ||
+    runtime.command.length !== 2 ||
+    runtime.command[0] !== "bun" ||
+    runtime.command[1] !== entrypoint ||
+    !runtime.command.every((value) => typeof value === "string" && value.length > 0)
+  ) {
+    throw new Error(`release unit Bun build.runtime.command must invoke Bun with the entrypoint: ${unit.name}`);
+  }
+  const environmentNames = (key) => {
+    const values = runtime[key];
+    if (
+      !Array.isArray(values) ||
+      new Set(values).size !== values.length ||
+      !values.every((value) => typeof value === "string" && /^[A-Z][A-Z0-9_]*$/.test(value))
+    ) {
+      throw new Error(`release unit Bun build.runtime.${key} is invalid: ${unit.name}`);
+    }
+    return new Set(values);
+  };
+  const required = environmentNames("required_env");
+  const optional = environmentNames("optional_env");
+  if ([...required].some((name) => optional.has(name))) {
+    throw new Error(`release unit Bun build.runtime environment names overlap: ${unit.name}`);
+  }
+}
+
 function canonicalJson(value) {
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
   if (value && typeof value === "object") {
@@ -686,7 +766,11 @@ export function assertReleaseConfig(config) {
     if (!Array.isArray(unit.archive_paths) || unit.archive_paths.length === 0) {
       throw new Error(`release unit has no archive paths: ${unit.name}`);
     }
-    if (unit.build !== undefined) assertWorkerBuildConfig(unit, unit.build);
+    if (unit.build !== undefined) {
+      if (unit.build.type === "cloudflare-worker") assertWorkerBuildConfig(unit, unit.build);
+      else if (unit.build.type === "bun-runtime") assertBunRuntimeBuildConfig(unit, unit.build);
+      else throw new Error(`unsupported release build type: ${unit.name}`);
+    }
     for (const [pathKind, paths] of [["runtime", unit.runtime_paths], ["archive", unit.archive_paths]]) {
       for (const value of paths) {
         const normalised = normalisePath(value.replace(/\*+$/, ""));

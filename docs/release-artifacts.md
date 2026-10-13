@@ -11,12 +11,14 @@ point at another source revision. The record carries the exact source commit,
 affected runtime units, artifact digests, and the `api/config` compatibility
 pair consumed by private Cloud promotion.
 
-This activation publishes three runtime units:
+This activation publishes four runtime units:
 
 - `gateway`, a deterministic, prebuilt Cloudflare Worker bundle.
 - `msg-worker`, a deterministic, prebuilt Cloudflare Worker bundle.
 - `database-worker`, a deterministic, prebuilt Cloudflare Worker bundle with
   its SQLite Durable Object contract.
+- `msg-webhook-dispatcher`, a deterministic, prebuilt Bun runtime bundle for
+  self-hosted secure MCP Events delivery.
 
 Streams and Communicator remain outside this activation. Platform and Brain
 remain validation-only until their own runtime artifacts and staging
@@ -56,6 +58,7 @@ assets/_msg/asset/mermaid-11.17.2.min.js
 migrations/0001_operations.sql
 migrations/0002_operations_retention.sql
 migrations/0003_creation_plan.sql
+migrations/0005_mcp_oauth.sql
 ```
 
 The public build runs the pinned Mermaid asset generator before copying
@@ -93,6 +96,57 @@ the release base, verifies the ordered migration ledger, applies the D1
 migrations in numeric order, then deploys the prebuilt Worker with
 `--no-bundle`. It owns staging, canary, production, and rollback promotion;
 this repository does not deploy or claim live staging health.
+
+## Msg webhook dispatcher bundle
+
+`msg-webhook-dispatcher-<version>.tar.gz` is a deterministic, prebuilt Bun
+runtime bundle for operators who need secure outbound MCP Events delivery from
+a Cloudflare Worker. Its root-level files are:
+
+```text
+mcp-webhook-dispatcher.js
+artifact-manifest.json
+```
+
+The entrypoint bundles the first-party dispatcher and its secure transport. The
+transport resolves the recipient, rejects any non-public result, connects to
+the validated address, retains the recipient hostname for TLS verification,
+and does not follow redirects. The dispatcher accepts only the fixed
+administrator-configured relay endpoint, authenticates its bearer token in
+constant time, forwards only the signed webhook header allowlist, and applies
+bounded request, response, concurrency, rate, and deadline limits.
+
+The embedded manifest records the exact Bun version, entrypoint command,
+required token variable, optional host/port/TLS/proxy variables, source commit,
+and entrypoint digest. It contains no token, endpoint, certificate, or private
+environment value. Start the extracted bundle with:
+
+```sh
+MSG_MCP_WEBHOOK_DISPATCH_TOKEN='operator-owned-secret' \
+MSG_MCP_WEBHOOK_DISPATCH_HOST='0.0.0.0' \
+MSG_MCP_WEBHOOK_DISPATCH_PORT='8787' \
+MSG_MCP_WEBHOOK_DISPATCH_TLS_CERT_FILE='/etc/msg/dispatcher.crt' \
+MSG_MCP_WEBHOOK_DISPATCH_TLS_KEY_FILE='/etc/msg/dispatcher.key' \
+bun mcp-webhook-dispatcher.js
+```
+
+For a private HTTPS reverse proxy that terminates TLS, omit the certificate and
+key variables and explicitly enable the trusted proxy mode:
+
+```sh
+MSG_MCP_WEBHOOK_DISPATCH_TOKEN='operator-owned-secret' \
+MSG_MCP_WEBHOOK_DISPATCH_HOST='127.0.0.1' \
+MSG_MCP_WEBHOOK_DISPATCH_PORT='8787' \
+MSG_MCP_WEBHOOK_DISPATCH_TRUSTED_INTERNAL_PROXY='1' \
+bun mcp-webhook-dispatcher.js
+```
+
+Direct non-loopback listeners require both certificate and key files. The
+Worker must use the administrator-configured HTTPS dispatcher URL and relay token. The
+public release workflow packages this companion runtime; it does not deploy
+the dispatcher or claim its TLS, host, or process supervision is configured.
+Its release record remains available as a public artifact, while the private
+Cloud selection contains only Cloudflare Worker bundles.
 
 ## Gateway Worker bundle
 

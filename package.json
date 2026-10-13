@@ -18,7 +18,7 @@
     "test:docs": "node --test packages/documentation-tools/test/*.test.mjs",
     "check:turbo": "turbo run check",
     "check:turbo:dry": "turbo run check --dry=json",
-    "test:release": "node --test scripts/release/release.test.mjs scripts/release/runtime.test.mjs",
+    "test:release": "node --test scripts/release/release.test.mjs scripts/release/runtime.test.mjs scripts/release/dispatcher-runtime.test.mjs",
     "release:event": "node scripts/release/event.mjs"
   },
   "devDependencies": {

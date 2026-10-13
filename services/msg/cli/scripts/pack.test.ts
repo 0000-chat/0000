@@ -1,5 +1,6 @@
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { closeSync, mkdtempSync, openSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { expect, test } from "bun:test";
@@ -33,13 +34,26 @@ test("package metadata builds and allowlists the public CLI files", () => {
 });
 
 test("packed archive contains the binary and excludes sources, tests, and caches", () => {
-  const result = spawnSync("npm", ["pack", "--dry-run", "--json"], {
-    cwd: packageRoot,
-    encoding: "utf8",
-  });
+  const temporaryDirectory = mkdtempSync(join(tmpdir(), "msg-cli-pack-"));
+  const reportPath = join(temporaryDirectory, "pack-report.json");
+  const reportFd = openSync(reportPath, "w");
+  let result: ReturnType<typeof spawnSync>;
+  try {
+    result = spawnSync("npm", ["pack", "--dry-run", "--json"], {
+      cwd: packageRoot,
+      encoding: "utf8",
+      env: { ...process.env, npm_config_cache: join(temporaryDirectory, "npm-cache") },
+      // npm only emits the pack report when stdout is a file or terminal.
+      stdio: ["ignore", reportFd, "pipe"],
+    });
+  } finally {
+    closeSync(reportFd);
+  }
+  const packOutput = readFileSync(reportPath, "utf8");
+  rmSync(temporaryDirectory, { recursive: true, force: true });
   expect(result.status, result.stderr).toBe(0);
-  const jsonStart = result.stdout.lastIndexOf("\n[\n") + 1;
-  const output = JSON.parse(result.stdout.slice(jsonStart)) as [{ files: { path: string }[]; name: string }];
+  const jsonStart = packOutput.lastIndexOf("\n[\n") + 1;
+  const output = JSON.parse(packOutput.slice(jsonStart)) as [{ files: { path: string }[]; name: string }];
   const files = output[0]?.files.map((file) => file.path).sort();
 
   expect(output[0]?.name).toBe("@0000chat/msg");
@@ -52,8 +66,8 @@ test("built binary reports package version and parser help", () => {
     version: string;
   };
   const binary = join(packageRoot, "dist/cli.js");
-  const version = spawnSync(binary, ["--version"], { encoding: "utf8" });
-  const help = spawnSync(binary, ["--help"], { encoding: "utf8" });
+  const version = runCli(binary, ["--version"]);
+  const help = runCli(binary, ["--help"]);
 
   expect(version.status, version.stderr).toBe(0);
   expect(version.stdout.trim()).toBe(manifest.version);
@@ -62,3 +76,22 @@ test("built binary reports package version and parser help", () => {
   expect(help.stdout).toContain("Usage: msg wait");
   expect(help.stdout).toContain("Usage: msg post");
 });
+
+function runCli(binary: string, arguments_: string[]): { readonly status: number | null; readonly stdout: string; readonly stderr: string } {
+  const temporaryDirectory = mkdtempSync(join(tmpdir(), "msg-cli-run-"));
+  const stdoutPath = join(temporaryDirectory, "stdout");
+  const stderrPath = join(temporaryDirectory, "stderr");
+  const stdoutFd = openSync(stdoutPath, "w");
+  const stderrFd = openSync(stderrPath, "w");
+  let result: ReturnType<typeof spawnSync>;
+  try {
+    result = spawnSync(binary, arguments_, { stdio: ["ignore", stdoutFd, stderrFd] });
+  } finally {
+    closeSync(stdoutFd);
+    closeSync(stderrFd);
+  }
+  const stdout = readFileSync(stdoutPath, "utf8");
+  const stderr = readFileSync(stderrPath, "utf8");
+  rmSync(temporaryDirectory, { recursive: true, force: true });
+  return { status: result.status, stdout, stderr };
+}

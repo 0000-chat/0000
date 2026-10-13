@@ -29,9 +29,9 @@ const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url))
 const releaseWorkflow = fs.readFileSync(path.join(repositoryRoot, ".github/workflows/release.yml"), "utf8");
 const legacyGatewayWorkflow = fs.readFileSync(path.join(repositoryRoot, ".github/workflows/deploy-gateway.yml"), "utf8");
 
-test("release configuration activates the Msg, Gateway, and Database Workers", () => {
+test("release configuration activates Worker and Bun runtime units", () => {
   assert.doesNotThrow(() => assertReleaseConfig(config));
-  assert.deepEqual(config.units.map((unit) => unit.name), ["msg-worker", "gateway", "database-worker"]);
+  assert.deepEqual(config.units.map((unit) => unit.name), ["msg-worker", "gateway", "database-worker", "msg-webhook-dispatcher"]);
 
   const msg = config.units[0];
   assert.equal(msg.kind, "cloudflare-worker-bundle");
@@ -168,6 +168,41 @@ test("release configuration activates the Msg, Gateway, and Database Workers", (
   });
   assert.equal(database.archive_paths.some((entry) => /cli|sdk|cloud/i.test(entry)), false);
   assert.doesNotThrow(() => assertWorkerBuildConfigMatchesSource(database, database.build, repositoryRoot));
+
+  const dispatcher = config.units.find((unit) => unit.name === "msg-webhook-dispatcher");
+  assert.equal(dispatcher.kind, "bun-runtime-bundle");
+  assert.deepEqual(dispatcher.runtime_paths, [
+    "services/msg/scripts/mcp-webhook-dispatcher.ts",
+    "services/msg/worker/src/mcp-webhook-transport.ts",
+    "services/msg/package.json"
+  ]);
+  assert.deepEqual(dispatcher.archive_paths, dispatcher.runtime_paths);
+  assert.deepEqual(dispatcher.build, {
+    type: "bun-runtime",
+    source: "services/msg/scripts/mcp-webhook-dispatcher.ts",
+    entrypoint: "mcp-webhook-dispatcher.js",
+    files: ["mcp-webhook-dispatcher.js", "artifact-manifest.json"],
+    runtime: {
+      engine: "bun",
+      version: "1.3.14",
+      command: ["bun", "mcp-webhook-dispatcher.js"],
+      required_env: ["MSG_MCP_WEBHOOK_DISPATCH_TOKEN"],
+      optional_env: [
+        "MSG_MCP_WEBHOOK_DISPATCH_HOST",
+        "MSG_MCP_WEBHOOK_DISPATCH_PORT",
+        "MSG_MCP_WEBHOOK_DISPATCH_TLS_CERT_FILE",
+        "MSG_MCP_WEBHOOK_DISPATCH_TLS_KEY_FILE",
+        "MSG_MCP_WEBHOOK_DISPATCH_TRUSTED_INTERNAL_PROXY"
+      ]
+    }
+  });
+});
+
+test("Bun dispatcher changes select only the dispatcher unit", () => {
+  assert.deepEqual(
+    affectedUnits(config, ["services/msg/scripts/mcp-webhook-dispatcher.ts"]).map((unit) => unit.name),
+    ["msg-webhook-dispatcher"],
+  );
 });
 
 test("Msg bundle manifest carries only public deployment metadata", () => {
@@ -353,6 +388,10 @@ test("Msg D1 migration metadata is ordered and content-addressed", () => {
     {
       name: "migrations/0003_creation_plan.sql",
       digest: "sha256:33933dda69e77a7f570c15c9d3f8b9d62be98a1378faefd1d0a3489bf81aad2c"
+    },
+    {
+      name: "migrations/0005_mcp_oauth.sql",
+      digest: "sha256:5a4707a70c08d19a88c8fa2e46b243d94d152c66a682a0813cdc89bfd3ca6eeb"
     }
   ]);
 });
@@ -566,7 +605,7 @@ test("Worker changes select their configured release units", () => {
   assert.deepEqual(affectedUnits(config, ["services/msg/cli/src/cli.ts"]), []);
   assert.deepEqual(affectedUnits(config, ["services/gateway/src/worker.ts"]).map((unit) => unit.name), ["gateway"]);
   assert.deepEqual(affectedUnits(config, ["services/database/src/worker.ts"]).map((unit) => unit.name), ["database-worker"]);
-  assert.deepEqual(affectedUnits(config, ["bun.lock"]).map((unit) => unit.name), ["database-worker", "gateway", "msg-worker"]);
+  assert.deepEqual(affectedUnits(config, ["bun.lock"]).map((unit) => unit.name), ["database-worker", "gateway", "msg-webhook-dispatcher", "msg-worker"]);
   assert.deepEqual(affectedUnits(config, [".github/workflows/release.yml"]).map((unit) => unit.name), ["msg-worker"]);
 });
 
@@ -595,7 +634,7 @@ test("unit registration retains simultaneous runtime and global inputs", () => {
   );
   assert.deepEqual(
     affectedUnits(config, ["release-units.json", "bun.lock"], previousConfig).map((unit) => unit.name),
-    ["database-worker", "gateway", "msg-worker"]
+    ["database-worker", "gateway", "msg-webhook-dispatcher", "msg-worker"]
   );
 });
 
@@ -608,7 +647,7 @@ test("changes to existing unit definitions remain conservative", () => {
   };
   assert.deepEqual(
     affectedUnits(config, ["release-units.json"], previousConfig).map((unit) => unit.name),
-    ["database-worker", "gateway", "msg-worker"]
+    ["database-worker", "gateway", "msg-webhook-dispatcher", "msg-worker"]
   );
 });
 
@@ -620,7 +659,7 @@ test("a release contract change alongside a new unit remains conservative", () =
   };
   assert.deepEqual(
     affectedUnits(config, ["release-units.json"], previousConfig).map((unit) => unit.name),
-    ["database-worker", "gateway", "msg-worker"]
+    ["database-worker", "gateway", "msg-webhook-dispatcher", "msg-worker"]
   );
 });
 
@@ -666,7 +705,7 @@ test("release planner reads the unit map from the push base commit", () => {
   assert.deepEqual(
     affectedUnits(config, ["release-units.json"], readBaseReleaseConfig(head, () => "not json"))
       .map((unit) => unit.name),
-    ["database-worker", "gateway", "msg-worker"]
+    ["database-worker", "gateway", "msg-webhook-dispatcher", "msg-worker"]
   );
 });
 
@@ -1026,6 +1065,34 @@ test("Database release records carry only finite public capacity policy", () => 
     if (name !== "SERVICE_SUSPENDED") assert.match(value, /^[1-9][0-9]*$/);
   }
   assert.equal(vars.SERVICE_SUSPENDED, "false");
+});
+
+test("Bun dispatcher release records carry a self-hosted runtime contract", () => {
+  const dispatcher = config.units.find((unit) => unit.name === "msg-webhook-dispatcher");
+  const plan = makePlan({ config, base: head, head, changedFiles: ["services/msg/scripts/mcp-webhook-dispatcher.ts"] });
+  const record = createReleaseRecord(plan, [{
+    name: dispatcher.name,
+    version: plan.release_version,
+    kind: dispatcher.kind,
+    media_type: "application/gzip",
+    asset_name: `msg-webhook-dispatcher-${plan.release_version}.tar.gz`,
+    digest: `sha256:${"f".repeat(64)}`,
+    compatibility: config.release.compatibility,
+    source_commit: head,
+    archive_paths: dispatcher.archive_paths,
+    artifact_format: "0000-bun-runtime-bundle-v1",
+    entrypoint: dispatcher.build.entrypoint,
+    files: dispatcher.build.files,
+    entrypoint_digest: `sha256:${"e".repeat(64)}`,
+    runtime: dispatcher.build.runtime,
+  }]);
+
+  assert.equal(record.artifacts[0].artifact_format, "0000-bun-runtime-bundle-v1");
+  assert.deepEqual(record.artifacts[0].runtime, dispatcher.build.runtime);
+  assert.deepEqual(record.cloud_selection.artifacts, []);
+  assert.equal(JSON.stringify(record).includes("MSG_MCP_WEBHOOK_DISPATCH_TOKEN"), true);
+  assert.equal(JSON.stringify(record).includes("Bearer"), false);
+  assert.equal(JSON.stringify(record).includes("https://"), false);
 });
 
 test("Cloud event carries exact Msg artifact and attestation provenance", () => {

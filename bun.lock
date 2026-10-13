@@ -81,6 +81,7 @@
       },
       "devDependencies": {
         "@modelcontextprotocol/client": "2.0.0",
+        "@types/node": "22.20.3",
         "@types/ws": "8.18.1",
         "mermaid": "11.17.2",
         "miniflare": "^4.20260515.0",

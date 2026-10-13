@@ -1,7 +1,7 @@
 import { ROOM_LIMITS } from "./room-domain";
 import { WEBHOOK_RETRY_INITIAL_DELAY_MS, WEBHOOK_RETRY_WINDOW_MS } from "./webhook-policy";
 
-export const CURRENT_ROOM_SCHEMA_VERSION = 18;
+export const CURRENT_ROOM_SCHEMA_VERSION = 20;
 
 interface SqlStorage {
   exec(query: string, ...values: unknown[]): Iterable<unknown>;
@@ -480,6 +480,51 @@ function applyMigration(sql: SqlStorage, version: number, inactivityTtlMs: numbe
     if (!columns.has("header_names")) sql.exec("ALTER TABLE webhook_endpoints ADD COLUMN header_names TEXT NOT NULL DEFAULT '[]'");
     if (!columns.has("prompt")) sql.exec("ALTER TABLE webhook_endpoints ADD COLUMN prompt TEXT");
     if (!columns.has("exclude_authors")) sql.exec("ALTER TABLE webhook_endpoints ADD COLUMN exclude_authors TEXT NOT NULL DEFAULT '[]'");
+    sql.exec("UPDATE room_state SET schema_version = ? WHERE singleton = 1", CURRENT_ROOM_SCHEMA_VERSION);
+    return;
+  }
+
+  if (version === 19) {
+    const stateColumns = new Set(rows<{ name: string }>(sql.exec("PRAGMA table_info(room_state)")).map((column) => column.name));
+    if (!stateColumns.has("room_id")) sql.exec("ALTER TABLE room_state ADD COLUMN room_id TEXT");
+    const messageColumns = new Set(rows<{ name: string }>(sql.exec("PRAGMA table_info(messages)")).map((column) => column.name));
+    if (!messageColumns.has("mcp_origin_subscription_id")) sql.exec("ALTER TABLE messages ADD COLUMN mcp_origin_subscription_id TEXT");
+    if (!messageColumns.has("mcp_origin_event_id")) sql.exec("ALTER TABLE messages ADD COLUMN mcp_origin_event_id TEXT");
+    sql.exec(`
+      CREATE TABLE IF NOT EXISTS mcp_events (
+        event_id TEXT PRIMARY KEY, sequence INTEGER NOT NULL UNIQUE, message_id TEXT NOT NULL UNIQUE,
+        created_at INTEGER NOT NULL, payload TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS mcp_events_sequence ON mcp_events(sequence);
+      CREATE TABLE IF NOT EXISTS mcp_subscriptions (
+        id TEXT PRIMARY KEY, principal_id TEXT NOT NULL, grant_id TEXT NOT NULL,
+        event_name TEXT NOT NULL, arguments_json TEXT NOT NULL, callback_url TEXT NOT NULL,
+        signing_secret TEXT NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+        expires_at INTEGER NOT NULL, cursor INTEGER NOT NULL, status TEXT NOT NULL CHECK(status IN ('active', 'stopped')),
+        UNIQUE(principal_id, event_name, arguments_json, callback_url)
+      );
+      CREATE INDEX IF NOT EXISTS mcp_subscriptions_active ON mcp_subscriptions(status, expires_at);
+      CREATE TABLE IF NOT EXISTS mcp_event_deliveries (
+        id TEXT PRIMARY KEY, subscription_id TEXT NOT NULL, event_id TEXT NOT NULL,
+        created_at INTEGER NOT NULL, due_at INTEGER NOT NULL, retry_expires_at INTEGER NOT NULL,
+        attempt_count INTEGER NOT NULL, attempted_at INTEGER, completed_at INTEGER,
+        lease_expires_at INTEGER, status TEXT NOT NULL CHECK(status IN ('pending', 'sending', 'retrying', 'delivered', 'failed', 'cancelled')),
+        failure_category TEXT, UNIQUE(subscription_id, event_id)
+      );
+      CREATE INDEX IF NOT EXISTS mcp_event_deliveries_due ON mcp_event_deliveries(status, due_at, retry_expires_at);
+      CREATE TABLE IF NOT EXISTS mcp_response_dedup (
+        subscription_id TEXT NOT NULL, event_id TEXT NOT NULL, message_id TEXT NOT NULL,
+        created_at INTEGER NOT NULL, PRIMARY KEY(subscription_id, event_id)
+      );
+    `);
+    sql.exec("UPDATE room_state SET schema_version = ? WHERE singleton = 1", CURRENT_ROOM_SCHEMA_VERSION);
+    return;
+  }
+  if (version === 20) {
+    const columns = new Set(rows<{ name: string }>(sql.exec("PRAGMA table_info(mcp_subscriptions)")).map((column) => column.name));
+    if (!columns.has("previous_signing_secret")) sql.exec("ALTER TABLE mcp_subscriptions ADD COLUMN previous_signing_secret TEXT");
+    if (!columns.has("rotation_until")) sql.exec("ALTER TABLE mcp_subscriptions ADD COLUMN rotation_until INTEGER");
+    sql.exec("UPDATE mcp_subscriptions SET previous_signing_secret = NULL, rotation_until = NULL WHERE rotation_until IS NULL OR rotation_until <= ?", now);
     sql.exec("UPDATE room_state SET schema_version = ? WHERE singleton = 1", CURRENT_ROOM_SCHEMA_VERSION);
     return;
   }

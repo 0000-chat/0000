@@ -85,7 +85,7 @@
         "compatibility": { "$ref": "#/$defs/compatibility" },
         "source_commit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
         "archive_paths": { "type": "array", "items": { "type": "string" } },
-        "artifact_format": { "type": "string", "const": "0000-cloudflare-worker-bundle-v1" },
+        "artifact_format": { "enum": ["0000-cloudflare-worker-bundle-v1", "0000-bun-runtime-bundle-v1"] },
         "entrypoint": { "type": "string", "pattern": "^[A-Za-z0-9._-]+$" },
         "config": { "type": "string", "pattern": "^[A-Za-z0-9._-]+$" },
         "files": {
@@ -156,6 +156,18 @@
           }
         },
         "entrypoint_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "runtime": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["engine", "version", "command", "required_env", "optional_env"],
+          "properties": {
+            "engine": { "const": "bun" },
+            "version": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$" },
+            "command": { "type": "array", "minItems": 2, "maxItems": 2, "items": { "type": "string" } },
+            "required_env": { "type": "array", "uniqueItems": true, "items": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]*$" } },
+            "optional_env": { "type": "array", "uniqueItems": true, "items": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]*$" } }
+          }
+        },
         "deployment": {
           "type": "object",
           "additionalProperties": false,
