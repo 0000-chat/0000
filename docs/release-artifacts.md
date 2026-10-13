@@ -37,10 +37,15 @@ dispatches private Cloud staging only when the plan contains a runtime
 artifact and the opt-in repository variable `CLOUD_RELEASE_DISPATCH_ENABLED`
 is `true`; a missing variable fails closed.
 
-Any other changed path under the validation-only service roots or under
-`apps/` is treated as a possible runtime change and fails release planning
-until an explicit release unit is configured. This fail-closed guard prevents
-new source, configuration, or migration code from being silently skipped.
+Platform is intentionally validation-only: changes anywhere under
+`services/platform/` contribute no runtime artifact until its runtime artifact
+and staging consumer are reviewed. A Platform-only change therefore publishes
+a zero-artifact release record; mixed changes can still publish artifacts
+selected by other units. Unmapped changes under the other fail-closed service
+roots (`services/database` and `services/brain`) or under `apps/` are treated
+as possible runtime changes and fail release planning until an explicit release
+unit is configured. This fail-closed guard prevents new source, configuration,
+or migration code from being silently skipped.
 
 ## Msg Worker bundle
 
