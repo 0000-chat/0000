@@ -471,7 +471,7 @@ test("Msg D1 migration metadata is ordered and content-addressed", () => {
     },
     {
       name: "migrations/0005_mcp_oauth.sql",
-      digest: "sha256:5a4707a70c08d19a88c8fa2e46b243d94d152c66a682a0813cdc89bfd3ca6eeb"
+      digest: "sha256:8a885a45b67809a491a3109c51a08f7048ff742ff7c7da654003e2f1b72fa369"
     }
   ]);
 });
