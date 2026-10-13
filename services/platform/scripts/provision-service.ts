@@ -460,7 +460,11 @@ async function main(): Promise<void> {
     if (mode === "stdin" && issuerHash) {
       const active = parseWranglerResults(
         await runWrangler(
-          `SELECT credential_hash, disabled FROM platform_service_grant_issuer WHERE service_id = ${sqlString(serviceId)} AND disabled = 0;`,
+          `SELECT issuer.credential_hash, issuer.disabled
+           FROM platform_service_grant_issuer AS issuer
+           INNER JOIN platform_service AS service ON service.service_id = issuer.service_id
+           WHERE issuer.service_id = ${sqlString(serviceId)}
+             AND issuer.disabled = 0 AND service.disabled = 0;`,
           args,
         ),
       ).at(-1)?.results;
