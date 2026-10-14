@@ -28,7 +28,7 @@ export function createMcpWebhookDispatcherClient(options: McpWebhookDispatcherCl
   const requestFetch = options.fetch ?? fetch;
   const timeoutMs = options.timeoutMs ?? DEFAULT_DISPATCHER_TIMEOUT_MS;
   return async function dispatcherFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
-    const target = new Request(input, init);
+    const target = new Request(input, { ...init, redirect: "manual" });
     if (target.method !== "POST") throw new Error("The webhook dispatcher only supports POST callbacks.");
     const relayBody = target.body === null ? "" : await boundedRequestText(target, MAX_RELAY_BODY_BYTES);
     const headers: Record<string, string> = {};
