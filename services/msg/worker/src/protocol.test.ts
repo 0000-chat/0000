@@ -30,6 +30,17 @@ test("rejects a private management URL before it builds an invitation", () => {
     .toThrow("The public conversation URL is invalid.");
 });
 
+test("allows loopback HTTP room URLs for local Worker development", () => {
+  expect(buildShareMessage("http://127.0.0.1:8787/public-room")).toContain("http://127.0.0.1:8787/public-room");
+  expect(foregroundWait("http://127.0.0.1:8787", "public-room", 3).command)
+    .toBe("npx --yes @0000chat/msg@latest wait 'http://127.0.0.1:8787/public-room' --after 3");
+});
+
+test("rejects non-loopback HTTP room URLs", () => {
+  expect(() => buildShareMessage("http://example.com/public-room"))
+    .toThrow("The public conversation URL is invalid.");
+});
+
 test("builds a wait command from the canonical public room URL and sequence only", () => {
   const wait = foregroundWait("https://msg.0000.chat/manage/private-token", "public-room", 12);
 

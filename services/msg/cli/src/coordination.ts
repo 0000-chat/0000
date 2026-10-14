@@ -1,4 +1,4 @@
-import { validateConversationUrl } from "./wait.js";
+import { DEFAULT_SERVICE_ORIGIN, equivalentServiceOrigins, validateConversationUrl } from "./wait.js";
 
 const USAGE = "Usage: msg coordination <conversation-url> overview | panel [--revision N] | panel-history [--after N] [--limit N] [--through N] | proposals [--after N] [--limit N] [--through N] | proposal <proposal-id> [--revision N] | requests [--after N] [--limit N] [--through N] [--owner-label LABEL] [--status STATUS] | request <request-id> [--after N] [--limit N] [--through N] | decisions [--after N] [--limit N] [--through N] | decision <decision-id> [--after N] [--limit N] [--through N] | decision-record <decision-id> <accepted-record-id> | publication <published-revision> | corrections [selectors] | correction <correction-id> | disputes [selectors] | dispute <report-id> [selectors] | supersessions [selectors] | propose | correct | supersede | report | revise <proposal-id> | review <management-coordination-url> <report-id> | publish <management-coordination-url>";
 
@@ -28,6 +28,7 @@ export type CoordinationCommand =
 export type CoordinationOptions = CoordinationCommand & {
   readonly fetch: typeof globalThis.fetch;
   readonly readStdin?: (signal?: AbortSignal) => Promise<string>;
+  readonly serviceOrigin?: string;
   readonly signal?: AbortSignal;
 };
 
@@ -35,15 +36,15 @@ export class CoordinationSignalError extends Error {
   constructor() { super("The msg coordination command was interrupted."); }
 }
 
-export function parseCoordinationCommand(args: readonly string[]): CoordinationCommand {
+export function parseCoordinationCommand(args: readonly string[], serviceOrigin?: string): CoordinationCommand {
   if (args[0] !== "coordination" || args.length < 3) throw new Error(USAGE);
   if (args[1] === "publish" && args.length === 3 || args[2] === "publish" && args.length === 4) {
-    return { managementUrl: validateManagementCoordinationUrl(args[1] === "publish" ? args[2] ?? "" : args[3] ?? ""), operation: "publish" };
+    return { managementUrl: validateManagementCoordinationUrl(args[1] === "publish" ? args[2] ?? "" : args[3] ?? "", serviceOrigin), operation: "publish" };
   }
   if (args[1] === "review" && args.length === 4) {
-    return { managementUrl: validateManagementCoordinationUrl(args[2] ?? ""), operation: "review", reportId: parseIdentifier(args[3] ?? "") };
+    return { managementUrl: validateManagementCoordinationUrl(args[2] ?? "", serviceOrigin), operation: "review", reportId: parseIdentifier(args[3] ?? "") };
   }
-  const conversationUrl = validateConversationUrl(args[1] ?? "");
+  const conversationUrl = validateConversationUrl(args[1] ?? "", serviceOrigin);
   const operation = args[2];
   if (operation === "overview" || operation === "propose" || operation === "correct" || operation === "supersede" || operation === "report" || operation === "revise" && args.length === 4) {
     if (operation === "overview" && args.length === 3) return { conversationUrl, operation };
@@ -157,7 +158,7 @@ function coordinationEndpoint(options: CoordinationOptions): URL {
     url.pathname = url.pathname.replace(/\/coordination\/publish$/u, `/coordination/disputes/${encodeURIComponent(options.reportId)}/review`);
     return url;
   }
-  const url = new URL(validateConversationUrl(options.conversationUrl));
+  const url = new URL(validateConversationUrl(options.conversationUrl, options.serviceOrigin));
   if (options.operation === "overview") url.pathname += "/coordination";
   else if (options.operation === "panel") url.pathname += "/coordination/panel";
   else if (options.operation === "panel-history") url.pathname += "/coordination/panel/history";
@@ -258,10 +259,12 @@ async function readJson(response: Response, signal?: AbortSignal): Promise<unkno
   }
 }
 
-function validateManagementCoordinationUrl(value: string): string {
+function validateManagementCoordinationUrl(value: string, serviceOrigin?: string): string {
   let url: URL;
   try { url = new URL(value); } catch { throw new Error("The coordination management URL is invalid."); }
-  if (url.protocol !== "https:" || url.username || url.password || url.search || url.hash || !/^\/manage\/[^/]+\/[^/]+\/coordination\/publish$/u.test(url.pathname)) {
+  let expected: URL;
+  try { expected = new URL(serviceOrigin ?? DEFAULT_SERVICE_ORIGIN); } catch { throw new Error("MSG_SERVICE_ORIGIN is invalid."); }
+  if (!equivalentServiceOrigins(url, expected) || url.username || url.password || url.search || url.hash || !/^\/manage\/[^/]+\/[^/]+\/coordination\/publish$/u.test(url.pathname)) {
     throw new Error("The coordination management URL is invalid.");
   }
   return url.toString();

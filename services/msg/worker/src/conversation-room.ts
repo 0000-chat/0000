@@ -769,15 +769,21 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
       this.pruneMcpSubscriptionMetadata(now);
       const requestedIdentity = mcpThreadIdentity(input.arguments_json);
       if (state.room_id === null && requestedIdentity !== undefined) this.rewriteMcpEventThreadIdentity(requestedIdentity);
-      const existing = rows<StoredMcpSubscription>(this.ctx.storage.sql.exec("SELECT * FROM mcp_subscriptions WHERE principal_id = ? AND event_name = ? AND arguments_json = ? AND callback_url = ?", input.principal_id, MCP_MESSAGE_EVENT, input.arguments_json, input.callback_url))[0];
+      const argumentSerializations = [...new Set([input.arguments_json, ...(input.legacy_arguments_json ?? [])])];
+      const argumentPlaceholders = argumentSerializations.map(() => "?").join(", ");
+      const existingMatches = rows<StoredMcpSubscription>(this.ctx.storage.sql.exec(`SELECT * FROM mcp_subscriptions WHERE principal_id = ? AND event_name = ? AND arguments_json IN (${argumentPlaceholders}) AND callback_url = ? ORDER BY updated_at DESC`, input.principal_id, MCP_MESSAGE_EVENT, ...argumentSerializations, input.callback_url));
+      const existing = existingMatches.find((candidate) => candidate.status === "active" && candidate.expires_at > now) ?? existingMatches[0];
       const reusable = existing?.status === "active" && existing.expires_at > now ? existing : undefined;
       if (reusable === undefined) {
-        const threadCount = Number(rows<{ count: number }>(this.ctx.storage.sql.exec("SELECT COUNT(*) AS count FROM mcp_subscriptions WHERE event_name = ? AND arguments_json = ? AND status = 'active' AND expires_at > ?", MCP_MESSAGE_EVENT, input.arguments_json, now))[0]?.count ?? 0);
+        const threadCount = Number(rows<{ count: number }>(this.ctx.storage.sql.exec(`SELECT COUNT(*) AS count FROM mcp_subscriptions WHERE event_name = ? AND arguments_json IN (${argumentPlaceholders}) AND status = 'active' AND expires_at > ?`, MCP_MESSAGE_EVENT, ...argumentSerializations, now))[0]?.count ?? 0);
         if (threadCount >= MCP_MAX_ACTIVE_SUBSCRIPTIONS_PER_THREAD) throw new ProtocolError(ERROR_CODES.rateLimited, "The Thread has reached its MCP subscription limit.", 429, 60);
-        const principalCount = Number(rows<{ count: number }>(this.ctx.storage.sql.exec("SELECT COUNT(*) AS count FROM mcp_subscriptions WHERE event_name = ? AND arguments_json = ? AND principal_id = ? AND status = 'active' AND expires_at > ?", MCP_MESSAGE_EVENT, input.arguments_json, input.principal_id, now))[0]?.count ?? 0);
+        const principalCount = Number(rows<{ count: number }>(this.ctx.storage.sql.exec(`SELECT COUNT(*) AS count FROM mcp_subscriptions WHERE event_name = ? AND arguments_json IN (${argumentPlaceholders}) AND principal_id = ? AND status = 'active' AND expires_at > ?`, MCP_MESSAGE_EVENT, ...argumentSerializations, input.principal_id, now))[0]?.count ?? 0);
         if (principalCount >= MCP_MAX_ACTIVE_SUBSCRIPTIONS_PER_PRINCIPAL_THREAD) throw new ProtocolError(ERROR_CODES.rateLimited, "This principal has reached its MCP subscription limit for the Thread.", 429, 60);
       }
-      const id = input.id ?? existing?.id ?? `sub_${crypto.randomUUID()}`;
+      // Keep a pre-cutover row's legacy arguments and id in place. The room
+      // authorization check uses that URL as the persisted grant key; the
+      // aliases above let canonical refresh/unsubscribe requests find it.
+      const id = existing?.id ?? input.id ?? `sub_${crypto.randomUUID()}`;
       const latest = state.next_sequence - 1;
       let cursor = input.cursor === null || input.cursor === undefined
         ? reusable?.cursor ?? latest
@@ -789,7 +795,14 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
       const keyChanged = reusable !== undefined && reusable.signing_secret !== input.secret;
       const previousSecret = keyChanged ? reusable.signing_secret : reusable?.previous_signing_secret ?? null;
       const rotationUntil = keyChanged ? now + MCP_SECRET_ROTATION_WINDOW_MS : reusable?.rotation_until ?? null;
-      this.ctx.storage.sql.exec("INSERT INTO mcp_subscriptions (id, principal_id, grant_id, event_name, arguments_json, callback_url, signing_secret, previous_signing_secret, rotation_until, created_at, updated_at, expires_at, cursor, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active') ON CONFLICT(principal_id, event_name, arguments_json, callback_url) DO UPDATE SET id = excluded.id, grant_id = excluded.grant_id, signing_secret = excluded.signing_secret, previous_signing_secret = excluded.previous_signing_secret, rotation_until = excluded.rotation_until, updated_at = excluded.updated_at, expires_at = excluded.expires_at, cursor = excluded.cursor, status = 'active'", id, input.principal_id, input.grant_id, MCP_MESSAGE_EVENT, input.arguments_json, input.callback_url, input.secret, previousSecret, rotationUntil, reusable?.created_at ?? now, now, expiresAt, cursor);
+      if (existing !== undefined && existing.arguments_json !== input.arguments_json) {
+        // A retained pre-cutover row may be stopped or expired because it is
+        // referenced by response history. Reactivate it in place so its id
+        // and legacy grant-key URL survive without a primary-key collision.
+        this.ctx.storage.sql.exec("UPDATE mcp_subscriptions SET grant_id = ?, signing_secret = ?, previous_signing_secret = ?, rotation_until = ?, updated_at = ?, expires_at = ?, cursor = ?, status = 'active' WHERE id = ?", input.grant_id, input.secret, previousSecret, rotationUntil, now, expiresAt, cursor, id);
+      } else {
+        this.ctx.storage.sql.exec("INSERT INTO mcp_subscriptions (id, principal_id, grant_id, event_name, arguments_json, callback_url, signing_secret, previous_signing_secret, rotation_until, created_at, updated_at, expires_at, cursor, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active') ON CONFLICT(principal_id, event_name, arguments_json, callback_url) DO UPDATE SET id = excluded.id, grant_id = excluded.grant_id, signing_secret = excluded.signing_secret, previous_signing_secret = excluded.previous_signing_secret, rotation_until = excluded.rotation_until, updated_at = excluded.updated_at, expires_at = excluded.expires_at, cursor = excluded.cursor, status = 'active'", id, input.principal_id, input.grant_id, MCP_MESSAGE_EVENT, input.arguments_json, input.callback_url, input.secret, previousSecret, rotationUntil, reusable?.created_at ?? now, now, expiresAt, cursor);
+      }
       const subscription = rows<StoredMcpSubscription>(this.ctx.storage.sql.exec("SELECT * FROM mcp_subscriptions WHERE id = ?", id))[0]!;
       // A delivered event may sit beyond the contiguous cursor while an older
       // delivery is retrying. Preserve that durable success so a refresh does
@@ -805,7 +818,9 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
   private async mcpUnsubscribe(request: Request): Promise<Response> {
     const input = await request.json() as McpUnsubscribeInput;
     const removed = this.ctx.storage.transactionSync(() => {
-      const subscriptions = rows<StoredMcpSubscription>(this.ctx.storage.sql.exec("SELECT id FROM mcp_subscriptions WHERE principal_id = ? AND grant_id = ? AND event_name = ? AND arguments_json = ? AND callback_url = ? AND status = 'active'", input.principal_id, input.grant_id, MCP_MESSAGE_EVENT, input.arguments_json, input.callback_url));
+      const argumentSerializations = [...new Set([input.arguments_json, ...(input.legacy_arguments_json ?? [])])];
+      const argumentPlaceholders = argumentSerializations.map(() => "?").join(", ");
+      const subscriptions = rows<StoredMcpSubscription>(this.ctx.storage.sql.exec(`SELECT id FROM mcp_subscriptions WHERE principal_id = ? AND grant_id = ? AND event_name = ? AND arguments_json IN (${argumentPlaceholders}) AND callback_url = ? AND status = 'active'`, input.principal_id, input.grant_id, MCP_MESSAGE_EVENT, ...argumentSerializations, input.callback_url));
       for (const subscription of subscriptions) this.stopMcpSubscription(subscription.id, this.now(), "unsubscribed");
       return subscriptions.length > 0;
     });

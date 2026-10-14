@@ -8,6 +8,7 @@ import { D1McpAuthStore } from "./mcp-auth-store";
 import type { McpAuthenticator } from "./mcp-events-handler";
 import type { RoomService } from "./protocol";
 import { createMcpWebhookDispatcherClient } from "./mcp-webhook-dispatcher-client";
+import { DEFAULT_LEGACY_ORIGIN, normalizeOrigin, redirectLegacyBrowserRequest } from "./host";
 
 export interface MsgProductionEnvironment extends MsgEnvironment {
   readonly MSG_TEST_MODE?: string;
@@ -22,6 +23,7 @@ export interface MsgProductionEnvironment extends MsgEnvironment {
   readonly MSG_OPERATOR_ALLOWLIST?: string;
   readonly MSG_POST_DISABLED?: string;
   readonly MSG_PUBLIC_ORIGIN?: string;
+  readonly MSG_LEGACY_ORIGIN?: string;
   readonly MSG_MCP_WEBHOOK_DISPATCH_URL?: string;
   readonly MSG_MCP_WEBHOOK_DISPATCH_TOKEN?: string;
   readonly MSG_OPERATOR_TOKEN?: string;
@@ -77,7 +79,7 @@ export function createMcpAuthenticator(auth: McpAuthService, origin: string, roo
   };
 }
 
-async function routeMcpAuthorization(request: Request, auth: McpAuthService, roomService: RoomService, rateLimit?: MsgRateLimit): Promise<Response | undefined> {
+async function routeMcpAuthorization(request: Request, auth: McpAuthService, roomService: RoomService, publicOrigin: string, legacyOrigin: string, rateLimit?: MsgRateLimit): Promise<Response | undefined> {
   const url = new URL(request.url);
   if (request.method === "GET" && url.pathname === "/.well-known/oauth-protected-resource") return mcpAuthJson(auth.protectedResourceMetadata());
   if (request.method === "GET" && url.pathname === "/.well-known/oauth-authorization-server") return mcpAuthJson(auth.authorizationServerMetadata());
@@ -96,9 +98,10 @@ async function routeMcpAuthorization(request: Request, auth: McpAuthService, roo
       validateThread: async (threadUrl) => {
         try {
           const thread = new URL(threadUrl);
-          if (thread.origin !== url.origin || !/^\/[^/]+$/u.test(thread.pathname) || !roomService.roomStatus) return null;
+          const acceptedOrigins = new Set([url.origin, publicOrigin, legacyOrigin]);
+          if (!acceptedOrigins.has(thread.origin) || !/^\/[^/]+$/u.test(thread.pathname) || !roomService.roomStatus) return null;
           const status = await roomService.roomStatus({ room: thread.pathname.slice(1) });
-          return status.active && status.public_grants_allowed !== false ? { canonicalUrl: `${thread.origin}${thread.pathname}` } : null;
+          return status.active && status.public_grants_allowed !== false ? { canonicalUrl: `${publicOrigin}${thread.pathname}` } : null;
         } catch { return null; }
       },
     });
@@ -130,7 +133,11 @@ const unavailableRateLimit: MsgRateLimit = {
 
 export default {
   fetch(request: Request, env: MsgProductionEnvironment): Promise<Response> {
-    const publicOrigin = env.MSG_PUBLIC_ORIGIN ?? new URL(request.url).origin;
+    const requestOrigin = new URL(request.url).origin;
+    const publicOrigin = normalizeOrigin(env.MSG_PUBLIC_ORIGIN, requestOrigin);
+    const legacyOrigin = normalizeOrigin(env.MSG_LEGACY_ORIGIN, DEFAULT_LEGACY_ORIGIN);
+    const redirect = redirectLegacyBrowserRequest(request, publicOrigin, legacyOrigin);
+    if (redirect) return Promise.resolve(redirect);
     const rateLimits = {
       creation: env.MSG_RATE_LIMIT_CREATION ?? unavailableRateLimit,
       live: env.MSG_RATE_LIMIT_LIVE ?? unavailableRateLimit,
@@ -140,7 +147,7 @@ export default {
     const roomService = env.ROOM_SERVICE ?? (env.ConversationRoom ? new DurableRoomService(env.ConversationRoom as RoomNamespace, publicOrigin) : undefined);
     if (!roomService) return createWorker(
       { async create() { throw new Error("The room service is not available."); } },
-      { assets: env.ASSETS, publicOrigin, rateLimits },
+      { assets: env.ASSETS, legacyOrigin, publicOrigin, rateLimits },
     ).fetch(request);
     const accessPort = roomService && roomService.proveLink && roomService.recordGrant && roomService.checkGrant && roomService.findGrant ? roomService as unknown as MsgRoomAuthPort : undefined;
     const platformAuth = env.MSG_TEST_MODE === "1"
@@ -156,15 +163,15 @@ export default {
       }, accessPort)
       : unavailableMsgAuthenticator();
     const mcpAuth = env.MSG_DB
-      ? new McpAuthService({ issuer: publicOrigin, resource: `${publicOrigin}/mcp`, store: new D1McpAuthStore(env.MSG_DB) })
+      ? new McpAuthService({ acceptedOrigins: [legacyOrigin], issuer: publicOrigin, resource: `${publicOrigin}/mcp`, store: new D1McpAuthStore(env.MSG_DB) })
       : undefined;
     if (mcpAuth && roomService) {
-      return routeMcpAuthorization(request, mcpAuth, roomService, env.MSG_RATE_LIMIT_READS).then((response) => {
+      return routeMcpAuthorization(request, mcpAuth, roomService, publicOrigin, legacyOrigin, env.MSG_RATE_LIMIT_READS).then((response) => {
         if (response) return response;
-        return routeMsgRequest(request, env, publicOrigin, roomService, mcpAuth, platformAuth);
+        return routeMsgRequest(request, env, publicOrigin, legacyOrigin, roomService, mcpAuth, platformAuth);
       });
     }
-    return routeMsgRequest(request, env, publicOrigin, roomService, mcpAuth, platformAuth);
+    return routeMsgRequest(request, env, publicOrigin, legacyOrigin, roomService, mcpAuth, platformAuth);
   },
   scheduled(_event: ScheduledEvent, env: MsgProductionEnvironment, ctx: ExecutionContext): void {
     if (!env.MSG_DB || !env.MSG_DATA_ENCRYPTION_KEY_V1) return;
@@ -181,6 +188,7 @@ function routeMsgRequest(
   request: Request,
   env: MsgProductionEnvironment,
   publicOrigin: string,
+  legacyOrigin: string,
   providedRoomService?: DurableRoomService | RoomService,
   providedAuth?: McpAuthService,
   providedPlatformAuth?: MsgAuthenticator,
@@ -188,7 +196,7 @@ function routeMsgRequest(
   const roomService = providedRoomService ?? env.ROOM_SERVICE ?? (env.ConversationRoom ? new DurableRoomService(env.ConversationRoom as RoomNamespace, publicOrigin) : undefined);
   if (!roomService) return createWorker(
       { async create() { throw new Error("The room service is not available."); } },
-      { assets: env.ASSETS, publicOrigin, rateLimits: {
+      { assets: env.ASSETS, legacyOrigin, publicOrigin, rateLimits: {
         creation: env.MSG_RATE_LIMIT_CREATION ?? unavailableRateLimit,
         live: env.MSG_RATE_LIMIT_LIVE ?? unavailableRateLimit,
         posts: env.MSG_RATE_LIMIT_POSTS ?? unavailableRateLimit,
@@ -200,7 +208,7 @@ function routeMsgRequest(
       : undefined;
   const pushConfigured = Boolean(env.MSG_VAPID_PUBLIC_KEY && env.MSG_VAPID_PRIVATE_KEY && env.MSG_VAPID_SUBJECT);
   const mcpAuth = providedAuth ?? (env.MSG_DB
-      ? new McpAuthService({ issuer: publicOrigin, resource: `${publicOrigin}/mcp`, store: new D1McpAuthStore(env.MSG_DB) })
+      ? new McpAuthService({ acceptedOrigins: [legacyOrigin], issuer: publicOrigin, resource: `${publicOrigin}/mcp`, store: new D1McpAuthStore(env.MSG_DB) })
       : undefined);
   const mcpCallbackFetch = createDispatcherFetch(env);
   const rateLimits = {
@@ -221,6 +229,7 @@ function routeMsgRequest(
       operatorToken: env.MSG_OPERATOR_TOKEN,
       postDisabled: env.MSG_POST_DISABLED === "1",
       publicOrigin,
+      legacyOrigin,
       pushConfigured,
       pushVapidPublicKey: pushConfigured ? env.MSG_VAPID_PUBLIC_KEY : undefined,
       rateLimits,

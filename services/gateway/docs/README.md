@@ -10,7 +10,8 @@ root [MCP topology](../../../docs/architecture/mcp-topology.md). This service
 directory owns Gateway implementation and protocol details:
 
 - [ADR 0002: canonical apex MCP address](adr/0002-canonical-apex-mcp-address.md)
-  records the direct apex and standalone-host behavior.
+  records the superseded apex proposal; the standalone host remains the
+  selected Gateway surface while Msg owns the current apex Worker contract.
 - [Gateway foundation plan](plans/2026-09-19-gateway-foundation.md) and
   [specification](specs/gateway-foundation.md) record the diagnostic milestone
   and its boundaries.

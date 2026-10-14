@@ -1,4 +1,4 @@
-import { AGENT_INSTRUCTIONS, jsonResponse, OPENAPI_DOCUMENT, renderDiscovery } from "./discovery";
+import { jsonResponse, renderAgentInstructions, renderDiscovery, renderOpenApi } from "./discovery";
 import { buildAgentRepresentation, renderAgentText } from "./agent-representation";
 import { agentBrowserAsset, renderAgentHomePage, renderAgentRoomPage, renderAgentStatusPage } from "./agent-browser";
 import { browserAsset, browserIcon, MERMAID_ASSET_PATH, renderBrowserDocument } from "./browser";
@@ -37,6 +37,7 @@ import { PUSH_SERVICE_WORKER_PATH, pushServiceWorkerResponse } from "./push-serv
 import { parsePushBrowserId, parsePushSubscription } from "./push-subscriptions";
 import { handleMcpRequest } from "./mcp";
 import type { McpAuthenticator } from "./mcp-events-handler";
+import { redirectLegacyBrowserRequest } from "./host";
 
 export interface MsgWorker {
   fetch(request: Request): Promise<Response>;
@@ -65,6 +66,7 @@ export interface MsgWorkerOptions {
   readonly operatorToken?: string;
   readonly postDisabled?: boolean;
   readonly publicOrigin?: string;
+  readonly legacyOrigin?: string;
   readonly pushConfigured?: boolean;
   readonly pushVapidPublicKey?: string;
   readonly rateLimits?: MsgRateLimits;
@@ -120,6 +122,8 @@ export function createWorker(service: RoomService, options: MsgWorkerOptions = {
   return {
     async fetch(request) {
       try {
+        const redirect = redirectLegacyBrowserRequest(request, options.publicOrigin ?? "https://msg.0000.chat", options.legacyOrigin);
+        if (redirect) return redirect;
         return secure(await route(request, service, options));
       } catch (error) {
         const representation = errorRepresentation(request);
@@ -131,7 +135,7 @@ export function createWorker(service: RoomService, options: MsgWorkerOptions = {
         const response =
           error instanceof ProtocolError
             ? agentHtml
-              ? htmlResponse(renderAgentStatusPage(error.status, error.code, renderedErrorMessage(error.message, isStaleSequenceDetails(error.details) ? error.details : undefined, isStaleRevisionDetails(error.details) ? error.details : undefined), requestUrl), error.status)
+              ? htmlResponse(renderAgentStatusPage(error.status, error.code, renderedErrorMessage(error.message, isStaleSequenceDetails(error.details) ? error.details : undefined, isStaleRevisionDetails(error.details) ? error.details : undefined), requestUrl, options.publicOrigin), error.status)
               : errorResponse(error.code, error.message, error.status, representation, error.details)
             : errorResponse(
                 ERROR_CODES.internal,
@@ -226,6 +230,7 @@ async function route(request: Request, service: RoomService, options: MsgWorkerO
       callbackFetch: options.mcpCallbackFetch,
       mcpOrigin: options.mcpOrigin ?? options.publicOrigin,
       mcpRateLimit: options.mcpRateLimit,
+      acceptedOrigins: options.legacyOrigin === undefined ? undefined : [options.legacyOrigin],
     });
   }
   if (request.method !== "GET" && request.method !== "HEAD" && !isSameOrigin(request, url)) {
@@ -255,13 +260,13 @@ async function route(request: Request, service: RoomService, options: MsgWorkerO
     return jsonResponse({ accepted: true }, 202);
   }
   if (request.method === "GET" && url.pathname === "/agent.txt") {
-    return textResponse(AGENT_INSTRUCTIONS);
+    return textResponse(renderAgentInstructions(options.publicOrigin));
   }
   if (request.method === "GET" && url.pathname === "/llms.txt") {
-    return textResponse(AGENT_INSTRUCTIONS);
+    return textResponse(renderAgentInstructions(options.publicOrigin));
   }
   if (request.method === "GET" && url.pathname === "/openapi.json") {
-    return jsonResponse(OPENAPI_DOCUMENT);
+    return renderOpenApi(options.publicOrigin);
   }
   if (request.method === "GET" && url.pathname === PUSH_SERVICE_WORKER_PATH) {
     return pushServiceWorkerResponse();
@@ -282,17 +287,17 @@ async function route(request: Request, service: RoomService, options: MsgWorkerO
       statusText: asset.statusText,
     });
   }
-  const assetMatch = /^\/_msg\/asset\/((?:agent\.css)|(?:client\.(?:css|js)))$/.exec(url.pathname);
+  const assetMatch = /^\/_msg\/asset\/((?:agent\.css)|(?:client\.(?:css|js))|(?:geist-sans\.woff2(?:\.license\.txt)?))$/.exec(url.pathname);
   if (request.method === "GET" && assetMatch) {
     return agentBrowserAsset(assetMatch[1]) ?? browserAsset(assetMatch[1]) ?? notFound();
   }
   if (request.method === "GET" && url.pathname === "/") {
     const representation = negotiateRepresentation(request.headers.get("accept"));
-    if (representation !== "html") return renderDiscovery(representation);
+    if (representation !== "html") return renderDiscovery(representation, options.publicOrigin);
     if (selectBrowserView(url, request.headers.get("cookie")) === "agent") {
-      return htmlResponse(renderAgentHomePage(url));
+      return htmlResponse(renderAgentHomePage(url, options.publicOrigin));
     }
-    const page = renderBrowserDocument({ title: "Start a temporary conversation", url });
+    const page = renderBrowserDocument({ publicOrigin: options.publicOrigin, title: "Start a temporary conversation", url });
     return htmlResponse(page.html, 200, page.styleNonce);
   }
   if (request.method === "POST" && url.pathname === "/") {
@@ -770,9 +775,9 @@ async function route(request: Request, service: RoomService, options: MsgWorkerO
       })) as unknown as ReadRoomResponse;
       if (negotiateRepresentation(request.headers.get("accept")) === "html") {
         if (selectBrowserView(url, request.headers.get("cookie")) === "agent") {
-        return withSetCookies(htmlResponse(renderAgentRoomPage(result, url)), [...(auth?.setCookies ?? [])]);
+        return withSetCookies(htmlResponse(renderAgentRoomPage(result, url, options.publicOrigin)), [...(auth?.setCookies ?? [])]);
         }
-        const page = renderBrowserDocument({ pushPublicKey: options.pushConfigured ? options.pushVapidPublicKey : undefined, room, title: "Temporary conversation", url });
+        const page = renderBrowserDocument({ publicOrigin: options.publicOrigin, pushPublicKey: options.pushConfigured ? options.pushVapidPublicKey : undefined, room, title: "Temporary conversation", url });
         return withSetCookies(htmlResponse(page.html, 200, page.styleNonce), [...(auth?.setCookies ?? [])]);
       }
       const etag = selectors.bounded

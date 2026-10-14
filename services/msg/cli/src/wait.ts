@@ -1,6 +1,10 @@
 export const DEFAULT_WAIT_TIMEOUT_MS = 60_000;
 export const MAX_WAIT_TIMEOUT_MS = 5 * 60_000;
 export const WAIT_READ_LIMIT = 20;
+export const DEFAULT_SERVICE_ORIGIN = "https://0000.chat";
+export const LEGACY_SERVICE_ORIGIN = "https://msg.0000.chat";
+
+const PUBLIC_SERVICE_ORIGINS = new Set([DEFAULT_SERVICE_ORIGIN, LEGACY_SERVICE_ORIGIN]);
 
 export interface WaitCommand {
   readonly after: number;
@@ -385,13 +389,38 @@ function sleep(delayMs: number, options: WaitOptions, registerCancel: (cancel: (
   });
 }
 
-export function validateConversationUrl(value: string, serviceOrigin = "https://msg.0000.chat"): string {
+export function validateConversationUrl(value: string, serviceOrigin = DEFAULT_SERVICE_ORIGIN): string {
   let url: URL;
-  try { url = new URL(value); } catch { throw new Error("The conversation URL must be https://msg.0000.chat/{room}."); }
+  try { url = new URL(value); } catch { throw new Error(publicConversationUrlUsage(serviceOrigin)); }
   let expected: URL;
   try { expected = new URL(serviceOrigin); } catch { throw new Error("MSG_SERVICE_ORIGIN is invalid."); }
-  if (url.origin !== expected.origin || url.protocol !== expected.protocol || url.username || url.password || url.search || url.hash || !/^\/[^/]+$/.test(url.pathname)) {
-    throw new Error(`The conversation URL must be ${expected.origin}/{room}.`);
+  if (!equivalentServiceOrigins(url, expected) || url.username || url.password || url.search || url.hash || !/^\/[^/]+$/.test(url.pathname)) {
+    throw new Error(publicConversationUrlUsage(expected.origin));
   }
   return url.toString();
+}
+
+export function conversationUrlsEquivalent(left: string, right: string, serviceOrigin = DEFAULT_SERVICE_ORIGIN): boolean {
+  let leftUrl: URL;
+  let rightUrl: URL;
+  try {
+    leftUrl = new URL(validateConversationUrl(left, serviceOrigin));
+    rightUrl = new URL(validateConversationUrl(right, serviceOrigin));
+  } catch {
+    return false;
+  }
+  return leftUrl.pathname === rightUrl.pathname && equivalentServiceOrigins(leftUrl, rightUrl);
+}
+
+export function equivalentServiceOrigins(left: URL, right: URL): boolean {
+  return left.origin === right.origin || PUBLIC_SERVICE_ORIGINS.has(left.origin) && PUBLIC_SERVICE_ORIGINS.has(right.origin);
+}
+
+function publicConversationUrlUsage(serviceOrigin: string): string {
+  let expected: URL;
+  try { expected = new URL(serviceOrigin); } catch { return "The conversation URL is invalid."; }
+  if (PUBLIC_SERVICE_ORIGINS.has(expected.origin)) {
+    return `The conversation URL must be ${DEFAULT_SERVICE_ORIGIN}/{room}. Legacy public URLs using ${LEGACY_SERVICE_ORIGIN}/{room}. Both public origins are accepted.`;
+  }
+  return `The conversation URL must be ${expected.origin}/{room}.`;
 }

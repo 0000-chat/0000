@@ -1258,6 +1258,108 @@ test("keeps the MCP cursor contiguous when a newer event succeeds before an olde
   }
 });
 
+test("reuses and unsubscribes a pre-cutover subscription through canonical arguments", async () => {
+  const database = new Database(":memory:");
+  const { room: durable } = await room(database, Date.now);
+  const legacyArguments = JSON.stringify({ room_url: "https://msg.example.test/legacy-thread" });
+  const canonicalArguments = JSON.stringify({ room_url: "https://0000.chat/legacy-thread" });
+  const common = {
+    principal_id: "principal-legacy",
+    grant_id: "grant-legacy",
+    callback_url: "https://receiver.example.test/legacy",
+    secret: `whsec_${btoa("l".repeat(32))}`,
+    cursor: null,
+  };
+  try {
+    const initialized = await durable.fetch(request("/initialize", { management_hash: "hash", initial: { content: "first", author: "a", display_name: "a", semantic_type: "message" } }));
+    expect(initialized.status).toBe(200);
+    const legacy = await durable.fetch(request("/mcp/subscribe", { ...common, id: "sub_legacy", arguments_json: legacyArguments }));
+    expect(legacy.status).toBe(200);
+    const refreshed = await durable.fetch(request("/mcp/subscribe", { ...common, id: "sub_canonical", arguments_json: canonicalArguments, legacy_arguments_json: [legacyArguments] }));
+    expect(refreshed.status).toBe(200);
+    expect(await refreshed.json()).toMatchObject({ id: "sub_legacy" });
+    expect(database.query("SELECT COUNT(*) AS count FROM mcp_subscriptions WHERE principal_id = ?").get("principal-legacy")).toMatchObject({ count: 1 });
+    expect(database.query("SELECT id, arguments_json FROM mcp_subscriptions WHERE principal_id = ?").get("principal-legacy")).toMatchObject({ id: "sub_legacy", arguments_json: legacyArguments });
+
+    const unsubscribed = await durable.fetch(request("/mcp/unsubscribe", { principal_id: common.principal_id, grant_id: common.grant_id, arguments_json: canonicalArguments, legacy_arguments_json: [legacyArguments], callback_url: common.callback_url }));
+    expect(await unsubscribed.json()).toEqual({ removed: true });
+    expect(database.query("SELECT status FROM mcp_subscriptions WHERE id = ?").get("sub_legacy")).toMatchObject({ status: "stopped" });
+  } finally {
+    database.close();
+  }
+});
+
+test("reactivates retained inactive legacy subscriptions without id collisions", async () => {
+  const database = new Database(":memory:");
+  let now = 1_000;
+  const { room: durable } = await room(database, () => now);
+  const legacyArguments = JSON.stringify({ room_url: "https://msg.example.test/retained-thread" });
+  const canonicalArguments = JSON.stringify({ room_url: "https://0000.chat/retained-thread" });
+  const common = {
+    principal_id: "principal-retained",
+    grant_id: "grant-retained",
+    callback_url: "https://receiver.example.test/retained",
+    secret: `whsec_${btoa("r".repeat(32))}`,
+    cursor: null,
+  };
+  try {
+    expect((await durable.fetch(request("/initialize", { management_hash: "hash", initial: { content: "first", author: "a", display_name: "a", semantic_type: "message" } }))).status).toBe(200);
+    const created = await durable.fetch(request("/mcp/subscribe", { ...common, id: "sub_retained", arguments_json: legacyArguments, ttl_ms: 1 }));
+    expect(created.status).toBe(200);
+    database.query("INSERT INTO mcp_response_dedup (subscription_id, event_id, message_id, created_at) VALUES (?, ?, ?, ?)").run("sub_retained", "event-retained", "message-retained", now);
+
+    now += 2;
+    const reactivatedExpired = await durable.fetch(request("/mcp/subscribe", { ...common, id: "sub_new", arguments_json: canonicalArguments, legacy_arguments_json: [legacyArguments] }));
+    expect(reactivatedExpired.status).toBe(200);
+    expect(await reactivatedExpired.json()).toMatchObject({ id: "sub_retained" });
+    expect(database.query("SELECT id, status, arguments_json FROM mcp_subscriptions WHERE id = ?").get("sub_retained")).toMatchObject({ id: "sub_retained", status: "active", arguments_json: legacyArguments });
+
+    const stopped = await durable.fetch(request("/mcp/unsubscribe", { principal_id: common.principal_id, grant_id: common.grant_id, arguments_json: canonicalArguments, legacy_arguments_json: [legacyArguments], callback_url: common.callback_url }));
+    expect(await stopped.json()).toEqual({ removed: true });
+    const reactivatedStopped = await durable.fetch(request("/mcp/subscribe", { ...common, id: "sub_newer", arguments_json: canonicalArguments, legacy_arguments_json: [legacyArguments] }));
+    expect(reactivatedStopped.status).toBe(200);
+    expect(await reactivatedStopped.json()).toMatchObject({ id: "sub_retained" });
+    expect(database.query("SELECT COUNT(*) AS count FROM mcp_subscriptions WHERE principal_id = ?").get(common.principal_id)).toMatchObject({ count: 1 });
+  } finally {
+    database.close();
+  }
+});
+
+test("counts active legacy subscription aliases against canonical limits", async () => {
+  const database = new Database(":memory:");
+  const { room: durable } = await room(database, Date.now);
+  const legacyArguments = JSON.stringify({ room_url: "https://msg.example.test/capped-thread" });
+  const canonicalArguments = JSON.stringify({ room_url: "https://0000.chat/capped-thread" });
+  try {
+    expect((await durable.fetch(request("/initialize", { management_hash: "hash", initial: { content: "first", author: "a", display_name: "a", semantic_type: "message" } }))).status).toBe(200);
+    for (let index = 0; index < 8; index += 1) {
+      const response = await durable.fetch(request("/mcp/subscribe", {
+        id: `sub_cap_${index}`,
+        principal_id: "principal-cap",
+        grant_id: "grant-cap",
+        arguments_json: legacyArguments,
+        callback_url: `https://receiver.example.test/cap-${index}`,
+        secret: `whsec_${btoa(String.fromCharCode(...new Uint8Array(32).fill(index + 1)))}`,
+        cursor: null,
+      }));
+      expect(response.status).toBe(200);
+    }
+    const overLimit = await durable.fetch(request("/mcp/subscribe", {
+      id: "sub_cap_over",
+      principal_id: "principal-cap",
+      grant_id: "grant-cap",
+      arguments_json: canonicalArguments,
+      legacy_arguments_json: [legacyArguments],
+      callback_url: "https://receiver.example.test/cap-over",
+      secret: `whsec_${btoa("z".repeat(32))}`,
+      cursor: null,
+    }));
+    expect(overLimit.status).toBe(429);
+  } finally {
+    database.close();
+  }
+});
+
 test("migrates legacy plaintext webhook secrets and header values to endpoint-bound encrypted records", async () => {
   const database = new Database(":memory:");
   const encryptionKey = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";

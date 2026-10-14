@@ -11,6 +11,7 @@ export interface ExportCommand {
 
 export interface ExportOptions extends ExportCommand {
   readonly fetch: typeof globalThis.fetch;
+  readonly serviceOrigin?: string;
   readonly signal?: AbortSignal;
   readonly stdout: (text: string) => void;
   readonly stdoutBytes?: (chunk: Uint8Array) => Promise<void>;
@@ -20,7 +21,7 @@ export class ExportSignalError extends Error {
   constructor() { super("The msg export was interrupted."); }
 }
 
-export function parseExportCommand(args: readonly string[]): ExportCommand {
+export function parseExportCommand(args: readonly string[], serviceOrigin?: string): ExportCommand {
   if (args.length < 2 || args[0] !== "export") throw new Error(USAGE);
   let format: ExportFormat = "json";
   let seenFormat = false;
@@ -31,11 +32,11 @@ export function parseExportCommand(args: readonly string[]): ExportCommand {
     format = value;
     seenFormat = true;
   }
-  return { conversationUrl: validateConversationUrl(args[1] ?? ""), format };
+  return { conversationUrl: validateConversationUrl(args[1] ?? "", serviceOrigin), format };
 }
 
 export async function exportConversation(options: ExportOptions): Promise<void> {
-  const conversationUrl = validateConversationUrl(options.conversationUrl);
+  const conversationUrl = validateConversationUrl(options.conversationUrl, options.serviceOrigin);
   if (options.signal?.aborted) throw new ExportSignalError();
   const endpoint = new URL(conversationUrl);
   endpoint.pathname = `${endpoint.pathname}/export.${options.format === "json" ? "json" : "md"}`;

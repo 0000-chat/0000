@@ -6,6 +6,8 @@ const managementUrl = "https://msg.0000.chat/manage/room-1/owner-token";
 
 test("parses and validates the private retention management URL", () => {
   expect(parseRetentionCommand(["retention", managementUrl, "inspect"])).toEqual({ managementUrl, operation: "inspect" });
+  expect(parseRetentionCommand(["retention", "https://0000.chat/manage/room-1/owner-token", "inspect"]))
+    .toEqual({ managementUrl: "https://0000.chat/manage/room-1/owner-token", operation: "inspect" });
   expect(parseRetentionCommand(["retention", managementUrl, "extend"])).toEqual({ managementUrl, operation: "extend" });
   for (const value of [
     "https://evil.example/manage/room-1/owner-token",
@@ -13,6 +15,10 @@ test("parses and validates the private retention management URL", () => {
     `${managementUrl}/retention`,
     "http://msg.0000.chat/manage/room-1/owner-token",
   ]) expect(() => parseRetentionCommand(["retention", value, "inspect"])).toThrow("management URL is invalid");
+  expect(parseRetentionCommand(["retention", "https://selfhost.example/manage/room-1/owner-token", "inspect"], "https://selfhost.example"))
+    .toEqual({ managementUrl: "https://selfhost.example/manage/room-1/owner-token", operation: "inspect" });
+  expect(() => parseRetentionCommand(["retention", "https://0000.chat/manage/room-1/owner-token", "inspect"], "https://selfhost.example"))
+    .toThrow("management URL is invalid");
 });
 
 test("inspects through the exact private URL without printing or changing it", async () => {

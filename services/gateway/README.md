@@ -45,10 +45,10 @@ From the monorepo root, run `bun run check`, `bun run check:turbo`, and
 ## MCP topology and delivery maturity
 
 The public cross-service contract is the [MCP topology](../../docs/architecture/mcp-topology.md).
-It names `https://0000.chat/mcp` as the canonical Gateway address and
-`https://gateway.0000.chat/mcp` as a standalone host for the same MCP surface.
-Both addresses are intended to serve MCP directly, without a redirect, after
-the apex route is provisioned. Gateway's default built-in catalog includes
+Msg owns the selected canonical Worker resource at `https://0000.chat/mcp`.
+Gateway remains directly addressable at `https://gateway.0000.chat/mcp`; its
+previous assembled apex target is deferred for a future separate route or host
+decision. Gateway's default built-in catalog includes
 enabled, service-published first-party tools; profile grants and each owning
 service's resource authorization remain separate checks. A catalog entry does
 not grant permission or create a hard dependency on every service.
@@ -62,15 +62,17 @@ management accepts only a verified human session with Platform's explicit
 `canManageProfile` permission. A missing verifier, database, or service
 binding fails closed.
 
-The canonical `/mcp` route derives the organization and profile from the
+The Gateway `/mcp` route derives the organization and profile from the
 verified agent credential. `/mcp/profile/{id}` and
 `/mcp/organizations/{org}/profiles/{id}` remain compatible aliases and
 reject credential/profile mismatches. The profile-scoped catalog contains
 `use`, `tools.search`, and granted declarations published by service-owned
-MCP `tools/list` responses. The Msg adapter uses the direct
-`https://msg.0000.chat/mcp` surface through a service binding, never forwards
-the incoming Platform credential, and sends only informational Gateway
-identity headers. Msg still authorizes each Thread or resource capability.
+MCP `tools/list` responses. The Msg adapter currently uses the compatibility
+endpoint `https://msg.0000.chat/mcp` through a service binding; it never
+forwards the incoming Platform credential and sends only informational Gateway
+identity headers. Msg's canonical public resource remains
+`https://0000.chat/mcp`, and Msg still authorizes each Thread or resource
+capability.
 
 `use` accepts the documented restricted JavaScript subset: literals, arrays,
 null-prototype object literals, bindings, returns, direct `tools` calls,

@@ -21,8 +21,24 @@ const response = {
 
 test("parses a canonical message command", () => {
   expect(parseMessageCommand(["message", conversationUrl, "message-7"])).toEqual({ conversationUrl, id: "message-7" });
-  expect(() => parseMessageCommand(["message", "https://example.test/room-1", "message-7"])).toThrow("The conversation URL must be https://msg.0000.chat/{room}.");
+  expect(parseMessageCommand(["message", "https://0000.chat/room-1", "message-7"])).toEqual({ conversationUrl: "https://0000.chat/room-1", id: "message-7" });
+  expect(() => parseMessageCommand(["message", "https://example.test/room-1", "message-7"])).toThrow("The conversation URL must be https://0000.chat/{room}.");
   expect(() => parseMessageCommand(["message", conversationUrl, ""])).toThrow("stored message ID");
+});
+
+test("accepts canonical message responses for legacy room URLs and keeps room identity strict", async () => {
+  const canonicalResponse = { ...response, conversation_url: "https://0000.chat/room-1" };
+  await expect(readMessage({
+    conversationUrl,
+    fetch: async () => Response.json(canonicalResponse),
+    id: "message-7",
+  })).resolves.toContain("https://0000.chat/room-1/messages/message-7");
+  await expect(readMessage({
+    conversationUrl,
+    fetch: async () => Response.json({ ...canonicalResponse, conversation_url: "https://0000.chat/other-room" }),
+    id: "message-7",
+  })).rejects.toThrow("invalid message response");
+  expect(() => parseMessageCommand(["message", "https://0000.chat/room-1", "message-7"], "https://selfhost.example")).toThrow("https://selfhost.example/{room}");
 });
 
 test("looks up one message and renders attributable evidence with local citations", async () => {

@@ -559,6 +559,24 @@ describe("stateless MCP endpoint", () => {
     }
   });
 
+  test("accepts legacy room URLs on legacy MCP POSTs while canonicalizing the service origin", async () => {
+    const canonical = "https://0000.chat";
+    const legacy = "https://msg.0000.chat";
+    const request = new Request(`${legacy}/mcp`, {
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 13,
+        method: "tools/call",
+        params: { name: "post_message", arguments: { room_url: `${legacy}/room-capability`, client_message_id: "legacy-1", author: "agent", content: "legacy client" } },
+      }),
+      headers: { accept, "content-type": "application/json", origin: legacy },
+      method: "POST",
+    });
+    const response = await handleMcpRequest(request, baseService(), { acceptedOrigins: [legacy], publicOrigin: canonical });
+    expect(response.status).toBe(200);
+    expect((await json(response)).result.isError).not.toBe(true);
+  });
+
   test("rejects GET and subscription streams without opening an SSE response", async () => {
     const worker = createWorker(baseService(), { publicOrigin: origin });
     const get = await worker.fetch(new Request(`${origin}/mcp`, { method: "GET", headers: { accept: "text/event-stream" } }));

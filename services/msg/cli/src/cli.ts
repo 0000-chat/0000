@@ -48,15 +48,16 @@ export async function runCli(args: readonly string[], dependencies: CliDependenc
       return 0;
     }
     if (args[0] === "message") {
-      const command = parseMessageCommand(args);
-      dependencies.stdout(`${await readMessage({ ...command, fetch: dependencies.fetch, signal: dependencies.signal })}\n`);
+      const command = parseMessageCommand(args, dependencies.serviceOrigin);
+      dependencies.stdout(`${await readMessage({ ...command, fetch: dependencies.fetch, serviceOrigin: dependencies.serviceOrigin, signal: dependencies.signal })}\n`);
       return 0;
     }
     if (args[0] === "export") {
-      const command = parseExportCommand(args);
+      const command = parseExportCommand(args, dependencies.serviceOrigin);
       await exportConversation({
         ...command,
         fetch: dependencies.fetch,
+        serviceOrigin: dependencies.serviceOrigin,
         signal: dependencies.signal,
         stdout: dependencies.stdout,
         stdoutBytes: dependencies.stdoutBytes,
@@ -97,15 +98,15 @@ export async function runCli(args: readonly string[], dependencies: CliDependenc
       return 0;
     }
     if (args[0] === "retention") {
-      const command = parseRetentionCommand(args);
-      const response = await runRetention({ ...command, fetch: dependencies.fetch, readStdin: dependencies.readStdin, signal: dependencies.signal });
+      const command = parseRetentionCommand(args, dependencies.serviceOrigin);
+      const response = await runRetention({ ...command, fetch: dependencies.fetch, readStdin: dependencies.readStdin, serviceOrigin: dependencies.serviceOrigin, signal: dependencies.signal });
       dependencies.stdout(`${JSON.stringify(response)}\n`);
       return 0;
     }
     if (args[0] === "coordination") {
-      const command = parseCoordinationCommand(args);
+      const command = parseCoordinationCommand(args, dependencies.serviceOrigin);
       const coordinationDependencies = dependencies.readStdin === undefined ? {} : { readStdin: dependencies.readStdin };
-      const response = await runCoordination({ ...command, fetch: dependencies.fetch, signal: dependencies.signal, ...coordinationDependencies });
+      const response = await runCoordination({ ...command, fetch: dependencies.fetch, serviceOrigin: dependencies.serviceOrigin, signal: dependencies.signal, ...coordinationDependencies });
       dependencies.stdout(`${JSON.stringify(response)}\n`);
       return 0;
     }

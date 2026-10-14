@@ -256,6 +256,29 @@ test("defaults HTML to human pages and honors explicit and saved agent views", a
   expect(invalidViewHtml).not.toContain('class="view-banner agent-view-banner"');
 });
 
+test("uses the configured public origin in human pages served through another host", async () => {
+  const configuredOrigin = "https://configured.example";
+  const worker = createWorker({
+    create: async () => createdRoom,
+    read: async () => ({
+      expires_at: "2026-08-16T00:00:00.000Z",
+      latest_message: 0,
+      messages: [],
+      protocol_version: 1 as const,
+    }),
+  }, { publicOrigin: configuredOrigin });
+
+  const home = await worker.fetch(new Request("https://edge.example/", { headers: { accept: "text/html" } }));
+  const room = await worker.fetch(new Request("https://edge.example/example", { headers: { accept: "text/html" } }));
+  const homeHtml = await home.text();
+  const roomHtml = await room.text();
+
+  expect(homeHtml).toContain('data-public-origin="https://configured.example"');
+  expect(roomHtml).toContain('data-public-origin="https://configured.example"');
+  expect(roomHtml).toContain("https://configured.example/mcp");
+  expect(roomHtml).not.toContain("https://edge.example/mcp");
+});
+
 test("serves the Notifications panel and its controller on a human room page", async () => {
   const conversationUrl = "https://msg.0000.chat/room-capability";
   const worker = createWorker({
@@ -301,7 +324,7 @@ test("serves the registered push worker with root scope and safe cache/content h
   expect(response.headers.get("service-worker-allowed")).toBe("/");
   expect(response.headers.get("cache-control")).toContain("no-store");
   expect(response.headers.get("x-content-type-options")).toBe("nosniff");
-  expect(source).toContain('"New message in msg"');
+  expect(source).toContain('"New message in 0000.chat"');
   expect(source).toContain('self.addEventListener("push"');
   expect(source).toContain('self.addEventListener("notificationclick"');
 });
@@ -429,10 +452,17 @@ test("serves browser assets through the existing strict same-origin policy", asy
   const script = await worker.fetch(new Request("https://msg.0000.chat/_msg/asset/client.js"));
   const style = await worker.fetch(new Request("https://msg.0000.chat/_msg/asset/client.css"));
   const agentStyle = await worker.fetch(new Request("https://msg.0000.chat/_msg/asset/agent.css"));
+  const geist = await worker.fetch(new Request("https://msg.0000.chat/_msg/asset/geist-sans.woff2"));
+  const geistLicense = await worker.fetch(new Request("https://msg.0000.chat/_msg/asset/geist-sans.woff2.license.txt"));
 
   expect(script.headers.get("content-type")).toContain("javascript");
   expect(style.headers.get("content-type")).toContain("text/css");
   expect(agentStyle.headers.get("content-type")).toContain("text/css");
+  expect(geist.headers.get("content-type")).toBe("font/woff2");
+  expect(geist.headers.get("link")).toBe('</_msg/asset/geist-sans.woff2.license.txt>; rel="license"');
+  expect((await geist.arrayBuffer()).byteLength).toBeGreaterThan(10_000);
+  expect(geistLicense.headers.get("content-type")).toContain("text/plain");
+  expect(await geistLicense.text()).toContain("SIL OPEN FONT LICENSE Version 1.1");
   expect(await agentStyle.text()).toContain("color-scheme:only light");
   expect(script.headers.get("content-security-policy")).toContain("script-src 'self'");
 });

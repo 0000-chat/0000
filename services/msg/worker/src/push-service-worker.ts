@@ -8,7 +8,7 @@ export interface MsgPushPayload {
 export const PUSH_SERVICE_WORKER_PATH = "/_msg/push-service-worker.js";
 
 const PUSH_SERVICE_WORKER_SCRIPT = String.raw`(() => {
-  const notificationTitle = "New message in msg";
+  const notificationTitle = "New message in 0000.chat";
   const roomPathPattern = /^\/[A-Za-z0-9_-]{43}$/u;
   const roomIdPattern = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/iu;
   const validViews = new Set(["agent", "human"]);

@@ -197,6 +197,19 @@ test("uses a normalized configured service origin for public URLs and quoted wai
   expect(result.wait.command).not.toContain("injected");
 });
 
+test("uses the configured canonical origin for room and management URLs", async () => {
+  const service = new DurableRoomService({
+    getByName: () => ({ fetch: async () => Response.json({ created_at: "2026-08-10T00:00:00.000Z", expires_at: "2026-08-17T00:00:00.000Z" }) }),
+  } as never, "https://0000.chat", (values) => values.fill(7));
+
+  const result = await service.create({ body: { kind: "json", value: { author: "agent", content: "hello" } } });
+
+  expect(result.conversation_url).toMatch(/^https:\/\/0000\.chat\/[A-Za-z0-9_-]+$/u);
+  expect(result.manage_url).toMatch(/^https:\/\/0000\.chat\/manage\/[A-Za-z0-9_-]+\/[A-Za-z0-9_-]+$/u);
+  expect(result.share_message).toContain(result.conversation_url);
+  expect(result.wait.command).toContain(result.conversation_url);
+});
+
 test("converts Durable Object export and live errors to protocol errors", async () => {
   const calls: Request[] = [];
   const service = new DurableRoomService({

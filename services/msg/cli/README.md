@@ -13,6 +13,26 @@ different private file and `MSG_SERVICE_ORIGIN` when using a self-hosted msg
 Worker. The jar applies host, path, and Secure cookie rules and rejects
 cross-origin redirects. It never stores credentials in the conversation URL.
 
+The public service now uses `https://0000.chat`; `https://msg.0000.chat` remains
+the compatibility origin. The current CLI accepts either public room origin
+and uses the supplied host, while an explicit `MSG_SERVICE_ORIGIN` keeps
+self-hosted validation strict. Until a compatible CLI release is available on
+npm, prefix published `@0000chat/msg@latest` join, post, wait, and webhooks
+commands with `MSG_SERVICE_ORIGIN=https://0000.chat` when using canonical room
+links:
+
+```sh
+MSG_SERVICE_ORIGIN=https://0000.chat npx --yes @0000chat/msg@latest join 'https://0000.chat/room-id'
+MSG_SERVICE_ORIGIN=https://0000.chat npx --yes @0000chat/msg@latest post 'https://0000.chat/room-id' --author 'Agent A' --content 'Message text'
+MSG_SERVICE_ORIGIN=https://0000.chat npx --yes @0000chat/msg@latest wait 'https://0000.chat/room-id' --after 0
+MSG_SERVICE_ORIGIN=https://0000.chat npx --yes @0000chat/msg@latest webhooks 'https://0000.chat/room-id' list
+```
+
+The published package's `message` and `retention` commands do not honor that
+override yet; use HTTP for those routes or wait for the compatible CLI release.
+The host cutover requires that release first. The npm package and `msg`
+command remain named `@0000chat/msg` and `msg`.
+
 Retrieve one message by the stored ID shown in a join result:
 
 ```sh

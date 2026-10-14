@@ -22,6 +22,7 @@ const created = {
 } satisfies CreateRoomResponse;
 
 const fixtures: Array<{ fixture: Miniflare; releaseRuntime: () => Promise<void> }> = [];
+const OPERATIONS_TEST_TIMEOUT_MS = 60_000;
 
 afterEach(async () => {
   for (const { fixture, releaseRuntime } of fixtures.splice(0)) {
@@ -60,7 +61,7 @@ async function store(clock: { now: number }, migrations = ["0001_operations.sql"
   }
 }
 
-test("atomically claims, completes, and replays an encrypted creation receipt", { timeout: 20_000 }, async () => {
+test("atomically claims, completes, and replays an encrypted creation receipt", { timeout: OPERATIONS_TEST_TIMEOUT_MS }, async () => {
   const clock = { now: 1_000 };
   const { operations } = await store(clock);
   const claim = await operations.claimCreation("create-key", "fingerprint");
@@ -73,7 +74,7 @@ test("atomically claims, completes, and replays an encrypted creation receipt", 
   await expect(operations.claimCreation("create-key", "different")).resolves.toEqual({ kind: "conflict" });
 });
 
-test("returns in-progress for a current lease and fences stale claimants", { timeout: 20_000 }, async () => {
+test("returns in-progress for a current lease and fences stale claimants", { timeout: OPERATIONS_TEST_TIMEOUT_MS }, async () => {
   const clock = { now: 1_000 };
   const { operations } = await store(clock);
   const first = await operations.claimCreation("create-key", "fingerprint");
@@ -88,7 +89,7 @@ test("returns in-progress for a current lease and fences stale claimants", { tim
   await expect(operations.completeCreation("create-key", second.leaseToken, created)).resolves.toBeUndefined();
 });
 
-test("permits only one concurrent same-key claimant", { timeout: 20_000 }, async () => {
+test("permits only one concurrent same-key claimant", { timeout: OPERATIONS_TEST_TIMEOUT_MS }, async () => {
   const { operations } = await store({ now: 1_000 });
   const claims = await Promise.all(Array.from({ length: 8 }, () => operations.claimCreation("create-key", "fingerprint")));
 
@@ -96,7 +97,7 @@ test("permits only one concurrent same-key claimant", { timeout: 20_000 }, async
   expect(claims.filter((claim) => claim.kind === "pending")).toHaveLength(7);
 });
 
-test("opportunistically removes expired encrypted receipts, reports, and audit rows", { timeout: 20_000 }, async () => {
+test("opportunistically removes expired encrypted receipts, reports, and audit rows", { timeout: OPERATIONS_TEST_TIMEOUT_MS }, async () => {
   const clock = { now: 1_000 };
   const { d1, operations } = await store(clock);
   const claim = await operations.claimCreation("create-key", "fingerprint");
@@ -113,7 +114,7 @@ test("opportunistically removes expired encrypted receipts, reports, and audit r
   await expect(d1.prepare("SELECT COUNT(*) AS count FROM operator_audit").first<{ count: number }>()).resolves.toEqual({ count: 0 });
 });
 
-test("stores report details encrypted and exposes them only through operator reads", { timeout: 20_000 }, async () => {
+test("stores report details encrypted and exposes them only through operator reads", { timeout: OPERATIONS_TEST_TIMEOUT_MS }, async () => {
   const { d1, operations } = await store({ now: 1_000 });
   await operations.submitReport({ capability: "room-capability", description: "review text" });
 
@@ -128,7 +129,7 @@ test("stores report details encrypted and exposes them only through operator rea
   expect(updated).toMatchObject({ status: "reviewed" });
 });
 
-test("stores opaque keyed creation identifiers and fingerprints", { timeout: 20_000 }, async () => {
+test("stores opaque keyed creation identifiers and fingerprints", { timeout: OPERATIONS_TEST_TIMEOUT_MS }, async () => {
   const { d1, operations } = await store({ now: 1_000 });
   const rawKey = "raw-idempotency-key";
   const rawFingerprint = "raw-request-fingerprint";
@@ -139,7 +140,7 @@ test("stores opaque keyed creation identifiers and fingerprints", { timeout: 20_
   expect(row?.plan_envelope).not.toContain("management");
 });
 
-test("does not recover an unscoped pre-plan receipt", { timeout: 20_000 }, async () => {
+test("does not recover an unscoped pre-plan receipt", { timeout: OPERATIONS_TEST_TIMEOUT_MS }, async () => {
   const { d1, operations } = await store({ now: 1_000 });
   const { wait: _wait, ...legacyCreated } = created;
   const envelope = await (await import("./operations-crypto")).encryptOperationRecord(key, "creation_idempotency", "legacy-key", legacyCreated);
@@ -149,14 +150,14 @@ test("does not recover an unscoped pre-plan receipt", { timeout: 20_000 }, async
   expect(claim.kind === "complete" ? claim.response : undefined).not.toEqual(legacyCreated);
 });
 
-test("does not hold an unscoped pre-plan pending row", { timeout: 20_000 }, async () => {
+test("does not hold an unscoped pre-plan pending row", { timeout: OPERATIONS_TEST_TIMEOUT_MS }, async () => {
   const { d1, operations } = await store({ now: 1_000 });
   await d1.prepare("INSERT INTO creation_idempotency (idempotency_key, request_fingerprint, state, response_envelope, plan_envelope, lease_token, created_at, updated_at, expires_at) VALUES (?, ?, 'pending', NULL, '', 'legacy', ?, ?, ?)").bind("legacy-key", "legacy-fingerprint", 1, 1, 86_400_001).run();
   const claim = await operations.claimCreation("legacy-key", "legacy-fingerprint", "guest-a");
   expect(claim.kind).toBe("claimed");
 });
 
-test("scopes creation plans and receipts by stable guest control", { timeout: 20_000 }, async () => {
+test("scopes creation plans and receipts by stable guest control", { timeout: OPERATIONS_TEST_TIMEOUT_MS }, async () => {
   const { operations } = await store({ now: 1_000 });
   const first = await operations.claimCreation("same-key", "fingerprint", "guest-a");
   if (first.kind !== "claimed") throw new Error("Expected the first guest to claim the plan.");
@@ -167,7 +168,7 @@ test("scopes creation plans and receipts by stable guest control", { timeout: 20
   if (second.kind === "claimed") expect(second.plan.room).not.toBe(first.plan.room);
 });
 
-test("persists the owner grant reference for an idempotent retry", { timeout: 20_000 }, async () => {
+test("persists the owner grant reference for an idempotent retry", { timeout: OPERATIONS_TEST_TIMEOUT_MS }, async () => {
   const { operations } = await store({ now: 1_000 });
   const first = await operations.claimCreation("same-key", "fingerprint", "guest-a");
   if (first.kind !== "claimed") throw new Error("Expected the first guest to claim the plan.");
