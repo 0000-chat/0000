@@ -5,13 +5,16 @@ import { createMcpWebhookDispatcherClient } from "./mcp-webhook-dispatcher-clien
 test("relays signed callback bytes only to the configured dispatcher", async () => {
   let endpoint = "";
   let authorization = "";
+  let userAgent = "";
   let relay: Record<string, unknown> | undefined;
   const callback = createMcpWebhookDispatcherClient({
     endpoint: "https://dispatcher.example.test/dispatch",
     token: "relay-secret",
     fetch: async (input, init) => {
       endpoint = String(input);
-      authorization = init?.headers instanceof Headers ? init.headers.get("authorization") ?? "" : String((init?.headers as Record<string, string> | undefined)?.authorization ?? "");
+      const requestHeaders = new Headers(init?.headers);
+      authorization = requestHeaders.get("authorization") ?? "";
+      userAgent = requestHeaders.get("user-agent") ?? "";
       relay = JSON.parse(String(init?.body)) as Record<string, unknown>;
       return new Response(JSON.stringify({ status: 204, headers: {}, body: "" }), { status: 200, headers: { "content-type": "application/json" } });
     },
@@ -23,6 +26,7 @@ test("relays signed callback bytes only to the configured dispatcher", async () 
   });
   expect(endpoint).toBe("https://dispatcher.example.test/dispatch");
   expect(authorization).toBe("Bearer relay-secret");
+  expect(userAgent).toBe("0000-msg-dispatcher-client/1");
   expect(relay).toMatchObject({ url: "https://attacker-controlled.example.test/events", method: "POST" });
   const relayHeaders = relay === undefined ? undefined : relay.headers;
   expect(relayHeaders && typeof relayHeaders === "object" ? (relayHeaders as Record<string, string>)["webhook-signature"] : undefined).toBe("v1,signature");

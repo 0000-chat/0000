@@ -1,6 +1,7 @@
 const MAX_DISPATCHER_RESPONSE_BYTES = 96 * 1024;
 const MAX_RELAY_BODY_BYTES = 256 * 1024;
 const DEFAULT_DISPATCHER_TIMEOUT_MS = 10_000;
+const DEFAULT_DISPATCHER_USER_AGENT = "0000-msg-dispatcher-client/1";
 const RESPONSE_HEADER_ALLOWLIST = new Set(["content-type", "location"]);
 
 export interface McpWebhookDispatcherClientOptions {
@@ -40,7 +41,11 @@ export function createMcpWebhookDispatcherClient(options: McpWebhookDispatcherCl
         method: "POST",
         redirect: "error",
         signal: controller.signal,
-        headers: { authorization: `Bearer ${options.token}`, "content-type": "application/json" },
+        headers: {
+          authorization: `Bearer ${options.token}`,
+          "content-type": "application/json",
+          "user-agent": DEFAULT_DISPATCHER_USER_AGENT,
+        },
         body: JSON.stringify({ url: target.url, method: "POST", headers, body: relayBody }),
       });
     } finally {

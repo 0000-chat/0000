@@ -858,6 +858,7 @@ export function unitAffectsFile(unit, file) {
 }
 
 const GLOBAL_RUNTIME_INPUTS = new Set(["package.json", "bun.lock", "turbo.json", "scripts/release/event.mjs"]);
+const GLOBAL_RUNTIME_INPUT_PREFIXES = ["packages/platform-client/"];
 
 function additiveUnitRegistrations(config, previousConfig) {
   if (!Array.isArray(previousConfig?.units)) return null;
@@ -879,9 +880,16 @@ function additiveUnitRegistrations(config, previousConfig) {
   return added;
 }
 
+function isGlobalRuntimeInput(file) {
+  if (GLOBAL_RUNTIME_INPUTS.has(file)) return true;
+  return GLOBAL_RUNTIME_INPUT_PREFIXES.some(
+    (prefix) => file.startsWith(prefix) && !isValidationOnlyPath(file),
+  );
+}
+
 export function affectedUnits(config, changedFiles, previousConfig = undefined) {
   const files = [...new Set(changedFiles.map(normalisePath))].sort();
-  if (files.some((file) => GLOBAL_RUNTIME_INPUTS.has(file))) return [...config.units].sort(byName);
+  if (files.some(isGlobalRuntimeInput)) return [...config.units].sort(byName);
 
   const releaseUnitsChanged = files.includes("release-units.json");
   const otherFiles = releaseUnitsChanged ? files.filter((file) => file !== "release-units.json") : files;
@@ -935,6 +943,15 @@ function pathInside(file, root) {
 
 function isValidationOnlyPath(file) {
   if (isDocumentationPath(file)) return true;
+
+  if (pathInside(file, "packages/platform-client")) {
+    const relative = file.slice("packages/platform-client/".length);
+    const segments = relative.split("/");
+    const basename = segments.at(-1);
+    if (segments.some((segment) => VALIDATION_ONLY_DIRECTORY_NAMES.has(segment))) return true;
+    if (basename && /\.(?:test|spec)\.[^.]+$/i.test(basename)) return true;
+    return false;
+  }
 
   const failClosedRoot = FAIL_CLOSED_SERVICE_ROOTS.find((root) => pathInside(file, root));
   if (failClosedRoot) {

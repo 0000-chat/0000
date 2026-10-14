@@ -41,6 +41,12 @@ dispatches private Cloud staging only when the plan contains a runtime
 artifact and the opt-in repository variable `CLOUD_RELEASE_DISPATCH_ENABLED`
 is `true`; a missing variable fails closed.
 
+The shared runtime client under `packages/platform-client` is a global runtime
+input. Source and package configuration changes select all five configured
+units, keeping Msg, its MCP Events companion, and Platform on one release
+version. Package documentation and test-only changes remain validation-only and
+do not create runtime artifacts by themselves.
+
 Platform runtime paths select the released `platform-worker` artifact. Its
 route-free bundle carries the public Worker, D1 migration ledger, neutral
 bindings, rate-limit contract, and provisioning helper described below.
