@@ -857,7 +857,13 @@ export function unitAffectsFile(unit, file) {
   return matchesAny(file, unit.runtime_paths);
 }
 
-const GLOBAL_RUNTIME_INPUTS = new Set(["package.json", "bun.lock", "turbo.json", "scripts/release/event.mjs"]);
+const GLOBAL_RUNTIME_INPUTS = new Set([
+  "package.json",
+  "bun.lock",
+  "turbo.json",
+  "scripts/release/event.mjs",
+  "scripts/release/lib.mjs",
+]);
 const GLOBAL_RUNTIME_INPUT_PREFIXES = ["packages/platform-client/"];
 const RUNTIME_COMPANIONS = new Map([
   ["msg-worker", ["msg-webhook-dispatcher"]],

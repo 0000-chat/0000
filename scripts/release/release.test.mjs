@@ -753,6 +753,21 @@ test("release event producer changes rebuild every runtime artifact", () => {
   assert.deepEqual(plan.artifacts.map((artifact) => artifact.name), allUnits);
 });
 
+test("release planner changes rebuild every runtime artifact", () => {
+  const allUnits = config.units.map((unit) => unit.name).sort();
+  const plan = makePlan({
+    config,
+    base: head,
+    head,
+    changedFiles: ["scripts/release/lib.mjs"],
+  });
+
+  assert.equal(plan.change_class, "runtime");
+  assert.equal(plan.runtime_redeployment, true);
+  assert.deepEqual(plan.affected_units, allUnits);
+  assert.deepEqual(plan.artifacts.map((artifact) => artifact.name), allUnits);
+});
+
 test("the first Database activation publishes only its new artifact", () => {
   const previousConfig = { ...config, units: config.units.filter((unit) => unit.name !== "database-worker") };
   const plan = makePlan({

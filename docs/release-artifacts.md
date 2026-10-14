@@ -34,9 +34,11 @@ select `msg-worker`. Adding a new entry to `release-units.json` selects that
 new unit for its first artifact without rebuilding unchanged units. Changes to
 existing unit definitions or the release compatibility contract remain
 conservative and select all configured units. Root manifests and lockfiles
-also select every configured unit. Documentation-only and other non-runtime
-changes publish a release record with zero artifacts and no runtime
-redeployment. The public workflow
+also select every configured unit. Release planner and event-producer changes
+select every configured unit so the publication contract and artifact
+selection logic take effect with a complete same-version release.
+Documentation-only and other non-runtime changes publish a release record with
+zero artifacts and no runtime redeployment. The public workflow
 dispatches private Cloud staging only when the plan contains a runtime
 artifact and the opt-in repository variable `CLOUD_RELEASE_DISPATCH_ENABLED`
 is `true`; a missing variable fails closed.
