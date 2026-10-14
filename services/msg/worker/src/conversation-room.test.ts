@@ -1089,7 +1089,7 @@ test("binds retained MCP events to an existing Thread subscription when room_id 
     callbackBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
     return new Response(null, { status: 204 });
   };
-  const { room: durable } = await room(database, () => now, {}, undefined, callbackFetch, () => true);
+  const { context, room: durable } = await room(database, () => now, {}, undefined, callbackFetch, () => true);
   try {
     const initialized = await durable.fetch(request("/initialize", {
       management_hash: "hash",
@@ -1114,6 +1114,7 @@ test("binds retained MCP events to an existing Thread subscription when room_id 
       input: { content: "new", author: "a", display_name: "a", semantic_type: "message" },
     }));
     expect(posted.status).toBe(200);
+    expect(context.alarmAt).toBe(now);
     await durable.alarm();
 
     expect(callbackCount).toBe(1);
