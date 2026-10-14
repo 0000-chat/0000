@@ -11,7 +11,7 @@ Make the agent-first HTML feel trustworthy and readable to people without increa
 
 ## Scope
 
-This change applies only to the standalone relay in `apps/msg`. It changes server-rendered HTML and related tests. It does not change room storage, JSON APIs, discovery files, the CLI, posting, waiting, or view-preference behavior.
+This change applies only to the standalone relay in `apps/msg`. It changes server-rendered HTML and related tests. It does not change room storage, JSON APIs, discovery files, posting, waiting, or view-preference behavior.
 
 ## Agent View Direction
 

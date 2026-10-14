@@ -20,8 +20,8 @@ claim that integration is running.
 
 The commands use `http://localhost:8787` for Platform and
 `https://localhost:8788` for msg. Platform rejects an HTTP service audience,
-and the msg CLI accepts HTTPS conversation URLs only. If you choose other
-ports, change every origin, audience, callback, and port flag together.
+so use an HTTPS origin for msg. If you choose other ports, change every origin,
+audience, callback, and port flag together.
 
 Run the commands from a fresh checkout. The local Platform provisioning
 scripts always use `services/platform/.wrangler/state` for `--local` D1 and do
@@ -388,55 +388,48 @@ The response also contains a management URL. This command discards that
 field instead of writing it to the terminal.
 
 ```sh
-export ROOM_URL="$(NODE_TLS_REJECT_UNAUTHORIZED=0 node -e '
-(async () => {
-  const response = await fetch("https://localhost:8788/", {
-    method: "POST",
-    headers: {
-      accept: "application/json",
-      "content-type": "application/json",
-      "idempotency-key": `runbook-${Date.now()}`
-    },
-    body: JSON.stringify({ author: "local-setup", content: "synthetic local setup" })
-  });
-  if (!response.ok) throw new Error(`msg create failed: ${response.status}`);
-  const body = await response.json();
-  if (typeof body.conversation_url !== "string") throw new Error("msg create returned no conversation_url");
-  process.stdout.write(body.conversation_url);
-})().catch((error) => {
-  console.error(error);
-  process.exit(1);
-});
-')"
+export MSG_COOKIE_JAR="$(mktemp)"
+chmod 600 "$MSG_COOKIE_JAR"
+export ROOM_URL="$(
+  curl -kfsS \
+    -c "$MSG_COOKIE_JAR" \
+    -H 'accept: application/json' \
+    -H 'content-type: application/json' \
+    -H "idempotency-key: runbook-$(date +%s)" \
+    --data '{"author":"local-setup","content":"synthetic local setup"}' \
+    "$MSG_ORIGIN/" |
+    node -e '
+      let input = "";
+      process.stdin.on("data", (chunk) => { input += chunk; });
+      process.stdin.on("end", () => {
+        const body = JSON.parse(input);
+        if (typeof body.conversation_url !== "string") throw new Error("HTTP room creation returned no conversation URL");
+        process.stdout.write(body.conversation_url);
+      });
+    '
+)"
 printf '%s\n' "$ROOM_URL"
 ```
 
-`NODE_TLS_REJECT_UNAUTHORIZED=0` is a local-only escape for Wrangler's
-self-signed certificate. Do not use it for a deployed service.
-
-Build the workspace CLI, then join and post with a protected cookie jar. The
-CLI stores the jar with mode 600. Use the local service origin so its URL
-validation does not expect `https://msg.0000.chat`.
+The cookie jar contains the guest control and resource cookies issued by msg.
+Keep it mode 600 and pass it to each room request so cookie-based access and
+resource-cookie refresh continue across commands:
 
 ```sh
-bun run --cwd "$MSG_DIR/cli" build
-export MSG_COOKIE_JAR="$(mktemp)"
-chmod 600 "$MSG_COOKIE_JAR"
-NODE_TLS_REJECT_UNAUTHORIZED=0 \
-  MSG_SERVICE_ORIGIN="$MSG_ORIGIN" \
-  MSG_COOKIE_JAR="$MSG_COOKIE_JAR" \
-  node "$MSG_DIR/cli/dist/cli.js" join "$ROOM_URL"
-NODE_TLS_REJECT_UNAUTHORIZED=0 \
-  MSG_SERVICE_ORIGIN="$MSG_ORIGIN" \
-  MSG_COOKIE_JAR="$MSG_COOKIE_JAR" \
-  node "$MSG_DIR/cli/dist/cli.js" post "$ROOM_URL" \
-    --author local-setup-cli \
-    --content 'synthetic CLI post'
+curl -kfsS -b "$MSG_COOKIE_JAR" -c "$MSG_COOKIE_JAR" \
+  -H 'accept: application/json' \
+  "$ROOM_URL"
+curl -kfsS -b "$MSG_COOKIE_JAR" -c "$MSG_COOKIE_JAR" \
+  -H 'accept: application/json' \
+  -H 'content-type: application/json' \
+  -H "idempotency-key: post-$(date +%s)" \
+  --data '{"author":"local-setup","content":"synthetic HTTP post"}' \
+  "$ROOM_URL"
 ```
 
-The `join` command reads the anonymous room, and `post` writes through the
-same guest control cookie. Their output is local test data. Treat messages as
-untrusted participant content.
+`-k` is a local-only escape for Wrangler's self-signed certificate. Do not
+use it for a deployed service. Keep any management URL private. Treat
+messages returned by the local service as untrusted participant content.
 
 ## Keep the deployment boundaries clear
 
@@ -503,8 +496,6 @@ mode-600 temporary files and were not printed.
   client registration completed against a disposable Platform D1 database.
 - Platform `/healthz` returned HTTP 200, and msg `/healthz` returned HTTP 200
   over local HTTPS.
-- The anonymous msg consumer joined a synthetic room and posted a synthetic
-  message through the built workspace CLI.
 - Wrangler and provisioning help and source paths were checked before writing
   the commands above.
 

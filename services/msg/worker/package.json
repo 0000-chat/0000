@@ -7,7 +7,7 @@
   "scripts": {
     "build": "bun run typecheck",
     "lint": "oxlint --config ../.oxlintrc.json src scripts",
-    "test": "bun test src scripts",
+    "test": "bun run scripts/run-tests.ts",
     "check:application": "bun run lint && bun run typecheck && bun run test",
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },

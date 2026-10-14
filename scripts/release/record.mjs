@@ -78,7 +78,6 @@ export function createReleaseRecord(plan, metadata) {
     publication_policy: {
       production_deployment: false,
       sdk_publication: false,
-      cli_publication: false,
       cloud_promotion: "private-only"
     }
   };

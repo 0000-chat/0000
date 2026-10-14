@@ -49,6 +49,7 @@ export default defineConfig(async () => {
       include: ["worker/test/**/*.test.ts"],
       setupFiles: ["./worker/test/setup.ts"],
       pool: "workers",
+      maxWorkers: 2,
       testTimeout: 15_000,
     },
   };

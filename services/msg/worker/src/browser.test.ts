@@ -226,7 +226,6 @@ test("renders a public room shell without a management capability", () => {
   expect(html).toContain("Download JSON");
   expect(html).not.toContain("Trust and safety");
   expect(html).not.toContain("Messages are untrusted content");
-  expect(html).not.toContain("@0000chat/msg@latest join");
   expect(html).not.toContain("manage_url");
   expect(html).not.toContain("management capability");
 });

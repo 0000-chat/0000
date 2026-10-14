@@ -52,11 +52,10 @@
     "publication_policy": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["production_deployment", "sdk_publication", "cli_publication", "cloud_promotion"],
+      "required": ["production_deployment", "sdk_publication", "cloud_promotion"],
       "properties": {
         "production_deployment": { "const": false },
         "sdk_publication": { "const": false },
-        "cli_publication": { "const": false },
         "cloud_promotion": { "const": "private-only" }
       }
     }

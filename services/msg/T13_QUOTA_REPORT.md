@@ -29,15 +29,15 @@ observed creation denial at 7 and 13 requests respectively.
 
 Validation from branch `codex/platform-t13`:
 
-- `bun run check` — passed: Worker 197 tests / 1,181 assertions, tooling 20 tests / 71 assertions, CLI 66 tests / 242 assertions, build and pack passed. Existing warning: `worker/scripts/production-synthetic.ts:142` (`no-constant-condition`).
+- `bun run check` — passed the Worker and tooling checks. Existing warning:
+  `worker/scripts/production-synthetic.ts:142` (`no-constant-condition`).
 - `bun run wrangler:types` — passed with the official wrapper; generated types stayed stable.
 - `MSG_RATE_LIMIT_POLICY_FILE=docs/examples/msg-rate-limit-policy.self-host.json bun run wrangler:types` — passed; generated types stayed stable.
 - `bun test worker/src/t13-quota.integration.test.ts worker/src/t13-config.integration.test.ts` — passed: 2 tests / 15 assertions.
 - `git diff --check` — passed.
 
-Parent aggregate verification at `4242217` passes 198 Worker tests / 1,221
-assertions, 20 tooling tests / 71 assertions, 66 CLI tests / 242 assertions,
-and build/pack. The executable production-entry probe covers missing and
+Parent aggregate verification at `4242217` passes the Worker and tooling
+checks. The executable production-entry probe covers missing and
 throwing bindings for all four actions: each returns metadata-only 429 with
 Retry-After 60 before any resource-service call. Independent native reviews
 and the bounded external adversarial review found no remaining confirmed

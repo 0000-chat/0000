@@ -18,16 +18,6 @@ Apache-2.0. Each discovered package manifest declares the same SPDX
 identifier as the map. The repository check rejects an absent, unsupported, or
 inconsistent declaration and verifies the canonical text digests.
 
-## Reviewed legacy exception
-
-`@0000chat/msg` at `services/msg/cli` remains MIT. It is an existing published
-CLI whose package manifest and local `LICENSE` already declare MIT. The map
-records this as a reviewed `legacy-exception` with a
-`preserve-without-relicensing` decision. This slice does not relicense it and
-does not assert copyright authority that has not been verified. A future
-migration requires an explicit rights and compatibility decision before the
-exception can change.
-
 Private Cloud operations are not part of this repository or its license map.
 They must not become a public distributable package through a workspace link
 or package entry.

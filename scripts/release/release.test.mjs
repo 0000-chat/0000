@@ -701,7 +701,6 @@ test("Worker changes select their configured release units", () => {
       .map((unit) => unit.name),
     ["msg-webhook-dispatcher", "msg-worker"]
   );
-  assert.deepEqual(affectedUnits(config, ["services/msg/cli/src/cli.ts"]), []);
   assert.deepEqual(affectedUnits(config, ["services/gateway/src/worker.ts"]).map((unit) => unit.name), ["gateway"]);
   assert.deepEqual(affectedUnits(config, ["services/database/src/worker.ts"]).map((unit) => unit.name), ["database-worker"]);
   assert.deepEqual(affectedUnits(config, ["bun.lock"]).map((unit) => unit.name), ["database-worker", "gateway", "msg-webhook-dispatcher", "msg-worker", "platform-worker"]);

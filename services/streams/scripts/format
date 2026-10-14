@@ -2,12 +2,12 @@
 set -eu
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-cache_dir="${XDG_CACHE_HOME:-${HOME}/.cache}/0000-scaffold/npm"
-mkdir -p "$cache_dir"
+tool_cache="$root/.cache/bun"
+mkdir -p "$tool_cache"
 cd "$root"
 
 if [ "$#" -eq 0 ]; then
     set -- .
 fi
 
-exec npx --yes --prefer-offline --workspaces=false --cache "$cache_dir" --package "@biomejs/biome@2.5.13" -- biome format --write --no-errors-on-unmatched "$@"
+exec env BUN_INSTALL="$tool_cache" bunx --package "@biomejs/biome@2.5.13" biome format --write --no-errors-on-unmatched "$@"

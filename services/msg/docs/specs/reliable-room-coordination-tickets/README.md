@@ -34,4 +34,4 @@ The approved tickets are published with native GitHub blocking relationships. In
 - Aggregate base: `0000-chat/0000@90b0333` (current main when prepared). Includes room notifications.
 - The original working copy was dirty and predates that main revision; its uncommitted files remained untouched during preparation. Delegated GET posting and cross-transport receipt parity are part of the aggregate implementation recorded by PR #74.
 - Implementers used isolated worktrees; the parent serialized integration and tracker updates.
-- The preparation validation command was `bun run check` from the msg service, including actual Worker/room routes and focused CLI/browser checks. Final ticket13 validation remains the parent handoff evidence.
+- The preparation validation command was `bun run check` from the msg service, including actual Worker/room routes and focused browser checks. Final ticket13 validation remains the parent handoff evidence.

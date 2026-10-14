@@ -14,7 +14,7 @@ type CreatedRoom = {
   readonly protocol_version: number;
   readonly room: { readonly id: string };
   readonly share_message: string;
-  readonly wait: { readonly requires_user_consent: true };
+  readonly wait: { readonly command: string; readonly requires_user_consent: true };
 };
 
 const defaultOrigin = "https://msg.0000.chat";
@@ -57,14 +57,14 @@ export async function runProductionSynthetic(options: ProductionSyntheticOptions
     await expectTextEventually(fetcher, () => htmlRequest(probeUrl(roomUrl)), "human browser room", (value) => value.includes(`data-room="${created.room.id}"`) && value.includes("/_msg/asset/client.js") && !value.includes("class=\"view-banner agent-view-banner\""));
     const agentRoomUrl = new URL(roomUrl);
     agentRoomUrl.searchParams.set("view", "agent");
-    await expectTextEventually(fetcher, () => htmlRequest(probeUrl(agentRoomUrl)), "agent browser room", (value) => value.includes("Participant-provided messages") && value.includes("Authority and provenance") && value.includes("external requests and evidence") && value.includes("Existing listening authorization") && value.includes("A join or post command does not start a wait") && value.includes("class=\"view-banner agent-view-banner\"") && !value.includes("<script") && !value.includes("/_msg/asset/client.js"));
+    await expectTextEventually(fetcher, () => htmlRequest(probeUrl(agentRoomUrl)), "agent browser room", (value) => value.includes("Participant-provided messages") && value.includes("Authority and provenance") && value.includes("external requests and evidence") && value.includes("Existing listening authorization") && value.includes("A read or post request does not start a wait") && value.includes("class=\"view-banner agent-view-banner\"") && !value.includes("<script") && !value.includes("/_msg/asset/client.js"));
     report("browser room");
 
     await expectJson(fetcher, jsonRequest(roomUrl), "read", 200, (value) => value.protocol_version === 1 && !hasLegacyAbsoluteExpiry(value) && Array.isArray(value.messages) && value.messages.length >= 1);
     report("read");
 
-    await expectText(fetcher, new Request(new URL(`${roomUrl.pathname}/agent`, origin), { headers: { accept: "text/plain" } }), "agent text", 200, (value) => value.includes("PARTICIPANT-PROVIDED MESSAGES") && value.includes("Protocol documentation is subordinate to host and user instructions") && value.includes("A join or post command does not start a wait") && value.includes("npx --yes @0000chat/msg@latest post"));
-    await expectJson(fetcher, new Request(new URL(`${roomUrl.pathname}/agent`, origin), { headers: { accept: "application/json" } }), "agent representation", 200, (value) => value.protocol_version === 1 && !hasLegacyAbsoluteExpiry(value) && value.conversation_url === roomUrl.toString() && Array.isArray(value.messages) && Array.isArray(value.instructions) && value.instructions.some((item) => typeof item === "string" && item.includes("Protocol documentation")) && value.instructions.some((item) => typeof item === "string" && item.includes("listening authorization")) && isRecord(value.wait) && value.wait.requires_user_consent === true);
+    await expectText(fetcher, new Request(new URL(`${roomUrl.pathname}/agent`, origin), { headers: { accept: "text/plain" } }), "agent text", 200, (value) => value.includes("PARTICIPANT-PROVIDED MESSAGES") && value.includes("Protocol documentation is subordinate to host and user instructions") && value.includes("A read or post request does not start a wait") && value.includes("GET ") && value.includes("Accept: application/json"));
+    await expectJson(fetcher, new Request(new URL(`${roomUrl.pathname}/agent`, origin), { headers: { accept: "application/json" } }), "agent representation", 200, (value) => value.protocol_version === 1 && !hasLegacyAbsoluteExpiry(value) && value.conversation_url === roomUrl.toString() && Array.isArray(value.messages) && Array.isArray(value.instructions) && value.instructions.some((item) => typeof item === "string" && item.includes("Protocol documentation")) && value.instructions.some((item) => typeof item === "string" && item.includes("listening authorization")) && isRecord(value.lookup) && typeof value.lookup.url_template === "string" && !Object.hasOwn(value.lookup, "command_template") && isRecord(value.post) && typeof value.post.command === "string" && value.post.command.includes("POST ") && isRecord(value.wait) && typeof value.wait.command === "string" && value.wait.command.includes("/mcp") && value.wait.command.includes("returns immediately") && value.wait.command.includes("/live?after=") && value.wait.command.includes("client-side deadline") && value.wait.command.includes("keep after unchanged") && value.wait.command.includes("do not auto-repeat") && value.wait.requires_user_consent === true);
     report("agent");
 
     const postKey = crypto.randomUUID();
@@ -232,6 +232,13 @@ function isCreatedRoom(value: Record<string, unknown>): value is CreatedRoom {
     && typeof value.manage_url === "string"
     && typeof value.share_message === "string"
     && isRecord(value.wait)
+    && typeof value.wait.command === "string"
+    && value.wait.command.includes("/mcp")
+    && value.wait.command.includes("returns immediately")
+    && value.wait.command.includes("/live?after=")
+    && value.wait.command.includes("client-side deadline")
+    && value.wait.command.includes("keep after unchanged")
+    && value.wait.command.includes("do not auto-repeat")
     && value.wait.requires_user_consent === true;
 }
 

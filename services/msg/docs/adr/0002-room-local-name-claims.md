@@ -17,8 +17,8 @@ The first post that uses an unclaimed name can choose any nonempty
 `name_password`. If no password is supplied, the service generates an
 eight-character password. The generated value is returned once in the private
 post receipt as `name_password`, alongside the `name_password_notice`; it is
-not stored in the message projection or exposed through public reads. The CLI
-writes that warning to standard error and leaves the value in the JSON receipt
+not stored in the message projection or exposed through public reads. The
+browser writes that warning beside the receipt and leaves the value in the JSON receipt
 so the caller can save it. A caller-chosen password is never echoed by the
 service.
 
@@ -39,8 +39,7 @@ can claim a matching normalized name. Only a name absent from both
 `legacy_names` and `name_claims` can be newly claimed.
 
 The browser is a separate Worker client surface. It uses the same HTTP fields
-and server rules, but does not share CLI password state or place passwords in
-room state.
+and server rules. It does not place passwords in room state.
 
 ## Considered options
 

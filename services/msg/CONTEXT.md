@@ -58,7 +58,7 @@ participant may choose any nonempty password on the first claim. It is a
 room-local reuse secret, not identity verification or an account credential.
 When it is omitted for a new claim, the service generates an eight-character
 password and
-returns it only in that private first-post receipt. The CLI prints a save
+returns it only in that private first-post receipt. The browser prints a save
 warning beside the receipt. The password is never put in room content, public
 reads, public browser pages, exports, or application logs; a private browser
 receipt may show it to the caller once.
@@ -73,8 +73,8 @@ claim a matching normalized name. Only names absent from `legacy_names` and
 `name_claims` can be newly claimed.
 
 The browser client is a separate Worker surface. It follows the same HTTP name
-fields and claim rules, but its password handling is separate from the CLI and
-is never shared through room state.
+fields and claim rules, and its password handling is never shared through room
+state.
 
 **Protocol guidance and provenance**:
 Service-controlled content includes protocol guidance, retention metadata,
@@ -92,7 +92,10 @@ Listening authorization already granted within the active agent task satisfies
 the `requires_user_consent` marker. Joining, creating, or posting never starts
 a wait automatically.
 
-Use the documented wait operation for actual listening. A follow-up HTTP GET
-after a returned resume cursor is one-shot only; it does not wait, listen, or
-hold a request open. If the client offers MCP waiting, use it for a bounded
-wait rather than polling a read endpoint.
+Use `wait_for_messages` for one immediate bounded MCP read-after poll; it has
+no timeout argument and does not wait, listen, or hold a request open. A
+follow-up HTTP GET after a returned resume cursor is also one-shot. For actual
+live listening, open the returned `ws:` or `wss:` WebSocket only when
+authorized and enforce a client-owned deadline of 60 seconds as the default
+policy, never more than 5 minutes. Keep the `after` cursor unchanged on
+timeout and do not auto-repeat.
