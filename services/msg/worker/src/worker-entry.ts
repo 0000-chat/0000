@@ -220,6 +220,7 @@ function routeMsgRequest(
       mcpRateLimit: env.MSG_RATE_LIMIT_READS,
       operatorToken: env.MSG_OPERATOR_TOKEN,
       postDisabled: env.MSG_POST_DISABLED === "1",
+      publicOrigin,
       pushConfigured,
       pushVapidPublicKey: pushConfigured ? env.MSG_VAPID_PUBLIC_KEY : undefined,
       rateLimits,
