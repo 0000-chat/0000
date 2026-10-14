@@ -708,6 +708,21 @@ test("Worker changes select their configured release units", () => {
   assert.deepEqual(affectedUnits(config, [".github/workflows/release.yml"]).map((unit) => unit.name), ["msg-worker"]);
 });
 
+test("release event producer changes rebuild every runtime artifact", () => {
+  const changedFiles = [
+    "docs/release-artifacts.md",
+    "scripts/release/event.mjs",
+    "scripts/release/release.test.mjs"
+  ];
+  const allUnits = config.units.map((unit) => unit.name).sort();
+  const plan = makePlan({ config, base: head, head, changedFiles });
+
+  assert.equal(plan.change_class, "runtime");
+  assert.equal(plan.runtime_redeployment, true);
+  assert.deepEqual(plan.affected_units, allUnits);
+  assert.deepEqual(plan.artifacts.map((artifact) => artifact.name), allUnits);
+});
+
 test("the first Database activation publishes only its new artifact", () => {
   const previousConfig = { ...config, units: config.units.filter((unit) => unit.name !== "database-worker") };
   const plan = makePlan({
