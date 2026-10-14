@@ -39,7 +39,7 @@ export function createMcpWebhookDispatcherClient(options: McpWebhookDispatcherCl
     try {
       response = await requestFetch(endpoint, {
         method: "POST",
-        redirect: "error",
+        redirect: "manual",
         signal: controller.signal,
         headers: {
           authorization: `Bearer ${options.token}`,
