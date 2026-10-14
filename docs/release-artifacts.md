@@ -24,9 +24,8 @@ This activation publishes five runtime units:
 
 Streams and Communicator remain outside this activation. Brain remains
 validation-only until its own runtime artifact and staging consumer are
-reviewed. The SDK placeholder and the `@0000chat/msg` CLI remain
-checks-only and are never release artifacts. Private Cloud content is never
-included.
+reviewed. The SDK placeholder remains checks-only and is never a release
+artifact. Private Cloud content is never included.
 
 The planner selects each Worker from its runtime paths. The public release
 workflow is a Msg runtime input, so changes to the publication protocol

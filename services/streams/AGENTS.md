@@ -15,7 +15,8 @@ Object backed by SQLite; database integration has not been verified. The
 Worker exposes browser, API, and MCP surfaces. Browser requests use Cloudflare
 Access, while MCP requests use the configured bearer token; a hosted 0000
 account is not required. The Wrangler route and migration configuration are
-present, but deployment has not been verified. No license has been selected.
+present, but deployment has not been verified. The service is licensed under
+AGPL-3.0-only.
 Keep product metadata canonical as `0000-streams`; the Bun workspace package is
 `@0000/streams`.
 

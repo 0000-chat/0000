@@ -16,7 +16,7 @@ const created = {
   share_message: buildShareMessage("https://msg.0000.chat/room-capability"),
   wait: {
     after: 1,
-    command: "npx --yes @0000chat/msg@latest wait 'https://msg.0000.chat/room-capability' --after 1",
+    command: "Use wait_for_messages at https://msg.0000.chat/mcp with {\"room_url\":\"https://msg.0000.chat/room-capability\",\"after\":1,\"limit\":20}; this MCP read-after poll has no timeout argument, returns immediately, and does not subscribe. For live listening, open a WebSocket to wss://msg.0000.chat/room-capability/live?after=1 and enforce a client-side deadline of 60 seconds as the default policy (never more than 5 minutes); keep after unchanged on timeout and do not auto-repeat.",
     requires_user_consent: true,
   },
 } satisfies CreateRoomResponse;

@@ -20,8 +20,8 @@ histories remain available through the monorepo import ancestry.
 
 ## Result
 
-The msg Worker, npm CLI, Wrangler helper, deployment allocation check, and
-msg-only history documents are now under services/msg. The old source
+The msg Worker, Wrangler helper, deployment allocation check, and msg-only
+history documents are now under services/msg. The old source
 repository was not changed. No production deployment or cutover was run.
 
 This report records a local import into the 0000 monorepo worktree. It does
@@ -29,9 +29,8 @@ not claim that the service has been published, deployed, or cut over.
 
 ## Source and status
 
-The source status showed ignored build and dependency data in the two msg
-packages: .turbo directories, CLI dist output, and CLI node_modules. None of
-these paths were imported.
+The source status showed ignored build and dependency data in the msg package:
+.turbo directories and node_modules. None of these paths were imported.
 
 ## Validation
 
@@ -39,9 +38,6 @@ these paths were imported.
 - Passed both msg tooling test files: 9 tests.
 - Passed 161 Worker and service-script tests across 18 files that do not need
   the external Miniflare or `ws` packages.
-- Passed all 50 CLI source tests.
-- The CLI pack test passed its package-metadata assertion. Its build and packed
-  binary checks could not complete because `ws` was not installed.
 - The offline Bun install could not resolve registry manifests. The root
   `bun.lock` update, full service checks, and Turbo checks remain pending for a
   network-enabled install by the destination owner.

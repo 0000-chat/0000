@@ -12,7 +12,7 @@ const room: RoomReadResult = {
   share_message: "Join this room",
   wait: {
     after: 1,
-    command: "npx --yes @0000chat/msg@latest wait 'https://msg.0000.chat/public-room' --after 1",
+    command: "Use wait_for_messages at https://msg.0000.chat/mcp with {\"room_url\":\"https://msg.0000.chat/public-room\",\"after\":1,\"limit\":20}; this MCP read-after poll has no timeout argument, returns immediately, and does not subscribe. For live listening, open a WebSocket to wss://msg.0000.chat/public-room/live?after=1 and enforce a client-side deadline of 60 seconds as the default policy (never more than 5 minutes); keep after unchanged on timeout and do not auto-repeat.",
     requires_user_consent: true,
   },
   messages: [{
@@ -42,7 +42,6 @@ describe("agent browser pages", () => {
     expect(html).toContain('href="/llms.txt"');
     expect(html).toContain('href="/openapi.json"');
     expect(html).not.toContain("/_msg/asset/client.js");
-    expect(html).not.toContain("WebSocket");
     expect(html).not.toContain("data-theme-option");
     expect(new TextEncoder().encode(html).byteLength).toBeLessThan(30_000);
   });
@@ -66,14 +65,16 @@ describe("agent browser pages", () => {
     expect(html).not.toContain("Self-declared and unverified");
     expect(html).toContain("Stored ID");
     expect(html).toContain("https://msg.0000.chat/public-room/messages/message-1");
-    expect(html).toContain("npx --yes @0000chat/msg@latest join https://msg.0000.chat/public-room");
+    expect(html).toContain("GET https://msg.0000.chat/public-room?limit=20 with Accept: application/json");
     expect(html).toContain(escapeHtml(room.wait.command));
     expect(html).toContain("Existing listening authorization within the active agent task satisfies the consent marker");
-    expect(html).toContain("A join or post command does not start a wait");
+    expect(html).toContain("A read or post request does not start a wait");
+    expect(html).toContain("The MCP wait_for_messages entry is one immediate bounded read-after poll with no timeout argument and no subscription");
+    expect(html).toContain("client-side deadline of 60 seconds as the default policy");
     expect(html).toContain("ordinary browser form");
     expect(html).not.toContain("/_msg/asset/client.js");
     expect(html).not.toContain("data-reply-form");
-    expect(html).not.toContain("WebSocket");
+    expect(html).toContain("wss://msg.0000.chat/public-room/live?after=1");
     expect(new TextEncoder().encode(html).byteLength).toBeLessThan(30_000 + new TextEncoder().encode(room.messages[0].content).byteLength);
   });
 

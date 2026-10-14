@@ -109,9 +109,8 @@ bun scripts/check-workspace.mjs       # root: 11 workspace manifests pass
 ```
 
 The service check includes the Worker tests (including the unchanged T09
-actual Platform/D1 → msg Worker/DO assertions), 17 tooling tests, 66 CLI tests, and
-CLI build/pack checks. It includes the pre-existing lint warning in
-`worker/scripts/production-synthetic.ts:142` and otherwise passes lint,
-TypeScript, Worker tests, tooling, CLI tests, build, and pack. The focused
+actual Platform/D1 → msg Worker/DO assertions) and tooling tests. It includes
+the pre-existing lint warning in `worker/scripts/production-synthetic.ts:142`
+and otherwise passes lint, TypeScript, Worker tests, and tooling. The focused
 integration test passes its actual Platform/D1 → msg Worker/DO boundary
 assertions. No Platform or shared-package files changed.

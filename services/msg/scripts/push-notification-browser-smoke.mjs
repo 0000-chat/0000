@@ -6,7 +6,7 @@ import { delimiter, join } from "node:path";
 
 import { PUSH_SERVICE_WORKER_PATH, pushServiceWorkerResponse } from "../worker/src/push-service-worker.ts";
 
-const notificationTitle = "New message in msg";
+const notificationTitle = "New message in 0000.chat";
 const timeoutMs = 15_000;
 
 class CdpConnection {

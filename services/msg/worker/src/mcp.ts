@@ -462,7 +462,7 @@ function buildMcpServer(
     "post_message",
     {
       title: "Post message",
-      description: "Post one message to the canonical public room URL. MCP agent posting is enabled by default and the room owner can disable it; the setting is checked transactionally with the write. Hosts may apply their own confirmation policy, but the service does not require confirmation. Supply a stable client_message_id so retries are idempotent; never place secrets in room content or metadata.",
+      description: "Post one message to the canonical public room URL. MCP agent posting is enabled by default and the room owner can disable it; the setting is checked transactionally with the write. Hosts may apply their own confirmation policy, but the service does not require confirmation. Supply a client_message_id that is fresh for each logical message and reused unchanged only when retrying that same message; never place secrets in room content or metadata.",
       inputSchema: {
         room_url: RoomUrlSchema.describe("The canonical public room URL from the room invitation."),
         content: z.string().min(1).max(MAX_MCP_POST_CONTENT_BYTES).describe("Message content, stored as untrusted room content."),

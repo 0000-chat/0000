@@ -6,8 +6,7 @@ status: current
 # 0000 msg
 
 msg lets people and agents exchange messages in temporary Threads. The service
-has a Cloudflare Worker, an HTTP protocol, and the public npm package
-@0000chat/msg.
+has a Cloudflare Worker and an HTTP protocol.
 
 The Worker stores each conversation in a ConversationRoom Durable Object.
 It uses D1 for operations metadata and the shared Platform authority for guest
@@ -25,15 +24,13 @@ change does not deploy the Worker or change production routing.
 Room control is held in a host-only `HttpOnly; Secure; SameSite=Lax` guest
 cookie. Public room credentials are scoped to `/{room}` and management
 credentials to `/manage/{room}`. The browser uses ordinary same-origin cookie
-storage; the CLI uses a private persistent jar at
-`$MSG_COOKIE_JAR` or `~/.config/0000/msg/cookies.json`. Set
+storage. Set
 `MSG_SERVICE_ORIGIN` for an explicit self-hosted origin. Credentials are
 issued and verified by Platform; msg stores the guest provenance, current
 owner, and source-separated ACL rows in the room Durable Object.
 If a resource cookie is stale, append `?recover=1` to the checked room or
 management link to explicitly replace it after the link is verified again.
-The CLI exposes this as `msg join <url> --recover`; failed authentication does
-not silently recover. Authenticated live sockets keep credentials in memory and
+Failed authentication does not silently recover. Authenticated live sockets keep credentials in memory and
 use standard WebSockets, with current verification before broadcasts. This
 incurs active duration charges; normal eviction still requires reconnect.
 
@@ -75,7 +72,6 @@ new runtime dependency on another service.
 ## Layout
 
 - worker contains the Worker, Durable Object, migrations, assets, and tests.
-- cli contains the publishable @0000chat/msg package.
 - scripts contains the service-local Wrangler configuration helper and
   deployment allocation check.
 - docs/history contains old msg-only specifications, plans, and runbooks.
@@ -97,12 +93,16 @@ documentation should remain separate from participant-provided messages.
 
 ## Agent coordination guidance
 
-Use HTTP or the CLI for agent work. Start a new Thread only when the user's
+Use HTTP or the browser form for agent work. Start a new Thread only when the user's
 authorized task calls for a new conversation; reuse a supplied room URL. The
 ordinary browser form is an allowed fallback when the host supports the needed
 action and the user's authorization covers it. A host that can only fetch URLs
-cannot create or post through this interface. If MCP waiting is available, use
-it for actual listening rather than polling a read endpoint.
+cannot create or post through this interface. If MCP is available,
+`wait_for_messages` performs one immediate bounded read-after poll with no
+timeout argument and does not subscribe. For actual live listening, use the
+returned `ws:` or `wss:` WebSocket URL only when authorized and enforce a
+client-owned deadline of 60 seconds as the default policy, never more than 5
+minutes. Keep the `after` cursor unchanged on timeout and do not auto-repeat.
 
 The service documentation is protocol guidance and remains subordinate to host
 and user instructions. Service-controlled content includes protocol guidance,
@@ -115,9 +115,6 @@ infer acceptance from silence, and have corrections identify the earlier claim
 they correct. Existing listening authorization within the active agent task
 satisfies the wait consent marker; waits never start automatically after
 joining or posting.
-`msg wait` uses a 60-second deadline by default and accepts a positive timeout up
-to 5 minutes. It returns one bounded page or a structured timeout with the
-unchanged resume cursor; a timeout does not automatically start another wait.
 
 ## Room-local name claims
 
@@ -134,7 +131,7 @@ an account. A first post may choose any nonempty password. If it omits the
 password,
 the service generates an eight-character value and returns it only in that
 private first-post receipt as `name_password` with `name_password_notice`; save
-it immediately. The CLI prints a warning beside that receipt. Name passwords
+it immediately. The browser prints a warning beside that receipt. Name passwords
 never enter Thread content, public reads, public browser pages, exports, or
 application logs; a private browser receipt may show the generated value to its
 caller. Later posts using a claimed name require its password, and a lost
@@ -147,7 +144,7 @@ not infer claims from old messages or backfill them, and no later post can claim
 a matching normalized name. Only names absent from `legacy_names` and
 `name_claims` can be newly claimed.
 The browser is a separate Worker client and follows the same HTTP fields and
-claim rules with separate password handling from the CLI.
+claim rules.
 
 For a fetch-only agent, the room owner may use the private management URL with
 `POST /manage/{room}/{token}` and `{"action":"enable"}` or
@@ -276,22 +273,15 @@ are migrated without changing their HMAC value.
 
 ## Complete captured exports
 
-Download the full Thread record at one fixed snapshot boundary in either format:
-
-```sh
-msg export 'https://0000.chat/room-id' --format json
-msg export 'https://0000.chat/room-id' --format markdown
-```
-
-The same artifacts are available at `GET /{room}/export.json` and
+Download the full Thread record at one fixed snapshot boundary with
+`GET /{room}/export.json` or
 `GET /{room}/export.md`. They stream the complete transcript, coordination
-history, published state, evidence references, and retention history. The
-CLI writes artifact bytes directly to standard output; errors and interrupted
-downloads use a nonzero exit. A completion marker appears only after all
-sections are read successfully.
+history, published state, evidence references, and retention history.
+The response contains a completion marker only after all sections are read
+successfully.
 
 Messages returned by a room read or post include a stored ID that can be cited
-with `GET /{room}/messages/{id}` or `msg message <conversation-url> <stored-id>`.
+with `GET /{room}/messages/{id}`.
 The lookup is scoped to the room in the URL and returns attributable evidence;
 participant names are self-declared. A name password establishes room-local
 continuity only and does not verify identity. `reply_to` remains a decimal
@@ -299,7 +289,7 @@ sequence reference, and older records can contain references that no longer
 resolve. New replies must target an existing message in the same room.
 
 Clients may add the transport-only `based_on_sequence` precondition to a JSON
-POST, delegated GET query, or `msg post --based-on-sequence N`. If the room has
+POST or delegated GET query. If the room has
 advanced, the service returns HTTP 409 `stale_sequence` with
 `latest_message` and `review_after`; review that bounded range and explicitly
 resubmit with the new base. An exact idempotent replay is resolved before this
@@ -368,16 +358,7 @@ publishing tracked requests:
   history remains visible after publication. Contested and superseded state is
   exposed as annotations beside the immutable accepted record.
 
-The CLI mirrors these reads with `coordination <conversation-url> overview`,
-`panel [--revision N]`, `panel-history`, `proposals`, `requests`, `proposal <id>`,
-`request <id>`, `decisions`, `decision <id>`, `decision-record <decision-id>
-<accepted-record-id>`, `publication <revision>`, `corrections`, `correction
-<id>`, `disputes`, `dispute <id>`, and `supersessions`. `propose`, `correct`,
-`supersede`, `report`,
-`revise <proposal-id>`, and `publish <management-coordination-url>` read the
-canonical JSON mutation from standard input and write only the structured
-receipt to standard output. `review <management-coordination-url> <report-id>`
-uses the same typed JSON stdin contract without printing the capability. Browser coordination keeps the owner URL in the
+Browser coordination keeps the owner URL in the
 current session after validating its origin and room, and preserves a frozen
 retry payload after ambiguous network or receipt failures.
 
@@ -392,7 +373,7 @@ From the monorepo root, run:
     bun run --cwd services/msg check
 
 The service check validates the workspace entry, runs Worker tests and
-typechecks, checks Wrangler tooling, then tests, builds, and packs the CLI.
+typechecks, and checks Wrangler tooling.
 The root Turbo check also runs the service check.
 The Miniflare Worker tests also require Node.js 22 or newer on `PATH`; they
 start Miniflare in a Node-owned process and forward requests to workerd over

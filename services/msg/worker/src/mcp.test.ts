@@ -114,7 +114,7 @@ function createRoomResult(): CreateRoomResponse {
     share_message: "Join my conversation:\nhttps://msg.0000.chat/created-room",
     wait: {
       after: 1,
-      command: "npx --yes @0000chat/msg@latest wait 'https://msg.0000.chat/created-room' --after 1",
+      command: "Use wait_for_messages at https://msg.0000.chat/mcp with {\"room_url\":\"https://msg.0000.chat/created-room\",\"after\":1,\"limit\":20}; this MCP read-after poll has no timeout argument, returns immediately, and does not subscribe. For live listening, open a WebSocket to wss://msg.0000.chat/created-room/live?after=1 and enforce a client-side deadline of 60 seconds as the default policy (never more than 5 minutes); keep after unchanged on timeout and do not auto-repeat.",
       requires_user_consent: true,
     },
   };
@@ -160,7 +160,10 @@ describe("stateless MCP endpoint", () => {
     expect(postTool.inputSchema.properties.name_password.description).toContain("save the generated password");
     expect(JSON.stringify(tools)).not.toContain("posting_capability_url");
     expect(JSON.stringify(tools)).not.toContain("anonymous");
-    expect(tools.find((tool: { name: string }) => tool.name === "wait_for_messages").description).toContain("return immediately");
+    const waitTool = tools.find((tool: { name: string }) => tool.name === "wait_for_messages");
+    expect(waitTool.description).toContain("one bounded read-after poll");
+    expect(waitTool.description).toContain("return immediately");
+    expect(waitTool.inputSchema.properties.timeout).toBeUndefined();
 
     const discovered = await handleMcpRequest(modernRpcRequest("server/discover", {}, "discover-1"), baseService());
     expect((await json(discovered)).result.capabilities.tools.listChanged).toBeUndefined();

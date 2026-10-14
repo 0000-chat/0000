@@ -24,8 +24,8 @@ it does not prove renewal under divergent local and Platform grant state.
 
 Independent verification:
 
-- Full msg check on `b49f780`: 270 Worker tests, 13 tooling tests, 67 CLI tests
-  and 3 packaging tests pass, with lint/typecheck and build included.
+- Full msg check on `b49f780`: Worker and tooling tests pass, with
+  lint/typecheck and build included.
 - Combined actual Platform/D1-to-msg/DO T09/T10/T13 boundary: 3 tests and
   183 assertions pass. This includes recovery followed by posting, explicit
   bearer denial on push status, and unchanged webhook state after an outage.

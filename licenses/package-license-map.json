@@ -101,19 +101,6 @@
       "classification": "agpl-runtime",
       "manifest": "services/msg/package.json"
     },
-    "services/msg/cli": {
-      "name": "@0000chat/msg",
-      "license": "MIT",
-      "classification": "legacy-exception",
-      "manifest": "services/msg/cli/package.json",
-      "licenseText": "services/msg/cli/LICENSE",
-      "sha256": "521b03adebffd3c4e2696f2327ad57850220ca0e7ea85c3bf96818cb42f71830",
-      "review": {
-        "status": "reviewed",
-        "decision": "preserve-without-relicensing",
-        "reason": "The existing published msg CLI already declares MIT. This slice records its disposition while copyright authority and a migration decision remain open."
-      }
-    },
     "services/msg/worker": {
       "name": "@0000/msg-worker",
       "license": "AGPL-3.0-only",

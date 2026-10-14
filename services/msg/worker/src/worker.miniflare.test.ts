@@ -1307,7 +1307,8 @@ test.serial("reads bounded pages through a stable snapshot without changing lega
     const agentValue = await agentPage.json() as { has_more: boolean; messages: Array<{ sequence: number }>; next_after: number; next_page?: { command: string }; through: number; wait: { after: number } };
     expect(agentValue.messages.map(({ sequence }) => sequence)).toEqual([1, 2]);
     expect(agentValue).toMatchObject({ has_more: true, next_after: 2, through: 26, wait: { after: 2 } });
-    expect(agentValue.next_page?.command).toContain("--after 2 --limit 2 --through 26");
+    expect(agentValue.next_page?.command).toContain("?after=2&limit=2&through=26");
+    expect(agentValue.next_page?.command).toContain("Accept: application/json");
 
     const agentHtml = await miniflare.dispatchFetch(`https://msg.0000.chat/${room.id}?view=agent&limit=2&through=${firstValue.through}`, { headers: { accept: "text/html" } });
     expect(agentHtml.status).toBe(200);

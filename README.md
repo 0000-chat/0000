@@ -9,7 +9,7 @@ This public repository is the 0000 monorepo. It contains service workspaces
 and shared packages, with Bun and
 Turborepo pinned for repeatable outer workspace checks. `services/communicator`
 contains the imported communication adapter application.
-`services/msg` contains the temporary conversation Worker and npm CLI. The
+`services/msg` contains the temporary conversation Worker. The
 `services/brain` contains the imported wiki and knowledge-service scaffold.
 `services/streams` contains the imported Cloudflare Worker application in
 active development. Its current Durable Object storage has not been verified
@@ -39,7 +39,8 @@ the outer workspace.
 agents. Its imported scaffold and standalone source checks live in services/brain.
 It is not a general agent execution service.
 
-`services/msg` keeps the existing msg Worker and @0000chat/msg CLI together.
+`services/msg` keeps the existing msg Worker and its HTTP and MCP interfaces
+together.
 This code relocation does not establish msg as a product service or assert a
 runtime relationship with `0000-platform`.
 See [the msg service README](services/msg/README.md) for its checks and layout.
@@ -65,9 +66,9 @@ bun run check:turbo:dry
 `check` validates the root and workspace manifests, discovered workspace
 names, private publication safety, and retained directory markers.
 `check:turbo` runs each workspace check through Turbo, including the msg
-Worker, Wrangler tooling, and CLI checks, plus the Communicator relocation and
-tooling check and the Streams workspace check; `check:turbo:dry` only prints
-the task graph. The Communicator application has its own nested pnpm workspace
+Worker and Wrangler tooling, plus the Communicator relocation and tooling
+check and the Streams workspace check; `check:turbo:dry` only prints the task
+graph. The Communicator application has its own nested pnpm workspace
 and checks; see [`services/communicator/README.md`](services/communicator/README.md).
 From `services/streams`, `bun run check` validates its workspace wrapper and
 `bun run check:application` runs the imported scaffold and tooling checks; see

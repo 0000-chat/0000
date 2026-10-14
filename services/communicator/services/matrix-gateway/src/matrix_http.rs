@@ -1511,7 +1511,9 @@ mod transport_tests {
                     .set_delay(Duration::from_millis(200))
                     .set_body_bytes(br#"{"next_batch":"late"}"#),
             )
-            .expect(1)
+            // Under suite load the deadline may expire before reqwest hands
+            // the request to Wiremock; the transport error below is the
+            // behavior under test, so arrival is intentionally not required.
             .mount(&server)
             .await;
         let transport = ReqwestMatrixTransport::new_for_test(

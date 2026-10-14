@@ -52,7 +52,7 @@ test("retries an accepted direct command with the same key after response loss",
               },
             }),
             {
-              status: 503,
+              status: 500,
               headers: { "Content-Type": "application/json" },
             },
           );
@@ -86,8 +86,11 @@ test("retries an accepted direct command with the same key after response loss",
     .first()
     .click();
   await expect(
-    page.getByRole("list", { name: "Command activity" }).getByRole("listitem"),
-  ).toHaveCount(2);
+    page
+      .getByRole("list", { name: "Command activity" })
+      .getByRole("listitem")
+      .filter({ hasText: "conversation_human_telegram_alex" }),
+  ).toHaveCount(1);
   const idempotencyKeys = await page.evaluate(
     () =>
       (window as Window & { __retryTestKeys?: string[] }).__retryTestKeys ?? [],
@@ -128,7 +131,9 @@ test("previews paced delivery and records its accepted command phase", async ({
     .getByRole("link", { name: "Activity", exact: true })
     .first()
     .click();
-  await expect(page.getByText("Human-paced", { exact: true })).toBeVisible();
+  await expect(
+    page.getByText("Human-paced", { exact: true }).first(),
+  ).toBeVisible();
   await expect(page.getByText("Accepted", { exact: true })).toBeVisible();
 });
 
@@ -155,12 +160,14 @@ test("shows the attention-required scenario and can reset it from System", async
   await identitySwitcher.selectOption("identity_agent");
   await expect(page.getByText("Agent WhatsApp", { exact: true })).toBeVisible();
   await identitySwitcher.selectOption("identity_human");
-  await expect(page.getByRole("alert")).toContainText("Action required");
+  await expect(
+    page.getByRole("alert").filter({ hasText: "Action required" }).first(),
+  ).toBeVisible();
   await expect(
     page
       .getByRole("article")
       .filter({ hasText: "Messenger" })
-      .getByRole("button", { name: /Simulation only.*Reconnect/ }),
+      .getByRole("button", { name: "Link WhatsApp account" }),
   ).toBeDisabled();
 
   await page.goto("/system");

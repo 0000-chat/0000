@@ -5,12 +5,12 @@ status: current
 
 # msg service rules
 
-Keep msg Worker code, CLI code, configuration, and service documentation in
-this directory. Root workspace changes should stay limited to the service
-manifest, lockfile, and root README when the service needs them.
+Keep msg Worker code, configuration, and service documentation in this
+directory. Root workspace changes should stay limited to the service manifest,
+lockfile, and root README when the service needs them.
 
 Run bun run check from this directory before handoff. This check covers the
-Worker, Wrangler tooling, and CLI. Run the monorepo root checks after changing
+Worker and Wrangler tooling. Run the monorepo root checks after changing
 workspace integration.
 
 Do not put secrets, generated caches, node_modules, or deployment output in

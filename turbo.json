@@ -1,5 +1,6 @@
 {
   "$schema": "https://turborepo.com/schema.json",
+  "globalPassThroughEnv": ["BUN_INSTALL", "TMPDIR"],
   "tasks": {
     "check": {
       "dependsOn": ["^check"],

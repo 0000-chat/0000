@@ -265,7 +265,7 @@ export function createMsgAuthenticator(
       const control = await this.control(request);
       const cookies = parseCookies(request.headers.get("cookie"));
       const resourceCookie = cookies.get(input.source === "management" ? MANAGEMENT_COOKIE : RESOURCE_COOKIE);
-      // A public room's read credential is also the browser/CLI's durable
+      // A public room's read credential is also the browser/client's durable
       // participant credential for subsequent posts.  The link proof still
       // gates issuance, while the DO ACL checks the requested action.
       const defaultCapabilities = input.source === "public"

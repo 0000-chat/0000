@@ -22,8 +22,8 @@ class. The Wrangler route and migration configuration are present, but this
 service's deployment has not been verified. The planned direct MCP entry is
 `https://streams.0000.chat/mcp`; the hostname does not change the configured
 authentication or imply permission to access a stream. See the [MCP topology
-contract](../../docs/architecture/mcp-topology.md). No license has been
-selected.
+contract](../../docs/architecture/mcp-topology.md). The service is licensed
+under AGPL-3.0-only.
 
 From the monorepo root, run the workspace checks:
 
