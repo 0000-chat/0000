@@ -3,6 +3,7 @@ import {
   createPlatformBrowserClient,
   createPlatformClient,
   createPlatformGuestClient,
+  createJsonTransport,
   isSameOriginUnsafeBrowserRequest,
   selectBrowserCredential,
   type BrowserOAuthTransaction,
@@ -54,11 +55,31 @@ describe("Platform verification client", () => {
     expect(new Headers(call?.init.headers).get("authorization")).toBe(
       "Bearer service-verifier-only",
     );
+    expect(new Headers(call?.init.headers).get("user-agent")).toBe(
+      "0000-platform-client/1",
+    );
     expect(call?.init.redirect).toBe("manual");
     expect(call?.init.signal).toBeInstanceOf(AbortSignal);
     expect(JSON.parse(String(call?.init.body))).toEqual({
       credential: "end-user-credential",
     });
+  });
+
+  it("keeps a caller-supplied User-Agent without creating a case variant", async () => {
+    let requestHeaders: Headers | undefined;
+    const transport = createJsonTransport(async (_input, init) => {
+      requestHeaders = new Headers(init?.headers);
+      return Response.json({ ok: true });
+    }, 1000);
+
+    await transport(new URL("https://platform.test/probe"), {
+      headers: { "User-Agent": "caller-client/7", "X-Caller": "kept" },
+    });
+
+    expect(requestHeaders?.get("user-agent")).toBe("caller-client/7");
+    expect(requestHeaders?.get("User-Agent")).toBe("caller-client/7");
+    expect(requestHeaders?.get("x-caller")).toBe("kept");
+    expect([...requestHeaders ?? []].filter(([name]) => name === "user-agent")).toHaveLength(1);
   });
 
   it("treats a wrong authority or malformed success response as an authority failure", async () => {
@@ -954,12 +975,17 @@ describe("Platform guest control client", () => {
   };
 
   it("uses the issuer-only transport and validates a grant success", async () => {
-    const calls: Array<{ path: string; authorization: string | null }> = [];
+    const calls: Array<{
+      path: string;
+      authorization: string | null;
+      userAgent: string | null;
+    }> = [];
     const fetch = mock(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = new URL(String(input));
       calls.push({
         path: url.pathname,
         authorization: new Headers(init?.headers).get("authorization"),
+        userAgent: new Headers(init?.headers).get("user-agent"),
       });
       if (url.pathname === "/internal/v1/guests") {
         return Response.json(
@@ -997,6 +1023,9 @@ describe("Platform guest control client", () => {
     expect(grant.status).toBe("success");
     expect(
       calls.every((call) => call.authorization === "Bearer guest-issuer-only"),
+    ).toBe(true);
+    expect(
+      calls.every((call) => call.userAgent === "0000-platform-client/1"),
     ).toBe(true);
     expect(calls.map((call) => call.path)).toEqual([
       "/internal/v1/guests",

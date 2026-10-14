@@ -63,6 +63,7 @@ export interface PlatformGuestClient {
 
 const DEFAULT_TIMEOUT_MS = 10_000;
 const MAX_TIMEOUT_MS = 60_000;
+const DEFAULT_PLATFORM_USER_AGENT = "0000-platform-client/1";
 
 type JsonTransportResult =
   | { response: Response; value: unknown }
@@ -143,6 +144,7 @@ export function createJsonTransport(
         try {
           const response = await request(url, {
             ...init,
+            headers: withDefaultUserAgent(init.headers),
             // Cloudflare's edge fetch does not implement redirect:error.
             // Manual mode still prevents forwarding the request, and every
             // redirect response is rejected before its body is trusted.
@@ -177,6 +179,14 @@ export function createJsonTransport(
       });
     });
   };
+}
+
+function withDefaultUserAgent(headers: HeadersInit | undefined): Headers {
+  const result = new Headers(headers);
+  if (!result.has("user-agent")) {
+    result.set("user-agent", DEFAULT_PLATFORM_USER_AGENT);
+  }
+  return result;
 }
 
 export function createPlatformClient(
