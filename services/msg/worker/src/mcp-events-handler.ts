@@ -1,6 +1,6 @@
 import { ProtocolError } from "./errors";
 import { publicConversationUrl, type McpPostMessageInput, type McpResponseOrigin, type McpSubscribeResponse, type RoomService } from "./protocol";
-import { validateReadLimit, validateThrough } from "./room-domain";
+import { MAX_READ_LIMIT, validateReadLimit, validateThrough } from "./room-domain";
 import {
   canonicalJson,
   constantTimeEqual,
@@ -62,7 +62,7 @@ export const MCP_TOOL_DEFINITIONS = [
     name: "read_thread",
     title: "Read Thread messages",
     description: "Read full retained messages and bounded Thread context for one selected Thread.",
-    inputSchema: { type: "object", properties: { room_url: { type: "string", format: "uri" }, after: { type: "integer", minimum: 0 }, limit: { type: "integer", minimum: 1 }, through: { type: "integer", minimum: 1 } }, required: ["room_url"], additionalProperties: false },
+    inputSchema: { type: "object", properties: { room_url: { type: "string", format: "uri" }, after: { type: "integer", minimum: 0 }, limit: { type: "integer", minimum: 1, maximum: MAX_READ_LIMIT }, through: { type: "integer", minimum: 1 } }, required: ["room_url"], additionalProperties: false },
     annotations: { readOnlyHint: true, openWorldHint: false, destructiveHint: false },
   },
   {
@@ -162,7 +162,7 @@ async function callTool(params: Record<string, unknown>, auth: McpAuthContext, s
   const args = argumentsValue as Record<string, unknown>;
   try {
     const result = await invokeTool(name, args, auth, service, options);
-    return { content: [{ type: "text", text: JSON.stringify(result) }], structuredContent: result };
+    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }], structuredContent: result };
   } catch (error) {
     if (error instanceof McpRpcFailure) return { isError: true, content: [{ type: "text", text: error.message }] };
     throw error;
@@ -180,6 +180,7 @@ async function invokeTool(name: string, args: Record<string, unknown>, auth: Mcp
     await requireScope(auth, room, "read");
     if (!service.mcpReadThread) throw unavailable();
     const after = integerOr(args.after, 0);
+    if (args.limit !== undefined && typeof args.limit !== "number") throw new McpRpcFailure(-32602, "The limit must be an integer from 1 to 100.");
     const limit = args.limit === undefined ? undefined : validateReadLimit(String(args.limit));
     const through = args.through === undefined ? undefined : validateThrough(String(args.through));
     return service.mcpReadThread({ room, after, ...(limit === undefined ? {} : { limit }), ...(through === undefined ? {} : { through }) });

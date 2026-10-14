@@ -2,7 +2,7 @@ import { createMcpHandler, isLegacyRequest, McpServer, WebStandardStreamableHTTP
 import { z } from "zod/v4";
 
 import { ERROR_CODES, ProtocolError } from "./errors";
-import { byteLength } from "./room-domain";
+import { byteLength, MAX_READ_LIMIT } from "./room-domain";
 import { foregroundWaitForConversation, MCP_READ_BYTE_BUDGET_BYTES, PROTOCOL_VERSION, stripLegacyAbsoluteExpiry, type CreateRoomResponse, type McpPostMessageResponse, type ReadRoomResponse, type RequestBody, type RoomMessage, type RoomService, type RoomStatusResponse } from "./protocol";
 import { parseWebhookCreateInput, parseWebhookUpdateInput, WebhookInputError } from "./webhooks";
 import { handleMcpRequest as handleMcp2Request, MCP_TOOL_DEFINITIONS as DURABLE_MCP_TOOL_DEFINITIONS, type McpAuthenticator } from "./mcp-events-handler";
@@ -14,7 +14,6 @@ const MAX_MCP_REQUEST_BYTES = 80 * 1024;
 export const MAX_MCP_WIRE_RESPONSE_BYTES = 512 * 1024;
 const MAX_ROOM_URL_CHARS = 2_048;
 const MAX_MCP_POST_CONTENT_BYTES = 64 * 1024;
-const MAX_READ_LIMIT = 100;
 const DEFAULT_READ_LIMIT = 50;
 const CREATE_NAME_PASSWORD_DESCRIPTION = "Optional nonempty room-local password shared by the author and display name. If omitted for this first message, the service may generate an eight-character password; save the generated password from the private response for later posts. Keep it private.";
 const POST_NAME_PASSWORD_DESCRIPTION = "Optional nonempty room-local password shared by the author and display name. Required when either supplied name is already claimed. Omit it for a new name so the service may generate an eight-character password; save the generated password from the private response for later posts. Keep it private.";
@@ -60,7 +59,7 @@ export interface McpWorkerOptions {
 
 const RoomUrlSchema = z.string().min(1).max(MAX_ROOM_URL_CHARS);
 const CursorSchema = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).optional();
-const ReadLimitSchema = z.number().int().positive().max(MAX_READ_LIMIT).optional();
+const ReadLimitSchema = z.number().int().min(1).max(MAX_READ_LIMIT).optional();
 const MessageIdSchema = z.string().min(1).max(128);
 const IdentitySchema = z.string().min(1).max(80);
 const WebhookIdSchema = z.string().uuid();
@@ -372,10 +371,10 @@ function buildMcpServer(
         const room = parsePublicRoomUrl(room_url, publicOrigin);
         await enforceMcpRateLimit(request, options.rateLimits?.reads);
         if (!service.read) throw new ProtocolError(ERROR_CODES.serviceUnavailable, "Room reads are unavailable.", 503);
-        const result = stripLegacyAbsoluteExpiry(await service.read({ after, limit: limit + 1, max_bytes: MCP_READ_BYTE_BUDGET_BYTES, room })) as ReadRoomResponse;
+        const result = stripLegacyAbsoluteExpiry(await service.read({ after, limit, max_bytes: MCP_READ_BYTE_BUDGET_BYTES, room })) as ReadRoomResponse;
         const output = boundedReadOutput(result, after, limit);
         return {
-          content: [{ type: "text" as const, text: "Room read complete." }],
+          content: [{ type: "text" as const, text: formatMcpPayload(output) }],
           structuredContent: output,
         };
       } catch (error) {
@@ -408,10 +407,10 @@ function buildMcpServer(
         const room = parsePublicRoomUrl(room_url, publicOrigin);
         await enforceMcpRateLimit(request, options.rateLimits?.reads);
         if (!service.read) throw new ProtocolError(ERROR_CODES.serviceUnavailable, "Room reads are unavailable.", 503);
-        const result = stripLegacyAbsoluteExpiry(await service.read({ after, limit: limit + 1, max_bytes: MCP_READ_BYTE_BUDGET_BYTES, room })) as ReadRoomResponse;
+        const result = stripLegacyAbsoluteExpiry(await service.read({ after, limit, max_bytes: MCP_READ_BYTE_BUDGET_BYTES, room })) as ReadRoomResponse;
         const output = { ...boundedReadOutput(result, after, limit), mode: "read_after" as const };
         return {
-          content: [{ type: "text" as const, text: "Room read-after poll complete." }],
+          content: [{ type: "text" as const, text: formatMcpPayload(output) }],
           structuredContent: output,
         };
       } catch (error) {
@@ -444,7 +443,7 @@ function buildMcpServer(
         if (!service.roomStatus) throw new ProtocolError(ERROR_CODES.serviceUnavailable, "Room status is unavailable.", 503);
         const output = stripLegacyAbsoluteExpiry(await service.roomStatus({ room })) as RoomStatusResponse;
         return {
-          content: [{ type: "text" as const, text: "Room status read complete." }],
+          content: [{ type: "text" as const, text: formatMcpPayload(output) }],
           structuredContent: output,
         };
       } catch (error) {
@@ -516,7 +515,7 @@ function buildMcpServer(
           if (typeof output.name_password_notice === "string") textLines.push(output.name_password_notice);
         }
         return {
-          content: [{ type: "text" as const, text: textLines.join("\n") }],
+          content: [{ type: "text" as const, text: `${textLines.join("\n")}\n${formatMcpPayload(output)}` }],
           structuredContent: output,
         };
       } catch (error) {
@@ -557,11 +556,11 @@ function buildMcpServer(
           content_type: response.headers.get("content-type") ?? (format === "json" ? "application/json" : "text/markdown"),
           format,
         };
-        if (mcpToolWireBytes(structuredContent, "Room export complete.") > MAX_MCP_WIRE_RESPONSE_BYTES) {
+        if (mcpToolWireBytes(structuredContent, body) > MAX_MCP_WIRE_RESPONSE_BYTES) {
           throw new McpResponseLimitError("The room export exceeded the maximum wire size.");
         }
         return {
-          content: [{ type: "text" as const, text: "Room export complete." }],
+          content: [{ type: "text" as const, text: body }],
           structuredContent,
         };
       } catch (error) {
@@ -597,7 +596,7 @@ function buildMcpServer(
           token,
         }));
         return {
-          content: [{ type: "text" as const, text: action === "delete" ? "Room deleted." : "Room management action complete." }],
+          content: [{ type: "text" as const, text: formatMcpPayload(output) }],
           structuredContent: output,
         };
       } catch (error) {
@@ -636,7 +635,7 @@ function registerWebhookTools(
         await enforceMcpRateLimit(request, options.rateLimits?.reads);
         if (!service.listWebhooks) throw new ProtocolError(ERROR_CODES.serviceUnavailable, "Webhook listing is unavailable.", 503);
         const output = await service.listWebhooks({ room });
-        return { content: [{ type: "text" as const, text: "Webhook list read complete." }], structuredContent: output };
+        return { content: [{ type: "text" as const, text: formatMcpPayload(output) }], structuredContent: output };
       } catch (error) {
         return mcpToolError(error, "The webhook list could not be read.");
       }
@@ -670,7 +669,7 @@ function registerWebhookTools(
         await enforceMcpRateLimit(request, options.rateLimits?.posts);
         if (!service.createWebhook) throw new ProtocolError(ERROR_CODES.serviceUnavailable, "Webhook creation is unavailable.", 503);
         const output = await service.createWebhook({ room, ...input });
-        return { content: [{ type: "text" as const, text: "Webhook created." }], structuredContent: output };
+        return { content: [{ type: "text" as const, text: formatMcpPayload(output) }], structuredContent: output };
       } catch (error) {
         return mcpToolError(error, "The webhook could not be created.");
       }
@@ -699,7 +698,7 @@ function registerWebhookTools(
         await enforceMcpRateLimit(request, options.rateLimits?.posts);
         if (!service.updateWebhook) throw new ProtocolError(ERROR_CODES.serviceUnavailable, "Webhook update is unavailable.", 503);
         const output = await service.updateWebhook({ id: webhook_id, room, ...input });
-        return { content: [{ type: "text" as const, text: "Webhook updated." }], structuredContent: output };
+        return { content: [{ type: "text" as const, text: formatMcpPayload(output) }], structuredContent: output };
       } catch (error) {
         return mcpToolError(error, "The webhook could not be updated.");
       }
@@ -721,7 +720,7 @@ function registerWebhookTools(
         await enforceMcpRateLimit(request, options.rateLimits?.posts);
         if (!service.removeWebhook) throw new ProtocolError(ERROR_CODES.serviceUnavailable, "Webhook removal is unavailable.", 503);
         const output = await service.removeWebhook({ id: webhook_id, room });
-        return { content: [{ type: "text" as const, text: "Webhook removed." }], structuredContent: output };
+        return { content: [{ type: "text" as const, text: formatMcpPayload(output) }], structuredContent: output };
       } catch (error) {
         return mcpToolError(error, "The webhook could not be removed.");
       }
@@ -750,7 +749,7 @@ function registerWebhookTools(
           const operation = service[method];
           if (!operation) throw new ProtocolError(ERROR_CODES.serviceUnavailable, `Webhook ${action} is unavailable.`, 503);
           const output = await operation({ id: webhook_id, room });
-          return { content: [{ type: "text" as const, text: `Webhook ${action}d.` }], structuredContent: output };
+          return { content: [{ type: "text" as const, text: formatMcpPayload(output) }], structuredContent: output };
         } catch (error) {
           return mcpToolError(error, `The webhook could not be ${action}d.`);
         }
@@ -773,7 +772,7 @@ function registerWebhookTools(
         await enforceMcpRateLimit(request, options.rateLimits?.posts);
         if (!service.rotateWebhookSecret) throw new ProtocolError(ERROR_CODES.serviceUnavailable, "Webhook secret rotation is unavailable.", 503);
         const output = await service.rotateWebhookSecret({ id: webhook_id, room });
-        return { content: [{ type: "text" as const, text: "Webhook secret rotated." }], structuredContent: output };
+        return { content: [{ type: "text" as const, text: formatMcpPayload(output) }], structuredContent: output };
       } catch (error) {
         return mcpToolError(error, "The webhook secret could not be rotated.");
       }
@@ -795,7 +794,7 @@ function registerWebhookTools(
         await enforceMcpRateLimit(request, options.rateLimits?.posts);
         if (!service.redeliverWebhook) throw new ProtocolError(ERROR_CODES.serviceUnavailable, "Webhook redelivery is unavailable.", 503);
         const output = await service.redeliverWebhook({ eventId: event_id, id: webhook_id, room });
-        return { content: [{ type: "text" as const, text: "Webhook redelivery request complete." }], structuredContent: output };
+        return { content: [{ type: "text" as const, text: formatMcpPayload(output) }], structuredContent: output };
       } catch (error) {
         return mcpToolError(error, "The webhook redelivery request could not be completed.");
       }
@@ -836,7 +835,13 @@ function createRoomToolText(result: ReturnType<typeof safeCreateOutput>, replaye
     lines.push(`Generated name password: ${result.name_password}`);
     if (typeof result.name_password_notice === "string") lines.push(result.name_password_notice);
   }
+  const { manage_url: _manageUrl, ...publicResult } = result;
+  lines.push(formatMcpPayload(publicResult));
   return lines.join("\n");
+}
+
+function formatMcpPayload(output: unknown): string {
+  return JSON.stringify(output, null, 2);
 }
 
 function parseExportJson(value: string): string | Record<string, unknown> {
@@ -995,7 +1000,9 @@ function boundedReadOutput(result: ReadRoomResponse, after: number, limit: numbe
 }
 
 function mcpReadWireBytes(output: McpReadOutput): number {
-  return mcpToolWireBytes(output, "Room read complete.");
+  // The wait response adds mode to the same read payload. Reserve it in both paths.
+  const waitOutput = { ...output, mode: "read_after" };
+  return mcpToolWireBytes(waitOutput, formatMcpPayload(waitOutput));
 }
 
 function mcpToolWireBytes(output: unknown, text: string): number {
