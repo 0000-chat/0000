@@ -47,6 +47,11 @@ units, keeping Msg, its MCP Events companion, and Platform on one release
 version. Package documentation and test-only changes remain validation-only and
 do not create runtime artifacts by themselves.
 
+The Msg Worker and MCP Events dispatcher are a release pair. Any `msg-worker`
+runtime change also selects `msg-webhook-dispatcher`, so the release event
+contains the companion archive from the same source commit and attestation.
+Dispatcher-only source changes remain scoped to the dispatcher unit.
+
 Platform runtime paths select the released `platform-worker` artifact. Its
 route-free bundle carries the public Worker, D1 migration ledger, neutral
 bindings, rate-limit contract, and provisioning helper described below.

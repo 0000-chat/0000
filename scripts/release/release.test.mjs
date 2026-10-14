@@ -699,13 +699,13 @@ test("Worker changes select their configured release units", () => {
   assert.deepEqual(
     affectedUnits(config, ["services/msg/worker/src/worker.ts", "services/msg/worker/test/health.test.ts"])
       .map((unit) => unit.name),
-    ["msg-worker"]
+    ["msg-webhook-dispatcher", "msg-worker"]
   );
   assert.deepEqual(affectedUnits(config, ["services/msg/cli/src/cli.ts"]), []);
   assert.deepEqual(affectedUnits(config, ["services/gateway/src/worker.ts"]).map((unit) => unit.name), ["gateway"]);
   assert.deepEqual(affectedUnits(config, ["services/database/src/worker.ts"]).map((unit) => unit.name), ["database-worker"]);
   assert.deepEqual(affectedUnits(config, ["bun.lock"]).map((unit) => unit.name), ["database-worker", "gateway", "msg-webhook-dispatcher", "msg-worker", "platform-worker"]);
-  assert.deepEqual(affectedUnits(config, [".github/workflows/release.yml"]).map((unit) => unit.name), ["msg-worker"]);
+  assert.deepEqual(affectedUnits(config, [".github/workflows/release.yml"]).map((unit) => unit.name), ["msg-webhook-dispatcher", "msg-worker"]);
 });
 
 test("shared Platform client source changes redeploy every runtime unit", () => {
@@ -724,6 +724,18 @@ test("shared Platform client source changes redeploy every runtime unit", () => 
   assert.equal(testOnlyPlan.change_class, "non-runtime");
   assert.equal(testOnlyPlan.runtime_redeployment, false);
   assert.deepEqual(testOnlyPlan.affected_units, []);
+});
+
+test("Msg Worker changes include the MCP Events companion artifact", () => {
+  const changedPath = "services/msg/worker/src/worker-entry.ts";
+  const expectedUnits = ["msg-webhook-dispatcher", "msg-worker"];
+
+  assert.deepEqual(affectedUnits(config, [changedPath]).map((unit) => unit.name), expectedUnits);
+  const plan = makePlan({ config, base: head, head, changedFiles: [changedPath] });
+  assert.equal(plan.change_class, "runtime");
+  assert.equal(plan.runtime_redeployment, true);
+  assert.deepEqual(plan.affected_units, expectedUnits);
+  assert.deepEqual(plan.artifacts.map((artifact) => artifact.name), expectedUnits);
 });
 
 test("release event producer changes rebuild every runtime artifact", () => {
@@ -762,7 +774,7 @@ test("unit registration retains simultaneous runtime and global inputs", () => {
   assert.deepEqual(
     affectedUnits(config, ["release-units.json", "services/msg/worker/src/worker.ts"], previousConfig)
       .map((unit) => unit.name),
-    ["database-worker", "msg-worker"]
+    ["database-worker", "msg-webhook-dispatcher", "msg-worker"]
   );
   assert.deepEqual(
     affectedUnits(config, ["release-units.json", "bun.lock"], previousConfig).map((unit) => unit.name),
@@ -805,8 +817,8 @@ test("deletion-only Msg source changes still trigger a runtime artifact", () => 
 
   assert.equal(plan.change_class, "runtime");
   assert.equal(plan.runtime_redeployment, true);
-  assert.deepEqual(plan.affected_units, ["msg-worker"]);
-  assert.deepEqual(plan.artifacts.map((artifact) => artifact.name), ["msg-worker"]);
+  assert.deepEqual(plan.affected_units, ["msg-webhook-dispatcher", "msg-worker"]);
+  assert.deepEqual(plan.artifacts.map((artifact) => artifact.name), ["msg-webhook-dispatcher", "msg-worker"]);
 });
 
 test("Git changed path discovery includes deletions", () => {
@@ -870,7 +882,7 @@ test("moving a Msg asset into docs still releases Msg for the source deletion", 
 
     assert.deepEqual(changed.sort(), ["docs/removed-asset.md", "services/msg/worker/public/removed-asset.js"]);
     const plan = makePlan({ config, base, head: next, changedFiles: changed });
-    assert.deepEqual(plan.affected_units, ["msg-worker"]);
+    assert.deepEqual(plan.affected_units, ["msg-webhook-dispatcher", "msg-worker"]);
     assert.equal(plan.runtime_redeployment, true);
   } finally {
     fs.rmSync(temporaryRoot, { force: true, recursive: true });
@@ -936,8 +948,8 @@ test("Platform runtime changes select the released unit and mix with other units
   });
   assert.equal(mixedPlan.change_class, "runtime");
   assert.equal(mixedPlan.runtime_redeployment, true);
-  assert.deepEqual(mixedPlan.affected_units, ["msg-worker", "platform-worker"]);
-  assert.deepEqual(mixedPlan.artifacts.map((artifact) => artifact.name), ["msg-worker", "platform-worker"]);
+    assert.deepEqual(mixedPlan.affected_units, ["msg-webhook-dispatcher", "msg-worker", "platform-worker"]);
+    assert.deepEqual(mixedPlan.artifacts.map((artifact) => artifact.name), ["msg-webhook-dispatcher", "msg-worker", "platform-worker"]);
 });
 
 test("unmapped service and app runtime changes fail closed", () => {
