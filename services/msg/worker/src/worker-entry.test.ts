@@ -37,6 +37,42 @@ test("uses the configured canonical public origin instead of the request origin"
   expect(workerConfig).toContain('"MSG_PUBLIC_ORIGIN": "https://msg.0000.chat"');
 });
 
+test("passes a staged public origin through the production MCP route", async () => {
+  const { default: productionEntry } = await import("./worker-entry");
+  const stagedOrigin = "https://msg-staging.example.test";
+  const service: RoomService = {
+    create: async () => { throw new Error("unused"); },
+    read: async () => { throw new Error("unused"); },
+    post: async () => { throw new Error("unused"); },
+    live: async () => { throw new Error("unused"); },
+  };
+  const response = await productionEntry.fetch(new Request(`${stagedOrigin}/mcp`, {
+    method: "POST",
+    headers: {
+      accept: "application/json, text/event-stream",
+      "content-type": "application/json",
+      origin: "https://chatgpt.com",
+      authorization: "Bearer staged-test-token",
+    },
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: { capabilities: {}, clientInfo: { name: "staging-proof", version: "1" }, protocolVersion: "2026-07-28" },
+    }),
+  }), {
+    MSG_TEST_MODE: "1",
+    MSG_PUBLIC_ORIGIN: stagedOrigin,
+    ROOM_SERVICE: service,
+    MSG_RATE_LIMIT_CREATION: allowRateLimit,
+    MSG_RATE_LIMIT_READS: allowRateLimit,
+    MSG_RATE_LIMIT_POSTS: allowRateLimit,
+    MSG_RATE_LIMIT_LIVE: allowRateLimit,
+  });
+  expect(response.status).toBe(200);
+  expect((await response.json() as { result?: { protocolVersion?: string } }).result?.protocolVersion).toBe("2026-07-28");
+});
+
 const actionBindings = {
   creation: "MSG_RATE_LIMIT_CREATION",
   reads: "MSG_RATE_LIMIT_READS",
