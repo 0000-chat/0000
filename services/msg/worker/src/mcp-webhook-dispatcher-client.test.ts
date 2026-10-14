@@ -34,6 +34,32 @@ test("relays signed callback bytes only to the configured dispatcher", async () 
   expect(response.status).toBe(204);
 });
 
+test("rejects dispatcher redirects without following or retrying them", async () => {
+  let calls = 0;
+  let redirect: RequestRedirect | undefined;
+  const callback = createMcpWebhookDispatcherClient({
+    endpoint: "https://dispatcher.example.test/dispatch",
+    token: "relay-secret",
+    fetch: async (_input, init) => {
+      calls += 1;
+      redirect = init?.redirect;
+      return new Response(null, {
+        status: 302,
+        headers: { location: "https://other.example.test/dispatch" },
+      });
+    },
+  });
+
+  await expect(
+    callback("https://attacker-controlled.example.test/events", {
+      method: "POST",
+      body: "{\"event_id\":\"event-redirect\"}",
+    }),
+  ).rejects.toThrow("dispatcher request failed");
+  expect(redirect).toBe("manual");
+  expect(calls).toBe(1);
+});
+
 test("rejects invalid dispatcher configuration before a callback can be sent", () => {
   expect(() => createMcpWebhookDispatcherClient({ endpoint: "http://dispatcher.example.test", token: "secret" })).toThrow();
   expect(() => createMcpWebhookDispatcherClient({ endpoint: "https://dispatcher.example.test", token: "" })).toThrow();
