@@ -5260,8 +5260,17 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
         const pushHistory = rows<{ at: number | null }>(this.ctx.storage.sql.exec(
           "SELECT MIN(retry_expires_at) AS at FROM push_deliveries",
         ))[0]?.at;
+        const mcpDue = rows<{ at: number | null }>(this.ctx.storage.sql.exec(
+          "SELECT MIN(CASE WHEN due_at < retry_expires_at THEN due_at ELSE retry_expires_at END) AS at FROM mcp_event_deliveries WHERE status IN ('pending', 'retrying')",
+        ))[0]?.at;
+        const mcpLease = rows<{ at: number | null }>(this.ctx.storage.sql.exec(
+          "SELECT MIN(lease_expires_at) AS at FROM mcp_event_deliveries WHERE status = 'sending'",
+        ))[0]?.at;
+        const mcpExpiry = rows<{ at: number | null }>(this.ctx.storage.sql.exec(
+          "SELECT MIN(expires_at) AS at FROM mcp_subscriptions WHERE status = 'active'",
+        ))[0]?.at;
         const stateDeadline = state.status === "deleted" ? state.tombstone_expires_at : (this.expiryEnabled ? state.inactivity_expires_at : null);
-        const deadlines = [stateDeadline, retry, lease, failureDeadline, history, healthHistory, pushDue, pushLease, pushHistory].filter((value): value is number => typeof value === "number");
+        const deadlines = [stateDeadline, retry, lease, failureDeadline, history, healthHistory, pushDue, pushLease, pushHistory, mcpDue, mcpLease, mcpExpiry].filter((value): value is number => typeof value === "number");
         if (deadlines.length === 0) await this.ctx.storage.deleteAlarm();
         else await this.ctx.storage.setAlarm(Math.min(...deadlines));
       }
