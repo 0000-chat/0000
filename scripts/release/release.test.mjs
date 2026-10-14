@@ -708,6 +708,21 @@ test("Worker changes select their configured release units", () => {
   assert.deepEqual(affectedUnits(config, [".github/workflows/release.yml"]).map((unit) => unit.name), ["msg-worker"]);
 });
 
+test("release event producer changes rebuild every runtime artifact", () => {
+  const changedFiles = [
+    "docs/release-artifacts.md",
+    "scripts/release/event.mjs",
+    "scripts/release/release.test.mjs"
+  ];
+  const allUnits = config.units.map((unit) => unit.name).sort();
+  const plan = makePlan({ config, base: head, head, changedFiles });
+
+  assert.equal(plan.change_class, "runtime");
+  assert.equal(plan.runtime_redeployment, true);
+  assert.deepEqual(plan.affected_units, allUnits);
+  assert.deepEqual(plan.artifacts.map((artifact) => artifact.name), allUnits);
+});
+
 test("the first Database activation publishes only its new artifact", () => {
   const previousConfig = { ...config, units: config.units.filter((unit) => unit.name !== "database-worker") };
   const plan = makePlan({
@@ -1231,36 +1246,83 @@ test("Bun dispatcher release records carry a self-hosted runtime contract", () =
   assert.equal(JSON.stringify(record).includes("https://"), false);
 });
 
-test("Cloud event carries exact Msg artifact and attestation provenance", () => {
-  const plan = makePlan({ config, base: head, head, changedFiles: ["services/msg/worker/src/worker.ts"] });
+test("runtime event carries Msg and dispatcher artifacts with attestation provenance", () => {
+  const dispatcher = config.units.find((unit) => unit.name === "msg-webhook-dispatcher");
+  const plan = makePlan({
+    config,
+    base: head,
+    head,
+    changedFiles: [
+      "services/msg/worker/src/worker.ts",
+      "services/msg/scripts/mcp-webhook-dispatcher.ts"
+    ]
+  });
   const record = createReleaseRecord(plan, [{
     name: "msg-worker",
     version: plan.release_version,
     kind: "cloudflare-worker-bundle",
     media_type: "application/gzip",
-    asset_name: "msg-worker-v0.0.0-0123456789abcdef0123456789abcdef01234567.tar.gz",
+    asset_name: `msg-worker-${plan.release_version}.tar.gz`,
     digest: `sha256:${"b".repeat(64)}`,
     compatibility: config.release.compatibility,
     source_commit: head,
     archive_paths: config.units[0].archive_paths
+  }, {
+    name: dispatcher.name,
+    version: plan.release_version,
+    kind: dispatcher.kind,
+    media_type: "application/gzip",
+    asset_name: `msg-webhook-dispatcher-${plan.release_version}.tar.gz`,
+    digest: `sha256:${"f".repeat(64)}`,
+    compatibility: config.release.compatibility,
+    source_commit: head,
+    archive_paths: dispatcher.archive_paths,
+    artifact_format: "0000-bun-runtime-bundle-v1",
+    entrypoint: dispatcher.build.entrypoint,
+    files: dispatcher.build.files,
+    entrypoint_digest: `sha256:${"e".repeat(64)}`,
+    runtime: dispatcher.build.runtime
   }]);
-  assert.deepEqual(createReleaseEvent(plan, record, {
+  assert.deepEqual(record.artifacts.map(({ name, asset_name }) => ({ name, asset_name })), [
+    {
+      name: "msg-webhook-dispatcher",
+      asset_name: `msg-webhook-dispatcher-${plan.release_version}.tar.gz`
+    },
+    {
+      name: "msg-worker",
+      asset_name: `msg-worker-${plan.release_version}.tar.gz`
+    }
+  ]);
+  assert.deepEqual(record.cloud_selection.artifacts.map(({ name }) => name), ["msg-worker"]);
+  const event = createReleaseEvent(plan, record, {
     workflow: "release",
     run_id: "123",
     workflow_run_url: "https://github.com/0000-chat/0000/actions/runs/123",
     attestation: "https://github.com/0000-chat/0000/attestations/456"
-  }).release, {
+  });
+  assert.deepEqual(event.release, {
     version: plan.release_version,
     commit: head,
-    artifacts: [{
-      name: "msg-worker",
-      version: plan.release_version,
-      digest: `sha256:${"b".repeat(64)}`,
-      compatibility: config.release.compatibility,
-      kind: "cloudflare-worker-bundle",
-      media_type: "application/gzip",
-      asset_name: "msg-worker-v0.0.0-0123456789abcdef0123456789abcdef01234567.tar.gz"
-    }],
+    artifacts: [
+      {
+        name: "msg-webhook-dispatcher",
+        version: plan.release_version,
+        digest: `sha256:${"f".repeat(64)}`,
+        compatibility: config.release.compatibility,
+        kind: "bun-runtime-bundle",
+        media_type: "application/gzip",
+        asset_name: `msg-webhook-dispatcher-${plan.release_version}.tar.gz`
+      },
+      {
+        name: "msg-worker",
+        version: plan.release_version,
+        digest: `sha256:${"b".repeat(64)}`,
+        compatibility: config.release.compatibility,
+        kind: "cloudflare-worker-bundle",
+        media_type: "application/gzip",
+        asset_name: `msg-worker-${plan.release_version}.tar.gz`
+      }
+    ],
     provenance: {
       workflow: "release",
       run_id: "123",

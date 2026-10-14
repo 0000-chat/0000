@@ -16,8 +16,10 @@ function argument(name, fallback = undefined) {
 /**
  * Project the public release plan/record into Cloud's workflow-dispatch
  * contract. The public record contains more provenance than Cloud needs at
- * dispatch time; only the immutable selection and changed paths cross the
- * boundary.
+ * dispatch time; only the immutable artifact selection and changed paths
+ * cross the boundary. The selection includes self-hosted companion runtimes
+ * as well as Cloudflare Workers so a staging consumer can verify every
+ * signed runtime dependency from the same release.
  */
 export function createReleaseEvent(plan, record, provenance) {
   if (!plan || !record || !provenance) throw new Error("plan, record, and provenance are required");
@@ -41,8 +43,8 @@ export function createReleaseEvent(plan, record, provenance) {
   if (!workflowRunUrl) {
     throw new Error("release event provenance.workflow_run_url is required");
   }
-  const artifacts = record.cloud_selection?.artifacts;
-  if (!Array.isArray(artifacts)) throw new Error("release record is missing cloud artifact selection");
+  const artifacts = record.artifacts;
+  if (!Array.isArray(artifacts)) throw new Error("release record is missing artifact selection");
   const attestation = typeof provenance.attestation === "string" ? provenance.attestation.trim() : "";
   if (artifacts.length > 0 && !attestation) {
     throw new Error("runtime release event provenance.attestation is required");

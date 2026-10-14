@@ -857,7 +857,7 @@ export function unitAffectsFile(unit, file) {
   return matchesAny(file, unit.runtime_paths);
 }
 
-const GLOBAL_RUNTIME_INPUTS = new Set(["package.json", "bun.lock", "turbo.json"]);
+const GLOBAL_RUNTIME_INPUTS = new Set(["package.json", "bun.lock", "turbo.json", "scripts/release/event.mjs"]);
 
 function additiveUnitRegistrations(config, previousConfig) {
   if (!Array.isArray(previousConfig?.units)) return null;

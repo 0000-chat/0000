@@ -270,8 +270,9 @@ After publishing the release record and provenance evidence, public CI can
 start the private Cloud `staging.yml` workflow through the GitHub Actions
 `workflow_dispatch` endpoint when `CLOUD_RELEASE_DISPATCH_ENABLED` is `true`.
 Its `release_event` input contains the immutable release version and commit,
-changed paths, each selected Worker artifact digest and compatibility, and
-workflow provenance. Runtime events carry the attestation URL emitted by
+changed paths, each selected runtime artifact digest and compatibility,
+including self-hosted companion runtimes such as the Msg webhook dispatcher,
+and workflow provenance. Runtime events carry the attestation URL emitted by
 the provenance action; documentation-only events have no artifact subject to
 attestation. The exact event is uploaded as release evidence. When automatic
 dispatch is disabled, the public workflow still publishes the same immutable
