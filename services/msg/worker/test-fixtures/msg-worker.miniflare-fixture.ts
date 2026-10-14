@@ -631,6 +631,7 @@ export async function startMsgMiniflare(
           fileURLToPath(new URL("../migrations/0001_operations.sql", import.meta.url)),
           fileURLToPath(new URL("../migrations/0002_operations_retention.sql", import.meta.url)),
           fileURLToPath(new URL("../migrations/0003_creation_plan.sql", import.meta.url)),
+          fileURLToPath(new URL("../migrations/0005_mcp_oauth.sql", import.meta.url)),
         ],
         d1Persist: `${persistenceDirectory}-d1`,
       } : {}),

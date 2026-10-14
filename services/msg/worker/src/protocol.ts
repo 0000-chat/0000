@@ -241,6 +241,12 @@ export interface RoomService {
   readCoordinationDispute?(input: CoordinationDisputeDetailInput): Promise<CoordinationDisputeResponse>;
   reviewCoordinationDispute?(input: CoordinationDisputeReviewInput): Promise<CoordinationDisputeReviewResponse>;
   listCoordinationSupersessions?(input: CoordinationSupersessionListInput): Promise<CoordinationSupersessionListResponse>;
+  mcpReadThread?(input: McpReadThreadInput): Promise<McpReadThreadResponse>;
+  mcpReadMessage?(input: McpReadMessageInput): Promise<McpReadMessageResponse>;
+  mcpPostMessage?(input: McpPostMessageInput & { readonly origin?: McpResponseOrigin; readonly principal_id?: string }): Promise<McpPostMessageResponse>;
+  mcpSubscribe?(input: McpSubscribeInput): Promise<McpSubscribeResponse>;
+  mcpUnsubscribe?(input: McpUnsubscribeInput): Promise<McpUnsubscribeResponse>;
+  mcpValidateResponseContext?(input: { readonly event_id: string; readonly principal_id: string; readonly room: string; readonly subscription_id: string }): Promise<boolean>;
 }
 
 export interface ReadRoomInput {
@@ -1014,6 +1020,55 @@ export interface McpPostMessageInput {
   readonly room: string;
 }
 
+export interface McpResponseOrigin {
+  readonly event_id: string;
+  readonly subscription_id: string;
+}
+
+export interface McpReadThreadInput {
+  readonly after: number;
+  readonly limit?: number;
+  readonly through?: number;
+  readonly room: string;
+}
+
+export interface McpReadThreadResponse extends ReadRoomResponse {}
+
+export interface McpReadMessageInput extends ReadMessageInput {
+  readonly room: string;
+}
+
+export interface McpReadMessageResponse extends ReadMessageResponse {}
+
+export interface McpSubscribeInput {
+  readonly arguments_json: string;
+  readonly callback_url: string;
+  readonly grant_id: string;
+  readonly principal_id: string;
+  readonly room: string;
+  readonly secret: string;
+  readonly ttl_ms?: number | null;
+  readonly cursor?: string | null;
+  readonly id?: string;
+}
+
+export interface McpSubscribeResponse {
+  readonly id: string;
+  readonly refreshBefore: string | null;
+  readonly cursor: string | null;
+  readonly truncated: boolean;
+}
+
+export interface McpUnsubscribeInput {
+  readonly arguments_json: string;
+  readonly callback_url: string;
+  readonly grant_id: string;
+  readonly principal_id: string;
+  readonly room: string;
+}
+
+export interface McpUnsubscribeResponse { readonly removed: boolean; }
+
 export interface McpPostMessageResponse {
   readonly accepted: true;
   readonly client_message_id?: string;
@@ -1035,6 +1090,8 @@ export interface RoomStatusInput {
 export interface RoomStatusResponse {
   readonly active: boolean;
   readonly agent_posting_enabled: boolean;
+  /** Public-link grants are unavailable after an ownership claim revokes links. */
+  readonly public_grants_allowed?: boolean;
   readonly expires_at: string;
   readonly latest_message: number;
   readonly protocol_version: typeof PROTOCOL_VERSION;

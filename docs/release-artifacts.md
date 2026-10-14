@@ -11,16 +11,20 @@ point at another source revision. The record carries the exact source commit,
 affected runtime units, artifact digests, and the `api/config` compatibility
 pair consumed by private Cloud promotion.
 
-This activation publishes three runtime units:
+This activation publishes five runtime units:
 
 - `gateway`, a deterministic, prebuilt Cloudflare Worker bundle.
 - `msg-worker`, a deterministic, prebuilt Cloudflare Worker bundle.
 - `database-worker`, a deterministic, prebuilt Cloudflare Worker bundle with
   its SQLite Durable Object contract.
+- `platform-worker`, a deterministic, prebuilt Cloudflare Worker bundle with
+  the public identity authority, D1 migration ledger, and rate-limit contract.
+- `msg-webhook-dispatcher`, a deterministic, prebuilt Bun runtime bundle for
+  self-hosted secure MCP Events delivery.
 
-Streams and Communicator remain outside this activation. Platform and Brain
-remain validation-only until their own runtime artifacts and staging
-consumers are reviewed. The SDK placeholder and the `@0000chat/msg` CLI remain
+Streams and Communicator remain outside this activation. Brain remains
+validation-only until its own runtime artifact and staging consumer are
+reviewed. The SDK placeholder and the `@0000chat/msg` CLI remain
 checks-only and are never release artifacts. Private Cloud content is never
 included.
 
@@ -37,13 +41,13 @@ dispatches private Cloud staging only when the plan contains a runtime
 artifact and the opt-in repository variable `CLOUD_RELEASE_DISPATCH_ENABLED`
 is `true`; a missing variable fails closed.
 
-Platform is intentionally validation-only: changes anywhere under
-`services/platform/` contribute no runtime artifact until its runtime artifact
-and staging consumer are reviewed. A Platform-only change therefore publishes
-a zero-artifact release record; mixed changes can still publish artifacts
-selected by other units. Unmapped changes under the other fail-closed service
-roots (`services/database` and `services/brain`) or under `apps/` are treated
-as possible runtime changes and fail release planning until an explicit release
+Platform runtime paths select the released `platform-worker` artifact. Its
+route-free bundle carries the public Worker, D1 migration ledger, neutral
+bindings, rate-limit contract, and provisioning helper described below.
+Platform documentation, examples, and validation-only tooling remain
+Cloud-silent. Unmapped changes under the other fail-closed service roots
+(`services/database` and `services/brain`) or under `apps/` are treated as
+possible runtime changes and fail release planning until an explicit release
 unit is configured. This fail-closed guard prevents new source, configuration,
 or migration code from being silently skipped.
 
@@ -61,6 +65,7 @@ assets/_msg/asset/mermaid-11.17.2.min.js
 migrations/0001_operations.sql
 migrations/0002_operations_retention.sql
 migrations/0003_creation_plan.sql
+migrations/0005_mcp_oauth.sql
 ```
 
 The public build runs the pinned Mermaid asset generator before copying
@@ -98,6 +103,104 @@ the release base, verifies the ordered migration ledger, applies the D1
 migrations in numeric order, then deploys the prebuilt Worker with
 `--no-bundle`. It owns staging, canary, production, and rollback promotion;
 this repository does not deploy or claim live staging health.
+
+## Platform Worker bundle
+
+`platform-worker-<version>.tar.gz` is a deterministic, prebuilt Cloudflare
+Worker bundle for the public identity authority. Its root-level files and
+directories are:
+
+```text
+worker.js
+wrangler.json
+artifact-manifest.json
+provision-service.js
+migrations/0001_better_auth.sql
+...
+migrations/0012_browser_purpose.sql
+```
+
+The route-free `wrangler.json` declares the `IDENTITY_DB` D1 binding and the
+ordered migration directory. The embedded manifest declares all five
+Platform rate-limit bindings without their environment-owned namespace IDs.
+Neither file contains a Worker name, route, custom domain, account ID,
+database ID, rate-limit namespace ID, provider ID, or secret value. The release manifest
+records the same D1 and rate-limit contract, the required
+`BETTER_AUTH_SECRET`, optional provider secret names, ordered migration
+digests, and the SHA-256 digest of the bundled `provision-service.js` helper.
+
+`BETTER_AUTH_SECRET` is required for the authority. Google and GitHub OAuth
+credentials are optional: the Worker registers a provider only when both its
+client ID and secret are present. A self-hosted deployment can therefore run
+the anonymous guest authority and service-to-service flows without human OAuth
+credentials; its human login endpoints remain unavailable until an operator
+configures a real provider client ID and secret. Provider secrets are never
+embedded in the artifact.
+
+The bundled `provision-service.js` helper registers and manages service and
+guest-issuer rows in the `IDENTITY_DB` binding. It accepts explicit
+`--config PATH` and `--wrangler PATH` options so an extracted artifact can use
+its neutral `wrangler.json` and an operator-selected Wrangler executable; its
+default invocation remains compatible with the source checkout. It prints
+one-time verifier or issuer values only on successful registration, so capture
+those values in a protected environment.
+
+Cloud supplies the Worker name, route, custom domain, account and database
+IDs, rate-limit namespace IDs, authority URL, non-secret public policy vars,
+and any optional OAuth provider configuration. The public release workflow
+builds and attests this artifact; it does not deploy Platform or claim live
+staging health.
+
+## Msg webhook dispatcher bundle
+
+`msg-webhook-dispatcher-<version>.tar.gz` is a deterministic, prebuilt Bun
+runtime bundle for operators who need secure outbound MCP Events delivery from
+a Cloudflare Worker. Its root-level files are:
+
+```text
+mcp-webhook-dispatcher.js
+artifact-manifest.json
+```
+
+The entrypoint bundles the first-party dispatcher and its secure transport. The
+transport resolves the recipient, rejects any non-public result, connects to
+the validated address, retains the recipient hostname for TLS verification,
+and does not follow redirects. The dispatcher accepts only the fixed
+administrator-configured relay endpoint, authenticates its bearer token in
+constant time, forwards only the signed webhook header allowlist, and applies
+bounded request, response, concurrency, rate, and deadline limits.
+
+The embedded manifest records the exact Bun version, entrypoint command,
+required token variable, optional host/port/TLS/proxy variables, source commit,
+and entrypoint digest. It contains no token, endpoint, certificate, or private
+environment value. Start the extracted bundle with:
+
+```sh
+MSG_MCP_WEBHOOK_DISPATCH_TOKEN='operator-owned-secret' \
+MSG_MCP_WEBHOOK_DISPATCH_HOST='0.0.0.0' \
+MSG_MCP_WEBHOOK_DISPATCH_PORT='8787' \
+MSG_MCP_WEBHOOK_DISPATCH_TLS_CERT_FILE='/etc/msg/dispatcher.crt' \
+MSG_MCP_WEBHOOK_DISPATCH_TLS_KEY_FILE='/etc/msg/dispatcher.key' \
+bun mcp-webhook-dispatcher.js
+```
+
+For a private HTTPS reverse proxy that terminates TLS, omit the certificate and
+key variables and explicitly enable the trusted proxy mode:
+
+```sh
+MSG_MCP_WEBHOOK_DISPATCH_TOKEN='operator-owned-secret' \
+MSG_MCP_WEBHOOK_DISPATCH_HOST='127.0.0.1' \
+MSG_MCP_WEBHOOK_DISPATCH_PORT='8787' \
+MSG_MCP_WEBHOOK_DISPATCH_TRUSTED_INTERNAL_PROXY='1' \
+bun mcp-webhook-dispatcher.js
+```
+
+Direct non-loopback listeners require both certificate and key files. The
+Worker must use the administrator-configured HTTPS dispatcher URL and relay token. The
+public release workflow packages this companion runtime; it does not deploy
+the dispatcher or claim its TLS, host, or process supervision is configured.
+Its release record remains available as a public artifact, while the private
+Cloud selection contains only Cloudflare Worker bundles.
 
 ## Gateway Worker bundle
 

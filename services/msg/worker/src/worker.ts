@@ -36,6 +36,7 @@ import { parseWebhookCreateInput, parseWebhookUpdateInput, type WebhookMutation 
 import { PUSH_SERVICE_WORKER_PATH, pushServiceWorkerResponse } from "./push-service-worker";
 import { parsePushBrowserId, parsePushSubscription } from "./push-subscriptions";
 import { handleMcpRequest } from "./mcp";
+import type { McpAuthenticator } from "./mcp-events-handler";
 
 export interface MsgWorker {
   fetch(request: Request): Promise<Response>;
@@ -67,6 +68,10 @@ export interface MsgWorkerOptions {
   readonly pushConfigured?: boolean;
   readonly pushVapidPublicKey?: string;
   readonly rateLimits?: MsgRateLimits;
+  readonly mcpAuth?: McpAuthenticator;
+  readonly mcpCallbackFetch?: typeof fetch;
+  readonly mcpOrigin?: string;
+  readonly mcpRateLimit?: MsgRateLimit;
 }
 
 export type CreationClaim =
@@ -145,6 +150,9 @@ export function createWorker(service: RoomService, options: MsgWorkerOptions = {
 
 async function route(request: Request, service: RoomService, options: MsgWorkerOptions): Promise<Response> {
   const url = new URL(request.url);
+  const authorizePublicRoom = (room: string, action: "read" | "write") => options.auth?.authorizeResource(request, { room, source: "public", action, recover: recoveryRequested(url) });
+  const authorizeManagedRoom = (room: string, token: string) => options.auth?.authorizeResource(request, { room, source: "management", token, action: "manage", recover: recoveryRequested(url) });
+  const withResourceCookies = (response: Response, auth: { readonly setCookies: readonly string[] } | undefined) => withSetCookies(response, [...(auth?.setCookies ?? [])]);
 
   if (url.pathname.startsWith("/operator/v1/")) {
     if (options.auth) {
@@ -214,6 +222,10 @@ async function route(request: Request, service: RoomService, options: MsgWorkerO
       postDisabled: options.postDisabled,
       publicOrigin: options.publicOrigin,
       rateLimits: options.rateLimits,
+      auth: options.mcpAuth,
+      callbackFetch: options.mcpCallbackFetch,
+      mcpOrigin: options.mcpOrigin ?? options.publicOrigin,
+      mcpRateLimit: options.mcpRateLimit,
     });
   }
   if (request.method !== "GET" && request.method !== "HEAD" && !isSameOrigin(request, url)) {
@@ -455,19 +467,21 @@ async function route(request: Request, service: RoomService, options: MsgWorkerO
   if (coordinationOverviewMatch && request.method === "GET") {
     if (!service.coordinationOverview) return notFound();
     await enforceRateLimit(request, options.rateLimits?.reads);
+    const auth = await authorizePublicRoom(coordinationOverviewMatch[1]!, "read");
     const result = await service.coordinationOverview({ room: coordinationOverviewMatch[1]! });
     const etag = coordinationEtag(result.coordination_cursor, result.published_revision, result.expires_at);
-    if (request.headers.get("if-none-match") === etag) return new Response(null, { headers: { etag, "retry-after": "5" }, status: 304 });
+    if (request.headers.get("if-none-match") === etag) return withResourceCookies(new Response(null, { headers: { etag, "retry-after": "5" }, status: 304 }), auth);
     const response = jsonResponse(result);
     response.headers.set("etag", etag);
     response.headers.set("retry-after", "5");
-    return response;
+    return withResourceCookies(response, auth);
   }
   const coordinationPublicationMatch = /^\/([^/]+)\/coordination\/publications\/([1-9][0-9]*)$/u.exec(url.pathname);
   if (coordinationPublicationMatch && request.method === "GET") {
     if (!service.readCoordinationPublication) return notFound();
     await enforceRateLimit(request, options.rateLimits?.reads);
-    return jsonResponse(await service.readCoordinationPublication({ room: coordinationPublicationMatch[1]!, publishedRevision: Number(coordinationPublicationMatch[2]!) }));
+    const auth = await authorizePublicRoom(coordinationPublicationMatch[1]!, "read");
+    return withResourceCookies(jsonResponse(await service.readCoordinationPublication({ room: coordinationPublicationMatch[1]!, publishedRevision: Number(coordinationPublicationMatch[2]!) })), auth);
   }
   const coordinationCorrectionCollection = /^\/([^/]+)\/coordination\/corrections$/u.exec(url.pathname);
   if (coordinationCorrectionCollection && request.method === "GET") {
@@ -480,7 +494,8 @@ async function route(request: Request, service: RoomService, options: MsgWorkerO
     const targetPublishedRevision = targetPublishedRevisionValue === null ? undefined : parsePositiveCoordinationRevision(targetPublishedRevisionValue);
     const targetClaimPath = parseCoordinationClaimPathSelector(url.searchParams.get("target_claim_path"));
     if (targetClaimPath !== undefined && targetType === "message") throw new ProtocolError(ERROR_CODES.invalidBody, "A message correction target cannot have a claim_path filter.", 400);
-    return jsonResponse(await service.listCoordinationCorrections({
+    const auth = await authorizePublicRoom(coordinationCorrectionCollection[1]!, "read");
+    return withResourceCookies(jsonResponse(await service.listCoordinationCorrections({
       room: coordinationCorrectionCollection[1]!,
       after: selectors.after,
       limit: selectors.limit,
@@ -489,13 +504,14 @@ async function route(request: Request, service: RoomService, options: MsgWorkerO
       ...(url.searchParams.get("target_message_id") === null ? {} : { targetMessageId: url.searchParams.get("target_message_id")! }),
       ...(targetPublishedRevision === undefined ? {} : { targetPublishedRevision }),
       ...(selectors.through === undefined ? {} : { through: selectors.through }),
-    }));
+    })), auth);
   }
   const coordinationCorrectionDetail = /^\/([^/]+)\/coordination\/corrections\/([^/]+)$/u.exec(url.pathname);
   if (coordinationCorrectionDetail && request.method === "GET") {
     if (!service.readCoordinationCorrection) return notFound();
     await enforceRateLimit(request, options.rateLimits?.reads);
-    return jsonResponse(await service.readCoordinationCorrection({ correctionId: decodePathSegment(coordinationCorrectionDetail[2]!), room: coordinationCorrectionDetail[1]! }));
+    const auth = await authorizePublicRoom(coordinationCorrectionDetail[1]!, "read");
+    return withResourceCookies(jsonResponse(await service.readCoordinationCorrection({ correctionId: decodePathSegment(coordinationCorrectionDetail[2]!), room: coordinationCorrectionDetail[1]! })), auth);
   }
   const coordinationDisputeCollection = /^\/([^/]+)\/coordination\/disputes$/u.exec(url.pathname);
   if (coordinationDisputeCollection && request.method === "GET") {
@@ -503,174 +519,193 @@ async function route(request: Request, service: RoomService, options: MsgWorkerO
     await enforceRateLimit(request, options.rateLimits?.reads);
     const selectors = parseCoordinationListSelectors(url);
     const kind = parseCoordinationDisputeKind(url.searchParams.get("kind"));
-    return jsonResponse(await service.listCoordinationDisputes({
+    const auth = await authorizePublicRoom(coordinationDisputeCollection[1]!, "read");
+    return withResourceCookies(jsonResponse(await service.listCoordinationDisputes({
       room: coordinationDisputeCollection[1]!,
       after: selectors.after,
       limit: selectors.limit,
       ...(url.searchParams.get("accepted_record_id") === null ? {} : { acceptedRecordId: url.searchParams.get("accepted_record_id")! }),
       ...(kind === undefined ? {} : { kind }),
       ...(selectors.through === undefined ? {} : { through: selectors.through }),
-    }));
+    })), auth);
   }
   if (coordinationDisputeCollection && request.method === "POST") {
     if (!service.submitCoordinationDispute) return notFound();
     await enforceRateLimit(request, options.rateLimits?.posts);
-    return jsonResponse(await service.submitCoordinationDispute({ body: await parseRequestBody(request, { maxBytes: MAX_ROOM_REQUEST_BYTES }), room: coordinationDisputeCollection[1]! }), 201);
+    const auth = await authorizePublicRoom(coordinationDisputeCollection[1]!, "write");
+    return withResourceCookies(jsonResponse(await service.submitCoordinationDispute({ body: await parseRequestBody(request, { maxBytes: MAX_ROOM_REQUEST_BYTES }), room: coordinationDisputeCollection[1]! }), 201), auth);
   }
   const coordinationSupersessionCollection = /^\/([^/]+)\/coordination\/supersessions$/u.exec(url.pathname);
   if (coordinationSupersessionCollection && request.method === "GET") {
     if (!service.listCoordinationSupersessions) return notFound();
     await enforceRateLimit(request, options.rateLimits?.reads);
     const selectors = parseCoordinationListSelectors(url);
-    return jsonResponse(await service.listCoordinationSupersessions({
+    const auth = await authorizePublicRoom(coordinationSupersessionCollection[1]!, "read");
+    return withResourceCookies(jsonResponse(await service.listCoordinationSupersessions({
       room: coordinationSupersessionCollection[1]!,
       after: selectors.after,
       limit: selectors.limit,
       ...(url.searchParams.get("predecessor_accepted_record_id") === null ? {} : { predecessorAcceptedRecordId: url.searchParams.get("predecessor_accepted_record_id")! }),
       ...(url.searchParams.get("successor_decision_id") === null ? {} : { successorDecisionId: url.searchParams.get("successor_decision_id")! }),
       ...(selectors.through === undefined ? {} : { through: selectors.through }),
-    }));
+    })), auth);
   }
   const coordinationDisputeReviewMatch = /^\/manage\/([^/]+)\/([^/]+)\/coordination\/disputes\/([^/]+)\/review$/u.exec(url.pathname);
   if (coordinationDisputeReviewMatch && request.method === "POST") {
     if (!service.reviewCoordinationDispute) return notFound();
     await enforceRateLimit(request, options.rateLimits?.posts);
-    return jsonResponse(await service.reviewCoordinationDispute({ body: await parseRequestBody(request, { maxBytes: MAX_ROOM_REQUEST_BYTES }), ownerToken: decodePathSegment(coordinationDisputeReviewMatch[2]!), reportId: decodePathSegment(coordinationDisputeReviewMatch[3]!), room: coordinationDisputeReviewMatch[1]! }), 201);
+    const auth = await authorizeManagedRoom(coordinationDisputeReviewMatch[1]!, decodePathSegment(coordinationDisputeReviewMatch[2]!));
+    return withResourceCookies(jsonResponse(await service.reviewCoordinationDispute({ body: await parseRequestBody(request, { maxBytes: MAX_ROOM_REQUEST_BYTES }), ownerToken: decodePathSegment(coordinationDisputeReviewMatch[2]!), reportId: decodePathSegment(coordinationDisputeReviewMatch[3]!), room: coordinationDisputeReviewMatch[1]! }), 201), auth);
   }
   const coordinationDisputeDetail = /^\/([^/]+)\/coordination\/disputes\/([^/]+)$/u.exec(url.pathname);
   if (coordinationDisputeDetail && request.method === "GET") {
     if (!service.readCoordinationDispute) return notFound();
     await enforceRateLimit(request, options.rateLimits?.reads);
     const selectors = parseCoordinationListSelectors(url);
-    return jsonResponse(await service.readCoordinationDispute({ reportId: decodePathSegment(coordinationDisputeDetail[2]!), room: coordinationDisputeDetail[1]!, after: selectors.after, limit: selectors.limit, ...(selectors.through === undefined ? {} : { through: selectors.through }) }));
+    const auth = await authorizePublicRoom(coordinationDisputeDetail[1]!, "read");
+    return withResourceCookies(jsonResponse(await service.readCoordinationDispute({ reportId: decodePathSegment(coordinationDisputeDetail[2]!), room: coordinationDisputeDetail[1]!, after: selectors.after, limit: selectors.limit, ...(selectors.through === undefined ? {} : { through: selectors.through }) })), auth);
   }
   const coordinationPanelHistoryMatch = /^\/([^/]+)\/coordination\/panel\/history$/u.exec(url.pathname);
   if (coordinationPanelHistoryMatch && request.method === "GET") {
     if (!service.listCoordinationPanelHistory) return notFound();
     await enforceRateLimit(request, options.rateLimits?.reads);
+    const auth = await authorizePublicRoom(coordinationPanelHistoryMatch[1]!, "read");
     const selectors = parseCoordinationListSelectors(url);
     const result = await service.listCoordinationPanelHistory({ room: coordinationPanelHistoryMatch[1]!, after: selectors.after, limit: selectors.limit, ...(selectors.through === undefined ? {} : { through: selectors.through }) });
     const etag = coordinationPanelHistoryEtag(result, selectors);
-    if (request.headers.get("if-none-match") === etag) return new Response(null, { headers: { etag, "retry-after": "5" }, status: 304 });
+    if (request.headers.get("if-none-match") === etag) return withResourceCookies(new Response(null, { headers: { etag, "retry-after": "5" }, status: 304 }), auth);
     const response = jsonResponse(result);
     response.headers.set("etag", etag);
     response.headers.set("retry-after", "5");
-    return response;
+    return withResourceCookies(response, auth);
   }
   const coordinationPanelMatch = /^\/([^/]+)\/coordination\/panel$/u.exec(url.pathname);
   if (coordinationPanelMatch && request.method === "GET") {
     if (!service.readCoordinationPanel) return notFound();
     await enforceRateLimit(request, options.rateLimits?.reads);
+    const auth = await authorizePublicRoom(coordinationPanelMatch[1]!, "read");
     const revisionValue = url.searchParams.get("revision");
     const revision = revisionValue === null ? undefined : parsePositiveCoordinationRevision(revisionValue);
     const result = await service.readCoordinationPanel({ room: coordinationPanelMatch[1]!, ...(revision === undefined ? {} : { revision }) });
     const etag = coordinationPanelEtag(result, revision);
-    if (request.headers.get("if-none-match") === etag) return new Response(null, { headers: { etag, "retry-after": "5" }, status: 304 });
+    if (request.headers.get("if-none-match") === etag) return withResourceCookies(new Response(null, { headers: { etag, "retry-after": "5" }, status: 304 }), auth);
     const response = jsonResponse(result);
     response.headers.set("etag", etag);
     response.headers.set("retry-after", "5");
-    return response;
+    return withResourceCookies(response, auth);
   }
   const coordinationDecisionCollection = /^\/([^/]+)\/coordination\/decisions$/u.exec(url.pathname);
   if (coordinationDecisionCollection && request.method === "GET") {
     if (!service.listCoordinationDecisions) return notFound();
     await enforceRateLimit(request, options.rateLimits?.reads);
+    const auth = await authorizePublicRoom(coordinationDecisionCollection[1]!, "read");
     const selectors = parseCoordinationListSelectors(url);
     const result = await service.listCoordinationDecisions({ room: coordinationDecisionCollection[1]!, after: selectors.after, limit: selectors.limit, ...(selectors.through === undefined ? {} : { through: selectors.through }) });
     const etag = coordinationDecisionListEtag(result, selectors);
-    if (request.headers.get("if-none-match") === etag) return new Response(null, { headers: { etag, "retry-after": "5" }, status: 304 });
+    if (request.headers.get("if-none-match") === etag) return withResourceCookies(new Response(null, { headers: { etag, "retry-after": "5" }, status: 304 }), auth);
     const response = jsonResponse(result);
     response.headers.set("etag", etag);
     response.headers.set("retry-after", "5");
-    return response;
+    return withResourceCookies(response, auth);
   }
   const coordinationAcceptedRecordMatch = /^\/([^/]+)\/coordination\/decisions\/([^/]+)\/records\/([^/]+)$/u.exec(url.pathname);
   if (coordinationAcceptedRecordMatch && request.method === "GET") {
     if (!service.readCoordinationAcceptedRecord) return notFound();
     await enforceRateLimit(request, options.rateLimits?.reads);
-    return jsonResponse(await service.readCoordinationAcceptedRecord({ acceptedRecordId: decodePathSegment(coordinationAcceptedRecordMatch[3]!), decisionId: decodePathSegment(coordinationAcceptedRecordMatch[2]!), room: coordinationAcceptedRecordMatch[1]! }));
+    const auth = await authorizePublicRoom(coordinationAcceptedRecordMatch[1]!, "read");
+    return withResourceCookies(jsonResponse(await service.readCoordinationAcceptedRecord({ acceptedRecordId: decodePathSegment(coordinationAcceptedRecordMatch[3]!), decisionId: decodePathSegment(coordinationAcceptedRecordMatch[2]!), room: coordinationAcceptedRecordMatch[1]! })), auth);
   }
   const coordinationDecisionDetail = /^\/([^/]+)\/coordination\/decisions\/([^/]+)$/u.exec(url.pathname);
   if (coordinationDecisionDetail && request.method === "GET") {
     if (!service.readCoordinationDecision) return notFound();
     await enforceRateLimit(request, options.rateLimits?.reads);
+    const auth = await authorizePublicRoom(coordinationDecisionDetail[1]!, "read");
     const selectors = parseCoordinationListSelectors(url);
     const result = await service.readCoordinationDecision({ decisionId: decodePathSegment(coordinationDecisionDetail[2]!), room: coordinationDecisionDetail[1]!, after: selectors.after, limit: selectors.limit, ...(selectors.through === undefined ? {} : { through: selectors.through }) });
     const etag = coordinationDecisionDetailEtag(result, selectors);
-    if (request.headers.get("if-none-match") === etag) return new Response(null, { headers: { etag, "retry-after": "5" }, status: 304 });
+    if (request.headers.get("if-none-match") === etag) return withResourceCookies(new Response(null, { headers: { etag, "retry-after": "5" }, status: 304 }), auth);
     const response = jsonResponse(result);
     response.headers.set("etag", etag);
     response.headers.set("retry-after", "5");
-    return response;
+    return withResourceCookies(response, auth);
   }
   const coordinationProposalCollection = /^\/([^/]+)\/coordination\/proposals$/u.exec(url.pathname);
   if (coordinationProposalCollection && request.method === "GET") {
     if (!service.listCoordinationProposals) return notFound();
     await enforceRateLimit(request, options.rateLimits?.reads);
+    const auth = await authorizePublicRoom(coordinationProposalCollection[1]!, "read");
     const selectors = parseCoordinationListSelectors(url);
-    return jsonResponse(await service.listCoordinationProposals({ room: coordinationProposalCollection[1]!, after: selectors.after, limit: selectors.limit, ...(selectors.through === undefined ? {} : { through: selectors.through }) }));
+    return withResourceCookies(jsonResponse(await service.listCoordinationProposals({ room: coordinationProposalCollection[1]!, after: selectors.after, limit: selectors.limit, ...(selectors.through === undefined ? {} : { through: selectors.through }) })), auth);
   }
   if (coordinationProposalCollection && request.method === "POST") {
     if (!service.submitCoordinationProposal) return notFound();
     await enforceRateLimit(request, options.rateLimits?.posts);
-    return jsonResponse(await service.submitCoordinationProposal({ body: await parseRequestBody(request, { maxBytes: MAX_ROOM_REQUEST_BYTES }), room: coordinationProposalCollection[1]! }), 201);
+    const auth = await authorizePublicRoom(coordinationProposalCollection[1]!, "write");
+    return withResourceCookies(jsonResponse(await service.submitCoordinationProposal({ body: await parseRequestBody(request, { maxBytes: MAX_ROOM_REQUEST_BYTES }), room: coordinationProposalCollection[1]! }), 201), auth);
   }
   const coordinationRevisionMatch = /^\/([^/]+)\/coordination\/proposals\/([^/]+)\/revisions$/u.exec(url.pathname);
   if (coordinationRevisionMatch && request.method === "POST") {
     if (!service.submitCoordinationRevision) return notFound();
     await enforceRateLimit(request, options.rateLimits?.posts);
-    return jsonResponse(await service.submitCoordinationRevision({ body: await parseRequestBody(request, { maxBytes: MAX_ROOM_REQUEST_BYTES }), proposalId: decodePathSegment(coordinationRevisionMatch[2]!), room: coordinationRevisionMatch[1]! }), 201);
+    const auth = await authorizePublicRoom(coordinationRevisionMatch[1]!, "write");
+    return withResourceCookies(jsonResponse(await service.submitCoordinationRevision({ body: await parseRequestBody(request, { maxBytes: MAX_ROOM_REQUEST_BYTES }), proposalId: decodePathSegment(coordinationRevisionMatch[2]!), room: coordinationRevisionMatch[1]! }), 201), auth);
   }
   const coordinationRevisionDetailMatch = /^\/([^/]+)\/coordination\/proposals\/([^/]+)\/revisions\/([1-9][0-9]*)$/u.exec(url.pathname);
   if (coordinationRevisionDetailMatch && request.method === "GET") {
     if (!service.readCoordinationProposalRevision) return notFound();
     await enforceRateLimit(request, options.rateLimits?.reads);
-    return jsonResponse(await service.readCoordinationProposalRevision({ proposalId: decodePathSegment(coordinationRevisionDetailMatch[2]!), revision: Number(coordinationRevisionDetailMatch[3]!), room: coordinationRevisionDetailMatch[1]! }));
+    const auth = await authorizePublicRoom(coordinationRevisionDetailMatch[1]!, "read");
+    return withResourceCookies(jsonResponse(await service.readCoordinationProposalRevision({ proposalId: decodePathSegment(coordinationRevisionDetailMatch[2]!), revision: Number(coordinationRevisionDetailMatch[3]!), room: coordinationRevisionDetailMatch[1]! })), auth);
   }
   const coordinationProposalDetail = /^\/([^/]+)\/coordination\/proposals\/([^/]+)$/u.exec(url.pathname);
   if (coordinationProposalDetail && request.method === "GET") {
     if (!service.readCoordinationProposal) return notFound();
     await enforceRateLimit(request, options.rateLimits?.reads);
-    return jsonResponse(await service.readCoordinationProposal({ proposalId: decodePathSegment(coordinationProposalDetail[2]!), room: coordinationProposalDetail[1]! }));
+    const auth = await authorizePublicRoom(coordinationProposalDetail[1]!, "read");
+    return withResourceCookies(jsonResponse(await service.readCoordinationProposal({ proposalId: decodePathSegment(coordinationProposalDetail[2]!), room: coordinationProposalDetail[1]! })), auth);
   }
   const coordinationRequestCollection = /^\/([^/]+)\/coordination\/requests$/u.exec(url.pathname);
   if (coordinationRequestCollection && request.method === "GET") {
     if (!service.listCoordinationRequests) return notFound();
     await enforceRateLimit(request, options.rateLimits?.reads);
+    const auth = await authorizePublicRoom(coordinationRequestCollection[1]!, "read");
     const selectors = parseCoordinationListSelectors(url);
     const result = await service.listCoordinationRequests({ room: coordinationRequestCollection[1]!, after: selectors.after, limit: selectors.limit, ...(selectors.owner_label === undefined ? {} : { owner_label: selectors.owner_label }), ...(selectors.status === undefined ? {} : { status: selectors.status }), ...(selectors.through === undefined ? {} : { through: selectors.through }) });
     const etag = coordinationListEtag("requests", result, selectors);
-    if (request.headers.get("if-none-match") === etag) return new Response(null, { headers: { etag, "retry-after": "5" }, status: 304 });
+    if (request.headers.get("if-none-match") === etag) return withResourceCookies(new Response(null, { headers: { etag, "retry-after": "5" }, status: 304 }), auth);
     const response = jsonResponse(result);
     response.headers.set("etag", etag);
     response.headers.set("retry-after", "5");
-    return response;
+    return withResourceCookies(response, auth);
   }
   const coordinationRequestDetail = /^\/([^/]+)\/coordination\/requests\/([^/]+)$/u.exec(url.pathname);
   if (coordinationRequestDetail && request.method === "GET") {
     if (!service.readCoordinationRequest) return notFound();
     await enforceRateLimit(request, options.rateLimits?.reads);
+    const auth = await authorizePublicRoom(coordinationRequestDetail[1]!, "read");
     const selectors = parseCoordinationListSelectors(url);
-    return jsonResponse(await service.readCoordinationRequest({ requestId: decodePathSegment(coordinationRequestDetail[2]!), room: coordinationRequestDetail[1]!, after: selectors.after, limit: selectors.limit, ...(selectors.owner_label === undefined ? {} : { owner_label: selectors.owner_label }), ...(selectors.status === undefined ? {} : { status: selectors.status }), ...(selectors.through === undefined ? {} : { through: selectors.through }) }));
+    return withResourceCookies(jsonResponse(await service.readCoordinationRequest({ requestId: decodePathSegment(coordinationRequestDetail[2]!), room: coordinationRequestDetail[1]!, after: selectors.after, limit: selectors.limit, ...(selectors.owner_label === undefined ? {} : { owner_label: selectors.owner_label }), ...(selectors.status === undefined ? {} : { status: selectors.status }), ...(selectors.through === undefined ? {} : { through: selectors.through }) })), auth);
   }
   const coordinationPublishMatch = /^\/manage\/([^/]+)\/([^/]+)\/coordination\/publish$/u.exec(url.pathname);
   if (coordinationPublishMatch && request.method === "POST") {
     if (!service.publishCoordinationRequest) return notFound();
     await enforceRateLimit(request, options.rateLimits?.posts);
-    return jsonResponse(await service.publishCoordinationRequest({ body: await parseRequestBody(request, { maxBytes: MAX_ROOM_REQUEST_BYTES }), ownerToken: decodePathSegment(coordinationPublishMatch[2]!), room: coordinationPublishMatch[1]! }), 201);
+    const auth = await authorizeManagedRoom(coordinationPublishMatch[1]!, decodePathSegment(coordinationPublishMatch[2]!));
+    return withResourceCookies(jsonResponse(await service.publishCoordinationRequest({ body: await parseRequestBody(request, { maxBytes: MAX_ROOM_REQUEST_BYTES }), ownerToken: decodePathSegment(coordinationPublishMatch[2]!), room: coordinationPublishMatch[1]! }), 201), auth);
   }
 
   const messageMatch = /^\/([^/]+)\/messages\/([^/]+)$/u.exec(url.pathname);
   if (messageMatch && request.method === "GET") {
     if (!service.readMessage) return notFound();
     await enforceRateLimit(request, options.rateLimits?.reads);
+    const auth = await authorizePublicRoom(messageMatch[1]!, "read");
     const result = stripLegacyAbsoluteExpiry(await service.readMessage({ id: decodePathSegment(messageMatch[2]!), room: messageMatch[1]! })) as unknown as ReadMessageResponse;
     const etag = coordinationMessageEtag(result);
-    if (request.headers.get("if-none-match") === etag) return new Response(null, { headers: { etag, "retry-after": "5" }, status: 304 });
+    if (request.headers.get("if-none-match") === etag) return withResourceCookies(new Response(null, { headers: { etag, "retry-after": "5" }, status: 304 }), auth);
     const response = messageResponse(result, negotiateRepresentation(request.headers.get("accept")));
     response.headers.set("etag", etag);
     response.headers.set("retry-after", "5");
-    return response;
+    return withResourceCookies(response, auth);
   }
 
   const agentMatch = /^\/([^/]+)\/agent$/.exec(url.pathname);
@@ -707,6 +742,7 @@ async function route(request: Request, service: RoomService, options: MsgWorkerO
     rejectGetPostPrefetch(request);
     const getPost = parseGetPostQuery(request, url);
     await enforceRateLimit(request, options.rateLimits?.posts);
+    const auth = await authorizePublicRoom(getPostMatch[1]!, "write");
     const result = stripLegacyAbsoluteExpiry(await service.getPost({
       body: { kind: "json", value: getPost.input },
       ...(getPost.basedOnSequence === undefined ? {} : { basedOnSequence: getPost.basedOnSequence }),
@@ -714,7 +750,7 @@ async function route(request: Request, service: RoomService, options: MsgWorkerO
       room: getPostMatch[1]!,
       token: getPost.token,
     })) as unknown as GetPostMessageResponse;
-    return getPostResponse(result);
+    return withResourceCookies(getPostResponse(result), auth);
   }
 
   const roomMatch = /^\/([^/]+)$/.exec(url.pathname);
@@ -787,8 +823,9 @@ async function route(request: Request, service: RoomService, options: MsgWorkerO
   if (retentionMatch && request.method === "POST") {
     if (!service.extendRetention) return notFound();
     await enforceRateLimit(request, options.rateLimits?.posts);
+    const auth = await authorizeManagedRoom(retentionMatch[1]!, decodePathSegment(retentionMatch[2]!));
     const result = await service.extendRetention({ body: await parseRequestBody(request, { maxBytes: 4 * 1024 }), room: retentionMatch[1]!, token: decodePathSegment(retentionMatch[2]!) });
-    return retentionResponse(result, negotiateRepresentation(request.headers.get("accept")));
+    return withResourceCookies(retentionResponse(result, negotiateRepresentation(request.headers.get("accept"))), auth);
   }
   if (manageMatch && (request.method === "GET" || request.method === "DELETE" || request.method === "POST")) {
     if (!service.manage) return notFound();

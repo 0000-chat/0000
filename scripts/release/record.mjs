@@ -34,13 +34,16 @@ export function createReleaseRecord(plan, metadata) {
         "vars",
         "migration_files",
         "modules",
+        "helpers",
         "entrypoint_digest",
+        "runtime",
         "deployment"
       ]) {
         if (artifact[key] !== undefined) record[key] = artifact[key];
       }
       return record;
     });
+  const cloudArtifacts = artifacts.filter((artifact) => artifact.kind === "cloudflare-worker-bundle");
   return {
     $schema: plan.$schema,
     schema_version: 1,
@@ -62,7 +65,7 @@ export function createReleaseRecord(plan, metadata) {
         version: plan.release_version,
         compatibility: plan.compatibility
       },
-      artifacts: artifacts.map(({ name, version, digest, compatibility, kind, media_type, asset_name }) => ({
+      artifacts: cloudArtifacts.map(({ name, version, digest, compatibility, kind, media_type, asset_name }) => ({
         name,
         version,
         digest,

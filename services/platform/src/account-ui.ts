@@ -1,4 +1,8 @@
 import type { OrganizationRole } from "./organization-state";
+import {
+  SOCIAL_PROVIDER_IDS,
+  type SocialProviderAvailability,
+} from "./auth-providers";
 
 export interface AccountProvider {
   id: string;
@@ -111,6 +115,7 @@ export interface AccountView {
   email: string;
   image: string | null;
   providers: AccountProvider[];
+  configuredProviders: SocialProviderAvailability;
   defaultOrganization: {
     name: string | null;
     role: string | null;
@@ -199,7 +204,34 @@ export function htmlResponse(
   });
 }
 
-export function loginPage(message = "", oauthQuery = ""): Response {
+function providerNames(providers: SocialProviderAvailability): string {
+  return SOCIAL_PROVIDER_IDS.filter((providerId) => providers[providerId])
+    .map(providerLabel)
+    .join(" or ");
+}
+
+function providerLoginMarkup(providers: SocialProviderAvailability): string {
+  const ids = SOCIAL_PROVIDER_IDS.filter((providerId) => providers[providerId]);
+  if (ids.length === 0) {
+    return `<p class="notice" role="status">Human sign-in is not configured for this deployment. An operator must configure Google or GitHub before Platform accounts are available. Anonymous guest access remains available for services that support it.</p>`;
+  }
+  const names = providerNames(providers);
+  return `<p class="lede">Use a ${names} account to manage your Platform identity.</p>
+      <div class="actions" aria-label="Sign-in providers">
+        ${ids
+          .map(
+            (providerId) =>
+              `<button type="button" class="provider-button" data-auth-provider="${providerId}">Continue with ${providerLabel(providerId)}</button>`,
+          )
+          .join("\n        ")}
+      </div>`;
+}
+
+export function loginPage(
+  message: string,
+  oauthQuery: string,
+  configuredProviders: SocialProviderAvailability,
+): Response {
   const error = message
     ? `<p class="notice" role="alert">${escapeHtml(message)}</p>`
     : "";
@@ -212,14 +244,10 @@ export function loginPage(message = "", oauthQuery = ""): Response {
       `<header class="brand">
         <p class="eyebrow">0000</p>
         <h1>Sign in to Platform</h1>
-        <p class="lede">Use a Google or GitHub account to manage your Platform identity.</p>
+        ${providerLoginMarkup(configuredProviders)}
       </header>
       ${error}
       ${query}
-      <div class="actions" aria-label="Sign-in providers">
-        <button type="button" class="provider-button" data-auth-provider="google">Continue with Google</button>
-        <button type="button" class="provider-button" data-auth-provider="github">Continue with GitHub</button>
-      </div>
       <p id="page-status" class="status" role="status" aria-live="polite"></p>`,
     ),
   );
@@ -522,9 +550,12 @@ export function accountPage(view: AccountView): Response {
         provider.providerId === "google" || provider.providerId === "github",
     )
     .map(linkedProviderMarkup);
-  const missing = (["google", "github"] as const)
+  const missing = SOCIAL_PROVIDER_IDS.filter(
+    (providerId) => view.configuredProviders[providerId],
+  )
     .filter((providerId) => !providers.has(providerId))
     .map(availableProviderMarkup);
+  const providerList = [...linked, ...missing].join("");
   const defaultMembership = view.defaultOrganization.suspended
     ? `<p class="access access-missing">This organization is suspended and access is unavailable.</p>`
     : view.defaultOrganization.role
@@ -606,7 +637,7 @@ export function accountPage(view: AccountView): Response {
       </section>
       <section class="card" aria-labelledby="providers-heading">
         <h2 id="providers-heading">Sign-in providers</h2>
-        <ul class="provider-list">${[...linked, ...missing].join("")}</ul>
+        <ul class="provider-list">${providerList || `<li class="muted">No human sign-in providers are configured for this deployment.</li>`}</ul>
         <p id="provider-status" class="status" role="status" aria-live="polite"></p>
       </section>
       <footer class="account-footer">

@@ -144,7 +144,7 @@ describe("stateless MCP endpoint", () => {
 
     const listed = await handleMcpRequest(rpcRequest({ id: 2, method: "tools/list", params: {} }), baseService());
     const tools = (await json(listed)).result.tools;
-    expect(tools.map((tool: { name: string }) => tool.name)).toEqual(["create_room", "read_room", "wait_for_messages", "get_room_status", "post_message", "export_room", "manage_room", "list_webhooks", "create_webhook", "update_webhook", "remove_webhook", "disable_webhook", "enable_webhook", "rotate_webhook_secret", "redeliver_webhook"]);
+    expect(tools.map((tool: { name: string }) => tool.name)).toEqual(["create_room", "read_room", "wait_for_messages", "get_room_status", "post_message", "export_room", "manage_room", "list_webhooks", "create_webhook", "update_webhook", "remove_webhook", "disable_webhook", "enable_webhook", "rotate_webhook_secret", "redeliver_webhook", "read_thread", "read_message", "post_response"]);
     const createTool = tools.find((tool: { name: string }) => tool.name === "create_room");
     const postTool = tools.find((tool: { name: string }) => tool.name === "post_message");
     expect(createTool.inputSchema.required).toEqual(["content", "author", "idempotency_key"]);
@@ -345,7 +345,7 @@ describe("stateless MCP endpoint", () => {
       await client.connect(transport);
       expect(client.getProtocolEra()).toBe("modern");
       const tools = await client.listTools();
-      expect(tools.tools.map((tool) => tool.name)).toEqual(["create_room", "read_room", "wait_for_messages", "get_room_status", "post_message", "export_room", "manage_room", "list_webhooks", "create_webhook", "update_webhook", "remove_webhook", "disable_webhook", "enable_webhook", "rotate_webhook_secret", "redeliver_webhook"]);
+      expect(tools.tools.map((tool) => tool.name)).toEqual(["create_room", "read_room", "wait_for_messages", "get_room_status", "post_message", "export_room", "manage_room", "list_webhooks", "create_webhook", "update_webhook", "remove_webhook", "disable_webhook", "enable_webhook", "rotate_webhook_secret", "redeliver_webhook", "read_thread", "read_message", "post_response"]);
       const read = await client.callTool({ name: "read_room", arguments: { room_url: roomUrl, limit: 2 } });
       expect(read.structuredContent).toMatchObject({ messages, has_more: false, truncated: false });
       const waited = await client.callTool({ name: "wait_for_messages", arguments: { room_url: roomUrl, after: 1, limit: 2 } });

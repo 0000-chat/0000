@@ -231,6 +231,45 @@ printf 'MSG_PLATFORM_SERVICE_VERIFIER=%s\n' "$SERVICE_VERIFIER" >> "$MSG_VARS"
 unset SERVICE_VERIFIER
 ```
 
+For a managed bootstrap that must survive a lost process result, split this
+into two phases. Run the same `register` command with `--generate-only`, save
+the one-time `verifier=` line in the operator's secret store before touching
+D1, then resume with `--credential-stdin` and pipe the stored value to the
+command. The resume path adopts an active row only when its service ID,
+audience, capabilities, display name and verifier hash all match; it does not
+rotate an existing verifier. The credential is accepted only from stdin and
+is not printed by a resumed command.
+
+```sh
+SERVICE_VERIFIER="$(
+  cd "$PLATFORM_DIR"
+  bun run provision:service -- \
+    --local --generate-only register \
+    --service-id "$MSG_SERVICE_ID" \
+    --audience "$MSG_ORIGIN" \
+    --capability msg:read \
+    --capability msg:write \
+    --capability msg:manage \
+    --capability msg:claim \
+    --capability msg:operator \
+    --name "$MSG_SERVICE_ID" |
+    sed -n 's/^generated verifier=//p'
+)"
+test -n "$SERVICE_VERIFIER"
+printf '%s\n' "$SERVICE_VERIFIER" |
+  bun run provision:service -- \
+    --local --credential-stdin register \
+    --service-id "$MSG_SERVICE_ID" \
+    --audience "$MSG_ORIGIN" \
+    --capability msg:read \
+    --capability msg:write \
+    --capability msg:manage \
+    --capability msg:claim \
+    --capability msg:operator \
+    --name "$MSG_SERVICE_ID"
+unset SERVICE_VERIFIER
+```
+
 Register the guest issuer for the same service. Capture its one-time value in
 the same protected file.
 
@@ -246,6 +285,11 @@ test -n "$GUEST_ISSUER"
 printf 'MSG_PLATFORM_GUEST_GRANT_ISSUER=%s\n' "$GUEST_ISSUER" >> "$MSG_VARS"
 unset GUEST_ISSUER
 ```
+
+The guest issuer has the same crash-safe two-phase option: use
+`--generate-only register-guest-issuer`, store the `generated issuer=` value,
+then pipe it to `--credential-stdin register-guest-issuer`. A resumed command
+prints only the registration status and never echoes the issuer.
 
 Use an explicit `--local` or `--remote` target with `provision-service.ts`.
 The current parser treats an omitted target as local, but the setup contract

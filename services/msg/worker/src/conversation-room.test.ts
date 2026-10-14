@@ -2,6 +2,7 @@ import { Database } from "bun:sqlite";
 import { expect, mock, test } from "bun:test";
 
 import { hashCapability, ROOM_LIMITS } from "./room-domain";
+import { CURRENT_ROOM_SCHEMA_VERSION } from "./room-schema";
 import { isWebhookEnvelope } from "./webhook-crypto";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -54,10 +55,10 @@ class FakeWebSocketPair {
 
 (globalThis as unknown as { WebSocketPair: typeof FakeWebSocketPair }).WebSocketPair = FakeWebSocketPair;
 
-async function room(database = new Database(":memory:"), clock: () => number = Date.now, env: Record<string, string> = {}, signWebhook?: WebhookPayloadSigner) {
+async function room(database = new Database(":memory:"), clock: () => number = Date.now, env: Record<string, string> = {}, signWebhook?: WebhookPayloadSigner, callbackFetch?: typeof fetch, grantCheck?: (input: { readonly grantId: string; readonly principalId: string; readonly scope: "monitor"; readonly threadUrl: string }) => Promise<boolean> | boolean) {
   const { ConversationRoom } = await import("./conversation-room");
   const context = new Context(database);
-  return { context, room: new ConversationRoom(context as never, { MSG_TEST_MODE: "1", MSG_TEST_ROOM_LIMITS: "{}", MSG_ROOM_EXPIRY_ENABLED: "1", ...env }, clock, signWebhook) };
+  return { context, room: new ConversationRoom(context as never, { MSG_TEST_MODE: "1", MSG_TEST_ROOM_LIMITS: "{}", MSG_ROOM_EXPIRY_ENABLED: "1", ...env }, clock, signWebhook, callbackFetch, grantCheck) };
 }
 
 async function withPausedFirstWebhookDecrypt<T>(run: (started: Promise<void>, release: () => void) => Promise<T>): Promise<T> {
@@ -525,7 +526,7 @@ test("repairs missing coordination tables when a high-version room is read", asy
 
   expect(response.status).toBe(200);
   expect(await response.json()).toMatchObject({ latest_message: 1, messages: [{ sequence: 1 }] });
-  expect(database.query("SELECT version FROM room_schema WHERE singleton = 1").get()).toEqual({ version: 18 });
+  expect(database.query("SELECT version FROM room_schema WHERE singleton = 1").get()).toEqual({ version: CURRENT_ROOM_SCHEMA_VERSION });
   const repairedTables = (database.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name GLOB 'coordination_*' ORDER BY name").all() as { name: string }[]).map(({ name }) => name);
   expect(repairedTables).toEqual(coordinationTables.sort());
   database.close();
@@ -1072,6 +1073,186 @@ test("supports direct MCP posting, status, owner control, and name password repl
 
     const enabled = await durable.fetch(request(`/manage?token=${management}`, { action: "enable_mcp" }));
     expect(await enabled.json()).toMatchObject({ agent_posting_enabled: true });
+  } finally {
+    database.close();
+  }
+});
+
+test("binds retained MCP events to an existing Thread subscription when room_id is absent", async () => {
+  const database = new Database(":memory:");
+  let now = 1_000;
+  let callbackBody: Record<string, unknown> | undefined;
+  let callbackCount = 0;
+  const secret = `whsec_${btoa("a".repeat(32))}`;
+  const callbackFetch = async (_input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+    callbackCount += 1;
+    callbackBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    return new Response(null, { status: 204 });
+  };
+  const { room: durable } = await room(database, () => now, {}, undefined, callbackFetch, () => true);
+  try {
+    const initialized = await durable.fetch(request("/initialize", {
+      management_hash: "hash",
+      initial: { content: "first", author: "a", display_name: "a", semantic_type: "message" },
+    }));
+    expect(initialized.status).toBe(200);
+
+    const argumentsJson = JSON.stringify({ room_url: "https://msg.example.test/existing-thread" });
+    const subscribed = await durable.fetch(request("/mcp/subscribe", {
+      id: "sub_existing",
+      principal_id: "principal-1",
+      grant_id: "grant-1",
+      arguments_json: argumentsJson,
+      callback_url: "https://receiver.example.test/callback",
+      secret,
+      cursor: null,
+    }));
+    expect(subscribed.status).toBe(200);
+
+    now += 1;
+    const posted = await durable.fetch(request("/messages", {
+      input: { content: "new", author: "a", display_name: "a", semantic_type: "message" },
+    }));
+    expect(posted.status).toBe(200);
+    await durable.alarm();
+
+    expect(callbackCount).toBe(1);
+    expect(callbackBody).toMatchObject({
+      data: { thread_id: "existing-thread", thread_url: "https://msg.example.test/existing-thread" },
+    });
+    const data = callbackBody?.data as { response_context: { event_id: string; subscription_id: string } };
+    const response = await durable.fetch(request("/mcp/post", {
+      principal_id: "principal-1",
+      origin: data.response_context,
+      input: {
+        content: "response",
+        author: "a",
+        display_name: "a",
+        name_password: "test-password",
+        client_message_id: "response-1",
+        semantic_type: "message",
+      },
+    }));
+    expect(response.status).toBe(200);
+    expect(database.query("SELECT mcp_origin_subscription_id, mcp_origin_event_id FROM messages WHERE client_message_id = ?").get("response-1")).toMatchObject({
+      mcp_origin_subscription_id: "sub_existing",
+      mcp_origin_event_id: data.response_context.event_id,
+    });
+
+    now += 1;
+    const secondTrigger = await durable.fetch(request("/messages", {
+      input: { content: "second trigger", author: "a", display_name: "a", semantic_type: "message" },
+    }));
+    expect(secondTrigger.status).toBe(200);
+    await durable.alarm();
+    expect(callbackCount).toBe(2);
+    const secondData = callbackBody?.data as { response_context: { event_id: string; subscription_id: string } };
+    expect(secondData.response_context.event_id).not.toBe(data.response_context.event_id);
+    const secondResponse = await durable.fetch(request("/mcp/post", {
+      principal_id: "principal-1",
+      origin: secondData.response_context,
+      input: {
+        content: "second response",
+        author: "a",
+        display_name: "a",
+        name_password: "test-password",
+        client_message_id: "response-2",
+        semantic_type: "message",
+      },
+    }));
+    expect(secondResponse.status).toBe(200);
+    expect(database.query("SELECT COUNT(*) AS count FROM messages WHERE mcp_origin_subscription_id = ?").get("sub_existing")).toMatchObject({ count: 2 });
+  } finally {
+    database.close();
+  }
+});
+
+test("stops public MCP delivery after Thread links are revoked", async () => {
+  const database = new Database(":memory:");
+  let now = 1_000;
+  let callbackCount = 0;
+  const secret = `whsec_${btoa("c".repeat(32))}`;
+  const callbackFetch = async (): Promise<Response> => {
+    callbackCount += 1;
+    return new Response(null, { status: 204 });
+  };
+  const { room: durable } = await room(database, () => now, {}, undefined, callbackFetch, () => true);
+  try {
+    await durable.fetch(request("/initialize", { management_hash: "hash", initial: { content: "first", author: "a", display_name: "a", semantic_type: "message" } }));
+    const argumentsJson = JSON.stringify({ room_url: "https://msg.example.test/revoked-thread" });
+    await durable.fetch(request("/mcp/subscribe", {
+      id: "sub_revoked",
+      principal_id: "principal-1",
+      grant_id: "grant-1",
+      arguments_json: argumentsJson,
+      callback_url: "https://receiver.example.test/revoked",
+      secret,
+      cursor: null,
+    }));
+    now += 1;
+    await durable.fetch(request("/messages", { input: { content: "before revoke", author: "a", display_name: "a", semantic_type: "message" } }));
+    await durable.alarm();
+    expect(callbackCount).toBe(1);
+
+    database.query("UPDATE room_state SET links_revoked = 1 WHERE singleton = 1").run();
+    expect(await (await durable.fetch(new Request("https://room/mcp/status"))).json()).toMatchObject({ public_grants_allowed: false });
+    now += 1;
+    await durable.fetch(request("/messages", { input: { content: "after revoke", author: "a", display_name: "a", semantic_type: "message" } }));
+    await durable.alarm();
+    expect(callbackCount).toBe(1);
+    expect(database.query("SELECT status FROM mcp_subscriptions WHERE id = ?").get("sub_revoked")).toMatchObject({ status: "stopped" });
+  } finally {
+    database.close();
+  }
+});
+
+test("keeps the MCP cursor contiguous when a newer event succeeds before an older retry", async () => {
+  const database = new Database(":memory:");
+  let now = 1_000;
+  let callbackCount = 0;
+  const cursors: string[] = [];
+  const secret = `whsec_${btoa("b".repeat(32))}`;
+  const callbackFetch = async (_input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+    callbackCount += 1;
+    const body = JSON.parse(String(init?.body)) as { cursor: string };
+    cursors.push(body.cursor);
+    return new Response(null, { status: callbackCount === 1 ? 500 : 204 });
+  };
+  const { room: durable } = await room(database, () => now, {}, undefined, callbackFetch, () => true);
+  try {
+    await durable.fetch(request("/initialize", { management_hash: "hash", initial: { content: "first", author: "a", display_name: "a", semantic_type: "message" } }));
+    const argumentsJson = JSON.stringify({ room_url: "https://msg.example.test/cursor-thread" });
+    await durable.fetch(request("/mcp/subscribe", {
+      id: "sub_cursor",
+      principal_id: "principal-1",
+      grant_id: "grant-1",
+      arguments_json: argumentsJson,
+      callback_url: "https://receiver.example.test/cursor",
+      secret,
+      cursor: null,
+    }));
+    now += 1;
+    await durable.fetch(request("/messages", { input: { content: "old", author: "a", display_name: "a", semantic_type: "message" } }));
+    await durable.alarm();
+    now += 1;
+    await durable.fetch(request("/messages", { input: { content: "new", author: "a", display_name: "a", semantic_type: "message" } }));
+    await durable.alarm();
+
+    expect(cursors).toEqual(["2", "1"]);
+    const refreshed = await durable.fetch(request("/mcp/subscribe", {
+      id: "sub_cursor",
+      principal_id: "principal-1",
+      grant_id: "grant-1",
+      arguments_json: argumentsJson,
+      callback_url: "https://receiver.example.test/cursor",
+      secret,
+      cursor: null,
+    }));
+    expect(await refreshed.json()).toMatchObject({ cursor: "1" });
+    now += 2_000;
+    await durable.alarm();
+    expect(cursors).toEqual(["2", "1", "3"]);
+    expect(database.query("SELECT cursor FROM mcp_subscriptions WHERE id = ?").get("sub_cursor")).toMatchObject({ cursor: 3 });
   } finally {
     database.close();
   }

@@ -20,6 +20,7 @@ import {
   recoverPendingSocialAccount,
 } from "./social-signup-recovery";
 import { emitPlatformDiagnostic } from "./diagnostics";
+import { configuredSocialProviders } from "./auth-providers";
 
 export const PLATFORM_SESSION_FRESH_AGE_SECONDS = 24 * 60 * 60;
 
@@ -314,6 +315,25 @@ export function createAuth(
     await recoverPendingSocialAccount(env.IDENTITY_DB, binding);
     return {};
   };
+  const configuredProviders = configuredSocialProviders(env);
+  const googleCredentials = configuredProviders.google;
+  const google = googleCredentials
+    ? {
+        clientId: googleCredentials.clientId,
+        clientSecret: googleCredentials.clientSecret,
+        mapProfileToUser: async (profile: object) =>
+          recoverSocialProfile("google", profile),
+      }
+    : undefined;
+  const githubCredentials = configuredProviders.github;
+  const github = githubCredentials
+    ? {
+        clientId: githubCredentials.clientId,
+        clientSecret: githubCredentials.clientSecret,
+        mapProfileToUser: async (profile: object) =>
+          recoverSocialProfile("github", profile),
+      }
+    : undefined;
   return betterAuth({
     appName: "0000 Platform",
     baseURL: env.PLATFORM_BASE_URL,
@@ -464,18 +484,8 @@ export function createAuth(
       },
     },
     socialProviders: {
-      google: {
-        clientId: env.GOOGLE_CLIENT_ID,
-        clientSecret: env.GOOGLE_CLIENT_SECRET,
-        mapProfileToUser: async (profile) =>
-          recoverSocialProfile("google", profile),
-      },
-      github: {
-        clientId: env.GITHUB_CLIENT_ID,
-        clientSecret: env.GITHUB_CLIENT_SECRET,
-        mapProfileToUser: async (profile) =>
-          recoverSocialProfile("github", profile),
-      },
+      ...(google ? { google } : {}),
+      ...(github ? { github } : {}),
     },
     plugins: createAuthPlugins(
       options.oauthPlatform

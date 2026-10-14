@@ -29,9 +29,9 @@ const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url))
 const releaseWorkflow = fs.readFileSync(path.join(repositoryRoot, ".github/workflows/release.yml"), "utf8");
 const legacyGatewayWorkflow = fs.readFileSync(path.join(repositoryRoot, ".github/workflows/deploy-gateway.yml"), "utf8");
 
-test("release configuration activates the Msg, Gateway, and Database Workers", () => {
+test("release configuration activates Worker and Bun runtime units", () => {
   assert.doesNotThrow(() => assertReleaseConfig(config));
-  assert.deepEqual(config.units.map((unit) => unit.name), ["msg-worker", "gateway", "database-worker"]);
+  assert.deepEqual(config.units.map((unit) => unit.name), ["msg-worker", "gateway", "database-worker", "platform-worker", "msg-webhook-dispatcher"]);
 
   const msg = config.units[0];
   assert.equal(msg.kind, "cloudflare-worker-bundle");
@@ -169,6 +169,94 @@ test("release configuration activates the Msg, Gateway, and Database Workers", (
   });
   assert.equal(database.archive_paths.some((entry) => /cli|sdk|cloud/i.test(entry)), false);
   assert.doesNotThrow(() => assertWorkerBuildConfigMatchesSource(database, database.build, repositoryRoot));
+
+  const platform = config.units.find((unit) => unit.name === "platform-worker");
+  assert.equal(platform.kind, "cloudflare-worker-bundle");
+  assert.deepEqual(platform.runtime_paths, [
+    "services/platform/src/**",
+    "services/platform/migrations/**",
+    "services/platform/package.json",
+    "services/platform/wrangler.jsonc",
+    "services/platform/scripts/wrangler-config.ts",
+    "services/platform/scripts/provision-service.ts"
+  ]);
+  assert.deepEqual(platform.archive_paths, [
+    "services/platform/src",
+    "services/platform/migrations",
+    "services/platform/package.json",
+    "services/platform/wrangler.jsonc",
+    "services/platform/scripts/wrangler-config.ts",
+    "services/platform/scripts/provision-service.ts"
+  ]);
+  assert.deepEqual(platform.build, {
+    type: "cloudflare-worker",
+    config_path: "services/platform/wrangler.jsonc",
+    entrypoint: "worker.js",
+    generated_entrypoint: "worker.js",
+    config: "wrangler.json",
+    files: ["worker.js", "wrangler.json", "artifact-manifest.json", "provision-service.js"],
+    compatibility_date: "2026-09-18",
+    compatibility_flags: ["nodejs_compat"],
+    wrapper: "services/platform/scripts/wrangler-config.ts",
+    helpers: [
+      { source: "services/platform/scripts/provision-service.ts", entrypoint: "provision-service.js" }
+    ],
+    migrations: { source: "services/platform/migrations", directory: "migrations" },
+    wrangler: {
+      d1_databases: [
+        { binding: "IDENTITY_DB", database_name: "platform-identity", migrations_dir: "migrations" }
+      ],
+      secrets: {
+        required: ["BETTER_AUTH_SECRET"],
+        optional: ["GOOGLE_CLIENT_SECRET", "GITHUB_CLIENT_SECRET"]
+      }
+    },
+    runtime: {
+      rate_limits: [
+        { name: "PLATFORM_RATE_LIMIT_LOGIN", simple: { limit: 30, period: 60 } },
+        { name: "PLATFORM_RATE_LIMIT_ISSUANCE", simple: { limit: 60, period: 60 } },
+        { name: "PLATFORM_RATE_LIMIT_MANAGEMENT", simple: { limit: 60, period: 60 } },
+        { name: "PLATFORM_RATE_LIMIT_VERIFICATION", simple: { limit: 600, period: 60 } },
+        { name: "PLATFORM_RATE_LIMIT_GUEST_CONTROL", simple: { limit: 120, period: 60 } }
+      ]
+    }
+  });
+  assert.doesNotThrow(() => assertWorkerBuildConfigMatchesSource(platform, platform.build, repositoryRoot));
+
+  const dispatcher = config.units.find((unit) => unit.name === "msg-webhook-dispatcher");
+  assert.equal(dispatcher.kind, "bun-runtime-bundle");
+  assert.deepEqual(dispatcher.runtime_paths, [
+    "services/msg/scripts/mcp-webhook-dispatcher.ts",
+    "services/msg/worker/src/mcp-webhook-transport.ts",
+    "services/msg/package.json"
+  ]);
+  assert.deepEqual(dispatcher.archive_paths, dispatcher.runtime_paths);
+  assert.deepEqual(dispatcher.build, {
+    type: "bun-runtime",
+    source: "services/msg/scripts/mcp-webhook-dispatcher.ts",
+    entrypoint: "mcp-webhook-dispatcher.js",
+    files: ["mcp-webhook-dispatcher.js", "artifact-manifest.json"],
+    runtime: {
+      engine: "bun",
+      version: "1.3.14",
+      command: ["bun", "mcp-webhook-dispatcher.js"],
+      required_env: ["MSG_MCP_WEBHOOK_DISPATCH_TOKEN"],
+      optional_env: [
+        "MSG_MCP_WEBHOOK_DISPATCH_HOST",
+        "MSG_MCP_WEBHOOK_DISPATCH_PORT",
+        "MSG_MCP_WEBHOOK_DISPATCH_TLS_CERT_FILE",
+        "MSG_MCP_WEBHOOK_DISPATCH_TLS_KEY_FILE",
+        "MSG_MCP_WEBHOOK_DISPATCH_TRUSTED_INTERNAL_PROXY"
+      ]
+    }
+  });
+});
+
+test("Bun dispatcher changes select only the dispatcher unit", () => {
+  assert.deepEqual(
+    affectedUnits(config, ["services/msg/scripts/mcp-webhook-dispatcher.ts"]).map((unit) => unit.name),
+    ["msg-webhook-dispatcher"],
+  );
 });
 
 test("Msg bundle manifest carries only public deployment metadata", () => {
@@ -216,6 +304,31 @@ test("Msg bundle manifest carries only public deployment metadata", () => {
     ],
     triggers: { crons: ["17 3 * * *"] }
   });
+});
+
+test("Platform bundle carries neutral authority bindings and helper attestation", () => {
+  const platform = config.units.find((unit) => unit.name === "platform-worker");
+  const plan = makePlan({ config, base: head, head, changedFiles: ["services/platform/src/worker.ts"] });
+  const helperDigest = `sha256:${"a".repeat(64)}`;
+  const manifest = workerArtifactManifest(platform, plan, {
+    helpers: [{ name: "provision-service.js", digest: helperDigest }],
+  });
+  assert.deepEqual(manifest.required_secrets, ["BETTER_AUTH_SECRET"]);
+  assert.deepEqual(manifest.optional_secrets, ["GOOGLE_CLIENT_SECRET", "GITHUB_CLIENT_SECRET"]);
+  assert.deepEqual(manifest.helpers, [{ name: "provision-service.js", digest: helperDigest }]);
+  assert.deepEqual(manifest.d1_databases, [
+    { binding: "IDENTITY_DB", database_name: "platform-identity", migrations_dir: "migrations" },
+  ]);
+  assert.deepEqual(manifest.rate_limits, platform.build.runtime.rate_limits);
+  assert.equal("vars" in manifest, false);
+
+  const neutral = neutralWranglerConfig(platform);
+  assert.deepEqual(neutral.secrets, { required: ["BETTER_AUTH_SECRET"] });
+  assert.deepEqual(neutral.d1_databases, manifest.d1_databases);
+  assert.equal("vars" in neutral, false);
+  assert.equal(JSON.stringify(neutral).includes("database_id"), false);
+  assert.equal(JSON.stringify(neutral).includes("namespace_id"), false);
+  assert.equal(JSON.stringify(neutral).includes("GOOGLE_CLIENT"), false);
 });
 
 test("Gateway bundle manifest and Wrangler config leave route ownership to Cloud", () => {
@@ -355,7 +468,29 @@ test("Msg D1 migration metadata is ordered and content-addressed", () => {
     {
       name: "migrations/0003_creation_plan.sql",
       digest: "sha256:33933dda69e77a7f570c15c9d3f8b9d62be98a1378faefd1d0a3489bf81aad2c"
+    },
+    {
+      name: "migrations/0005_mcp_oauth.sql",
+      digest: "sha256:8a885a45b67809a491a3109c51a08f7048ff742ff7c7da654003e2f1b72fa369"
     }
+  ]);
+});
+
+test("Platform D1 migration metadata is ordered and content-addressed", () => {
+  const directory = path.join(repositoryRoot, "services/platform/migrations");
+  assert.deepEqual(migrationMetadata(directory, fs.readdirSync(directory)), [
+    { name: "migrations/0001_better_auth.sql", digest: "sha256:76db66e0712fa0d028a2d68a7c7135c5ed9ea9fdf021d480755af15fec029bda" },
+    { name: "migrations/0002_platform_authority.sql", digest: "sha256:6c86953f078d68b4571aebeec47589565c52dba500ca5bf058e8b4de3af75d1f" },
+    { name: "migrations/0003_organization_authority.sql", digest: "sha256:c3edcd26752b4f0e688603c6527ce43ef31f9e75190c1611cc6d10af7d4791d0" },
+    { name: "migrations/0004_credential_lifecycle.sql", digest: "sha256:6245f3e83814e2e1415ceeb714a484f99fd03c6cc062adddcf8eb4b0b02e6f41" },
+    { name: "migrations/0005_agent_authority.sql", digest: "sha256:20ff59f9dc1a2a8c33c8b08b67fff8853568bd0fb686ea3e02c620a31c14a858" },
+    { name: "migrations/0006_social_signup_recovery.sql", digest: "sha256:617cf8e9638ae9cd2e6830c0a4a7eedc0e745e509d2d91ef98c1405addc14b45" },
+    { name: "migrations/0007_guest_lifecycle.sql", digest: "sha256:f929beacc68cb04bedc09348fd7b9c7ce79e0cf4e83d699af76e7bde45f0eeb0" },
+    { name: "migrations/0008_oauth_installation.sql", digest: "sha256:54c0309975576fa032d7bcded26bc4f49e9a66b100b5bc7dec2127c828f6b896" },
+    { name: "migrations/0009_guest_permission_grants.sql", digest: "sha256:aabe862138e1121ee0b0147df7048c5b850e3c53f5d77cefd7ed9a0b33fb1bf6" },
+    { name: "migrations/0010_oauth_refresh.sql", digest: "sha256:50340870c588f9fb6ba231eb1e8e30b95644f18cdabed8c4d68be09879ec0b0a" },
+    { name: "migrations/0011_machine_kinds.sql", digest: "sha256:9c45071f74aa45646411c5415a8355fadb7b014e5adb9c35ef5d15012dcbecee" },
+    { name: "migrations/0012_browser_purpose.sql", digest: "sha256:c7a57c01ed187961fadf68405650386769e5b590c8aa1ada5f75798583ec5c1a" }
   ]);
 });
 
@@ -569,7 +704,7 @@ test("Worker changes select their configured release units", () => {
   assert.deepEqual(affectedUnits(config, ["services/msg/cli/src/cli.ts"]), []);
   assert.deepEqual(affectedUnits(config, ["services/gateway/src/worker.ts"]).map((unit) => unit.name), ["gateway"]);
   assert.deepEqual(affectedUnits(config, ["services/database/src/worker.ts"]).map((unit) => unit.name), ["database-worker"]);
-  assert.deepEqual(affectedUnits(config, ["bun.lock"]).map((unit) => unit.name), ["database-worker", "gateway", "msg-worker"]);
+  assert.deepEqual(affectedUnits(config, ["bun.lock"]).map((unit) => unit.name), ["database-worker", "gateway", "msg-webhook-dispatcher", "msg-worker", "platform-worker"]);
   assert.deepEqual(affectedUnits(config, [".github/workflows/release.yml"]).map((unit) => unit.name), ["msg-worker"]);
 });
 
@@ -598,7 +733,7 @@ test("unit registration retains simultaneous runtime and global inputs", () => {
   );
   assert.deepEqual(
     affectedUnits(config, ["release-units.json", "bun.lock"], previousConfig).map((unit) => unit.name),
-    ["database-worker", "gateway", "msg-worker"]
+    ["database-worker", "gateway", "msg-webhook-dispatcher", "msg-worker", "platform-worker"]
   );
 });
 
@@ -611,7 +746,7 @@ test("changes to existing unit definitions remain conservative", () => {
   };
   assert.deepEqual(
     affectedUnits(config, ["release-units.json"], previousConfig).map((unit) => unit.name),
-    ["database-worker", "gateway", "msg-worker"]
+    ["database-worker", "gateway", "msg-webhook-dispatcher", "msg-worker", "platform-worker"]
   );
 });
 
@@ -623,7 +758,7 @@ test("a release contract change alongside a new unit remains conservative", () =
   };
   assert.deepEqual(
     affectedUnits(config, ["release-units.json"], previousConfig).map((unit) => unit.name),
-    ["database-worker", "gateway", "msg-worker"]
+    ["database-worker", "gateway", "msg-webhook-dispatcher", "msg-worker", "platform-worker"]
   );
 });
 
@@ -669,7 +804,7 @@ test("release planner reads the unit map from the push base commit", () => {
   assert.deepEqual(
     affectedUnits(config, ["release-units.json"], readBaseReleaseConfig(head, () => "not json"))
       .map((unit) => unit.name),
-    ["database-worker", "gateway", "msg-worker"]
+    ["database-worker", "gateway", "msg-webhook-dispatcher", "msg-worker", "platform-worker"]
   );
 });
 
@@ -735,20 +870,30 @@ test("validation-only service changes create a record without Cloud dispatch", (
   }
 });
 
-test("Platform runtime changes remain validation-only and mix with released units", () => {
+test("Platform runtime changes select the released unit and mix with other units", () => {
   for (const changedFile of [
     "services/platform/src/worker.ts",
     "services/platform/migrations/0001_better_auth.sql",
     "services/platform/wrangler.jsonc",
     "services/platform/scripts/wrangler-config.ts",
-    "services/platform/.dev.vars.example"
   ]) {
     const plan = makePlan({ config, base: head, head, changedFiles: [changedFile] });
-    assert.equal(plan.change_class, "non-runtime");
-    assert.equal(plan.runtime_redeployment, false);
-    assert.deepEqual(plan.affected_units, []);
-    assert.deepEqual(plan.artifacts, []);
+    assert.equal(plan.change_class, "runtime");
+    assert.equal(plan.runtime_redeployment, true);
+    assert.deepEqual(plan.affected_units, ["platform-worker"]);
+    assert.deepEqual(plan.artifacts.map((artifact) => artifact.name), ["platform-worker"]);
   }
+
+  const validationOnlyPlan = makePlan({
+    config,
+    base: head,
+    head,
+    changedFiles: ["services/platform/.dev.vars.example"]
+  });
+  assert.equal(validationOnlyPlan.change_class, "non-runtime");
+  assert.equal(validationOnlyPlan.runtime_redeployment, false);
+  assert.deepEqual(validationOnlyPlan.affected_units, []);
+  assert.deepEqual(validationOnlyPlan.artifacts, []);
 
   const mixedPlan = makePlan({
     config,
@@ -758,8 +903,8 @@ test("Platform runtime changes remain validation-only and mix with released unit
   });
   assert.equal(mixedPlan.change_class, "runtime");
   assert.equal(mixedPlan.runtime_redeployment, true);
-  assert.deepEqual(mixedPlan.affected_units, ["msg-worker"]);
-  assert.deepEqual(mixedPlan.artifacts.map((artifact) => artifact.name), ["msg-worker"]);
+  assert.deepEqual(mixedPlan.affected_units, ["msg-worker", "platform-worker"]);
+  assert.deepEqual(mixedPlan.artifacts.map((artifact) => artifact.name), ["msg-worker", "platform-worker"]);
 });
 
 test("unmapped service and app runtime changes fail closed", () => {
@@ -1056,6 +1201,34 @@ test("Database release records carry only finite public capacity policy", () => 
     if (name !== "SERVICE_SUSPENDED") assert.match(value, /^[1-9][0-9]*$/);
   }
   assert.equal(vars.SERVICE_SUSPENDED, "false");
+});
+
+test("Bun dispatcher release records carry a self-hosted runtime contract", () => {
+  const dispatcher = config.units.find((unit) => unit.name === "msg-webhook-dispatcher");
+  const plan = makePlan({ config, base: head, head, changedFiles: ["services/msg/scripts/mcp-webhook-dispatcher.ts"] });
+  const record = createReleaseRecord(plan, [{
+    name: dispatcher.name,
+    version: plan.release_version,
+    kind: dispatcher.kind,
+    media_type: "application/gzip",
+    asset_name: `msg-webhook-dispatcher-${plan.release_version}.tar.gz`,
+    digest: `sha256:${"f".repeat(64)}`,
+    compatibility: config.release.compatibility,
+    source_commit: head,
+    archive_paths: dispatcher.archive_paths,
+    artifact_format: "0000-bun-runtime-bundle-v1",
+    entrypoint: dispatcher.build.entrypoint,
+    files: dispatcher.build.files,
+    entrypoint_digest: `sha256:${"e".repeat(64)}`,
+    runtime: dispatcher.build.runtime,
+  }]);
+
+  assert.equal(record.artifacts[0].artifact_format, "0000-bun-runtime-bundle-v1");
+  assert.deepEqual(record.artifacts[0].runtime, dispatcher.build.runtime);
+  assert.deepEqual(record.cloud_selection.artifacts, []);
+  assert.equal(JSON.stringify(record).includes("MSG_MCP_WEBHOOK_DISPATCH_TOKEN"), true);
+  assert.equal(JSON.stringify(record).includes("Bearer"), false);
+  assert.equal(JSON.stringify(record).includes("https://"), false);
 });
 
 test("Cloud event carries exact Msg artifact and attestation provenance", () => {

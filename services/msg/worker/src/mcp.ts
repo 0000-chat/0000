@@ -5,6 +5,7 @@ import { ERROR_CODES, ProtocolError } from "./errors";
 import { byteLength } from "./room-domain";
 import { foregroundWaitForConversation, MCP_READ_BYTE_BUDGET_BYTES, PROTOCOL_VERSION, stripLegacyAbsoluteExpiry, type CreateRoomResponse, type McpPostMessageResponse, type ReadRoomResponse, type RequestBody, type RoomMessage, type RoomService, type RoomStatusResponse } from "./protocol";
 import { parseWebhookCreateInput, parseWebhookUpdateInput, WebhookInputError } from "./webhooks";
+import { handleMcpRequest as handleMcp2Request, MCP_TOOL_DEFINITIONS as DURABLE_MCP_TOOL_DEFINITIONS, type McpAuthenticator } from "./mcp-events-handler";
 
 const DEFAULT_PUBLIC_ORIGIN = "https://msg.0000.chat";
 const CHATGPT_ORIGINS = ["https://chatgpt.com", "https://chat.openai.com"] as const;
@@ -51,6 +52,10 @@ export interface McpWorkerOptions {
   readonly postDisabled?: boolean;
   readonly publicOrigin?: string;
   readonly rateLimits?: McpRateLimits;
+  readonly auth?: McpAuthenticator;
+  readonly callbackFetch?: typeof fetch;
+  readonly mcpOrigin?: string;
+  readonly mcpRateLimit?: McpRateLimit;
 }
 
 const RoomUrlSchema = z.string().min(1).max(MAX_ROOM_URL_CHARS);
@@ -178,6 +183,7 @@ const WebhookRedeliveryInputSchema = {
 const RoomStatusOutputSchema = z.object({
   active: z.boolean(),
   agent_posting_enabled: z.boolean(),
+  public_grants_allowed: z.boolean().optional(),
   expires_at: z.string(),
   latest_message: z.number().int().nonnegative(),
   protocol_version: z.number().int().positive(),
@@ -215,6 +221,16 @@ export async function handleMcpRequest(
   if (!await requestWithinLimit(request)) {
     return mcpRequestError(origin, 413, "The MCP request is too large.");
   }
+  const specialMethod = await readMcpSpecialMethod(request);
+  if (specialMethod !== undefined && (specialMethod === "initialize" || specialMethod === "server/discover" || specialMethod === "notifications/initialized" || specialMethod === "events/list" || specialMethod === "events/subscribe" || specialMethod === "events/unsubscribe" || specialMethod === "durable-tool")) {
+    const response = await handleMcp2Request(request, service, {
+      auth: options.auth,
+      callbackFetch: options.callbackFetch,
+      origin: options.mcpOrigin ?? publicOrigin,
+      rateLimit: options.mcpRateLimit,
+    });
+    return applyMcpCors(response, origin);
+  }
   if (await isSubscriptionListenRequest(request)) {
     return mcpRequestError(origin, 405, "This stateless MCP endpoint does not support subscriptions.", { allow: "POST, OPTIONS" });
   }
@@ -248,6 +264,7 @@ export async function handleMcpRequest(
       await handler.close().catch(() => undefined);
     }
   }
+  if (specialMethod === "tools-list") response = await appendDurableToolDefinitions(response);
   response = await enforceMcpWireLimit(response);
   return applyMcpCors(response, origin);
 }
@@ -271,7 +288,7 @@ function buildMcpServer(
     "create_room",
     {
       title: "Create room",
-      description: "Create a temporary room directly with an initial message. The result contains the public conversation URL and share instructions plus the private owner management URL for the tool caller; never copy that private URL into room content or public messages. Supply a stable idempotency_key to safely retry the same creation request.",
+      description: "Create a temporary room directly with an initial message. MCP room creation is account-free: the returned owner control link is the explicit owner capability, while opening or sharing the public URL can establish an automatic Platform guest for ordinary room access. The result contains the public conversation URL and share instructions plus the owner control link for the tool caller; never copy that private link into room content or public messages. Supply a stable idempotency_key to safely retry the same creation request.",
       inputSchema: CreateRoomInputSchema,
       outputSchema: CreateRoomOutputSchema,
       annotations: {
@@ -1180,4 +1197,38 @@ export async function enforceMcpWireLimit(response: Response): Promise<Response>
   const body = await response.arrayBuffer();
   if (body.byteLength <= MAX_MCP_WIRE_RESPONSE_BYTES) return new Response(body, response);
   return mcpHttpError(500, "The MCP response exceeded the maximum wire size.");
+}
+
+type SpecialMcpMethod = "initialize" | "server/discover" | "notifications/initialized" | "events/list" | "events/subscribe" | "events/unsubscribe" | "durable-tool" | "tools-list";
+
+async function readMcpSpecialMethod(request: Request): Promise<SpecialMcpMethod | undefined> {
+  let body: unknown;
+  try { body = await request.clone().json() as unknown; } catch { return undefined; }
+  if (body === null || typeof body !== "object" || Array.isArray(body)) return undefined;
+  const record = body as Record<string, unknown>;
+  if (typeof record.method !== "string") return undefined;
+  if (record.method === "initialize" || record.method === "server/discover" || record.method === "notifications/initialized" || record.method === "events/list" || record.method === "events/subscribe" || record.method === "events/unsubscribe") return record.method;
+  if (record.method === "tools/list") return "tools-list";
+  if (record.method !== "tools/call" || record.params === null || typeof record.params !== "object" || Array.isArray(record.params)) return undefined;
+  const params = record.params as Record<string, unknown>;
+  const name = params.name;
+  if (name === "read_thread" || name === "read_message" || name === "post_response") return "durable-tool";
+  if (name === "post_message" && params.arguments !== null && typeof params.arguments === "object" && !Array.isArray(params.arguments) && "response_context" in (params.arguments as Record<string, unknown>)) return "durable-tool";
+  return undefined;
+}
+
+async function appendDurableToolDefinitions(response: Response): Promise<Response> {
+  if (!response.ok || response.status === 204) return response;
+  let value: unknown;
+  try { value = await response.clone().json() as unknown; } catch { return response; }
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return response;
+  const envelope = value as Record<string, unknown>;
+  if (envelope.result === null || typeof envelope.result !== "object" || Array.isArray(envelope.result)) return response;
+  const result = envelope.result as Record<string, unknown>;
+  const tools = Array.isArray(result.tools) ? result.tools : [];
+  const existing = new Set(tools.flatMap((tool) => tool !== null && typeof tool === "object" && !Array.isArray(tool) && typeof (tool as Record<string, unknown>).name === "string" ? [(tool as Record<string, unknown>).name as string] : []));
+  const additions = DURABLE_MCP_TOOL_DEFINITIONS.filter((tool) => !existing.has(tool.name));
+  if (additions.length === 0) return response;
+  result.tools = [...tools, ...additions];
+  return new Response(JSON.stringify(envelope), { status: response.status, statusText: response.statusText, headers: response.headers });
 }

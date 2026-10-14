@@ -45,6 +45,7 @@ import {
   type AccountOAuthInstallation,
   type OrganizationDetails,
 } from "./account-ui";
+import { configuredSocialProviderAvailability } from "./auth-providers";
 import {
   CredentialRotationConflict,
   ensureDefaultOrganization,
@@ -3216,16 +3217,22 @@ async function accountRoute(
   }
   if (pathname === "/login" && request.method === "GET") {
     const rawQuery = url.search.slice(1);
+    const configuredProviders = configuredSocialProviderAvailability(env);
     return loginPage(
       loginErrorMessage(url.searchParams.get("error")),
       parseOAuthQuery(rawQuery) ? rawQuery : "",
+      configuredProviders,
     );
   }
   if (
     (pathname === "/error" || pathname === "/api/auth/error") &&
     request.method === "GET"
   ) {
-    return loginPage(loginErrorMessage(url.searchParams.get("error")));
+    return loginPage(
+      loginErrorMessage(url.searchParams.get("error")),
+      "",
+      configuredSocialProviderAvailability(env),
+    );
   }
   if (pathname === "/account" && request.method === "GET") {
     const auth = createAuth(env);
@@ -3414,6 +3421,7 @@ async function accountRoute(
         id: account.id,
         providerId: account.providerId,
       })),
+      configuredProviders: configuredSocialProviderAvailability(env),
     });
   }
   if (pathname === "/api/account/profile" && request.method === "POST") {

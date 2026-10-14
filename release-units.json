@@ -169,6 +169,102 @@
           }
         }
       }
+    },
+    {
+      "name": "platform-worker",
+      "kind": "cloudflare-worker-bundle",
+      "runtime_paths": [
+        "services/platform/src/**",
+        "services/platform/migrations/**",
+        "services/platform/package.json",
+        "services/platform/wrangler.jsonc",
+        "services/platform/scripts/wrangler-config.ts",
+        "services/platform/scripts/provision-service.ts"
+      ],
+      "archive_paths": [
+        "services/platform/src",
+        "services/platform/migrations",
+        "services/platform/package.json",
+        "services/platform/wrangler.jsonc",
+        "services/platform/scripts/wrangler-config.ts",
+        "services/platform/scripts/provision-service.ts"
+      ],
+      "build": {
+        "type": "cloudflare-worker",
+        "config_path": "services/platform/wrangler.jsonc",
+        "entrypoint": "worker.js",
+        "generated_entrypoint": "worker.js",
+        "config": "wrangler.json",
+        "files": ["worker.js", "wrangler.json", "artifact-manifest.json", "provision-service.js"],
+        "compatibility_date": "2026-09-18",
+        "compatibility_flags": ["nodejs_compat"],
+        "wrapper": "services/platform/scripts/wrangler-config.ts",
+        "helpers": [
+          {
+            "source": "services/platform/scripts/provision-service.ts",
+            "entrypoint": "provision-service.js"
+          }
+        ],
+        "migrations": {
+          "source": "services/platform/migrations",
+          "directory": "migrations"
+        },
+        "wrangler": {
+          "d1_databases": [
+            {
+              "binding": "IDENTITY_DB",
+              "database_name": "platform-identity",
+              "migrations_dir": "migrations"
+            }
+          ],
+          "secrets": {
+            "required": ["BETTER_AUTH_SECRET"],
+            "optional": ["GOOGLE_CLIENT_SECRET", "GITHUB_CLIENT_SECRET"]
+          }
+        },
+        "runtime": {
+          "rate_limits": [
+            { "name": "PLATFORM_RATE_LIMIT_LOGIN", "simple": { "limit": 30, "period": 60 } },
+            { "name": "PLATFORM_RATE_LIMIT_ISSUANCE", "simple": { "limit": 60, "period": 60 } },
+            { "name": "PLATFORM_RATE_LIMIT_MANAGEMENT", "simple": { "limit": 60, "period": 60 } },
+            { "name": "PLATFORM_RATE_LIMIT_VERIFICATION", "simple": { "limit": 600, "period": 60 } },
+            { "name": "PLATFORM_RATE_LIMIT_GUEST_CONTROL", "simple": { "limit": 120, "period": 60 } }
+          ]
+        }
+      }
+    },
+    {
+      "name": "msg-webhook-dispatcher",
+      "kind": "bun-runtime-bundle",
+      "runtime_paths": [
+        "services/msg/scripts/mcp-webhook-dispatcher.ts",
+        "services/msg/worker/src/mcp-webhook-transport.ts",
+        "services/msg/package.json"
+      ],
+      "archive_paths": [
+        "services/msg/scripts/mcp-webhook-dispatcher.ts",
+        "services/msg/worker/src/mcp-webhook-transport.ts",
+        "services/msg/package.json"
+      ],
+      "build": {
+        "type": "bun-runtime",
+        "source": "services/msg/scripts/mcp-webhook-dispatcher.ts",
+        "entrypoint": "mcp-webhook-dispatcher.js",
+        "files": ["mcp-webhook-dispatcher.js", "artifact-manifest.json"],
+        "runtime": {
+          "engine": "bun",
+          "version": "1.3.14",
+          "command": ["bun", "mcp-webhook-dispatcher.js"],
+          "required_env": ["MSG_MCP_WEBHOOK_DISPATCH_TOKEN"],
+          "optional_env": [
+            "MSG_MCP_WEBHOOK_DISPATCH_HOST",
+            "MSG_MCP_WEBHOOK_DISPATCH_PORT",
+            "MSG_MCP_WEBHOOK_DISPATCH_TLS_CERT_FILE",
+            "MSG_MCP_WEBHOOK_DISPATCH_TLS_KEY_FILE",
+            "MSG_MCP_WEBHOOK_DISPATCH_TRUSTED_INTERNAL_PROXY"
+          ]
+        }
+      }
     }
   ]
 }

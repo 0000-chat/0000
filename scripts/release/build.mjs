@@ -147,6 +147,19 @@ function buildWorkerUnit(unit, plan) {
     }
     const workerBytes = fs.readFileSync(generatedWorker);
     fs.writeFileSync(path.join(artifactRoot, unit.build.entrypoint), workerBytes);
+    const helperArtifacts = [];
+    for (const helper of unit.build.helpers ?? []) {
+      const helperPath = path.join(artifactRoot, helper.entrypoint);
+      run(
+        "bun",
+        ["build", repositoryPath(helper.source, `${unit.name} build helper source`), "--target=bun", "--sourcemap=none", "--outfile", helperPath],
+        { maxBuffer: 128 * 1024 * 1024 },
+      );
+      helperArtifacts.push({
+        name: helper.entrypoint,
+        digest: `sha256:${sha256(fs.readFileSync(helperPath))}`,
+      });
+    }
     fs.writeFileSync(
       path.join(artifactRoot, unit.build.config),
       stableJson(neutralWranglerConfig(unit)),
@@ -167,7 +180,8 @@ function buildWorkerUnit(unit, plan) {
     );
     const manifest = workerArtifactManifest(unit, plan, {
       ...(migrationFiles.length > 0 ? { migration_files: migrationFiles } : {}),
-      ...(modules.length > 0 ? { modules } : {})
+      ...(modules.length > 0 ? { modules } : {}),
+      ...(helperArtifacts.length > 0 ? { helpers: helperArtifacts } : {})
     });
     fs.writeFileSync(path.join(artifactRoot, "artifact-manifest.json"), stableJson(manifest), "utf8");
 
@@ -209,6 +223,7 @@ function buildWorkerUnit(unit, plan) {
         ...(unit.build.wrangler?.vars ? { vars: unit.build.wrangler.vars } : {}),
         migration_files: migrationFiles,
         modules,
+        ...(helperArtifacts.length > 0 ? { helpers: helperArtifacts } : {}),
         entrypoint_digest: `sha256:${sha256(workerBytes)}`,
         deployment: {
           tool: "wrangler",
@@ -233,6 +248,83 @@ function buildWorkerUnit(unit, plan) {
   }
 }
 
+function buildBunRuntimeUnit(unit, plan) {
+  const commit = plan.source_commit;
+  const currentCommit = run("git", ["rev-parse", "HEAD"]).toString().trim();
+  if (currentCommit !== commit) {
+    throw new Error(`built artifact source checkout ${currentCommit} does not match release commit ${commit}`);
+  }
+
+  const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), `0000-${unit.name}-`));
+  const artifactRoot = path.join(temporaryRoot, "artifact");
+  fs.mkdirSync(artifactRoot);
+  try {
+    const source = repositoryPath(unit.build.source, `${unit.name} build.source`);
+    const entrypointPath = path.join(artifactRoot, unit.build.entrypoint);
+    run(
+      "bun",
+      ["build", source, "--target=bun", "--sourcemap=none", "--outfile", entrypointPath],
+      { maxBuffer: 128 * 1024 * 1024 },
+    );
+    if (!fs.existsSync(entrypointPath) || !fs.statSync(entrypointPath).isFile()) {
+      throw new Error(`Bun did not emit the configured runtime entrypoint: ${unit.build.entrypoint}`);
+    }
+    const entrypointBytes = fs.readFileSync(entrypointPath);
+    const manifest = {
+      schema_version: 1,
+      product: "0000",
+      name: unit.name,
+      version: plan.release_version,
+      kind: unit.kind,
+      media_type: "application/gzip",
+      source_commit: plan.source_commit,
+      compatibility: plan.compatibility,
+      entrypoint: unit.build.entrypoint,
+      runtime: unit.build.runtime,
+      files: unit.build.files,
+      entrypoint_digest: `sha256:${sha256(entrypointBytes)}`,
+    };
+    fs.writeFileSync(path.join(artifactRoot, "artifact-manifest.json"), stableJson(manifest), "utf8");
+
+    const missing = unit.build.files.filter((file) => !fs.existsSync(path.join(artifactRoot, file)));
+    if (missing.length > 0) {
+      throw new Error(`built artifact is missing configured files for ${unit.name}: ${missing.join(", ")}`);
+    }
+    const tar = run(
+      "tar",
+      [
+        "--format=ustar",
+        "--sort=name",
+        "--mtime=@0",
+        "--owner=0",
+        "--group=0",
+        "--numeric-owner",
+        "--mode=0644",
+        "-cf",
+        "-",
+        "-C",
+        artifactRoot,
+        ...unit.build.files,
+      ],
+      { maxBuffer: 128 * 1024 * 1024 },
+    );
+    if (tar.length === 0) throw new Error(`empty built archive for ${unit.name}`);
+    const bytes = gzipSync(tar, { level: 9, mtime: 0 });
+    return {
+      bytes,
+      metadata: {
+        artifact_format: "0000-bun-runtime-bundle-v1",
+        entrypoint: unit.build.entrypoint,
+        files: unit.build.files,
+        runtime: unit.build.runtime,
+        entrypoint_digest: `sha256:${sha256(entrypointBytes)}`,
+      },
+    };
+  } finally {
+    fs.rmSync(temporaryRoot, { force: true, recursive: true });
+  }
+}
+
 const planPath = argument("--plan");
 const outputDirectory = argument("--output-dir");
 if (!planPath || !outputDirectory) throw new Error("usage: build.mjs --plan PLAN --output-dir DIRECTORY");
@@ -247,7 +339,9 @@ for (const name of plan.affected_units) {
   if (!unit) throw new Error(`plan references unknown release unit: ${name}`);
 
   const built = unit.build
-    ? buildWorkerUnit(unit, plan)
+    ? unit.build.type === "cloudflare-worker"
+      ? buildWorkerUnit(unit, plan)
+      : buildBunRuntimeUnit(unit, plan)
     : { bytes: archiveUnit(unit, plan.source_commit), metadata: {} };
   const digest = `sha256:${sha256(built.bytes)}`;
   const archiveName = `${unit.name}-${plan.release_version}.tar.gz`;

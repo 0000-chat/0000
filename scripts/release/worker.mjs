@@ -5,7 +5,12 @@ export function neutralWranglerConfig(unit) {
   const publicContract = Object.fromEntries(
     PUBLIC_WRANGLER_KEYS
       .filter((key) => Object.prototype.hasOwnProperty.call(build.wrangler ?? {}, key))
-      .map((key) => [key, build.wrangler[key]]),
+      .map((key) => [
+        key,
+        key === "secrets"
+          ? { required: build.wrangler.secrets.required }
+          : build.wrangler[key],
+      ]),
   );
   const config = {
     $schema: "https://developers.cloudflare.com/workers/wrangler/config-schema.json",
@@ -55,9 +60,13 @@ export function workerArtifactManifest(unit, plan, extra = {}) {
   if (wrangler.durable_objects) manifest.durable_objects = wrangler.durable_objects;
   if (wrangler.migrations) manifest.migrations = wrangler.migrations;
   if (wrangler.d1_databases) manifest.d1_databases = wrangler.d1_databases;
-  if (wrangler.secrets) manifest.required_secrets = wrangler.secrets.required;
+  if (wrangler.secrets) {
+    manifest.required_secrets = wrangler.secrets.required;
+    if (wrangler.secrets.optional) manifest.optional_secrets = wrangler.secrets.optional;
+  }
   if (wrangler.observability) manifest.observability = wrangler.observability;
   if (wrangler.vars) manifest.vars = wrangler.vars;
+  if (extra.helpers) manifest.helpers = extra.helpers;
   if (wrangler.rules || extra.modules) manifest.modules = extra.modules ?? [];
   if (build.runtime?.rate_limits) manifest.rate_limits = build.runtime.rate_limits;
   if (build.runtime?.triggers) manifest.triggers = build.runtime.triggers;

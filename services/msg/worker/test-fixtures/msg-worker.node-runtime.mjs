@@ -254,6 +254,10 @@ function dispatchOverHttp(descriptor, body) {
 
   return new Promise((resolve, reject) => {
     const outgoing = sendWorkerRequest({
+      // A body rejected from Content-Length can leave the worker closing the
+      // connection before consuming it. Never reuse that socket for the next
+      // test dispatch, or the next request can fail with ECONNRESET.
+      agent: false,
       hostname: workerUrl.hostname,
       port: workerUrl.port,
       path: `${descriptor.url.pathname}${descriptor.url.search}`,

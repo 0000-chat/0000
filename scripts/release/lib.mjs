@@ -196,6 +196,31 @@ function assertWorkerBuildConfig(unit, build) {
     }
   }
 
+  if (build.helpers !== undefined) {
+    if (!Array.isArray(build.helpers) || build.helpers.length === 0) {
+      throw new Error(`release unit build.helpers must be non-empty: ${unit.name}`);
+    }
+    const helperEntrypoints = new Set([build.entrypoint, build.config, "artifact-manifest.json"]);
+    for (const helper of build.helpers) {
+      if (
+        !helper ||
+        typeof helper !== "object" ||
+        Array.isArray(helper) ||
+        typeof helper.source !== "string" ||
+        !helper.source.startsWith("services/") ||
+        normalisePath(helper.source) !== helper.source ||
+        typeof helper.entrypoint !== "string" ||
+        helper.entrypoint.length === 0 ||
+        helper.entrypoint.includes("/") ||
+        normalisePath(helper.entrypoint) !== helper.entrypoint ||
+        helperEntrypoints.has(helper.entrypoint)
+      ) {
+        throw new Error(`release unit build.helpers is invalid: ${unit.name}`);
+      }
+      helperEntrypoints.add(helper.entrypoint);
+    }
+  }
+
   if (build.runtime !== undefined) {
     const runtime = build.runtime;
     if (!runtime || typeof runtime !== "object" || Array.isArray(runtime)) {
@@ -416,14 +441,20 @@ function assertWorkerBuildConfig(unit, build) {
     }
     if (build.wrangler.secrets !== undefined) {
       const required = build.wrangler.secrets?.required;
+      const optional = build.wrangler.secrets?.optional;
       if (
         !build.wrangler.secrets ||
         typeof build.wrangler.secrets !== "object" ||
         Array.isArray(build.wrangler.secrets) ||
         !Array.isArray(required) ||
-        !required.every((secret) => typeof secret === "string" && NAME_RE.test(secret))
+        !required.every((secret) => typeof secret === "string" && NAME_RE.test(secret)) ||
+        (optional !== undefined &&
+          (!Array.isArray(optional) ||
+            !optional.every((secret) => typeof secret === "string" && NAME_RE.test(secret)))) ||
+        (optional !== undefined &&
+          new Set([...required, ...optional]).size !== required.length + optional.length)
       ) {
-        throw new Error(`release unit build.wrangler.secrets.required is invalid: ${unit.name}`);
+        throw new Error(`release unit build.wrangler.secrets is invalid: ${unit.name}`);
       }
     }
     if (build.wrangler.observability !== undefined) {
@@ -438,6 +469,86 @@ function assertWorkerBuildConfig(unit, build) {
     }
   }
   assertWorkerBuildConfigMatchesSource(unit, build);
+}
+
+function assertBunRuntimeBuildConfig(unit, build) {
+  if (!build || typeof build !== "object" || Array.isArray(build)) {
+    throw new Error(`release unit build configuration must be an object: ${unit.name}`);
+  }
+  if (build.type !== "bun-runtime") {
+    throw new Error(`unsupported release build type: ${unit.name}`);
+  }
+  if (unit.kind !== "bun-runtime-bundle") {
+    throw new Error(`Bun runtime build requires bun-runtime-bundle kind: ${unit.name}`);
+  }
+  if (
+    typeof build.source !== "string" ||
+    !build.source.startsWith("services/") ||
+    normalisePath(build.source) !== build.source
+  ) {
+    throw new Error(`release unit Bun build.source must be a normalized services path: ${unit.name}`);
+  }
+  const entrypoint = build.entrypoint;
+  if (
+    typeof entrypoint !== "string" ||
+    entrypoint.length === 0 ||
+    entrypoint.includes("/") ||
+    normalisePath(entrypoint) !== entrypoint
+  ) {
+    throw new Error(`release unit Bun build.entrypoint must be a root-level artifact file: ${unit.name}`);
+  }
+  if (
+    !Array.isArray(build.files) ||
+    build.files.length === 0 ||
+    new Set(build.files).size !== build.files.length ||
+    !build.files.every(
+      (file) => typeof file === "string" && !file.includes("/") && normalisePath(file) === file,
+    ) ||
+    !build.files.includes(entrypoint) ||
+    !build.files.includes("artifact-manifest.json")
+  ) {
+    throw new Error(`release unit Bun build.files must contain unique root-level files and artifact-manifest.json: ${unit.name}`);
+  }
+  const runtime = build.runtime;
+  if (!runtime || typeof runtime !== "object" || Array.isArray(runtime)) {
+    throw new Error(`release unit Bun build.runtime must be an object: ${unit.name}`);
+  }
+  const unsupported = Object.keys(runtime).filter(
+    (key) => !["engine", "version", "command", "required_env", "optional_env"].includes(key),
+  );
+  if (
+    unsupported.length > 0 ||
+    runtime.engine !== "bun" ||
+    typeof runtime.version !== "string" ||
+    !/^\d+\.\d+\.\d+$/.test(runtime.version)
+  ) {
+    throw new Error(`release unit Bun build.runtime contract is invalid: ${unit.name}`);
+  }
+  if (
+    !Array.isArray(runtime.command) ||
+    runtime.command.length !== 2 ||
+    runtime.command[0] !== "bun" ||
+    runtime.command[1] !== entrypoint ||
+    !runtime.command.every((value) => typeof value === "string" && value.length > 0)
+  ) {
+    throw new Error(`release unit Bun build.runtime.command must invoke Bun with the entrypoint: ${unit.name}`);
+  }
+  const environmentNames = (key) => {
+    const values = runtime[key];
+    if (
+      !Array.isArray(values) ||
+      new Set(values).size !== values.length ||
+      !values.every((value) => typeof value === "string" && /^[A-Z][A-Z0-9_]*$/.test(value))
+    ) {
+      throw new Error(`release unit Bun build.runtime.${key} is invalid: ${unit.name}`);
+    }
+    return new Set(values);
+  };
+  const required = environmentNames("required_env");
+  const optional = environmentNames("optional_env");
+  if ([...required].some((name) => optional.has(name))) {
+    throw new Error(`release unit Bun build.runtime environment names overlap: ${unit.name}`);
+  }
 }
 
 function canonicalJson(value) {
@@ -626,7 +737,12 @@ export function assertWorkerBuildConfigMatchesSource(unit, build, root = reposit
     durable_objects: releaseContract.durable_objects,
     migrations: releaseContract.migrations,
     d1_databases: releaseContract.d1_databases,
-    secrets: releaseContract.secrets,
+    // Wrangler accepts only the required secret declaration. Optional
+    // provider secrets remain an artifact contract and are omitted from the
+    // generated neutral config.
+    secrets: releaseContract.secrets
+      ? { required: releaseContract.secrets.required }
+      : undefined,
     observability: releaseContract.observability,
     assets: build.assets
       ? {
@@ -686,7 +802,11 @@ export function assertReleaseConfig(config) {
     if (!Array.isArray(unit.archive_paths) || unit.archive_paths.length === 0) {
       throw new Error(`release unit has no archive paths: ${unit.name}`);
     }
-    if (unit.build !== undefined) assertWorkerBuildConfig(unit, unit.build);
+    if (unit.build !== undefined) {
+      if (unit.build.type === "cloudflare-worker") assertWorkerBuildConfig(unit, unit.build);
+      else if (unit.build.type === "bun-runtime") assertBunRuntimeBuildConfig(unit, unit.build);
+      else throw new Error(`unsupported release build type: ${unit.name}`);
+    }
     for (const [pathKind, paths] of [["runtime", unit.runtime_paths], ["archive", unit.archive_paths]]) {
       for (const value of paths) {
         const normalised = normalisePath(value.replace(/\*+$/, ""));
@@ -791,12 +911,6 @@ const FAIL_CLOSED_SERVICE_ROOTS = [
   "services/brain"
 ];
 
-// Platform is deliberately validation-only while its Worker artifact and
-// staging consumer remain unreviewed. Keep it out of the fail-closed roots so
-// source, configuration, and migration changes produce a zero-artifact record
-// instead of being mistaken for an undeclared deployable runtime.
-const VALIDATION_ONLY_SERVICE_ROOTS = ["services/platform"];
-
 const VALIDATION_ONLY_FILE_NAMES = new Set([
   ".env.example",
   ".gitignore",
@@ -821,8 +935,6 @@ function pathInside(file, root) {
 
 function isValidationOnlyPath(file) {
   if (isDocumentationPath(file)) return true;
-
-  if (VALIDATION_ONLY_SERVICE_ROOTS.some((root) => pathInside(file, root))) return true;
 
   const failClosedRoot = FAIL_CLOSED_SERVICE_ROOTS.find((root) => pathInside(file, root));
   if (failClosedRoot) {
