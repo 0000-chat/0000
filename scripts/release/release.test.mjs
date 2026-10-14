@@ -708,6 +708,24 @@ test("Worker changes select their configured release units", () => {
   assert.deepEqual(affectedUnits(config, [".github/workflows/release.yml"]).map((unit) => unit.name), ["msg-worker"]);
 });
 
+test("shared Platform client source changes redeploy every runtime unit", () => {
+  const sourcePath = "packages/platform-client/src/index.ts";
+  const testPath = "packages/platform-client/src/index.test.ts";
+  const allUnits = config.units.map((unit) => unit.name).sort();
+
+  assert.deepEqual(affectedUnits(config, [sourcePath, testPath]).map((unit) => unit.name), allUnits);
+  const sourcePlan = makePlan({ config, base: head, head, changedFiles: [sourcePath, testPath] });
+  assert.equal(sourcePlan.change_class, "runtime");
+  assert.equal(sourcePlan.runtime_redeployment, true);
+  assert.deepEqual(sourcePlan.affected_units, allUnits);
+
+  const testOnlyPlan = makePlan({ config, base: head, head, changedFiles: [testPath] });
+  assert.deepEqual(affectedUnits(config, [testPath]), []);
+  assert.equal(testOnlyPlan.change_class, "non-runtime");
+  assert.equal(testOnlyPlan.runtime_redeployment, false);
+  assert.deepEqual(testOnlyPlan.affected_units, []);
+});
+
 test("release event producer changes rebuild every runtime artifact", () => {
   const changedFiles = [
     "docs/release-artifacts.md",
