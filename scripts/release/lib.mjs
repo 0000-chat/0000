@@ -857,8 +857,17 @@ export function unitAffectsFile(unit, file) {
   return matchesAny(file, unit.runtime_paths);
 }
 
-const GLOBAL_RUNTIME_INPUTS = new Set(["package.json", "bun.lock", "turbo.json", "scripts/release/event.mjs"]);
+const GLOBAL_RUNTIME_INPUTS = new Set([
+  "package.json",
+  "bun.lock",
+  "turbo.json",
+  "scripts/release/event.mjs",
+  "scripts/release/lib.mjs",
+]);
 const GLOBAL_RUNTIME_INPUT_PREFIXES = ["packages/platform-client/"];
+const RUNTIME_COMPANIONS = new Map([
+  ["msg-worker", ["msg-webhook-dispatcher"]],
+]);
 
 function additiveUnitRegistrations(config, previousConfig) {
   if (!Array.isArray(previousConfig?.units)) return null;
@@ -887,6 +896,15 @@ function isGlobalRuntimeInput(file) {
   );
 }
 
+function includeRuntimeCompanions(config, units) {
+  const affectedNames = new Set(units.map((unit) => unit.name));
+  for (const [unitName, companions] of RUNTIME_COMPANIONS) {
+    if (!affectedNames.has(unitName)) continue;
+    for (const companion of companions) affectedNames.add(companion);
+  }
+  return config.units.filter((unit) => affectedNames.has(unit.name)).sort(byName);
+}
+
 export function affectedUnits(config, changedFiles, previousConfig = undefined) {
   const files = [...new Set(changedFiles.map(normalisePath))].sort();
   if (files.some(isGlobalRuntimeInput)) return [...config.units].sort(byName);
@@ -895,13 +913,16 @@ export function affectedUnits(config, changedFiles, previousConfig = undefined) 
   const otherFiles = releaseUnitsChanged ? files.filter((file) => file !== "release-units.json") : files;
   const directlyAffected = config.units.filter((unit) => otherFiles.some((file) => unitAffectsFile(unit, file)));
 
-  if (!releaseUnitsChanged) return directlyAffected.sort(byName);
+  if (!releaseUnitsChanged) return includeRuntimeCompanions(config, directlyAffected);
 
   const addedUnits = additiveUnitRegistrations(config, previousConfig);
   if (!addedUnits) return [...config.units].sort(byName);
 
   const affectedNames = new Set([...addedUnits, ...directlyAffected].map((unit) => unit.name));
-  return config.units.filter((unit) => affectedNames.has(unit.name)).sort(byName);
+  return includeRuntimeCompanions(
+    config,
+    config.units.filter((unit) => affectedNames.has(unit.name)),
+  );
 }
 
 export function isDocumentationPath(file) {
