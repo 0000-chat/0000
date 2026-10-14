@@ -12,10 +12,12 @@ status: current
 ## Problem Statement
 
 Gateway now has a first Worker entry with a public health signal and
-stateless MCP diagnostic, but the canonical apex route, standalone-host route,
-and connected service-tool catalog remain target behavior. Consumers need a
-clear MCP address contract and a harmless diagnostic while route and release
-owners keep hosted evidence separate from repository documentation.
+stateless MCP diagnostic, but its standalone host route and connected
+service-tool catalog remain target behavior. Msg owns the selected canonical
+apex Worker and MCP resource for the current cutover; Gateway's earlier apex
+route target is deferred. Consumers need a clear MCP address contract and a
+harmless diagnostic while route and release owners keep hosted evidence
+separate from repository documentation.
 
 The first useful slice must establish the public entry boundary while keeping
 the Gateway Capability contract deliberate. It must provide connectivity
@@ -24,11 +26,10 @@ integration, or internal service calls.
 
 ## Solution
 
-Create the first Gateway slice as a Cloudflare Worker target with the
-canonical MCP entry `https://0000.chat/mcp` and standalone host
-`https://gateway.0000.chat/mcp`. The same MCP surface serves both addresses
-directly, without an HTTP redirect, once the operator-owned apex route is
-provisioned. A plain Hono application provides `GET /health`. A stateless
+Create the first Gateway slice as a Cloudflare Worker target at the standalone
+MCP host `https://gateway.0000.chat/mcp`. The previous Gateway apex target is
+deferred pending a future separate route or host decision; Msg owns the
+selected `https://0000.chat/mcp` resource. A plain Hono application provides `GET /health`. A stateless
 `mcp-use@2.5.0` MCP server is composed into the Hono application while
 preserving its expected request path, so the public MCP endpoint is exactly
 `/mcp`. The health endpoint returns HTTP 200 with a JSON status of `ok` and
@@ -39,9 +40,10 @@ downstream calls or mutations. It requires no persistent session state or
 Views.
 
 Use an MCP client to exercise initialize, list, and diagnostic call behavior
-against the local Worker runtime. When the operator-owned routes are
-provisioned, exercise both hosted addresses directly and add the canonical MCP
-endpoint to Codex as a new, distinct Streamable HTTP server entry. Preserve
+against the local Worker runtime. When the operator-owned standalone Gateway
+route and Msg apex route are provisioned, exercise both service-owned
+addresses directly and add each required MCP endpoint to Codex as a distinct
+Streamable HTTP server entry. Preserve
 the existing `0000` configuration, which is a stdio server without a URL;
 adding the new entry requires Desktop settings configuration, Save + Restart,
 and a fresh task.
@@ -90,12 +92,12 @@ diagnostic milestone does not call downstream services.
 22. As a Platform owner, I want Platform to establish identity for future authenticated operations, so that the Gateway does not become the owner of identity policy.
 23. As a downstream service owner, I want downstream services to retain their resource ACLs, so that Gateway-level checks do not replace service-owned resource authorization.
 24. As a Gateway developer, I want Cap'n Web over Cloudflare service bindings reserved for future internal calls, so that the first diagnostic can remain independent of downstream RPC implementation.
-25. As a test owner, I want the same external HTTP and MCP checks to run against the local Worker and both hosted addresses once routes are provisioned, so that local evidence and release evidence exercise the same public boundary.
+25. As a test owner, I want the same external HTTP and MCP checks to run against the local Worker and the selected Gateway and Msg hosted addresses once routes are provisioned, so that local evidence and release evidence exercise the same public boundaries.
 
 ## Implementation Decisions
 
 - The Gateway remains a stable entry and adaptation boundary. It does not own product data, identity policy, or downstream Service Operation behavior.
-- The first milestone is a diagnostics-only Cloudflare Worker target. Its hosted MCP contract is the canonical `https://0000.chat/mcp` address and the standalone `https://gateway.0000.chat/mcp` host serving the same surface directly without a redirect; route provisioning and deployment evidence remain operator-owned.
+- The first milestone is a diagnostics-only Cloudflare Worker target at `https://gateway.0000.chat/mcp`. Msg owns the selected canonical `https://0000.chat/mcp` Worker resource; the earlier Gateway apex target is deferred. Route provisioning and deployment evidence remain operator-owned.
 - Plain Hono is the initial HTTP application. It serves `GET /health` before the MCP handler is composed, returning HTTP 200 with JSON status `ok` and service name `gateway`; this reports Worker liveness, not downstream readiness.
 - `mcp-use@2.5.0` is the selected package for the diagnostic prototype. Its Worker-compatible package export and documented Fetch composition have been inspected from the published package and pinned source.
 - The MCP server Fetch handler is composed into the Hono application while preserving its expected request path, making the public MCP endpoint exactly `/mcp`. The default MCP transport is stateless Streamable HTTP.

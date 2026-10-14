@@ -1,10 +1,17 @@
 import { readFileSync } from "node:fs";
 import { rm } from "node:fs/promises";
+import { fileURLToPath } from "node:url";
 
 import { expect, test } from "bun:test";
 
 import { parseMsgRateLimitPolicyJson } from "../../scripts/msg-rate-limit-policy";
-import { createMsgMiniflareTempDirectory, startMsgMiniflare, TEST_ROOM_LIMITS } from "../test-fixtures/msg-worker.miniflare-fixture";
+import {
+  createMsgMiniflareTempDirectory,
+  isMsgPlatformScenarioChild,
+  runMsgPlatformScenarioInChild,
+  startMsgMiniflare,
+  TEST_ROOM_LIMITS,
+} from "../test-fixtures/msg-worker.miniflare-fixture";
 
 async function createRoom(fixture: Awaited<ReturnType<typeof startMsgMiniflare>>, actor: string): Promise<number> {
   const response = await fixture.miniflare.dispatchFetch("https://msg.0000.chat/", {
@@ -19,7 +26,12 @@ async function createRoom(fixture: Awaited<ReturnType<typeof startMsgMiniflare>>
   return response.status;
 }
 
-test.serial("uses the managed and self-host policy examples as real binding thresholds", { timeout: 30_000 }, async () => {
+test.serial("uses the managed and self-host policy examples as real binding thresholds", { timeout: 120_000 }, async () => {
+  const scenarioFile = fileURLToPath(import.meta.url);
+  if (!isMsgPlatformScenarioChild("t13-config", scenarioFile)) {
+    await runMsgPlatformScenarioInChild({ scenario: "t13-config", scenarioFile, timeoutMs: 120_000 });
+    return;
+  }
   for (const [name, expectedSuccessfulCreations] of [["managed", 6], ["self-host", 12]] as const) {
     const policy = parseMsgRateLimitPolicyJson(readFileSync(new URL(`../../docs/examples/msg-rate-limit-policy.${name}.json`, import.meta.url), "utf8"));
     const persistenceDirectory = await createMsgMiniflareTempDirectory(`t13-${name}-quota`);

@@ -8,6 +8,11 @@ test("parses a wait command with an integer cursor and duration timeout", () => 
     conversationUrl: "https://msg.0000.chat/room-1",
     timeoutMs: 2_000,
   });
+  expect(parseWaitCommand(["wait", "https://0000.chat/room-1", "--after", "4"])).toEqual({
+    after: 4,
+    conversationUrl: "https://0000.chat/room-1",
+  });
+  expect(() => parseWaitCommand(["wait", "https://0000.chat/room-1", "--after", "4"], "https://selfhost.example")).toThrow("https://selfhost.example/{room}");
 });
 
 test("uses a finite default and rejects unsafe or overlong timeout overrides", () => {

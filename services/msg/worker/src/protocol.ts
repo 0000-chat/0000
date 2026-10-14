@@ -121,7 +121,7 @@ export function publicConversationUrl(value: string): string {
     throw new Error("The public conversation URL is invalid.");
   }
   if (
-    conversation.protocol !== "https:" ||
+    !isSecureOrLoopbackOrigin(conversation) ||
     conversation.username ||
     conversation.password ||
     conversation.search ||
@@ -131,6 +131,14 @@ export function publicConversationUrl(value: string): string {
     throw new Error("The public conversation URL is invalid.");
   }
   return conversation.toString();
+}
+
+/** Allow the HTTP origin used by the local Worker harness without weakening hosted URLs. */
+function isSecureOrLoopbackOrigin(url: URL): boolean {
+  if (url.protocol === "https:") return true;
+  if (url.protocol !== "http:") return false;
+  const hostname = url.hostname.replace(/^\[|\]$/gu, "").toLowerCase();
+  return hostname === "localhost" || hostname === "::1" || hostname === "127.0.0.1";
 }
 
 export function messageCitationUrl(conversationUrl: string, id: string): string {
@@ -1042,6 +1050,8 @@ export interface McpReadMessageResponse extends ReadMessageResponse {}
 
 export interface McpSubscribeInput {
   readonly arguments_json: string;
+  /** Pre-cutover argument serializations to reuse during origin migration. */
+  readonly legacy_arguments_json?: readonly string[];
   readonly callback_url: string;
   readonly grant_id: string;
   readonly principal_id: string;
@@ -1061,6 +1071,8 @@ export interface McpSubscribeResponse {
 
 export interface McpUnsubscribeInput {
   readonly arguments_json: string;
+  /** Pre-cutover argument serializations to remove during origin migration. */
+  readonly legacy_arguments_json?: readonly string[];
   readonly callback_url: string;
   readonly grant_id: string;
   readonly principal_id: string;

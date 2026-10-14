@@ -1,5 +1,5 @@
 const CONTENT_SECURITY_POLICY =
-  "default-src 'none'; base-uri 'none'; connect-src 'self'; form-action 'none'; frame-ancestors 'none'; img-src 'self'; object-src 'none'; script-src 'self'; style-src 'self'";
+  "default-src 'none'; base-uri 'none'; connect-src 'self'; form-action 'none'; frame-ancestors 'none'; img-src 'self'; font-src 'self'; object-src 'none'; script-src 'self'; style-src 'self'";
 
 export function applySecurityHeaders(headers: Headers, styleNonce?: string, allowSameOriginForms = false): Headers {
   const nonceSource = styleNonce && /^[A-Za-z0-9+/]{32}$/.test(styleNonce) ? ` 'nonce-${styleNonce}'` : "";

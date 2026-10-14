@@ -33,6 +33,8 @@ export interface McpRateLimit {
 export interface McpRequestOptions {
   readonly auth?: McpAuthenticator;
   readonly origin?: string;
+  /** Explicitly configured origins accepted for legacy room URLs. */
+  readonly acceptedOrigins?: readonly string[];
   readonly callbackFetch?: typeof fetch;
   readonly rateLimit?: McpRateLimit;
 }
@@ -170,7 +172,7 @@ async function callTool(params: Record<string, unknown>, auth: McpAuthContext, s
 }
 
 async function invokeTool(name: string, args: Record<string, unknown>, auth: McpAuthContext, service: RoomService, options: McpRequestOptions): Promise<unknown> {
-  const room = roomId(args.room_url, options.origin);
+  const room = roomId(args.room_url, options.origin, options.acceptedOrigins);
   if (name === "get_room_status") {
     await requireScope(auth, room, "read");
     if (!service.roomStatus) throw unavailable();
@@ -221,7 +223,8 @@ async function invokeTool(name: string, args: Record<string, unknown>, auth: Mcp
 async function subscribe(params: Record<string, unknown>, auth: McpAuthContext, service: RoomService, options: McpRequestOptions): Promise<McpSubscribeResponse> {
   if (params.name !== MCP_MESSAGE_EVENT) throw new McpRpcFailure(-32602, "The event name is not supported.");
   const argumentsValue = objectArg(params.arguments, "arguments");
-  const room = roomId(argumentsValue.room_url, options.origin);
+  const roomUrl = canonicalRoomUrl(argumentsValue.room_url, options.origin, options.acceptedOrigins);
+  const room = roomId(roomUrl, options.origin, options.acceptedOrigins);
   await requireScope(auth, room, "monitor");
   const delivery = objectArg(params.delivery, "delivery");
   if (delivery.mode !== "webhook") throw new McpRpcFailure(-32602, "Only webhook delivery is supported.");
@@ -230,23 +233,27 @@ async function subscribe(params: Record<string, unknown>, auth: McpAuthContext, 
   try { callbackUrl = validateCallbackUrl(delivery.url); secret = validateCallbackSecret(delivery.secret); } catch (error) { throw new McpRpcFailure(-32602, error instanceof Error ? error.message : "Invalid delivery."); }
   const cursor = params.cursor === null || params.cursor === undefined ? null : stringArg(params.cursor, "cursor");
   const ttl = params.ttlMs === null ? MCP_SUBSCRIPTION_MAX_TTL_MS : params.ttlMs === undefined ? MCP_SUBSCRIPTION_MAX_TTL_MS : boundedTtl(params.ttlMs);
-  const argumentsJson = canonicalJson({ room_url: publicConversationUrl(String(argumentsValue.room_url)) });
+  const argumentsJson = canonicalJson({ room_url: roomUrl });
+  const legacyArgumentsJson = legacyRoomArgumentJson(argumentsValue.room_url, options.origin, options.acceptedOrigins);
   const id = await deterministicSubscriptionId(auth.principalId, MCP_MESSAGE_EVENT, argumentsJson, callbackUrl);
   if (!options.callbackFetch) throw new McpRpcFailure(-32015, "The MCP callback dispatcher is not configured.");
   await verifyCallback(auth.principalId, callbackUrl, secret, id, options.callbackFetch);
   if (!service.mcpSubscribe) throw unavailable();
-  return service.mcpSubscribe({ room, principal_id: auth.principalId, grant_id: auth.grantId, arguments_json: argumentsJson, callback_url: callbackUrl, secret, cursor, ttl_ms: ttl, id });
+  return service.mcpSubscribe({ room, principal_id: auth.principalId, grant_id: auth.grantId, arguments_json: argumentsJson, ...(legacyArgumentsJson.length === 0 ? {} : { legacy_arguments_json: legacyArgumentsJson }), callback_url: callbackUrl, secret, cursor, ttl_ms: ttl, id });
 }
 
 async function unsubscribe(params: Record<string, unknown>, auth: McpAuthContext, service: RoomService, options: McpRequestOptions): Promise<unknown> {
   if (params.name !== MCP_MESSAGE_EVENT) throw new McpRpcFailure(-32602, "The event name is not supported.");
   const argumentsValue = objectArg(params.arguments, "arguments");
-  const room = roomId(argumentsValue.room_url, options.origin);
+  const roomUrl = canonicalRoomUrl(argumentsValue.room_url, options.origin, options.acceptedOrigins);
+  const room = roomId(roomUrl, options.origin, options.acceptedOrigins);
   await requireScope(auth, room, "monitor");
   const delivery = objectArg(params.delivery, "delivery");
   if (delivery.mode !== "webhook") throw new McpRpcFailure(-32602, "Only webhook delivery is supported.");
   if (!service.mcpUnsubscribe) throw unavailable();
-  return service.mcpUnsubscribe({ room, principal_id: auth.principalId, grant_id: auth.grantId, arguments_json: canonicalJson({ room_url: publicConversationUrl(String(argumentsValue.room_url)) }), callback_url: validateCallbackUrl(delivery.url) });
+  const argumentsJson = canonicalJson({ room_url: roomUrl });
+  const legacyArgumentsJson = legacyRoomArgumentJson(argumentsValue.room_url, options.origin, options.acceptedOrigins);
+  return service.mcpUnsubscribe({ room, principal_id: auth.principalId, grant_id: auth.grantId, arguments_json: argumentsJson, ...(legacyArgumentsJson.length === 0 ? {} : { legacy_arguments_json: legacyArgumentsJson }), callback_url: validateCallbackUrl(delivery.url) });
 }
 
 async function verifyCallback(principalId: string, url: string, secret: string, subscriptionId: string, callbackFetch: typeof fetch): Promise<void> {
@@ -295,11 +302,27 @@ async function requireScope(auth: McpAuthContext, room: string, scope: "read" | 
   if (!tokenAllowed || !grantAllowed) throw new McpRpcFailure(-32001, "The OAuth token and Thread grant must both allow this action.");
 }
 
-function roomId(value: unknown, origin = "https://msg.0000.chat"): string {
-  const canonical = publicConversationUrl(stringArg(value, "room_url"));
-  const url = new URL(canonical);
-  if (new URL(origin).origin !== url.origin) throw new McpRpcFailure(-32602, "The Thread URL must use this Msg service origin.");
-  return url.pathname.slice(1);
+function roomId(value: unknown, origin = "https://msg.0000.chat", acceptedOrigins: readonly string[] = [origin]): string {
+  return new URL(canonicalRoomUrl(value, origin, acceptedOrigins)).pathname.slice(1);
+}
+
+function canonicalRoomUrl(value: unknown, origin = "https://msg.0000.chat", acceptedOrigins: readonly string[] = [origin]): string {
+  const parsed = new URL(publicConversationUrl(stringArg(value, "room_url")));
+  const canonicalOrigin = new URL(origin).origin;
+  const accepted = new Set([canonicalOrigin, ...acceptedOrigins.map((candidate) => new URL(candidate).origin)]);
+  if (!accepted.has(parsed.origin)) throw new McpRpcFailure(-32602, "The Thread URL must use this Msg service origin.");
+  return `${canonicalOrigin}${parsed.pathname}`;
+}
+
+function legacyRoomArgumentJson(value: unknown, origin = "https://msg.0000.chat", acceptedOrigins: readonly string[] = [origin]): readonly string[] {
+  const parsed = new URL(publicConversationUrl(stringArg(value, "room_url")));
+  const canonicalOrigin = new URL(origin).origin;
+  const aliases = new Set<string>();
+  for (const candidate of acceptedOrigins) {
+    const candidateOrigin = new URL(candidate).origin;
+    if (candidateOrigin !== canonicalOrigin) aliases.add(canonicalJson({ room_url: `${candidateOrigin}${parsed.pathname}` }));
+  }
+  return [...aliases];
 }
 
 function parseResponseContext(value: unknown): McpResponseOrigin | undefined {

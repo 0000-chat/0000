@@ -13,6 +13,6 @@ test("sets private relay security headers without third-party sources", () => {
   expect(headers.get("cross-origin-opener-policy")).toBe("same-origin");
   expect(headers.get("permissions-policy")).toContain("camera=()");
   expect(headers.get("content-security-policy")).toBe(
-    "default-src 'none'; base-uri 'none'; connect-src 'self'; form-action 'none'; frame-ancestors 'none'; img-src 'self'; object-src 'none'; script-src 'self'; style-src 'self'",
+    "default-src 'none'; base-uri 'none'; connect-src 'self'; form-action 'none'; frame-ancestors 'none'; img-src 'self'; font-src 'self'; object-src 'none'; script-src 'self'; style-src 'self'",
   );
 });

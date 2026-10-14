@@ -69,6 +69,16 @@ test("stores host and path scoped cookies without forwarding room credentials", 
   expect(jar.cookieHeader("https://foreign.0000.chat/room-one")).toBeUndefined();
 });
 
+test("accepts the canonical and legacy public origins while keeping host cookies isolated", async () => {
+  const { filePath } = await temporaryJar();
+  const jar = new PersistentCookieJar({ filePath, serviceOrigin: "https://0000.chat" });
+  jar.store("https://msg.0000.chat/room-one", new Response(null, { headers: { "set-cookie": "msg_resource=legacy; Path=/room-one; Secure" } }));
+  jar.store("https://0000.chat/room-one", new Response(null, { headers: { "set-cookie": "msg_resource=canonical; Path=/room-one; Secure" } }));
+  expect(jar.cookieHeader("https://msg.0000.chat/room-one")).toBe("msg_resource=legacy");
+  expect(jar.cookieHeader("https://0000.chat/room-one")).toBe("msg_resource=canonical");
+  expect(jar.cookieHeader("https://foreign.0000.chat/room-one")).toBeUndefined();
+});
+
 test("persists private cookie state and honors Secure transport", async () => {
   const { jar, filePath } = await temporaryJar();
   jar.store("https://msg.0000.chat/room-one", new Response(null, { headers: { "set-cookie": "msg_resource=encoded%20value; Path=/room-one; Secure" } }));

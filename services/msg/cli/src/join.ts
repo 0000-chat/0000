@@ -1,4 +1,4 @@
-import { validateConversationUrl } from "./wait.js";
+import { conversationUrlsEquivalent, validateConversationUrl } from "./wait.js";
 
 const DEFAULT_JOIN_LIMIT = 20;
 const MAX_JOIN_LIMIT = 100;
@@ -95,15 +95,15 @@ export async function joinConversation(options: JoinOptions): Promise<string> {
       throw new Error(`The msg service returned HTTP ${response.status}.`);
     }
     const value = await response.json();
-    return renderJoin(validateAgentRepresentation(value, conversationUrl, options), options);
+    return renderJoin(validateAgentRepresentation(value, conversationUrl, options, options.serviceOrigin), options);
   } catch (error) {
     if (options.signal?.aborted || isAbortError(error)) throw new JoinSignalError();
     throw error;
   }
 }
 
-function validateAgentRepresentation(value: unknown, conversationUrl: string, command: JoinCommand): AgentRepresentation {
-  if (!isRecord(value) || value.protocol_version !== 1 || value.conversation_url !== conversationUrl || typeof value.expires_at !== "string") {
+function validateAgentRepresentation(value: unknown, conversationUrl: string, command: JoinCommand, serviceOrigin?: string): AgentRepresentation {
+  if (!isRecord(value) || value.protocol_version !== 1 || typeof value.conversation_url !== "string" || !conversationUrlsEquivalent(value.conversation_url, conversationUrl, serviceOrigin) || typeof value.expires_at !== "string") {
     throw new Error("The msg service returned an invalid agent representation.");
   }
   if (value.retention !== undefined && (!isRecord(value.retention) || value.retention.mode !== "temporary" || value.retention.policy !== "sliding_inactivity" || value.retention.expires_at !== value.expires_at || !isSafePositiveInteger(value.retention.inactivity_window_ms))) {

@@ -1,9 +1,16 @@
 ---
 repo: 0000-chat/0000
-status: accepted
+status: superseded
 ---
 
 # Serve Gateway MCP at the canonical apex address
+
+> **Superseded route selection:** Msg now owns the selected `0000.chat` apex
+> Worker and `/mcp` contract for the current cutover. Gateway remains at
+> `gateway.0000.chat/mcp`; this earlier apex proposal is deferred pending a
+> future separate route or host decision. See the maintained [MCP topology](../../../../docs/architecture/mcp-topology.md)
+> for the current selection. The text below is retained as the historical
+> Gateway design record.
 
 `https://0000.chat/mcp` is the intended canonical public Gateway MCP address. The Gateway Worker can be built and deployed first at `https://gateway.0000.chat/mcp`. When the apex route is added, the same Worker serves MCP requests directly at both addresses, without an HTTP redirect. Both addresses then expose the same MCP behavior as Gateway evolves; documentation and future authentication or discovery metadata identify the apex address as canonical.
 

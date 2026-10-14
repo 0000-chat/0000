@@ -33,8 +33,43 @@ test("fails closed for a missing production binding while keeping the unit port 
 
 test("uses the configured canonical public origin instead of the request origin", () => {
   expect(workerEntry).toContain("readonly MSG_PUBLIC_ORIGIN?: string;");
+  expect(workerEntry).toContain("readonly MSG_LEGACY_ORIGIN?: string;");
   expect(workerEntry).toContain("env.MSG_PUBLIC_ORIGIN");
-  expect(workerConfig).toContain('"MSG_PUBLIC_ORIGIN": "https://msg.0000.chat"');
+  expect(workerConfig).toContain('"MSG_PUBLIC_ORIGIN": "https://0000.chat"');
+  expect(workerConfig).toContain('"MSG_LEGACY_ORIGIN": "https://msg.0000.chat"');
+});
+
+test("redirects browser GETs on the legacy host while preserving API and MCP POSTs", async () => {
+  const { default: productionEntry } = await import("./worker-entry");
+  const service: RoomService = {
+    create: async () => { throw new Error("unused"); },
+    read: async () => { throw new Error("unused"); },
+    post: async () => { throw new Error("unused"); },
+    live: async () => { throw new Error("unused"); },
+  };
+  const environment: MsgProductionEnvironment = {
+    MSG_TEST_MODE: "1",
+    MSG_PUBLIC_ORIGIN: "https://0000.chat",
+    MSG_LEGACY_ORIGIN: "https://msg.0000.chat",
+    ROOM_SERVICE: service,
+    MSG_RATE_LIMIT_CREATION: allowRateLimit,
+    MSG_RATE_LIMIT_READS: allowRateLimit,
+    MSG_RATE_LIMIT_POSTS: allowRateLimit,
+    MSG_RATE_LIMIT_LIVE: allowRateLimit,
+  };
+  const browser = await productionEntry.fetch(new Request("https://msg.0000.chat/manage/room-1/secret?recover=1", { headers: { accept: "text/html" } }), environment);
+  expect(browser.status).toBe(301);
+  expect(browser.headers.get("location")).toBe("https://0000.chat/manage/room-1/secret?recover=1");
+
+  const api = await productionEntry.fetch(new Request("https://msg.0000.chat/room-1?after=0", { headers: { accept: "application/json" } }), environment);
+  expect(api.status).not.toBe(301);
+
+  const mcp = await productionEntry.fetch(new Request("https://msg.0000.chat/mcp", {
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { capabilities: {}, clientInfo: { name: "legacy", version: "1" }, protocolVersion: "2026-07-28" } }),
+    headers: { accept: "application/json, text/event-stream", "content-type": "application/json", origin: "https://msg.0000.chat" },
+    method: "POST",
+  }), environment);
+  expect(mcp.status).toBe(200);
 });
 
 test("passes a staged public origin through the production MCP route", async () => {

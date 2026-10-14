@@ -1,5 +1,6 @@
+import { DEFAULT_SERVICE_ORIGIN, equivalentServiceOrigins } from "./wait.js";
+
 const USAGE = "Usage: msg retention <management-url> inspect | extend";
-const PRODUCTION_ORIGIN = "https://msg.0000.chat";
 const ABSOLUTE_ISO_TIMESTAMP = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,9}))?(Z|[+-]\d{2}:\d{2})$/u;
 
 export type RetentionCommand =
@@ -9,6 +10,7 @@ export type RetentionCommand =
 export type RetentionOptions = RetentionCommand & {
   readonly fetch: typeof globalThis.fetch;
   readonly readStdin?: (signal?: AbortSignal) => Promise<string>;
+  readonly serviceOrigin?: string;
   readonly signal?: AbortSignal;
 }
 
@@ -16,14 +18,14 @@ export class RetentionSignalError extends Error {
   constructor() { super("The msg retention command was interrupted."); }
 }
 
-export function parseRetentionCommand(args: readonly string[]): RetentionCommand {
+export function parseRetentionCommand(args: readonly string[], serviceOrigin?: string): RetentionCommand {
   if (args.length !== 3 || args[0] !== "retention" || (args[2] !== "inspect" && args[2] !== "extend")) throw new Error(USAGE);
-  return { managementUrl: validateManagementUrl(args[1] ?? ""), operation: args[2] };
+  return { managementUrl: validateManagementUrl(args[1] ?? "", serviceOrigin), operation: args[2] };
 }
 
 export async function runRetention(options: RetentionOptions): Promise<unknown> {
   if (options.signal?.aborted) throw new RetentionSignalError();
-  const endpoint = new URL(options.managementUrl);
+  const endpoint = new URL(validateManagementUrl(options.managementUrl, options.serviceOrigin));
   let body: string | undefined;
   if (options.operation === "extend") {
     if (!options.readStdin) throw new Error("Retention extension requires one JSON object on stdin.");
@@ -62,10 +64,12 @@ export async function runRetention(options: RetentionOptions): Promise<unknown> 
   return value;
 }
 
-export function validateManagementUrl(value: string): string {
+export function validateManagementUrl(value: string, serviceOrigin = DEFAULT_SERVICE_ORIGIN): string {
   let url: URL;
   try { url = new URL(value); } catch { throw new Error("The retention management URL is invalid."); }
-  if (url.origin !== PRODUCTION_ORIGIN || url.username || url.password || url.search || url.hash || !/^\/manage\/[^/]+\/[^/]+$/u.test(url.pathname)) {
+  let expected: URL;
+  try { expected = new URL(serviceOrigin); } catch { throw new Error("MSG_SERVICE_ORIGIN is invalid."); }
+  if (!equivalentServiceOrigins(url, expected) || url.username || url.password || url.search || url.hash || !/^\/manage\/[^/]+\/[^/]+$/u.test(url.pathname)) {
     throw new Error("The retention management URL is invalid.");
   }
   return url.toString();

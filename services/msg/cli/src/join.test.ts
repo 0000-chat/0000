@@ -20,12 +20,14 @@ const agentFixture = {
 };
 
 test("parses a canonical join command and renders participant-provided messages separately", async () => {
+  expect(parseJoinCommand(["join", "https://0000.chat/room-1"]))
+    .toEqual({ conversationUrl: "https://0000.chat/room-1" });
   expect(parseJoinCommand(["join", "https://msg.0000.chat/room-1"]))
     .toEqual({ conversationUrl: "https://msg.0000.chat/room-1" });
   expect(parseJoinCommand(["join", "https://msg.0000.chat/room-1", "--recover"]))
     .toEqual({ conversationUrl: "https://msg.0000.chat/room-1", recover: true });
   expect(() => parseJoinCommand(["join", "https://example.test/room-1"]))
-    .toThrow("The conversation URL must be https://msg.0000.chat/{room}.");
+    .toThrow("The conversation URL must be https://0000.chat/{room}.");
 
   let calls = 0;
   const output = await joinConversation({
@@ -57,6 +59,19 @@ test("parses a canonical join command and renders participant-provided messages 
   expect(output).toContain('from "Alice Example" (self-declared; a room-local name password verifies reuse only, not a real-world identity); author "Alice"');
   expect(output).not.toContain("evil.example/forged");
   expect(output).not.toContain("manage_url");
+});
+
+test("accepts a canonical response for a legacy room URL but rejects a different room", async () => {
+  const canonicalFixture = { ...agentFixture, conversation_url: "https://0000.chat/room-1" };
+  await expect(joinConversation({
+    conversationUrl: "https://msg.0000.chat/room-1",
+    fetch: async () => Response.json(canonicalFixture),
+  })).resolves.toContain("Conversation: https://0000.chat/room-1");
+  await expect(joinConversation({
+    conversationUrl: "https://msg.0000.chat/room-1",
+    fetch: async () => Response.json({ ...canonicalFixture, conversation_url: "https://0000.chat/other-room" }),
+  })).rejects.toThrow("invalid agent representation");
+  expect(() => parseJoinCommand(["join", "https://0000.chat/room-1"], "https://selfhost.example")).toThrow("https://selfhost.example/{room}");
 });
 
 test("forwards only explicit join recovery", async () => {

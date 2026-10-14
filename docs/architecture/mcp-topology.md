@@ -17,9 +17,9 @@ Every first-party MCP surface uses the `/mcp` path.
 
 | Surface | Target MCP address | Owner and maturity |
 | --- | --- | --- |
-| Gateway canonical | `https://0000.chat/mcp` | [Gateway](../../services/gateway/docs/README.md); target route |
-| Gateway standalone host | `https://gateway.0000.chat/mcp` | [Gateway](../../services/gateway/docs/README.md); target alias |
-| Msg | `https://msg.0000.chat/mcp` | [Msg](../../services/msg/README.md); Worker MCP surface, hosted route evidence remains separate |
+| Msg canonical Worker | `https://0000.chat/mcp` | [Msg](../../services/msg/README.md); selected Worker resource and URL contract, `msg.0000.chat/mcp` remains a POST compatibility origin |
+| Gateway standalone host | `https://gateway.0000.chat/mcp` | [Gateway](../../services/gateway/docs/README.md); selected standalone MCP surface |
+| Gateway apex route (deferred) | `https://0000.chat/mcp` | [Gateway](../../services/gateway/docs/README.md); previous assembled target, requiring a future separate route/host decision |
 | Database | `https://database.0000.chat/mcp` | [Database](../../services/database/README.md); target service surface |
 | Streams | `https://streams.0000.chat/mcp` | [Streams](../../services/streams/README.md); Worker MCP surface, hosted route unverified |
 | Brain | `https://brain.0000.chat/mcp` | [Brain](../../services/brain/README.md); target service surface |
@@ -28,13 +28,13 @@ The service-host pattern for a later first-party service is
 `https://<service>.0000.chat/mcp`. A service may also expose other HTTP
 surfaces, but those do not become Gateway tools merely because they exist.
 
-The apex and standalone Gateway addresses are two direct entry points to the
-same MCP surface. Once the apex route is provisioned, both addresses must
-serve MCP requests directly, including POST requests, with no HTTP redirect
-between them. The apex `/mcp` path and MCP paths beneath it belong to Gateway;
-other apex paths remain with the landing application. Route provisioning and
-the environment mapping are operator-owned, so this contract does not claim
-that either route is configured or deployed.
+Msg owns the selected apex Worker and `/mcp` contract for this cutover. Its
+compatibility host continues to accept MCP POSTs and legacy OAuth flows. The
+Gateway remains directly addressable at `gateway.0000.chat/mcp`; its previous
+assembled apex target is deferred until a future separate route or host
+decision. Route provisioning and the environment mapping are operator-owned,
+so this contract does not claim that either selected route is configured or
+deployed.
 
 ## Gateway connected tools
 
@@ -68,8 +68,8 @@ evidence:
 
 | Surface | Repository evidence | Hosted status represented here |
 | --- | --- | --- |
-| Gateway | The Worker source provides health, the stateless `gateway_info` diagnostic, and a configured-app path for authenticated profile-bound `use`, `tools.search`, D1 grants, and service-owned catalog adapters. Gateway tests exercise the boundary in a real Worker runtime, including the Msg adapter. | Canonical and standalone MCP routes are target behavior; this document claims no live route or hosted binding. |
-| Msg | The Worker contains an MCP implementation and the service owns its Thread protocol. | The direct `/mcp` address is the target service contract; this document claims no new deployment. |
+| Gateway | The Worker source provides health, the stateless `gateway_info` diagnostic, and a configured-app path for authenticated profile-bound `use`, `tools.search`, D1 grants, and service-owned catalog adapters. Gateway tests exercise the boundary in a real Worker runtime, including the Msg adapter. | The standalone MCP route is the selected Gateway surface; the previous apex target is deferred. This document claims no live route or hosted binding. |
+| Msg | The Worker contains an MCP implementation and the service owns its Thread protocol. | Msg owns the selected canonical Worker resource and `/mcp` entry at `https://0000.chat/mcp`; `https://msg.0000.chat/mcp` remains the POST compatibility entry. This document claims no new deployment. |
 | Database | The public service remains a scaffold without a selected application API. | The direct address is a planned service surface. |
 | Streams | The Worker exposes browser, API, and MCP surfaces; route configuration exists. | The direct address is the target service contract; deployment remains unverified. |
 | Brain | The public service remains scaffold-only without an application API. | The direct address is a planned service surface. |

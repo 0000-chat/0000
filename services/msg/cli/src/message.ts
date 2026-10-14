@@ -1,4 +1,4 @@
-import { validateConversationUrl } from "./wait.js";
+import { conversationUrlsEquivalent, validateConversationUrl } from "./wait.js";
 
 export interface MessageCommand {
   readonly conversationUrl: string;
@@ -7,6 +7,7 @@ export interface MessageCommand {
 
 export interface MessageOptions extends MessageCommand {
   readonly fetch: typeof globalThis.fetch;
+  readonly serviceOrigin?: string;
   readonly signal?: AbortSignal;
 }
 
@@ -30,15 +31,15 @@ export class MessageSignalError extends Error {
   constructor() { super("The msg message lookup was interrupted."); }
 }
 
-export function parseMessageCommand(args: readonly string[]): MessageCommand {
+export function parseMessageCommand(args: readonly string[], serviceOrigin?: string): MessageCommand {
   if (args.length !== 3 || args[0] !== "message") throw new Error("Usage: msg message <conversation-url> <stored-id>");
   const id = args[2] ?? "";
   validateStoredId(id);
-  return { conversationUrl: validateConversationUrl(args[1] ?? ""), id };
+  return { conversationUrl: validateConversationUrl(args[1] ?? "", serviceOrigin), id };
 }
 
 export async function readMessage(options: MessageOptions): Promise<string> {
-  const conversationUrl = validateConversationUrl(options.conversationUrl);
+  const conversationUrl = validateConversationUrl(options.conversationUrl, options.serviceOrigin);
   validateStoredId(options.id);
   throwIfAborted(options.signal);
   const endpoint = messageCitationUrl(conversationUrl, options.id);
@@ -64,11 +65,11 @@ export async function readMessage(options: MessageOptions): Promise<string> {
     if (options.signal?.aborted || isAbortError(error)) throw new MessageSignalError();
     throw error;
   }
-  return renderMessage(validateMessageResponse(value, conversationUrl, options.id));
+  return renderMessage(validateMessageResponse(value, conversationUrl, options.id, options.serviceOrigin));
 }
 
-export function validateMessageResponse(value: unknown, conversationUrl: string, id: string): MessageResponse {
-  if (!isRecord(value) || value.protocol_version !== 1 || value.conversation_url !== conversationUrl || typeof value.expires_at !== "string" || !isPositiveSafeInteger(value.latest_message) || !isRecord(value.message)) {
+export function validateMessageResponse(value: unknown, conversationUrl: string, id: string, serviceOrigin?: string): MessageResponse {
+  if (!isRecord(value) || value.protocol_version !== 1 || typeof value.conversation_url !== "string" || !conversationUrlsEquivalent(value.conversation_url, conversationUrl, serviceOrigin) || typeof value.expires_at !== "string" || !isPositiveSafeInteger(value.latest_message) || !isRecord(value.message)) {
     throw new Error("The msg service returned an invalid message response.");
   }
   const message = value.message;

@@ -11,7 +11,7 @@
   "bugs": {
     "url": "https://github.com/0000-chat/0000/issues?q=label%3Aservice%3Amsg"
   },
-  "homepage": "https://msg.0000.chat",
+  "homepage": "https://0000.chat",
   "type": "module",
   "private": false,
   "engines": {

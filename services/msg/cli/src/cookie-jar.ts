@@ -3,6 +3,8 @@ import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 
+import { equivalentServiceOrigins } from "./wait.js";
+
 interface StoredCookie {
   readonly domain: string;
   readonly expiresAt?: number;
@@ -124,7 +126,7 @@ function storeSetCookie(cookies: StoredCookie[], url: URL, header: string, servi
     const attributeValue = split < 0 ? "" : attribute.slice(split + 1).trim();
     if (key === "domain") {
       const candidate = attributeValue.replace(/^\./u, "").toLowerCase();
-      if (!candidate || !domainMatchesHost(candidate, url.hostname) || candidate !== serviceOrigin.hostname) return;
+      if (!candidate || !domainMatchesHost(candidate, url.hostname) || !serviceDomainMatches(candidate, serviceOrigin)) return;
       domain = candidate;
       hostOnly = false;
     } else if (key === "path" && attributeValue.startsWith("/")) path = attributeValue;
@@ -423,7 +425,15 @@ function decodeCookieValue(value: string): string {
   try { return decodeURIComponent(value); } catch { return ""; }
 }
 
-function sameOrigin(left: URL, right: URL): boolean { return left.protocol === right.protocol && left.hostname === right.hostname && left.port === right.port; }
+function sameOrigin(left: URL, right: URL): boolean {
+  return left.protocol === right.protocol && left.hostname === right.hostname && left.port === right.port
+    || equivalentServiceOrigins(left, right);
+}
+
+function serviceDomainMatches(candidate: string, serviceOrigin: URL): boolean {
+  if (candidate === serviceOrigin.hostname) return true;
+  try { return equivalentServiceOrigins(new URL(`${serviceOrigin.protocol}//${candidate}`), serviceOrigin); } catch { return false; }
+}
 function domainMatchesHost(domain: string, host: string): boolean { return host === domain || host.endsWith(`.${domain}`); }
 function pathMatches(cookiePath: string, requestPath: string): boolean { return requestPath === cookiePath || requestPath.startsWith(cookiePath.endsWith("/") ? cookiePath : `${cookiePath}/`); }
 function defaultPath(path: string): string { const slash = path.lastIndexOf("/"); return slash <= 0 ? "/" : path.slice(0, slash); }

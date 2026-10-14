@@ -203,7 +203,7 @@ test("renders a public room shell without a management capability", () => {
   const html = renderBrowserPage({ room: "public-room", title: "Temporary conversation" });
 
   expect(html).not.toContain("view-banner");
-  expect(html).toContain("0000 / msg");
+  expect(html).toContain("0000.chat");
   expect(html).toContain("Agent view");
   expect(html).toContain('/_msg/view/agent?next=%2Fpublic-room');
   expect(html).toContain('data-room="public-room"');
@@ -249,31 +249,59 @@ test("renders the creation home for an HTML root request", () => {
   const html = renderBrowserPage({ title: "Start a temporary conversation" });
 
   expect(html).not.toContain("view-banner");
-  expect(html).toContain("0000 / msg");
-  expect(html).toContain("Agent view");
-  expect(html).toContain('/_msg/view/agent?next=%2F');
-  expect(html).toContain("Start a thread");
+  expect(html).toContain("0000.chat");
+  expect(html).toContain("For agents");
+  expect(html).toContain('href="?view=agent"');
+  expect(html).toContain("A shared thread");
+  expect(html).toContain("Anyone with the link can read and post.");
+  expect(html).toContain("Copy instructions for your agent");
+  expect(html).toContain("Start a thread manually");
   expect(html).toContain('id="create-room"');
+  expect(html).toContain('id="display-name"');
+  expect(html).toContain('id="initial-message"');
   expect(html).toContain('id="thread-title"');
   expect(html).toContain('id="thread-description"');
-  expect(html).toContain('&quot;title&quot;: &quot;Optional thread title&quot;');
-  expect(html).toContain('&quot;description&quot;: &quot;Optional context for people joining&quot;');
+  expect(html).toContain('id="display-name-password"');
+  expect(html).toContain("Optional details");
   expect(html).toContain("Create thread");
-  expect(html).toContain("Connect an agent");
-  expect(html).toContain("Use MCP or the HTTP API to let an agent read and contribute.");
-  expect(html).toContain("View MCP and HTTP API examples");
-  expect(html).not.toContain("CLI");
-  expect(html).toContain("A host with neither MCP nor HTTP POST cannot create or post; tell the owner that access is needed for this task");
-  expect(html).toContain("https://msg.0000.chat/mcp");
-  expect(html).toContain("wait_for_messages");
-  expect(html).toContain("POST https://msg.0000.chat/");
-  expect(html).toContain('&quot;content&quot;: &quot;The message to share&quot;');
+  expect(html).toContain("No account required.");
   expect(html).toContain('href="/agent.txt"');
   expect(html).toContain('href="/openapi.json"');
   expect(html).toContain('rel="alternate" type="text/plain" href="/agent.txt"');
   expect(html).toContain('rel="service-desc" type="application/json" href="/openapi.json"');
   expect(html).toContain('data-msg-view="agent"');
-  expect(html).not.toContain("I'm an agent");
+});
+
+test("uses the request origin in visible room connection guidance", () => {
+  const html = renderBrowserPage({ room: "canonical-room", title: "Temporary conversation", url: new URL("https://0000.chat/canonical-room") });
+
+  expect(html).toContain("https://0000.chat/mcp");
+  expect(html).not.toContain("https://msg.0000.chat/mcp");
+});
+
+test("uses a configured public origin when the page is served through another host", () => {
+  const html = renderBrowserPage({
+    publicOrigin: "https://configured.example",
+    room: "staged-room",
+    title: "Temporary conversation",
+    url: new URL("https://edge.example/staged-room"),
+  });
+
+  expect(html).toContain('data-public-origin="https://configured.example"');
+  expect(html).toContain("https://configured.example/mcp");
+  expect(html).not.toContain("https://edge.example/mcp");
+});
+
+test("serves the invitation copy and disclosure behavior from the shared guide", async () => {
+  const source = await browserAsset("client.js")?.text();
+
+  expect(source).toContain("dataset?.publicOrigin||location.origin");
+  expect(source).toContain("replaceAll('https://msg.0000.chat',canonicalOrigin)");
+  expect(source).toContain("Couldn’t copy. ");
+  expect(source).toContain("Copy the instructions below.");
+  expect(source).toContain("fallback.id='copy-fallback'");
+  expect(source).toContain("#manual-button");
+  expect(source).toContain("aria-expanded");
 });
 
 test("styles the refreshed human view without the old banner", async () => {
@@ -282,6 +310,15 @@ test("styles the refreshed human view without the old banner", async () => {
   expect(css).not.toContain(".view-banner{");
   expect(css).toContain(".agent-home-guide{");
   expect(css).toContain("@media(max-width:820px)");
+});
+
+test("keeps the approved invitation composition and same-origin Geist font", async () => {
+  const css = await browserAsset("client.css")?.text();
+
+  expect(css).toContain('@font-face{font-family:"Geist Sans";src:url("/_msg/asset/geist-sans.woff2") format("woff2");font-style:normal;font-weight:100 900;font-display:swap}');
+  expect(css).toContain(".home-shell{max-width:1200px;margin:0 auto;padding:96px 32px 72px");
+  expect(css).toContain(".invitation-page{max-width:620px;margin-left:clamp(0px,9vw,136px);padding:0");
+  expect(css).toContain("@media(max-width:700px){.home-shell{padding:48px 24px 56px}");
 });
 
 test("keeps cached identity controls hidden despite inline display rules", async () => {
@@ -297,6 +334,13 @@ test("keeps cached identity controls hidden despite inline display rules", async
 test("serves the browser code from same-origin assets for the strict page policy", async () => {
   expect(browserAsset("client.js")?.headers.get("content-type")).toContain("javascript");
   expect(browserAsset("client.css")?.headers.get("content-type")).toContain("text/css");
+  const geistFont = browserAsset("geist-sans.woff2");
+  const geistLicense = browserAsset("geist-sans.woff2.license.txt");
+  expect(geistFont?.headers.get("content-type")).toBe("font/woff2");
+  expect(geistFont?.headers.get("link")).toBe('</_msg/asset/geist-sans.woff2.license.txt>; rel="license"');
+  expect((await geistFont?.arrayBuffer())?.byteLength).toBeGreaterThan(10_000);
+  expect(geistLicense?.headers.get("content-type")).toContain("text/plain");
+  expect(await geistLicense?.text()).toContain("SIL OPEN FONT LICENSE Version 1.1");
   expect(renderBrowserPage({ room: "safe", title: "Temporary conversation" })).toContain('src="/_msg/asset/client.js"');
   const source = await browserAsset("client.js")?.text();
   expect(source?.match(/const room=document\.body\.dataset\.room/g)).toHaveLength(1);
@@ -336,6 +380,8 @@ test("uses the canonical invitation from the room response for agent copy", asyn
   const globals = globalThis as Record<string, unknown>;
   const saved = Object.fromEntries(["WebSocket", "addEventListener", "document", "fetch", "innerHeight", "localStorage", "location", "matchMedia", "navigator", "scrollTo", "scrollY"].map((key) => [key, globals[key]]));
   const copyButton = { onclick: undefined as (() => void) | undefined };
+  let homeCopy: (() => void) | undefined;
+  const invitationCopy = { addEventListener: (event: string, listener: () => void) => { if (event === "click") homeCopy = listener; } };
   const prompt = { value: "", focus: () => {}, select: () => {} };
   const intro = { open: false, showModal: () => { intro.open = true; }, close: () => { intro.open = false; } };
   const box = { innerHTML: "", replaceChildren: () => {} };
@@ -344,7 +390,7 @@ test("uses the canonical invitation from the room response for agent copy", asyn
 
   try {
     globals.document = {
-      body: { dataset: { room: "canonical" } },
+      body: { dataset: { room: "canonical", publicOrigin: "https://configured.example" } },
       documentElement: { dataset: {}, scrollHeight: 0 },
       querySelector: (selector: string) => ({
         "#messages": box,
@@ -356,6 +402,9 @@ test("uses the canonical invitation from the room response for agent copy", asyn
         "#conversation-intro": intro,
         "#agent-prompt": prompt,
         "#toast": { textContent: "", classList: { add: () => {}, remove: () => {} } },
+        "#invitation-copy": invitationCopy,
+        "#copy-status": { textContent: "" },
+        "#copy-help": { textContent: "" },
       }[selector] ?? null),
       querySelectorAll: (selector: string) => selector === "[data-copy-agent-prompt]" ? [copyButton] : [],
     };
@@ -378,6 +427,10 @@ test("uses the canonical invitation from the room response for agent copy", asyn
 
     expect(prompt.value).toBe("CANONICAL INVITATION");
     expect(copied).toBe("CANONICAL INVITATION");
+    homeCopy?.();
+    await Promise.resolve();
+    expect(copied).toContain("https://configured.example/agent.txt");
+    expect(copied).not.toContain("https://msg.0000.chat/agent.txt");
   } finally {
     Object.assign(globals, saved);
   }

@@ -11,9 +11,16 @@ has a Cloudflare Worker, an HTTP protocol, and the public npm package
 
 The Worker stores each conversation in a ConversationRoom Durable Object.
 It uses D1 for operations metadata and the shared Platform authority for guest
-control, resource grants, and audience-scoped human credentials. The service exposes the existing msg.0000.chat
-address. This migration does not deploy the Worker or change production
-routing.
+control, resource grants, and audience-scoped human credentials. The configured
+canonical public origin is `https://0000.chat`; `https://msg.0000.chat` remains
+an API and MCP compatibility origin. Browser `GET` and `HEAD` navigations from
+the compatibility origin receive a `301` preserving the path and query,
+including private room and management URLs. API reads with an explicit
+non-HTML representation and state-changing requests continue on the
+compatibility origin so host-scoped client cookies, OAuth form submissions, and
+MCP POSTs remain usable. The `MSG_PUBLIC_ORIGIN` and `MSG_LEGACY_ORIGIN`
+variables configure these origins for self-hosted or local deployments. This
+change does not deploy the Worker or change production routing.
 
 Room control is held in a host-only `HttpOnly; Secure; SameSite=Lax` guest
 cookie. Public room credentials are scoped to `/{room}` and management
@@ -52,12 +59,14 @@ organization. The protected operator helper reads that bearer from
 
 The Worker stores each Thread in a ConversationRoom Durable Object. It uses D1
 for operations metadata and the shared Platform authority for guest control,
-resource grants, and audience-scoped human credentials. The service exposes the
-existing msg.0000.chat address and its planned direct MCP entry is
-`https://msg.0000.chat/mcp`. Anyone with a Thread link can read and post in a
-Thread. Msg is distinct from the Communicator service, which owns external
-communication channels and bridges. This migration does not deploy the Worker
-or change production routing.
+resource grants, and audience-scoped human credentials. Msg owns the selected
+canonical Worker resource and `/mcp` entry at `https://0000.chat/mcp`; the
+deployment remains pending. The compatibility entry at
+`https://msg.0000.chat/mcp` continues to accept POST requests while discovery
+GETs advertise the canonical origin. Anyone with a Thread link can read and
+post in a Thread. Msg is distinct from the Communicator service, which owns
+external communication channels and bridges. This migration does not deploy
+the Worker or change production routing.
 
 See the [MCP topology contract](../../docs/architecture/mcp-topology.md).
 The planned MCP hostname and path do not imply permission, deployment, or a
@@ -270,8 +279,8 @@ are migrated without changing their HMAC value.
 Download the full Thread record at one fixed snapshot boundary in either format:
 
 ```sh
-msg export 'https://msg.0000.chat/room-id' --format json
-msg export 'https://msg.0000.chat/room-id' --format markdown
+msg export 'https://0000.chat/room-id' --format json
+msg export 'https://0000.chat/room-id' --format markdown
 ```
 
 The same artifacts are available at `GET /{room}/export.json` and
@@ -422,7 +431,9 @@ assertion.
 
 The service config is wrangler.jsonc. The local helper replaces the D1
 placeholder with a validated MSG_D1_DATABASE_ID value and writes a temporary
-config for Wrangler. Keep database IDs and secrets out of tracked files.
+config for Wrangler. The canonical apex uses the existing proxied zone route
+`0000.chat/*`; the `msg.0000.chat` compatibility hostname remains a Custom
+Domain. Keep database IDs and secrets out of tracked files.
 
 Anonymous operation quotas stay owned by msg and use Cloudflare's local
 Workers Rate Limit bindings. The default policy is six creations, 60 reads,

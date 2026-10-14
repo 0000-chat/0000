@@ -44,9 +44,11 @@ promises; an effect that has already started is not automatically reversible.
 "tools.search" and "use" discovery return only profile-authorized Gateway
 declarations. Msg declarations are loaded from its MCP tools/list response,
 including all pages up to Gateway's bounded catalog limits. Gateway does not
-infer operations from arbitrary Msg HTTP routes. The Msg adapter uses the
-service binding and the target endpoint https://msg.0000.chat/mcp; it does
-not forward the incoming Platform bearer credential or cookies. Gateway
+infer operations from arbitrary Msg HTTP routes. The Msg adapter currently
+uses the service binding and Msg compatibility endpoint
+https://msg.0000.chat/mcp; it does not forward the incoming Platform bearer
+credential or cookies. Msg's canonical public resource remains
+https://0000.chat/mcp. Gateway
 identity headers sent to Msg are informational attribution only. Msg remains
 the authority for Thread/resource-capability authorization.
 
@@ -109,11 +111,11 @@ metadata must remain safe.
 
 Cloud owns the hosted composition. A configured Worker must bind
 PLATFORM_VERIFICATION, GATEWAY_DB, and the service binding named MSG, apply
-the Gateway profile migration, and preserve the direct /mcp route on both the
-canonical apex and standalone Gateway host. Those hosts must serve MCP POST
-requests directly without a redirect; other apex paths remain with the
-landing application. Cloud keeps binding credentials and route secrets outside
-the public repository and supplies staging evidence separately.
+the Gateway profile migration, and preserve the direct `/mcp` route on the
+standalone Gateway host. Msg owns the selected apex Worker and MCP resource
+separately; the earlier Gateway apex target is deferred. Cloud keeps binding
+credentials and route secrets outside the public repository and supplies
+staging evidence separately.
 
 ## Integration acceptance
 

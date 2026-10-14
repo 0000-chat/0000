@@ -21,9 +21,13 @@ The foundation plan, specification, and ADR are approved. This documentation
 does not claim a production deployment or live hostname evidence.
 
 The maintained cross-service target is recorded in the [MCP topology](../../docs/architecture/mcp-topology.md):
-`https://0000.chat/mcp` is canonical and
-`https://gateway.0000.chat/mcp` is the same direct MCP surface without a
-redirect. Route provisioning and deployment evidence remain operator-owned.
+Msg owns the selected canonical Worker and MCP resource at
+`https://0000.chat/mcp`. Gateway remains directly addressable at
+`https://gateway.0000.chat/mcp`; its earlier assembled apex target is
+deferred for a future separate route or host decision. The Gateway-to-Msg
+adapter currently uses Msg's compatibility endpoint at
+`https://msg.0000.chat/mcp`. Route provisioning and deployment evidence
+remain operator-owned.
 
 The root Bun and Turborepo workspace owns monorepo validation. Run
 `bun run check`, `bun run check:turbo`, and `bun run check:turbo:dry` from the

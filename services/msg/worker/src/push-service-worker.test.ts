@@ -147,7 +147,7 @@ test("shows only the generic notification and focuses a matching room client wit
   await harness.dispatchPush(payload);
 
   expect(harness.notifications).toEqual([{
-    title: "New message in msg",
+    title: "New message in 0000.chat",
     options: { data: { room_url: `https://msg.0000.chat/${roomId}?view=agent` }, tag: "msg-room-550e8400-e29b-41d4-a716-446655440000" },
   }]);
 
@@ -226,7 +226,7 @@ test("does not suppress for an unfocused room tab or a focused different room", 
   await harness.dispatchPush(roomPayload(`https://msg.0000.chat/${roomId}`));
 
   expect(harness.notifications).toEqual([{
-    title: "New message in msg",
+    title: "New message in 0000.chat",
     options: { data: { room_url: `https://msg.0000.chat/${roomId}?view=human` }, tag: "msg-room-550e8400-e29b-41d4-a716-446655440000" },
   }]);
 });
@@ -248,7 +248,7 @@ test("replaces a visible alert for the same room while keeping another room aler
     `msg-room-${firstRoomId}`,
   ]);
   expect(harness.visibleNotifications()).toHaveLength(2);
-  expect(harness.visibleNotifications().map(({ title }) => title)).toEqual(["New message in msg", "New message in msg"]);
+  expect(harness.visibleNotifications().map(({ title }) => title)).toEqual(["New message in 0000.chat", "New message in 0000.chat"]);
   expect(harness.visibleNotifications().find(({ options }) => options.tag === `msg-room-${firstRoomId}`)?.options.data).toEqual({
     room_url: `https://msg.0000.chat/${firstRoom}?view=agent`,
   });

@@ -119,4 +119,62 @@ test("requires the bearer token scope and selected Thread grant together", async
   const events = await handleMcpRequest(request("events/list"), service, { origin: "https://msg.example.test", auth: { authenticate: async () => readOnlyAuth } });
   expect((await events.json() as { error?: { code?: number } }).error?.code).toBe(-32001);
 });
+
+test("accepts configured legacy room origins for durable tools and subscription migration", async () => {
+  const canonicalOrigin = "https://msg.example.test";
+  const legacyOrigin = "https://legacy.msg.example.test";
+  const rooms: string[] = [];
+  const subscriptions: Array<Parameters<NonNullable<RoomService["mcpSubscribe"]>>[0]> = [];
+  let unsubscribed: Parameters<NonNullable<RoomService["mcpUnsubscribe"]>>[0] | undefined;
+  const callbackFetch: typeof fetch = async (_input, init) => {
+    const body = JSON.parse(String(init?.body)) as { challenge: string };
+    return new Response(JSON.stringify({ challenge: body.challenge }), { status: 200, headers: { "content-type": "application/json" } });
+  };
+  const durableService: RoomService = {
+    ...service,
+    mcpReadThread: async ({ room }) => { rooms.push(`read:${room}`); return {} as never; },
+    mcpReadMessage: async ({ room }) => { rooms.push(`message:${room}`); return {} as never; },
+    mcpPostMessage: async ({ room }) => { rooms.push(`post:${room}`); return { accepted: true, protocol_version: 1, request_id: "legacy-post", sequence: 2, expires_at: "now", replayed: false }; },
+    mcpSubscribe: async (input) => { subscriptions.push(input); return { id: input.id ?? "sub-test", refreshBefore: new Date(10_000).toISOString(), cursor: input.cursor ?? "1", truncated: false }; },
+    mcpUnsubscribe: async (input) => { unsubscribed = input; return { removed: true }; },
+  };
+  const options = {
+    origin: canonicalOrigin,
+    acceptedOrigins: [legacyOrigin],
+    auth: { authenticate: async () => auth },
+    callbackFetch,
+  };
+  const legacyRoom = `${legacyOrigin}/thread-1`;
+  const canonicalRoom = `${canonicalOrigin}/thread-1`;
+
+  for (const [name, args] of [
+    ["read_thread", { room_url: legacyRoom }] as const,
+    ["read_message", { room_url: legacyRoom, message_id: "message-1" }] as const,
+    ["post_message", { room_url: legacyRoom, content: "legacy post", author: "agent", client_message_id: "legacy-1" }] as const,
+  ]) {
+    const response = await handleMcpRequest(request("tools/call", { name, arguments: args }), durableService, options);
+    expect(response.status).toBe(200);
+  }
+  expect(rooms).toEqual(["read:thread-1", "message:thread-1", "post:thread-1"]);
+
+  const subscriptionParams = (room_url: string) => ({
+    name: "message.created",
+    arguments: { room_url },
+    delivery: { mode: "webhook", url: "https://receiver.example.test/migrate", secret: `whsec_${btoa("m".repeat(32))}` },
+    cursor: null,
+  });
+  const legacySubscribe = await handleMcpRequest(request("events/subscribe", subscriptionParams(legacyRoom)), durableService, options);
+  const canonicalSubscribe = await handleMcpRequest(request("events/subscribe", subscriptionParams(canonicalRoom)), durableService, options);
+  expect(legacySubscribe.status).toBe(200);
+  expect(canonicalSubscribe.status).toBe(200);
+  expect(subscriptions).toHaveLength(2);
+  expect(subscriptions[0]?.id).toBe(subscriptions[1]?.id);
+  expect(JSON.parse(subscriptions[0]!.arguments_json)).toEqual({ room_url: canonicalRoom });
+  expect(subscriptions[0]!.legacy_arguments_json).toEqual([JSON.stringify({ room_url: legacyRoom })]);
+
+  const unsubscribedResponse = await handleMcpRequest(request("events/unsubscribe", subscriptionParams(canonicalRoom)), durableService, options);
+  expect(unsubscribedResponse.status).toBe(200);
+  expect(unsubscribed?.arguments_json).toBe(JSON.stringify({ room_url: canonicalRoom }));
+  expect(unsubscribed?.legacy_arguments_json).toEqual([JSON.stringify({ room_url: legacyRoom })]);
+});
 });

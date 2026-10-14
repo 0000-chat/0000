@@ -4,14 +4,14 @@ import { randomUUID } from "node:crypto";
 import WebSocket from "ws";
 
 import { readStdin, runCli } from "./cli.js";
-import type { WaitSocket } from "./wait.js";
+import { DEFAULT_SERVICE_ORIGIN, type WaitSocket } from "./wait.js";
 import { PersistentCookieJar } from "./cookie-jar.js";
 
 const controller = new AbortController();
 process.once("SIGINT", () => controller.abort());
 process.once("SIGTERM", () => controller.abort());
 
-const serviceOrigin = process.env.MSG_SERVICE_ORIGIN ?? "https://msg.0000.chat";
+const serviceOrigin = process.env.MSG_SERVICE_ORIGIN ?? DEFAULT_SERVICE_ORIGIN;
 const cookieJar = new PersistentCookieJar({ serviceOrigin });
 const code = await runCli(process.argv.slice(2), {
   fetch: cookieJar.wrapFetch(fetch),

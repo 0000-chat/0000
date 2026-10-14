@@ -56,6 +56,8 @@ export interface McpWorkerOptions {
   readonly callbackFetch?: typeof fetch;
   readonly mcpOrigin?: string;
   readonly mcpRateLimit?: McpRateLimit;
+  /** Origins accepted for legacy API/MCP requests while canonical URLs are advertised. */
+  readonly acceptedOrigins?: readonly string[];
 }
 
 const RoomUrlSchema = z.string().min(1).max(MAX_ROOM_URL_CHARS);
@@ -208,7 +210,8 @@ export async function handleMcpRequest(
   const publicOrigin = canonicalOrigin(options.publicOrigin ?? DEFAULT_PUBLIC_ORIGIN);
   const origin = request.headers.get("origin");
 
-  if (!mcpHostIsSafe(request, publicOrigin) || !mcpOriginIsAllowed(origin, publicOrigin)) {
+  const acceptedOrigins = [publicOrigin, ...(options.acceptedOrigins ?? [])];
+  if (!mcpHostIsSafe(request, acceptedOrigins) || !mcpOriginIsAllowed(origin, acceptedOrigins)) {
     return mcpHttpError(403, "The MCP request origin is not allowed.");
   }
 
@@ -227,6 +230,7 @@ export async function handleMcpRequest(
       auth: options.auth,
       callbackFetch: options.callbackFetch,
       origin: options.mcpOrigin ?? publicOrigin,
+      acceptedOrigins,
       rateLimit: options.mcpRateLimit,
     });
     return applyMcpCors(response, origin);
@@ -237,7 +241,7 @@ export async function handleMcpRequest(
 
   let response: Response;
   if (await isLegacyRequest(request)) {
-    const server = buildMcpServer(request, service, publicOrigin, options);
+    const server = buildMcpServer(request, service, publicOrigin, options, acceptedOrigins);
     const transport = new WebStandardStreamableHTTPServerTransport({
       enableJsonResponse: true,
       sessionIdGenerator: undefined,
@@ -253,7 +257,7 @@ export async function handleMcpRequest(
     }
   } else {
     const handler = createMcpHandler(
-      () => buildMcpServer(request, service, publicOrigin, options),
+      () => buildMcpServer(request, service, publicOrigin, options, acceptedOrigins),
       { legacy: "reject" },
     );
     try {
@@ -274,6 +278,7 @@ function buildMcpServer(
   service: RoomService,
   publicOrigin: string,
   options: McpWorkerOptions,
+  acceptedOrigins: readonly string[],
 ): McpServer {
   const creationOperations = options.creationOperations ?? options.operations;
   const server = new McpServer(
@@ -369,7 +374,7 @@ function buildMcpServer(
     },
     async ({ room_url, after = 0, limit = DEFAULT_READ_LIMIT }) => {
       try {
-        const room = parsePublicRoomUrl(room_url, publicOrigin);
+        const room = parsePublicRoomUrl(room_url, publicOrigin, acceptedOrigins);
         await enforceMcpRateLimit(request, options.rateLimits?.reads);
         if (!service.read) throw new ProtocolError(ERROR_CODES.serviceUnavailable, "Room reads are unavailable.", 503);
         const result = stripLegacyAbsoluteExpiry(await service.read({ after, limit: limit + 1, max_bytes: MCP_READ_BYTE_BUDGET_BYTES, room })) as ReadRoomResponse;
@@ -405,7 +410,7 @@ function buildMcpServer(
     },
     async ({ room_url, after = 0, limit = DEFAULT_READ_LIMIT }) => {
       try {
-        const room = parsePublicRoomUrl(room_url, publicOrigin);
+        const room = parsePublicRoomUrl(room_url, publicOrigin, acceptedOrigins);
         await enforceMcpRateLimit(request, options.rateLimits?.reads);
         if (!service.read) throw new ProtocolError(ERROR_CODES.serviceUnavailable, "Room reads are unavailable.", 503);
         const result = stripLegacyAbsoluteExpiry(await service.read({ after, limit: limit + 1, max_bytes: MCP_READ_BYTE_BUDGET_BYTES, room })) as ReadRoomResponse;
@@ -439,7 +444,7 @@ function buildMcpServer(
     },
     async ({ room_url }) => {
       try {
-        const room = parsePublicRoomUrl(room_url, publicOrigin);
+        const room = parsePublicRoomUrl(room_url, publicOrigin, acceptedOrigins);
         await enforceMcpRateLimit(request, options.rateLimits?.reads);
         if (!service.roomStatus) throw new ProtocolError(ERROR_CODES.serviceUnavailable, "Room status is unavailable.", 503);
         const output = stripLegacyAbsoluteExpiry(await service.roomStatus({ room })) as RoomStatusResponse;
@@ -484,7 +489,7 @@ function buildMcpServer(
     },
     async ({ room_url, content, client_message_id, author, display_name, name_password, client, semantic_type, reply_to }) => {
       try {
-        const room = parsePublicRoomUrl(room_url, publicOrigin);
+        const room = parsePublicRoomUrl(room_url, publicOrigin, acceptedOrigins);
         if (byteLength(content) > MAX_MCP_POST_CONTENT_BYTES) throw new ProtocolError(ERROR_CODES.bodyTooLarge, "The message is too large.", 413);
         await enforceMcpRateLimit(request, options.rateLimits?.posts);
         if (options.postDisabled) throw new ProtocolError(ERROR_CODES.serviceUnavailable, "Posting is temporarily unavailable.", 503);
@@ -545,7 +550,7 @@ function buildMcpServer(
     },
     async ({ room_url, format }) => {
       try {
-        const room = parsePublicRoomUrl(room_url, publicOrigin);
+        const room = parsePublicRoomUrl(room_url, publicOrigin, acceptedOrigins);
         await enforceMcpRateLimit(request, options.rateLimits?.reads);
         if (!service.exportRoom) throw new ProtocolError(ERROR_CODES.serviceUnavailable, "Room exports are unavailable.", 503);
         const response = await service.exportRoom({ format, room });
@@ -587,7 +592,7 @@ function buildMcpServer(
     },
     async ({ management_url, action }) => {
       try {
-        const { room, token } = parseManagementUrl(management_url, publicOrigin);
+        const { room, token } = parseManagementUrl(management_url, publicOrigin, acceptedOrigins);
         if (!service.manage) throw new ProtocolError(ERROR_CODES.serviceUnavailable, "Room management is unavailable.", 503);
         const method = action === "status" ? "GET" : action === "delete" ? "DELETE" : "POST";
         const output = stripLegacyAbsoluteExpiry(await service.manage({
@@ -606,7 +611,7 @@ function buildMcpServer(
     },
   );
 
-  registerWebhookTools(server, request, service, options, publicOrigin);
+  registerWebhookTools(server, request, service, options, publicOrigin, acceptedOrigins);
 
   // The SDK defaults registered tool handlers to listChanged: true. This server
   // creates a fixed tool list and has no notification or subscription channel.
@@ -620,6 +625,7 @@ function registerWebhookTools(
   service: RoomService,
   options: McpWorkerOptions,
   publicOrigin: string,
+  acceptedOrigins: readonly string[],
 ): void {
   server.registerTool(
     "list_webhooks",
@@ -632,7 +638,7 @@ function registerWebhookTools(
     },
     async ({ room_url }) => {
       try {
-        const room = parsePublicRoomUrl(room_url, publicOrigin);
+        const room = parsePublicRoomUrl(room_url, publicOrigin, acceptedOrigins);
         await enforceMcpRateLimit(request, options.rateLimits?.reads);
         if (!service.listWebhooks) throw new ProtocolError(ERROR_CODES.serviceUnavailable, "Webhook listing is unavailable.", 503);
         const output = await service.listWebhooks({ room });
@@ -654,7 +660,7 @@ function registerWebhookTools(
     },
     async ({ room_url, url, headers, prompt, exclude_authors }) => {
       try {
-        const room = parsePublicRoomUrl(room_url, publicOrigin);
+        const room = parsePublicRoomUrl(room_url, publicOrigin, acceptedOrigins);
         let input: ReturnType<typeof parseWebhookCreateInput>;
         try {
           input = parseWebhookCreateInput({
@@ -688,7 +694,7 @@ function registerWebhookTools(
     },
     async ({ room_url, webhook_id, url, headers, prompt, exclude_authors }) => {
       try {
-        const room = parsePublicRoomUrl(room_url, publicOrigin);
+        const room = parsePublicRoomUrl(room_url, publicOrigin, acceptedOrigins);
         let input: ReturnType<typeof parseWebhookUpdateInput>;
         try {
           input = parseWebhookUpdateInput({ ...(url === undefined ? {} : { url }), ...(headers === undefined ? {} : { headers }), ...(prompt === undefined ? {} : { prompt }), ...(exclude_authors === undefined ? {} : { exclude_authors }) });
@@ -717,7 +723,7 @@ function registerWebhookTools(
     },
     async ({ room_url, webhook_id }) => {
       try {
-        const room = parsePublicRoomUrl(room_url, publicOrigin);
+        const room = parsePublicRoomUrl(room_url, publicOrigin, acceptedOrigins);
         await enforceMcpRateLimit(request, options.rateLimits?.posts);
         if (!service.removeWebhook) throw new ProtocolError(ERROR_CODES.serviceUnavailable, "Webhook removal is unavailable.", 503);
         const output = await service.removeWebhook({ id: webhook_id, room });
@@ -745,7 +751,7 @@ function registerWebhookTools(
       },
       async ({ room_url, webhook_id }) => {
         try {
-          const room = parsePublicRoomUrl(room_url, publicOrigin);
+          const room = parsePublicRoomUrl(room_url, publicOrigin, acceptedOrigins);
           await enforceMcpRateLimit(request, options.rateLimits?.posts);
           const operation = service[method];
           if (!operation) throw new ProtocolError(ERROR_CODES.serviceUnavailable, `Webhook ${action} is unavailable.`, 503);
@@ -769,7 +775,7 @@ function registerWebhookTools(
     },
     async ({ room_url, webhook_id }) => {
       try {
-        const room = parsePublicRoomUrl(room_url, publicOrigin);
+        const room = parsePublicRoomUrl(room_url, publicOrigin, acceptedOrigins);
         await enforceMcpRateLimit(request, options.rateLimits?.posts);
         if (!service.rotateWebhookSecret) throw new ProtocolError(ERROR_CODES.serviceUnavailable, "Webhook secret rotation is unavailable.", 503);
         const output = await service.rotateWebhookSecret({ id: webhook_id, room });
@@ -791,7 +797,7 @@ function registerWebhookTools(
     },
     async ({ room_url, webhook_id, event_id }) => {
       try {
-        const room = parsePublicRoomUrl(room_url, publicOrigin);
+        const room = parsePublicRoomUrl(room_url, publicOrigin, acceptedOrigins);
         await enforceMcpRateLimit(request, options.rateLimits?.posts);
         if (!service.redeliverWebhook) throw new ProtocolError(ERROR_CODES.serviceUnavailable, "Webhook redelivery is unavailable.", 503);
         const output = await service.redeliverWebhook({ eventId: event_id, id: webhook_id, room });
@@ -891,7 +897,7 @@ function exportProtocolError(status: number): ProtocolError {
   return new ProtocolError(ERROR_CODES.serviceUnavailable, "The room export could not be completed.", status >= 400 ? status : 503);
 }
 
-function parseManagementUrl(value: string, publicOrigin: string): { readonly room: string; readonly token: string } {
+function parseManagementUrl(value: string, publicOrigin: string, acceptedOrigins: readonly string[] = [publicOrigin]): { readonly room: string; readonly token: string } {
   let parsed: URL;
   try {
     parsed = new URL(value);
@@ -899,9 +905,9 @@ function parseManagementUrl(value: string, publicOrigin: string): { readonly roo
     throw new McpInputError("The private management URL is invalid.");
   }
   const match = /^\/manage\/([A-Za-z0-9_-]+)\/([A-Za-z0-9_-]+)$/u.exec(parsed.pathname);
-  const canonical = `${publicOrigin}${parsed.pathname}`;
+  const canonical = `${parsed.origin}${parsed.pathname}`;
   if (
-    parsed.origin !== publicOrigin
+    !acceptedOrigins.includes(parsed.origin)
     || value !== canonical
     || parsed.protocol !== "https:"
     || parsed.username
@@ -1009,7 +1015,7 @@ function mcpToolWireBytes(output: unknown, text: string): number {
   }));
 }
 
-function parsePublicRoomUrl(value: string, publicOrigin: string): string {
+function parsePublicRoomUrl(value: string, publicOrigin: string, acceptedOrigins: readonly string[] = [publicOrigin]): string {
   let parsed: URL;
   try {
     parsed = new URL(value);
@@ -1017,9 +1023,9 @@ function parsePublicRoomUrl(value: string, publicOrigin: string): string {
     throw new McpInputError("The public room URL is invalid.");
   }
   const capability = parsed.pathname.slice(1);
-  const canonical = `${publicOrigin}/${capability}`;
+  const canonical = `${parsed.origin}/${capability}`;
   if (
-    parsed.origin !== publicOrigin
+    !acceptedOrigins.includes(parsed.origin)
     || parsed.protocol !== "https:"
     || value !== canonical
     || parsed.username
@@ -1043,10 +1049,10 @@ function canonicalOrigin(value: string): string {
   }
 }
 
-function mcpHostIsSafe(request: Request, publicOrigin: string): boolean {
+function mcpHostIsSafe(request: Request, acceptedOrigins: readonly string[]): boolean {
   try {
     const requestUrl = new URL(request.url);
-    if (requestUrl.origin !== publicOrigin) return false;
+    if (!acceptedOrigins.includes(requestUrl.origin)) return false;
     const host = request.headers.get("host");
     if (host === null) return true;
     const normalizedHost = normalizeHost(host, requestUrl.protocol);
@@ -1068,8 +1074,8 @@ function normalizeHost(value: string, protocol: string): string | undefined {
   }
 }
 
-function mcpOriginIsAllowed(origin: string | null, publicOrigin: string): boolean {
-  return origin === null || origin === publicOrigin || (CHATGPT_ORIGINS as readonly string[]).includes(origin);
+function mcpOriginIsAllowed(origin: string | null, acceptedOrigins: readonly string[]): boolean {
+  return origin === null || acceptedOrigins.includes(origin) || (CHATGPT_ORIGINS as readonly string[]).includes(origin);
 }
 
 function mcpPreflight(request: Request, origin: string | null): Response {
