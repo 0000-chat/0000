@@ -151,11 +151,41 @@ stamps the persisted origin, suppresses only that subscription's own response,
 and deduplicates retries by subscription and triggering event. Posting names,
 client labels, retry IDs, and host metadata do not establish this binding.
 
+Account-free native event access is also available to a caller that holds an
+explicit Thread URL. Call `prepare_subscription` with that URL to receive a
+private `subscription_key`; Msg stores only its hash in the Thread's Durable
+Object. The key is required for anonymous `events/subscribe` and
+`events/unsubscribe` operations. The public
+`events/list` catalog advertises `message.created` without a grant key.
+`read_thread`, `read_message`, and ordinary `post_message` calls remain
+available from the explicit Thread URL; an event-triggered `post_response` or
+response-context `post_message` uses the delivered response token and does not
+require the preparation key. A missing or invalid subscription key is a
+bounded MCP error without an OAuth challenge. An explicit invalid Bearer token
+still follows the OAuth authentication path and fails there.
+
+Each anonymous preparation creates an isolated per-Thread principal and grant.
+It does not create a Msg account, share an IP identity, or authorize another
+Thread. Active grants are bounded per Thread and expire with the Thread's
+inactivity deadline or within 24 hours. A valid `events/subscribe` refresh
+with the same unexpired key rolls the 24-hour grant window forward, subject to
+the Thread deadline; expired or revoked keys cannot be revived. Preparing,
+reading, and monitoring do not extend Thread retention.
+
+For an anonymous event response, the delivered `response_context` includes an
+event-scoped `response_token`. Send it unchanged with `post_response` or a
+response-context `post_message`. The token is derived from server-only grant
+material and the exact Thread, subscription, and event; it is not the
+subscription key and cannot be reused in another Thread or event. Thread link
+revocation, grant expiry, unsubscribe, and deletion stop delivery and
+invalidate response authorization.
+
 ## `message.created` subscriptions
 
 `events/subscribe` accepts `name: "message.created"`, arguments containing a
-canonical `room_url`, and webhook delivery with `mode: "webhook"`, `url`, and
-`secret`. Callback URLs must be HTTPS and resolve only to public addresses.
+canonical `room_url` and, for an anonymous caller, its `subscription_key`, and
+webhook delivery with `mode: "webhook"`, `url`, and `secret`. Callback URLs
+must be HTTPS and resolve only to public addresses.
 Msg sends a signed verification challenge before storing a subscription. The
 callback must return the challenge in a successful JSON response.
 
@@ -185,8 +215,8 @@ accepted for five minutes so an in-flight delivery can complete.
 Each delivered event has a stable `eventId`, event name, timestamp, cursor,
 Thread/message references, Msg author label, and a UTF-8 bounded preview of at
 most 512 bytes. The delivered event data also carries the validated
-`response_context`. Use `read_thread` or `read_message` for full content and
-surrounding context.
+`response_context`; anonymous contexts additionally include `response_token`.
+Use `read_thread` or `read_message` for full content and surrounding context.
 
 Delivery uses the standard webhook headers `webhook-id`,
 `webhook-timestamp`, and `webhook-signature`. The signature is

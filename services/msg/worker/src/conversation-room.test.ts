@@ -1168,6 +1168,201 @@ test("binds retained MCP events to an existing Thread subscription when room_id 
   }
 });
 
+test("keeps anonymous subscription keys hashed, renews active grants, signs responses, and stops delivery on link revocation", async () => {
+  const database = new Database(":memory:");
+  let now = 1_000;
+  let callbackCount = 0;
+  let callbackBody: Record<string, unknown> | undefined;
+  const secret = `whsec_${btoa("a".repeat(32))}`;
+  const callbackFetch = async (_input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+    callbackCount += 1;
+    callbackBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    return new Response(null, { status: 204 });
+  };
+  const { context, room: durable } = await room(database, () => now, {}, undefined, callbackFetch);
+  try {
+    await durable.fetch(request("/initialize", {
+      management_hash: "hash",
+      initial: { content: "first", author: "a", display_name: "a", semantic_type: "message" },
+    }));
+    // Start with a short room deadline, then emulate activity extending the
+    // room after the anonymous grant has been prepared. The subscription must
+    // still stop at the grant deadline until a valid key refresh renews it.
+    database.query("UPDATE room_state SET inactivity_expires_at = ? WHERE singleton = 1").run(now + 60_000);
+
+    const prepared = await durable.fetch(request("/mcp/prepare-subscription", {}));
+    expect(prepared.status).toBe(200);
+    const preparedValue = await prepared.json() as { subscription_key: string; expires_at: string };
+    expect(preparedValue.subscription_key).toMatch(/^[A-Za-z0-9_-]{43}$/u);
+    const storedGrant = database.query("SELECT grant_id, principal_id, key_hash, response_secret, expires_at FROM mcp_anonymous_grants").get() as { grant_id: string; principal_id: string; key_hash: string; response_secret: string; expires_at: number };
+    expect(storedGrant.key_hash).not.toBe(preparedValue.subscription_key);
+    expect(storedGrant.response_secret).not.toBe(preparedValue.subscription_key);
+
+    const resolved = await durable.fetch(request("/mcp/resolve-subscription", { subscription_key: preparedValue.subscription_key, renew: true }));
+    expect(resolved.status).toBe(200);
+    const resolvedValue = await resolved.json() as { grant_id: string; principal_id: string; expires_at: string };
+    expect(resolvedValue).toMatchObject({ grant_id: storedGrant.grant_id, principal_id: storedGrant.principal_id });
+    expect(Date.parse(resolvedValue.expires_at)).toBeGreaterThanOrEqual(Date.parse(preparedValue.expires_at));
+    database.query("UPDATE room_state SET inactivity_expires_at = ? WHERE singleton = 1").run(now + DAY_MS);
+    expect((await durable.fetch(request("/mcp/resolve-subscription", { subscription_key: "Z".repeat(43), renew: false }))).status).toBe(404);
+
+    const argumentsJson = JSON.stringify({ room_url: "https://msg.example.test/fixture-room" });
+    const subscribed = await durable.fetch(request("/mcp/subscribe", {
+      id: "sub_anonymous",
+      principal_id: resolvedValue.principal_id,
+      grant_id: resolvedValue.grant_id,
+      arguments_json: argumentsJson,
+      callback_url: "https://receiver.example.test/anonymous",
+      secret,
+      cursor: null,
+    }));
+    expect(subscribed.status).toBe(200);
+    const storedSubscription = database.query("SELECT arguments_json FROM mcp_subscriptions WHERE id = ?").get("sub_anonymous") as { arguments_json: string };
+    expect(JSON.parse(storedSubscription.arguments_json)).toEqual({ room_url: "https://msg.example.test/fixture-room" });
+    expect(database.query("SELECT expires_at FROM mcp_subscriptions WHERE id = ?").get("sub_anonymous")).toEqual({ expires_at: storedGrant.expires_at });
+
+    now += 1;
+    await durable.fetch(request("/messages", { input: { content: "trigger", author: "a", display_name: "a", semantic_type: "message" } }));
+    await durable.alarm();
+    expect(callbackCount).toBe(1);
+    const eventData = (callbackBody?.data ?? {}) as { response_context?: { event_id?: string; response_token?: string; subscription_id?: string } };
+    expect(eventData.response_context?.subscription_id).toBe("sub_anonymous");
+    expect(eventData.response_context?.response_token).toMatch(/^[A-Za-z0-9_-]+$/u);
+    const persistedEvent = database.query("SELECT payload FROM mcp_events ORDER BY sequence DESC LIMIT 1").get() as { payload: string };
+    expect(persistedEvent.payload).not.toContain(preparedValue.subscription_key);
+    expect(persistedEvent.payload).not.toContain(eventData.response_context?.response_token);
+    const resolvedResponse = await durable.fetch(request("/mcp/resolve-response", {
+      subscription_id: "sub_anonymous",
+      event_id: eventData.response_context?.event_id,
+      response_token: eventData.response_context?.response_token,
+    }));
+    expect(await resolvedResponse.json()).toEqual({ grant_id: resolvedValue.grant_id, principal_id: resolvedValue.principal_id });
+    const unresolvedResponse = await durable.fetch(request("/mcp/resolve-response", {
+      subscription_id: "sub_anonymous",
+      event_id: eventData.response_context?.event_id,
+      response_token: "wrong-token",
+    }));
+    expect(unresolvedResponse.status).toBe(404);
+    const valid = await durable.fetch(request("/mcp/validate-response", {
+      principal_id: resolvedValue.principal_id,
+      subscription_id: "sub_anonymous",
+      event_id: eventData.response_context?.event_id,
+      response_token: eventData.response_context?.response_token,
+    }));
+    expect(await valid.json()).toEqual({ valid: true });
+    const invalid = await durable.fetch(request("/mcp/validate-response", {
+      principal_id: resolvedValue.principal_id,
+      subscription_id: "sub_anonymous",
+      event_id: eventData.response_context?.event_id,
+      response_token: "wrong-token",
+    }));
+    expect(await invalid.json()).toEqual({ valid: false });
+
+    database.query("UPDATE room_state SET links_revoked = 1 WHERE singleton = 1").run();
+    const revokedResponse = await durable.fetch(request("/mcp/resolve-response", {
+      subscription_id: "sub_anonymous",
+      event_id: eventData.response_context?.event_id,
+      response_token: eventData.response_context?.response_token,
+    }));
+    expect(revokedResponse.status).toBe(404);
+    const revokedValidation = await durable.fetch(request("/mcp/validate-response", {
+      principal_id: resolvedValue.principal_id,
+      subscription_id: "sub_anonymous",
+      event_id: eventData.response_context?.event_id,
+      response_token: eventData.response_context?.response_token,
+    }));
+    expect(await revokedValidation.json()).toEqual({ valid: false });
+    now += 1;
+    await durable.fetch(request("/messages", { input: { content: "revoked", author: "a", display_name: "a", semantic_type: "message" } }));
+    await durable.alarm();
+    expect(callbackCount).toBe(1);
+    expect(database.query("SELECT status FROM mcp_subscriptions WHERE id = ?").get("sub_anonymous")).toMatchObject({ status: "stopped" });
+    expect((await durable.fetch(request("/mcp/resolve-subscription", { subscription_key: preparedValue.subscription_key, renew: true }))).status).toBe(403);
+    expect(context.alarmAt).toBeDefined();
+  } finally {
+    database.close();
+  }
+});
+
+test("bounds anonymous grant and principal subscription quotas", async () => {
+  const database = new Database(":memory:");
+  const { room: durable } = await room(database, () => 1_000, {}, undefined, async () => new Response(null, { status: 204 }));
+  try {
+    await durable.fetch(request("/initialize", { management_hash: "hash", initial: { content: "first", author: "a", display_name: "a", semantic_type: "message" } }));
+    const keys: string[] = [];
+    for (let index = 0; index < 33; index += 1) {
+      const prepared = await durable.fetch(request("/mcp/prepare-subscription", {}));
+      if (prepared.status === 200) keys.push((await prepared.json() as { subscription_key: string }).subscription_key);
+      else expect(prepared.status).toBe(429);
+    }
+    expect(keys).toHaveLength(32);
+    const grantResponse = await durable.fetch(request("/mcp/resolve-subscription", { subscription_key: keys[0]!, renew: false }));
+    const grant = await grantResponse.json() as { grant_id: string; principal_id: string };
+    const argumentsJson = JSON.stringify({ room_url: "https://msg.example.test/quota-room" });
+    for (let index = 0; index < 9; index += 1) {
+      const subscribed = await durable.fetch(request("/mcp/subscribe", {
+        id: `sub_quota_${index}`, principal_id: grant.principal_id, grant_id: grant.grant_id, arguments_json: argumentsJson,
+        callback_url: `https://receiver.example.test/quota/${index}`, secret: `whsec_${btoa("q".repeat(32))}`, cursor: null,
+      }));
+      if (index < 8) expect(subscribed.status).toBe(200);
+      else expect(subscribed.status).toBe(429);
+    }
+  } finally {
+    database.close();
+  }
+});
+
+test("isolates anonymous grants and response tokens across subscriptions", async () => {
+  const database = new Database(":memory:");
+  let now = 1_000;
+  const callbackBodies: Array<Record<string, unknown>> = [];
+  const secret = `whsec_${btoa("i".repeat(32))}`;
+  const callbackFetch = async (_input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+    callbackBodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+    return new Response(null, { status: 204 });
+  };
+  const { room: durable } = await room(database, () => now, {}, undefined, callbackFetch);
+  try {
+    await durable.fetch(request("/initialize", { management_hash: "hash", initial: { content: "first", author: "a", display_name: "a", semantic_type: "message" } }));
+    const first = await durable.fetch(request("/mcp/prepare-subscription", {}));
+    const second = await durable.fetch(request("/mcp/prepare-subscription", {}));
+    const firstKey = (await first.json() as { subscription_key: string }).subscription_key;
+    const secondKey = (await second.json() as { subscription_key: string }).subscription_key;
+    const firstGrant = await durable.fetch(request("/mcp/resolve-subscription", { subscription_key: firstKey, renew: false }));
+    const secondGrant = await durable.fetch(request("/mcp/resolve-subscription", { subscription_key: secondKey, renew: false }));
+    const firstValue = await firstGrant.json() as { grant_id: string; principal_id: string };
+    const secondValue = await secondGrant.json() as { grant_id: string; principal_id: string };
+    const argumentsJson = JSON.stringify({ room_url: "https://msg.example.test/isolation-room" });
+    for (const [id, grant] of [["sub_a", firstValue], ["sub_b", secondValue]] as const) {
+      const subscribed = await durable.fetch(request("/mcp/subscribe", {
+        id, principal_id: grant.principal_id, grant_id: grant.grant_id, arguments_json: argumentsJson,
+        callback_url: "https://receiver.example.test/isolation", secret, cursor: null,
+      }));
+      expect(subscribed.status).toBe(200);
+    }
+    expect(firstValue.principal_id).not.toBe(secondValue.principal_id);
+    expect(firstValue.grant_id).not.toBe(secondValue.grant_id);
+    expect(database.query("SELECT key_hash FROM mcp_anonymous_grants ORDER BY grant_id").all()).toHaveLength(2);
+    now += 1;
+    await durable.fetch(request("/messages", { input: { content: "trigger", author: "a", display_name: "a", semantic_type: "message" } }));
+    await durable.alarm();
+    expect(callbackBodies).toHaveLength(2);
+    const contexts = callbackBodies.map((body) => (body.data as Record<string, unknown>).response_context as { event_id: string; response_token: string; subscription_id: string });
+    const firstContext = contexts.find((context) => context.subscription_id === "sub_a")!;
+    const secondContext = contexts.find((context) => context.subscription_id === "sub_b")!;
+    expect(firstContext.response_token).toEqual(expect.any(String));
+    expect(firstContext.response_token).not.toBe(secondContext.response_token);
+    const crossRoom = await durable.fetch(request("/mcp/resolve-response", {
+      subscription_id: "sub_b",
+      event_id: secondContext.event_id,
+      response_token: firstContext.response_token,
+    }));
+    expect(crossRoom.status).toBe(404);
+  } finally {
+    database.close();
+  }
+});
+
 test("stops public MCP delivery after Thread links are revoked", async () => {
   const database = new Database(":memory:");
   let now = 1_000;

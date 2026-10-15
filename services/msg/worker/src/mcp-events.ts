@@ -12,6 +12,7 @@ export const MCP_DELIVERY_TIMEOUT_MS = 10_000;
 export const MCP_SECRET_ROTATION_WINDOW_MS = 5 * 60 * 1_000;
 export const MCP_MAX_ACTIVE_SUBSCRIPTIONS_PER_THREAD = 32;
 export const MCP_MAX_ACTIVE_SUBSCRIPTIONS_PER_PRINCIPAL_THREAD = 8;
+export const MCP_MAX_ACTIVE_ANONYMOUS_GRANTS_PER_THREAD = 32;
 
 export interface McpEventData {
   readonly thread_id: string;
@@ -107,15 +108,21 @@ export function constantTimeEqual(left: string, right: string): boolean {
   return result === 0;
 }
 
-export function mcpEventDefinition() {
+export function mcpEventDefinition(options: { readonly anonymous?: boolean } = {}) {
+  const anonymous = options.anonymous === true;
   return {
     name: MCP_MESSAGE_EVENT,
-    description: "A new message was added to the selected Msg Thread.",
+    description: anonymous
+      ? "A new message was added to the selected Msg Thread. Call prepare_subscription first, then provide its subscription_key with this Thread URL."
+      : "A new message was added to the selected Msg Thread.",
     delivery: ["webhook"],
     inputSchema: {
       type: "object",
-      properties: { room_url: { type: "string", format: "uri", description: "Canonical public URL of the Thread to monitor." } },
-      required: ["room_url"],
+      properties: {
+        room_url: { type: "string", format: "uri", description: "Canonical public URL of the Thread to monitor." },
+        ...(anonymous ? { subscription_key: { type: "string", minLength: 43, maxLength: 43, description: "Required for events/subscribe and events/unsubscribe; returned by prepare_subscription for this Thread." } } : { subscription_key: { type: "string", minLength: 43, maxLength: 43, description: "Optional anonymous subscription key; OAuth connections may omit it." } }),
+      },
+      required: anonymous ? ["room_url", "subscription_key"] : ["room_url"],
       additionalProperties: false,
     },
     payloadSchema: {
@@ -123,10 +130,19 @@ export function mcpEventDefinition() {
       properties: {
         thread_id: { type: "string" }, thread_url: { type: "string", format: "uri" }, message_id: { type: "string" },
         sequence: { type: "integer" }, author: { type: "string" }, display_name: { type: "string" }, preview: { type: "string" },
-        response_context: { type: "object", properties: { subscription_id: { type: "string" }, event_id: { type: "string" } }, required: ["subscription_id", "event_id"], additionalProperties: false },
+        response_context: { type: "object", properties: { subscription_id: { type: "string" }, event_id: { type: "string" }, ...(anonymous ? { response_token: { type: "string", minLength: 1 } } : { response_token: { type: "string", minLength: 1, description: "Required for anonymous subscriptions." } }) }, required: anonymous ? ["subscription_id", "event_id", "response_token"] : ["subscription_id", "event_id"], additionalProperties: false },
       },
       required: ["thread_id", "thread_url", "message_id", "sequence", "author", "preview", "response_context"],
       additionalProperties: false,
     },
   };
+}
+
+/** Derive a response-only capability from private per-grant material. */
+export async function mcpResponseToken(responseSecret: string, threadUrl: string, subscriptionId: string, eventId: string): Promise<string> {
+  const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(responseSecret), { hash: "SHA-256", name: "HMAC" }, false, ["sign"]);
+  const signature = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(`msg:mcp-response:v1\n${threadUrl}\n${subscriptionId}\n${eventId}`));
+  let binary = "";
+  for (const byte of new Uint8Array(signature)) binary += String.fromCharCode(byte);
+  return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/u, "");
 }
