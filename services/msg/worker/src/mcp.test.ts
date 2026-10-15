@@ -4,8 +4,9 @@ import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/cli
 
 import { ERROR_CODES, ProtocolError } from "./errors";
 import { handleMcpRequest, MAX_MCP_WIRE_RESPONSE_BYTES } from "./mcp";
-import { MCP_READ_BYTE_BUDGET_BYTES, type CreateRoomResponse, type McpPostMessageResponse, type ReadRoomResponse, type RoomService, type RoomStatusResponse } from "./protocol";
+import { MCP_READ_BYTE_BUDGET_BYTES, type CreateRoomResponse, type McpPostMessageResponse, type ReadRoomResponse, type RoomService, type RoomStatusResponse, type WebhookSummary } from "./protocol";
 import { createWorker } from "./worker";
+import { validateReadLimit } from "./room-domain";
 
 const origin = "https://msg.0000.chat";
 const roomUrl = `${origin}/room-capability`;
@@ -133,6 +134,126 @@ function baseService(): RoomService {
 }
 
 describe("stateless MCP endpoint", () => {
+  for (const modern of [false, true]) {
+    const call = (name: string, args: Record<string, unknown>) => modern
+      ? modernRpcRequest("tools/call", { name, arguments: args }, 1, { "mcp-name": name })
+      : rpcRequest({ id: 1, method: "tools/call", params: { name, arguments: args } });
+
+    test(`includes read, wait, and status payloads in text for ${modern ? "modern" : "legacy"} clients`, async () => {
+      const message = { sequence: 7, id: "msg-7", author: "Alice", content: "Hello\nworld", created_at: "2026-10-14T00:00:00.000Z" };
+      const service: RoomService = { ...baseService(), read: async () => readResult([message]) };
+      for (const name of ["read_room", "wait_for_messages", "get_room_status"]) {
+        const response = await handleMcpRequest(call(name, { room_url: roomUrl }), service);
+        const result = (await json(response)).result;
+        expect(result.isError).toBeUndefined();
+        expect(JSON.parse(result.content[0].text)).toEqual(result.structuredContent);
+        if (name === "get_room_status") expect(JSON.parse(result.content[0].text)).toEqual(roomStatus());
+        else expect(JSON.parse(result.content[0].text).messages).toEqual([message]);
+      }
+    });
+
+    test(`accepts inclusive read limits through the service validator for ${modern ? "modern" : "legacy"} clients`, async () => {
+      const seen: number[] = [];
+      const service: RoomService = {
+        ...baseService(),
+        read: async ({ limit }) => {
+          const validated = validateReadLimit(String(limit));
+          if (validated !== undefined) seen.push(validated);
+          return { ...readResult([]), has_more: true };
+        },
+      };
+      for (const name of ["read_room", "wait_for_messages"]) {
+        for (const limit of [1, 99, 100]) {
+          const result = (await json(await handleMcpRequest(call(name, { room_url: roomUrl, limit }), service))).result;
+          expect(result.isError).toBeUndefined();
+          expect(result.structuredContent.has_more).toBe(true);
+        }
+        for (const limit of [0, -1, 101, 1.5, "100"]) {
+          const body = await json(await handleMcpRequest(call(name, { room_url: roomUrl, limit }), service));
+          expect(body.error !== undefined || body.result?.isError === true).toBe(true);
+        }
+      }
+      expect(seen).toEqual([1, 99, 100, 1, 99, 100]);
+    });
+
+    for (const format of ["markdown", "json"] as const) {
+      test(`includes the complete ${format} export body in text for ${modern ? "modern" : "legacy"} clients`, async () => {
+        const body = format === "markdown" ? "# Thread\n\n7. Alice at 2026-10-14T00:00:00.000Z\nHello" : '{"messages":[{"sequence":7,"author":"Alice","content":"Hello","created_at":"2026-10-14T00:00:00.000Z"}]}';
+        const service: RoomService = { ...baseService(), exportRoom: async () => new Response(body) };
+        const result = (await json(await handleMcpRequest(call("export_room", { room_url: roomUrl, format }), service))).result;
+        expect(result.content[0].text).toBe(body);
+        expect(result.structuredContent.content).toEqual(format === "json" ? JSON.parse(body) : body);
+      });
+    }
+  }
+
+  test("advertises and enforces the same inclusive limit for every message-reading tool", async () => {
+    const tools = (await json(await handleMcpRequest(rpcRequest({ id: 1, method: "tools/list", params: {} }), baseService()))).result.tools;
+    for (const name of ["read_room", "wait_for_messages", "read_thread"]) {
+      expect(tools.find((tool: { name: string }) => tool.name === name).inputSchema.properties.limit).toMatchObject({ type: "integer", minimum: 1, maximum: 100 });
+    }
+    const seen: number[] = [];
+    const service: RoomService = { ...baseService(), mcpReadThread: async ({ limit }) => { if (limit !== undefined) seen.push(limit); return readResult([]); } };
+    const options = { auth: { authenticate: async () => ({ grantId: "test-grant", principalId: "test-principal", scopes: ["read"], authorize: () => true }) } };
+    for (const limit of [1, 99, 100]) {
+      const result = (await json(await handleMcpRequest(rpcRequest({ id: 1, method: "tools/call", params: { name: "read_thread", arguments: { room_url: roomUrl, limit } } }), service, options))).result;
+      expect(result.isError).toBeUndefined();
+      expect(JSON.parse(result.content[0].text)).toEqual(result.structuredContent);
+    }
+    for (const limit of [0, -1, 101, 1.5, "100"]) {
+      const body = await json(await handleMcpRequest(rpcRequest({ id: 1, method: "tools/call", params: { name: "read_thread", arguments: { room_url: roomUrl, limit } } }), service, options));
+      expect(body.error !== undefined || body.result?.isError === true).toBe(true);
+    }
+    expect(seen).toEqual([1, 99, 100]);
+  });
+
+  test("includes owner and webhook result fields in text", async () => {
+    const webhook: WebhookSummary = {
+      id: "11111111-1111-4111-8111-111111111111", url: "https://hooks.example.com/msg", status: "active",
+      created_at: "2026-10-14T00:00:00.000Z", deliveries: [], disabled_at: null, exclude_authors: [],
+      failure_started_at: null, header_names: [], last_failure_at: null, last_success_at: null, prompt: null, recovered_at: null,
+    };
+    const service: RoomService = {
+      ...baseService(),
+      manage: async () => ({ protocol_version: 1, agent_posting_enabled: false }),
+      listWebhooks: async () => ({ protocol_version: 1, webhooks: [webhook] }),
+      createWebhook: async () => ({ protocol_version: 1, webhook, secret: "test-secret" }),
+      updateWebhook: async () => ({ protocol_version: 1, webhook }),
+      removeWebhook: async () => ({ protocol_version: 1, removed: true }),
+      disableWebhook: async () => ({ protocol_version: 1, webhook: { ...webhook, status: "disabled" } }),
+      enableWebhook: async () => ({ protocol_version: 1, webhook }),
+      rotateWebhookSecret: async () => ({ protocol_version: 1, webhook, secret: "replacement-secret" }),
+      redeliverWebhook: async () => ({ protocol_version: 1, result: "queued", delivery: {
+        attempts: [], attempt_count: 0, attempted_at: null, cancelled_at: null, completed_at: null,
+        created_at: webhook.created_at, event_id: webhook.id, failure_category: null, message_id: "msg-1", message_sequence: 1,
+        next_attempt_at: null, retry_expires_at: "2026-10-15T00:00:00.000Z", status: "pending",
+      } }),
+    };
+    const calls: Array<{ name: string; args: Record<string, unknown> }> = [
+      { name: "manage_room", args: { management_url: `${origin}/manage/room-capability/private-token`, action: "disable_mcp" } },
+      { name: "list_webhooks", args: { room_url: roomUrl } },
+      { name: "create_webhook", args: { room_url: roomUrl, url: webhook.url } },
+      ...["update_webhook", "remove_webhook", "disable_webhook", "enable_webhook", "rotate_webhook_secret", "redeliver_webhook"].map((name) => ({ name, args: { room_url: roomUrl, webhook_id: webhook.id, ...(name === "redeliver_webhook" ? { event_id: webhook.id } : {}), ...(name === "update_webhook" ? { url: webhook.url } : {}) } })),
+    ];
+    for (const { name, args } of calls) {
+      const result = (await json(await handleMcpRequest(rpcRequest({ id: 1, method: "tools/call", params: { name, arguments: args } }), service))).result;
+      expect(result.isError, name).toBeUndefined();
+      expect(JSON.parse(result.content[0].text)).toEqual(result.structuredContent);
+    }
+  });
+
+  test("counts export text and structured content together against the wire limit", async () => {
+    for (const format of ["markdown", "json"] as const) {
+      const body = format === "json" ? JSON.stringify({ content: "x".repeat(260 * 1024) }) : "x".repeat(260 * 1024);
+      const service: RoomService = { ...baseService(), exportRoom: async () => new Response(body) };
+      const response = await handleMcpRequest(rpcRequest({ id: 1, method: "tools/call", params: { name: "export_room", arguments: { room_url: roomUrl, format } } }), service);
+      const result = (await json(response)).result;
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toBe("The room export exceeded the maximum wire size.");
+      expect(result.structuredContent).toBeUndefined();
+    }
+  });
+
   test("advertises the direct room, export, owner, and webhook tools without private posting inputs", async () => {
     const initialized = await handleMcpRequest(initializeRequest(), baseService());
     expect(initialized.status).toBe(200);
@@ -380,7 +501,7 @@ describe("stateless MCP endpoint", () => {
     };
     const response = await handleMcpRequest(rpcRequest({ id: 4, method: "tools/call", params: { name: "read_room", arguments: { after: 1, limit: 2, room_url: roomUrl } } }), service);
     const result = (await json(response)).result.structuredContent;
-    expect(input).toEqual({ after: 1, limit: 3, max_bytes: MCP_READ_BYTE_BUDGET_BYTES, room: "room-capability" });
+    expect(input).toEqual({ after: 1, limit: 2, max_bytes: MCP_READ_BYTE_BUDGET_BYTES, room: "room-capability" });
     expect(result.messages).toHaveLength(2);
     expect(result.next_after).toBe(2);
     expect(result.share_message).toBeUndefined();
@@ -388,7 +509,7 @@ describe("stateless MCP endpoint", () => {
   });
 
   test("returns complete maximum-size messages and caps the full JSON-RPC wire response", async () => {
-    const content = "\u0000".repeat(64 * 1024);
+    const content = '"'.repeat(64 * 1024);
     const messages = [1, 2].map((sequence) => ({ content, created_at: "2026-09-22T00:00:00.000Z", id: `message-${sequence}`, sequence }));
     const service = {
       ...baseService(),
@@ -437,7 +558,8 @@ describe("stateless MCP endpoint", () => {
     const output = result.structuredContent;
     expect(output).not.toHaveProperty("name_password");
     expect(output).not.toHaveProperty("name_password_notice");
-    expect(result.content[0].text).toBe("Room message accepted.");
+    expect(result.content[0].text).toStartWith("Room message accepted.\n");
+    expect(result.content[0].text).toContain('"sequence": 1');
     expect(result.content[0].text).not.toContain("CallerSecret");
   });
 
@@ -448,7 +570,7 @@ describe("stateless MCP endpoint", () => {
       mcpPost: async () => generated,
     });
     const firstResult = (await json(first)).result;
-    expect(firstResult.content[0].text).toBe("Room message accepted.\nGenerated name password: Ab3dE7x9\nSave this password now.");
+    expect(firstResult.content[0].text).toStartWith("Room message accepted.\nGenerated name password: Ab3dE7x9\nSave this password now.\n");
     expect(firstResult.structuredContent.name_password).toBe("Ab3dE7x9");
 
     const replay = await handleMcpRequest(rpcRequest({ id: 52, method: "tools/call", params: { name: "post_message", arguments: { room_url: roomUrl, client_message_id: "generated-1", author: "new-agent", display_name: "New Agent", content: "first" } } }), {
@@ -456,7 +578,8 @@ describe("stateless MCP endpoint", () => {
       mcpPost: async () => ({ ...generated, replayed: true }),
     });
     const replayResult = (await json(replay)).result;
-    expect(replayResult.content[0].text).toBe("Room message already accepted.");
+    expect(replayResult.content[0].text).toStartWith("Room message already accepted.\n");
+    expect(replayResult.content[0].text).not.toContain("Ab3dE7x9");
     expect(replayResult.structuredContent).not.toHaveProperty("name_password");
     expect(replayResult.structuredContent).not.toHaveProperty("name_password_notice");
 

@@ -4,6 +4,8 @@ import { expect, mock, test } from "bun:test";
 import { hashCapability, ROOM_LIMITS } from "./room-domain";
 import { CURRENT_ROOM_SCHEMA_VERSION } from "./room-schema";
 import { isWebhookEnvelope } from "./webhook-crypto";
+import { handleMcpRequest } from "./mcp";
+import { DurableRoomService } from "./room-service";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 type WebhookPayloadSigner = (secret: string, timestamp: string, body: string) => Promise<string>;
@@ -114,6 +116,31 @@ test("stores ordered messages and idempotent replay in SQLite", async () => {
     expect((await replay.json()).replayed).toBe(true);
     expect((await read.json()).messages.map((message: { sequence: number }) => message.sequence)).toEqual([1, 2]);
   } finally { Date.now = originalNow; }
+});
+
+test("MCP reads accept 100 messages through the Durable Room service and SQLite boundary", async () => {
+  const { room: durable } = await room();
+  const initialized = await durable.fetch(request("/initialize", { management_hash: "hash", initial: { content: "message-1", author: "Alice", display_name: "Alice", semantic_type: "message" } }));
+  expect(initialized.status, await initialized.text()).toBe(200);
+  for (let sequence = 2; sequence <= 101; sequence += 1) {
+    const response = await durable.fetch(request("/messages", { idempotency_key: `msg-${sequence}`, input: { content: `message-${sequence}`, author: "Alice", display_name: "Alice", semantic_type: "message" } }));
+    expect(response.status, await response.text()).toBe(200);
+  }
+  const origin = "https://msg.0000.chat";
+  const service = new DurableRoomService({ getByName: () => durable }, origin);
+  for (const name of ["read_room", "wait_for_messages"]) {
+    for (const limit of [1, 100]) {
+      const response = await handleMcpRequest(new Request(`${origin}/mcp`, {
+        method: "POST", headers: { accept: "application/json, text/event-stream", "content-type": "application/json" },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: { room_url: `${origin}/fixture-room`, limit } } }),
+      }), service);
+      const body = await response.json();
+      expect(body.result.isError).toBeUndefined();
+      expect(body.result.structuredContent.messages).toHaveLength(limit);
+      expect(body.result.structuredContent).toMatchObject({ has_more: true, next_after: limit, latest_message: 101 });
+      expect(JSON.parse(body.result.content[0].text).messages.at(-1)).toMatchObject({ sequence: limit, author: "Alice", content: `message-${limit}` });
+    }
+  }
 });
 
 test("describes room-local name continuity and participant content in public reads", async () => {
