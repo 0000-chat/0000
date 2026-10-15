@@ -195,6 +195,21 @@ test("leaves an existing current schema unchanged", () => {
   expect(database.query("SELECT version FROM room_schema").get()).toEqual({ version: CURRENT_ROOM_SCHEMA_VERSION });
 });
 
+test("adds the hashed anonymous MCP grant table when upgrading schema 20", () => {
+  const database = new Database(":memory:");
+  const roomStorage = storage(database);
+  migrateRoomSchema(roomStorage);
+  database.query("DROP TABLE mcp_anonymous_grants").run();
+  database.query("UPDATE room_schema SET version = 20 WHERE singleton = 1").run();
+  migrateRoomSchema(roomStorage);
+  expect(database.query("SELECT version FROM room_schema").get()).toEqual({ version: CURRENT_ROOM_SCHEMA_VERSION });
+  expect(database.query("PRAGMA table_info(mcp_anonymous_grants)").all()).toEqual(expect.arrayContaining([
+    expect.objectContaining({ name: "key_hash" }),
+    expect.objectContaining({ name: "response_secret" }),
+    expect.objectContaining({ name: "expires_at" }),
+  ]));
+});
+
 test("upgrades the Platform v6 schema and adds notification state", () => {
   const database = new Database(":memory:");
   createPlatformV6Schema(database);

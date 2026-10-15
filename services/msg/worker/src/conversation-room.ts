@@ -5,11 +5,11 @@ import { createPlatformClient } from "@0000/platform-client";
 
 import { ERROR_CODES, isStaleRevisionDetails, isStaleSequenceDetails, ProtocolError, type StaleRevisionDetails, type StaleSequenceDetails } from "./errors";
 import { CLAIM_CORRECTION_KIND, coordinationMutationFingerprint, coordinationStorageBytes, COORDINATION_DEFAULT_LIMIT, COORDINATION_KIND, COORDINATION_MAX_LIMIT, COORDINATION_PANEL_KIND, COORDINATION_PROGRESS_KIND, DECISION_POSITION_KIND, DECISION_PROPOSAL_KIND, DECISION_SUPERSESSION_KIND, DISPUTE_REPORTED_EVENT_KIND, DISPUTE_REVIEWED_EVENT_KIND, MAX_COORDINATION_PAGE_BYTES, parseCoordinationClaimPath, parseCoordinationDispute, parseCoordinationDisputeReview, parseCoordinationListSelectors, parseCoordinationProposal, parseCoordinationPublish, parseCoordinationRevision, RETENTION_EXTENDED_EVENT_KIND, type ClaimCorrectionBody, type CoordinationClaimTarget, type CoordinationDecisionApproval, type CoordinationDisputeInput, type CoordinationDisputeReviewInput, type CoordinationEventKind, type CoordinationKind, type CoordinationPanelBody, type CoordinationProgressBody, type CoordinationProposalBody, type CoordinationProposalInput, type CoordinationPublishInput, type CoordinationRequestBody, type CoordinationStatus, type DecisionPositionBody, type DecisionProposalBody, type DecisionSupersessionBody } from "./coordination-domain";
-import { byteLength, compareCapabilities, DEFAULT_READ_LIMIT, hashCapability, MAX_READ_MESSAGE_BYTES, messageStorageBytes, parseRetentionExtension, retentionMetadata, ROOM_EXPIRY_ENABLED, ROOM_LIMITS, validateBasedOnSequence, validateBoundedCursor, validateCursor, validateReadLimit, validateRequestId, validateThrough } from "./room-domain";
+import { byteLength, compareCapabilities, DEFAULT_READ_LIMIT, hashCapability, MAX_READ_MESSAGE_BYTES, messageStorageBytes, parseRetentionExtension, randomCapability, retentionMetadata, ROOM_EXPIRY_ENABLED, ROOM_LIMITS, validateBasedOnSequence, validateBoundedCursor, validateCursor, validateReadLimit, validateRequestId, validateThrough } from "./room-domain";
 import type { MessageInput } from "./room-domain";
 import { MCP_READ_BYTE_BUDGET_BYTES, NAME_PASSWORD_NOTICE, PROTOCOL_VERSION, type CoordinationAcceptedRecord, type CoordinationAcceptedRecordAnnotations, type CoordinationCorrection, type CoordinationDecision, type CoordinationDecisionApprovalEvidence, type CoordinationDecisionHistoryEntry, type CoordinationDecisionPosition, type CoordinationDisputeReport, type CoordinationDisputeReview, type CoordinationEvidenceItem, type CoordinationPanel, type CoordinationPanelHistoryEntry, type CoordinationProgress, type CoordinationProposal, type CoordinationProposalSummary, type CoordinationRequest, type CoordinationRequestSummary, type CoordinationSourceMessage, type CoordinationSupersession, type CreateWebhookResponse, type ManageWebhookResponse, type RedeliverWebhookResponse, type RotateWebhookSecretResponse, type UpdateWebhookResponse, type WebhookAttemptMetadata, type WebhookDeliveryMetadata, type WebhookSummary } from "./protocol";
 import { CURRENT_ROOM_SCHEMA_VERSION, migrateRoomSchema } from "./room-schema";
-import { boundedPreview, MCP_DELIVERY_RETRY_WINDOW_MS, MCP_DELIVERY_TIMEOUT_MS, MCP_EVENT_MAX_BYTES, MCP_MAX_ACTIVE_SUBSCRIPTIONS_PER_PRINCIPAL_THREAD, MCP_MAX_ACTIVE_SUBSCRIPTIONS_PER_THREAD, MCP_MESSAGE_EVENT, MCP_SECRET_ROTATION_WINDOW_MS, standardWebhookSignature } from "./mcp-events";
+import { boundedPreview, constantTimeEqual, MCP_DELIVERY_RETRY_WINDOW_MS, MCP_DELIVERY_TIMEOUT_MS, MCP_EVENT_MAX_BYTES, MCP_MAX_ACTIVE_ANONYMOUS_GRANTS_PER_THREAD, MCP_MAX_ACTIVE_SUBSCRIPTIONS_PER_PRINCIPAL_THREAD, MCP_MAX_ACTIVE_SUBSCRIPTIONS_PER_THREAD, MCP_MESSAGE_EVENT, MCP_SECRET_ROTATION_WINDOW_MS, mcpResponseToken, standardWebhookSignature } from "./mcp-events";
 import { createMcpWebhookDispatcherClient } from "./mcp-webhook-dispatcher-client";
 import type { McpSubscribeInput, McpUnsubscribeInput } from "./protocol";
 import { discardWebhookResponseBody, generateWebhookSecret, normalizeWebhookAuthor, parseWebhookCreateInput, parseWebhookUpdateInput, redactWebhookUrl, signWebhookPayload, webhookRequestTarget, type WebhookMutation } from "./webhooks";
@@ -320,6 +320,16 @@ interface StoredMcpSubscription {
   readonly status: "active" | "stopped";
 }
 
+interface StoredMcpAnonymousGrant {
+  readonly grant_id: string;
+  readonly principal_id: string;
+  readonly key_hash: string;
+  readonly response_secret: string;
+  readonly created_at: number;
+  readonly expires_at: number;
+  readonly revoked_at: number | null;
+}
+
 interface StoredMcpDelivery {
   readonly id: string;
   readonly subscription_id: string;
@@ -581,6 +591,9 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
       if (request.method === "POST" && url.pathname === "/mcp-post") return await this.legacyMcpPost(request);
       if (request.method === "POST" && url.pathname === "/mcp/subscribe") return await this.mcpSubscribe(request);
       if (request.method === "POST" && url.pathname === "/mcp/unsubscribe") return await this.mcpUnsubscribe(request);
+      if (request.method === "POST" && url.pathname === "/mcp/prepare-subscription") return await this.mcpPrepareSubscription();
+      if (request.method === "POST" && url.pathname === "/mcp/resolve-subscription") return await this.mcpResolveSubscription(request);
+      if (request.method === "POST" && url.pathname === "/mcp/resolve-response") return await this.mcpResolveResponse(request);
       if (request.method === "POST" && url.pathname === "/mcp/validate-response") return await this.mcpValidateResponse(request);
       if (request.method === "GET" && url.pathname === "/read") return await this.read(request);
       if (request.method === "GET" && url.pathname === "/status") return await this.status();
@@ -664,6 +677,7 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
           this.ctx.storage.sql.exec("DELETE FROM mcp_subscriptions");
           this.ctx.storage.sql.exec("DELETE FROM mcp_events");
           this.ctx.storage.sql.exec("DELETE FROM mcp_response_dedup");
+          this.ctx.storage.sql.exec("DELETE FROM mcp_anonymous_grants");
           this.ctx.storage.sql.exec("DELETE FROM room_state");
         });
         await this.ctx.storage.deleteAlarm();
@@ -759,14 +773,73 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
     return this.readMessage(decodePathSegment(id));
   }
 
+  private async mcpPrepareSubscription(): Promise<Response> {
+    const state = await this.requireActive(this.now());
+    if (state.links_revoked === 1) throw new ProtocolError(ERROR_CODES.forbidden, "Public Thread grants are no longer available.", 403);
+    const now = this.now();
+    const subscriptionKey = randomCapability();
+    const keyHash = await hashCapability(subscriptionKey);
+    const responseSecret = randomCapability();
+    const grantId = `anon_grant_${crypto.randomUUID()}`;
+    const principalId = `anon_principal_${crypto.randomUUID()}`;
+    const result = this.ctx.storage.transactionSync(() => {
+      this.pruneMcpAnonymousGrants(now);
+      const active = rows<{ count: number }>(this.ctx.storage.sql.exec("SELECT COUNT(*) AS count FROM mcp_anonymous_grants WHERE revoked_at IS NULL AND expires_at > ?", now))[0]?.count ?? 0;
+      if (active >= MCP_MAX_ACTIVE_ANONYMOUS_GRANTS_PER_THREAD) throw new ProtocolError(ERROR_CODES.rateLimited, "The Thread has reached its anonymous subscription preparation limit.", 429, 60);
+      const expiresAt = this.anonymousGrantExpiry(state.inactivity_expires_at, now);
+      this.ctx.storage.sql.exec(
+        "INSERT INTO mcp_anonymous_grants (grant_id, principal_id, key_hash, response_secret, created_at, expires_at, revoked_at) VALUES (?, ?, ?, ?, ?, ?, NULL)",
+        grantId, principalId, keyHash, responseSecret, now, expiresAt,
+      );
+      return expiresAt;
+    });
+    await this.schedule();
+    return this.json({ subscription_key: subscriptionKey, expires_at: iso(result) });
+  }
+
+  private async mcpResolveSubscription(request: Request): Promise<Response> {
+    const input = await request.json() as { renew?: unknown; subscription_key?: unknown };
+    if (typeof input.subscription_key !== "string" || !/^[A-Za-z0-9_-]{43}$/u.test(input.subscription_key)) {
+      return this.json({ valid: false }, 404);
+    }
+    const renew = input.renew === true;
+    const state = await this.requireActive(this.now());
+    if (state.links_revoked === 1) return this.json({ valid: false }, 403);
+    const now = this.now();
+    const keyHash = await hashCapability(input.subscription_key);
+    const result = this.ctx.storage.transactionSync(() => {
+      const row = rows<StoredMcpAnonymousGrant>(this.ctx.storage.sql.exec("SELECT * FROM mcp_anonymous_grants WHERE key_hash = ? AND revoked_at IS NULL AND expires_at > ?", keyHash, now))[0];
+      if (!row) return undefined;
+      const expiresAt = renew ? this.anonymousGrantExpiry(state.inactivity_expires_at, now) : row.expires_at;
+      if (expiresAt <= now) return undefined;
+      if (renew && expiresAt !== row.expires_at) this.ctx.storage.sql.exec("UPDATE mcp_anonymous_grants SET expires_at = ? WHERE grant_id = ? AND revoked_at IS NULL AND expires_at > ?", expiresAt, row.grant_id, now);
+      return { expiresAt, grantId: row.grant_id, principalId: row.principal_id };
+    });
+    if (!result) return this.json({ valid: false }, 404);
+    return this.json({ expires_at: iso(result.expiresAt), grant_id: result.grantId, principal_id: result.principalId });
+  }
+
+  private anonymousGrantExpiry(roomExpiresAt: number, now: number): number {
+    return Math.min(roomExpiresAt, now + MCP_DELIVERY_RETRY_WINDOW_MS);
+  }
+
+  private pruneMcpAnonymousGrants(now: number): void {
+    this.ctx.storage.sql.exec("DELETE FROM mcp_anonymous_grants WHERE revoked_at IS NOT NULL OR expires_at <= ?", now);
+  }
+
   private async mcpSubscribe(request: Request): Promise<Response> {
     const input = await request.json() as McpSubscribeInput;
     const state = await this.requireActive(this.now());
     const now = this.now();
     const requestedTtl = input.ttl_ms === undefined || input.ttl_ms === null ? MCP_DELIVERY_RETRY_WINDOW_MS : Math.min(Math.max(1, input.ttl_ms), MCP_DELIVERY_RETRY_WINDOW_MS);
-    const expiresAt = now + requestedTtl;
     const result = this.ctx.storage.transactionSync(() => {
       this.pruneMcpSubscriptionMetadata(now);
+      const anonymousGrant = rows<Pick<StoredMcpAnonymousGrant, "expires_at">>(this.ctx.storage.sql.exec(
+        "SELECT expires_at FROM mcp_anonymous_grants WHERE grant_id = ? AND principal_id = ? AND revoked_at IS NULL AND expires_at > ?",
+        input.grant_id, input.principal_id, now,
+      ))[0];
+      if (anonymousGrant === undefined && input.grant_id.startsWith("anon_grant_")) throw new ProtocolError(ERROR_CODES.forbidden, "The anonymous subscription grant is no longer active.", 403);
+      const expiresAt = Math.min(now + requestedTtl, anonymousGrant?.expires_at ?? Number.POSITIVE_INFINITY);
       const requestedIdentity = mcpThreadIdentity(input.arguments_json);
       if (state.room_id === null && requestedIdentity !== undefined) this.rewriteMcpEventThreadIdentity(requestedIdentity);
       const argumentSerializations = [...new Set([input.arguments_json, ...(input.legacy_arguments_json ?? [])])];
@@ -828,10 +901,47 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
     return this.json({ removed });
   }
 
+  private async mcpResolveResponse(request: Request): Promise<Response> {
+    const input = await request.json() as { event_id?: unknown; response_token?: unknown; subscription_id?: unknown };
+    if (typeof input.event_id !== "string" || input.event_id.length === 0 || typeof input.response_token !== "string" || input.response_token.length === 0 || typeof input.subscription_id !== "string" || input.subscription_id.length === 0) {
+      return this.json({ valid: false }, 404);
+    }
+    const row = rows<{ event_id: string; grant_id: string; id: string; payload: string; principal_id: string }>(this.ctx.storage.sql.exec(
+      "SELECT subscriptions.id, subscriptions.principal_id, subscriptions.grant_id, events.event_id, events.payload FROM mcp_subscriptions AS subscriptions JOIN mcp_event_deliveries AS deliveries ON deliveries.subscription_id = subscriptions.id JOIN mcp_events AS events ON events.event_id = deliveries.event_id WHERE subscriptions.id = ? AND subscriptions.status = 'active' AND subscriptions.expires_at > ? AND events.event_id = ?",
+      input.subscription_id, this.now(), input.event_id,
+    ))[0];
+    if (!row || !row.grant_id.startsWith("anon_grant_")) return this.json({ valid: false }, 404);
+    if (this.state()?.links_revoked === 1) return this.json({ valid: false }, 404);
+    const grant = rows<Pick<StoredMcpAnonymousGrant, "response_secret" | "revoked_at" | "expires_at">>(this.ctx.storage.sql.exec(
+      "SELECT response_secret, revoked_at, expires_at FROM mcp_anonymous_grants WHERE grant_id = ? AND principal_id = ?",
+      row.grant_id, row.principal_id,
+    ))[0];
+    if (!grant || grant.revoked_at !== null || grant.expires_at <= this.now()) return this.json({ valid: false }, 404);
+    let payload: unknown;
+    try { payload = JSON.parse(row.payload); } catch { return this.json({ valid: false }, 404); }
+    const data = isRecord(payload) && isRecord(payload.data) ? payload.data : undefined;
+    const threadUrl = data && typeof data.thread_url === "string" ? data.thread_url : undefined;
+    if (!threadUrl) return this.json({ valid: false }, 404);
+    const expected = await mcpResponseToken(grant.response_secret, threadUrl, row.id, row.event_id);
+    if (!constantTimeEqual(expected, input.response_token)) return this.json({ valid: false }, 404);
+    return this.json({ grant_id: row.grant_id, principal_id: row.principal_id });
+  }
+
   private async mcpValidateResponse(request: Request): Promise<Response> {
-    const input = await request.json() as { event_id: string; principal_id: string; subscription_id: string };
-    const row = rows<{ id: string; principal_id: string; event_id: string; message_id: string; sequence: number }>(this.ctx.storage.sql.exec("SELECT subscriptions.id, subscriptions.principal_id, events.event_id, events.message_id, events.sequence FROM mcp_subscriptions AS subscriptions JOIN mcp_event_deliveries AS deliveries ON deliveries.subscription_id = subscriptions.id JOIN mcp_events AS events ON events.event_id = deliveries.event_id WHERE subscriptions.id = ? AND subscriptions.principal_id = ? AND subscriptions.status = 'active' AND subscriptions.expires_at > ? AND events.event_id = ?", input.subscription_id, input.principal_id, this.now(), input.event_id))[0];
-    return this.json({ valid: row !== undefined });
+    const input = await request.json() as { event_id: string; principal_id: string; response_token?: unknown; subscription_id: string };
+    const row = rows<{ event_id: string; grant_id: string; id: string; payload: string; principal_id: string }>(this.ctx.storage.sql.exec("SELECT subscriptions.id, subscriptions.principal_id, subscriptions.grant_id, events.event_id, events.payload FROM mcp_subscriptions AS subscriptions JOIN mcp_event_deliveries AS deliveries ON deliveries.subscription_id = subscriptions.id JOIN mcp_events AS events ON events.event_id = deliveries.event_id WHERE subscriptions.id = ? AND subscriptions.principal_id = ? AND subscriptions.status = 'active' AND subscriptions.expires_at > ? AND events.event_id = ?", input.subscription_id, input.principal_id, this.now(), input.event_id))[0];
+    if (!row) return this.json({ valid: false });
+    const grant = rows<Pick<StoredMcpAnonymousGrant, "response_secret" | "revoked_at" | "expires_at">>(this.ctx.storage.sql.exec("SELECT response_secret, revoked_at, expires_at FROM mcp_anonymous_grants WHERE grant_id = ? AND principal_id = ?", row.grant_id, row.principal_id))[0];
+    if (!grant) return this.json({ valid: !row.grant_id.startsWith("anon_grant_") });
+    if (row.grant_id.startsWith("anon_grant_") && this.state()?.links_revoked === 1) return this.json({ valid: false });
+    if (grant.revoked_at !== null || grant.expires_at <= this.now() || typeof input.response_token !== "string") return this.json({ valid: false });
+    let payload: unknown;
+    try { payload = JSON.parse(row.payload); } catch { return this.json({ valid: false }); }
+    const data = isRecord(payload) && isRecord(payload.data) ? payload.data : undefined;
+    const threadUrl = data && typeof data.thread_url === "string" ? data.thread_url : undefined;
+    if (!threadUrl) return this.json({ valid: false });
+    const expected = await mcpResponseToken(grant.response_secret, threadUrl, row.id, row.event_id);
+    return this.json({ valid: constantTimeEqual(expected, input.response_token) });
   }
 
   private queueMcpReplay(subscription: StoredMcpSubscription, cursor: number, now: number): void {
@@ -2273,7 +2383,7 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
 
   private async mcpPost(request: Request): Promise<Response> {
     if (this.config.MSG_POST_DISABLED === "1") throw new ProtocolError(ERROR_CODES.serviceUnavailable, "New messages are temporarily unavailable.", 503);
-    const input = await request.json() as { based_on_sequence?: unknown; browser_id?: string; input: NameAwareMessageInput; idempotency_key?: string; origin?: { event_id: string; subscription_id: string }; principal_id?: string };
+    const input = await request.json() as { based_on_sequence?: unknown; browser_id?: string; input: NameAwareMessageInput; idempotency_key?: string; origin?: { event_id: string; response_token?: string; subscription_id: string }; principal_id?: string };
     const password = await prepareNamePassword(input.input);
     const now = this.now();
     const result = this.commitMessage(input.input, {
@@ -4334,6 +4444,7 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
       this.ctx.storage.sql.exec("DELETE FROM coordination_supersessions");
       this.ctx.storage.sql.exec("DELETE FROM name_claims");
       this.ctx.storage.sql.exec("DELETE FROM legacy_names");
+      this.ctx.storage.sql.exec("DELETE FROM mcp_anonymous_grants");
       this.ctx.storage.sql.exec("UPDATE room_state SET status = 'deleted', tombstone_expires_at = ?, management_hash = NULL, get_post_hash = NULL, get_post_enabled = 0, mcp_post_enabled = 0, message_count = 0, total_bytes = 0, coordination_cursor = 0, published_revision = 0 WHERE singleton = 1", now + this.limits.tombstoneTtlMs);
       return true;
     });
@@ -4655,7 +4766,16 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
     let failure = "network_error";
     try {
       const eventValue = JSON.parse(claimed.event.payload) as Record<string, unknown>;
-      const eventData = eventValue.data !== null && typeof eventValue.data === "object" ? { ...(eventValue.data as Record<string, unknown>), response_context: { subscription_id: claimed.subscription.id, event_id: claimed.event.event_id } } : eventValue.data;
+      let responseContext: { readonly event_id: string; readonly response_token?: string; readonly subscription_id: string } = { subscription_id: claimed.subscription.id, event_id: claimed.event.event_id };
+      const anonymousGrant = rows<Pick<StoredMcpAnonymousGrant, "response_secret">>(this.ctx.storage.sql.exec(
+        "SELECT response_secret FROM mcp_anonymous_grants WHERE grant_id = ? AND principal_id = ? AND revoked_at IS NULL AND expires_at > ?",
+        claimed.subscription.grant_id, claimed.subscription.principal_id, this.now(),
+      ))[0];
+      const eventDataValue = eventValue.data !== null && typeof eventValue.data === "object" ? eventValue.data as Record<string, unknown> : undefined;
+      if (anonymousGrant && typeof eventDataValue?.thread_url === "string") {
+        responseContext = { ...responseContext, response_token: await mcpResponseToken(anonymousGrant.response_secret, eventDataValue.thread_url, claimed.subscription.id, claimed.event.event_id) };
+      }
+      const eventData = eventDataValue === undefined ? eventValue.data : { ...eventDataValue, response_context: responseContext };
       const body = JSON.stringify({ ...eventValue, cursor: String(this.mcpContiguousCursor(claimed.subscription.id, claimed.event.event_id)), data: eventData });
       if (new TextEncoder().encode(body).byteLength > MCP_EVENT_MAX_BYTES) {
         failure = "payload_too_large";
@@ -4706,6 +4826,14 @@ export class ConversationRoom extends DurableObject<ConversationRoomEnv> {
     if (typeof threadUrl !== "string" || threadUrl.length === 0) return false;
     const state = this.state();
     if (!state || state.status !== "active") return false;
+    const anonymous = rows<{ revoked_at: number | null; expires_at: number }>(this.ctx.storage.sql.exec(
+      "SELECT revoked_at, expires_at FROM mcp_anonymous_grants WHERE grant_id = ? AND principal_id = ?",
+      subscription.grant_id, subscription.principal_id,
+    ))[0];
+    if (subscription.grant_id.startsWith("anon_grant_")) {
+      return anonymous !== undefined && anonymous.revoked_at === null && anonymous.expires_at > this.now() && state.links_revoked !== 1;
+    }
+    if (anonymous) return anonymous.revoked_at === null && anonymous.expires_at > this.now() && state.links_revoked !== 1;
     if (this.mcpGrantCheck) {
       // The injected checker has no grant provenance. Test and local callers
       // use it for public-link grants, which must stop at link revocation.

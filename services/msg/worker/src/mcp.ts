@@ -5,7 +5,7 @@ import { ERROR_CODES, ProtocolError } from "./errors";
 import { byteLength } from "./room-domain";
 import { foregroundWaitForConversation, MCP_READ_BYTE_BUDGET_BYTES, PROTOCOL_VERSION, stripLegacyAbsoluteExpiry, type CreateRoomResponse, type McpPostMessageResponse, type ReadRoomResponse, type RequestBody, type RoomMessage, type RoomService, type RoomStatusResponse } from "./protocol";
 import { parseWebhookCreateInput, parseWebhookUpdateInput, WebhookInputError } from "./webhooks";
-import { handleMcpRequest as handleMcp2Request, MCP_TOOL_DEFINITIONS as DURABLE_MCP_TOOL_DEFINITIONS, type McpAuthenticator } from "./mcp-events-handler";
+import { handleMcpRequest as handleMcp2Request, MCP_TOOL_DEFINITIONS as DURABLE_MCP_TOOL_DEFINITIONS, type McpAuthenticator, type McpAuthContext } from "./mcp-events-handler";
 
 const DEFAULT_PUBLIC_ORIGIN = "https://msg.0000.chat";
 const CHATGPT_ORIGINS = ["https://chatgpt.com", "https://chat.openai.com"] as const;
@@ -234,6 +234,10 @@ export async function handleMcpRequest(
       rateLimit: options.mcpRateLimit,
     });
     return applyMcpCors(response, origin);
+  }
+  if ((specialMethod === "tools-list" || specialMethod === undefined) && hasAuthorizationHeader(request)) {
+    const failure = await validateExplicitBearer(request, options.auth, options.mcpOrigin ?? publicOrigin);
+    if (failure !== undefined) return applyMcpCors(failure, origin);
   }
   if (await isSubscriptionListenRequest(request)) {
     return mcpRequestError(origin, 405, "This stateless MCP endpoint does not support subscriptions.", { allow: "POST, OPTIONS" });
@@ -1218,8 +1222,10 @@ async function readMcpSpecialMethod(request: Request): Promise<SpecialMcpMethod 
   if (record.method !== "tools/call" || record.params === null || typeof record.params !== "object" || Array.isArray(record.params)) return undefined;
   const params = record.params as Record<string, unknown>;
   const name = params.name;
-  if (name === "read_thread" || name === "read_message" || name === "post_response") return "durable-tool";
-  if (name === "post_message" && params.arguments !== null && typeof params.arguments === "object" && !Array.isArray(params.arguments) && "response_context" in (params.arguments as Record<string, unknown>)) return "durable-tool";
+  if (name === "prepare_subscription" || name === "read_thread" || name === "read_message" || name === "post_response") return "durable-tool";
+  const argumentsValue = params.arguments;
+  const hasDurableArguments = argumentsValue !== null && typeof argumentsValue === "object" && !Array.isArray(argumentsValue) && ("response_context" in (argumentsValue as Record<string, unknown>) || "subscription_key" in (argumentsValue as Record<string, unknown>));
+  if (name === "post_message" && (hasAuthorizationHeader(request) || hasDurableArguments)) return "durable-tool";
   return undefined;
 }
 
@@ -1234,7 +1240,51 @@ async function appendDurableToolDefinitions(response: Response): Promise<Respons
   const tools = Array.isArray(result.tools) ? result.tools : [];
   const existing = new Set(tools.flatMap((tool) => tool !== null && typeof tool === "object" && !Array.isArray(tool) && typeof (tool as Record<string, unknown>).name === "string" ? [(tool as Record<string, unknown>).name as string] : []));
   const additions = DURABLE_MCP_TOOL_DEFINITIONS.filter((tool) => !existing.has(tool.name));
-  if (additions.length === 0) return response;
-  result.tools = [...tools, ...additions];
+  const enriched = tools.map((tool) => augmentDurableToolSchema(tool));
+  result.tools = [...enriched, ...additions];
   return new Response(JSON.stringify(envelope), { status: response.status, statusText: response.statusText, headers: response.headers });
+}
+
+function augmentDurableToolSchema(tool: unknown): unknown {
+  if (tool === null || typeof tool !== "object" || Array.isArray(tool)) return tool;
+  const record = tool as Record<string, unknown>;
+  if (record.name !== "post_message" && record.name !== "post_response") return tool;
+  const schema = record.inputSchema;
+  if (schema === null || typeof schema !== "object" || Array.isArray(schema)) return tool;
+  const inputSchema = schema as Record<string, unknown>;
+  const existingProperties = inputSchema.properties;
+  const properties = existingProperties !== null && typeof existingProperties === "object" && !Array.isArray(existingProperties) ? { ...(existingProperties as Record<string, unknown>) } : {};
+  properties.subscription_key ??= { type: "string", minLength: 43, maxLength: 43, description: "Optional private key returned by prepare_subscription for this Thread." };
+  const existingContext = properties.response_context;
+  const context = existingContext !== null && typeof existingContext === "object" && !Array.isArray(existingContext) ? existingContext as Record<string, unknown> : {};
+  const contextProperties = context.properties;
+  const responseProperties = contextProperties !== null && typeof contextProperties === "object" && !Array.isArray(contextProperties) ? { ...(contextProperties as Record<string, unknown>) } : {};
+  responseProperties.subscription_id ??= { type: "string", minLength: 1, description: "Subscription that received the triggering event." };
+  responseProperties.event_id ??= { type: "string", minLength: 1, description: "Event that triggered the response." };
+  responseProperties.response_token ??= { type: "string", minLength: 1, description: "Required for anonymous replies; use the response_token delivered with the triggering event." };
+  const existingRequired = Array.isArray(context.required) ? [...context.required] : [];
+  for (const required of ["subscription_id", "event_id"]) {
+    if (!existingRequired.includes(required)) existingRequired.push(required);
+  }
+  properties.response_context = { ...context, type: "object", properties: responseProperties, required: existingRequired, additionalProperties: false, description: "Only event-triggered posts need response_context. Anonymous replies use the delivered response_token; a subscription_key is optional." };
+  return { ...record, inputSchema: { ...inputSchema, properties } };
+}
+
+async function validateExplicitBearer(request: Request, auth: McpAuthenticator | undefined, resourceOrigin: string): Promise<Response | undefined> {
+  if (!auth) return mcpAuthRequiredError(resourceOrigin);
+  let context: McpAuthContext | null;
+  try { context = await auth.authenticate(request); } catch { context = null; }
+  if (!context) return mcpAuthRequiredError(resourceOrigin);
+  if (context.active !== undefined) {
+    try { if (!(await context.active())) return mcpAuthRequiredError(resourceOrigin); } catch { return mcpAuthRequiredError(resourceOrigin); }
+  }
+  return undefined;
+}
+
+function mcpAuthRequiredError(resourceOrigin: string): Response {
+  return mcpHttpError(401, "Authentication is required.", { "www-authenticate": `Bearer realm="msg", resource_metadata="${resourceOrigin}/.well-known/oauth-protected-resource"` });
+}
+
+function hasAuthorizationHeader(request: Request): boolean {
+  return (request.headers.get("authorization") ?? "").trim().length > 0;
 }

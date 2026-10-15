@@ -1,7 +1,7 @@
 import { ROOM_LIMITS } from "./room-domain";
 import { WEBHOOK_RETRY_INITIAL_DELAY_MS, WEBHOOK_RETRY_WINDOW_MS } from "./webhook-policy";
 
-export const CURRENT_ROOM_SCHEMA_VERSION = 20;
+export const CURRENT_ROOM_SCHEMA_VERSION = 21;
 
 interface SqlStorage {
   exec(query: string, ...values: unknown[]): Iterable<unknown>;
@@ -546,6 +546,18 @@ function applyMigration(sql: SqlStorage, version: number, inactivityTtlMs: numbe
     if (!columns.has("previous_signing_secret")) sql.exec("ALTER TABLE mcp_subscriptions ADD COLUMN previous_signing_secret TEXT");
     if (!columns.has("rotation_until")) sql.exec("ALTER TABLE mcp_subscriptions ADD COLUMN rotation_until INTEGER");
     sql.exec("UPDATE mcp_subscriptions SET previous_signing_secret = NULL, rotation_until = NULL WHERE rotation_until IS NULL OR rotation_until <= ?", now);
+    sql.exec("UPDATE room_state SET schema_version = ? WHERE singleton = 1", CURRENT_ROOM_SCHEMA_VERSION);
+    return;
+  }
+  if (version === 21) {
+    sql.exec(`
+      CREATE TABLE IF NOT EXISTS mcp_anonymous_grants (
+        grant_id TEXT PRIMARY KEY, principal_id TEXT NOT NULL UNIQUE, key_hash TEXT NOT NULL UNIQUE,
+        response_secret TEXT NOT NULL, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL,
+        revoked_at INTEGER
+      );
+      CREATE INDEX IF NOT EXISTS mcp_anonymous_grants_active ON mcp_anonymous_grants(expires_at, revoked_at);
+    `);
     sql.exec("UPDATE room_state SET schema_version = ? WHERE singleton = 1", CURRENT_ROOM_SCHEMA_VERSION);
     return;
   }

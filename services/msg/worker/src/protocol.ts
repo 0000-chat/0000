@@ -257,7 +257,10 @@ export interface RoomService {
   mcpPostMessage?(input: McpPostMessageInput & { readonly origin?: McpResponseOrigin; readonly principal_id?: string }): Promise<McpPostMessageResponse>;
   mcpSubscribe?(input: McpSubscribeInput): Promise<McpSubscribeResponse>;
   mcpUnsubscribe?(input: McpUnsubscribeInput): Promise<McpUnsubscribeResponse>;
-  mcpValidateResponseContext?(input: { readonly event_id: string; readonly principal_id: string; readonly room: string; readonly subscription_id: string }): Promise<boolean>;
+  mcpPrepareSubscription?(input: McpPrepareSubscriptionInput): Promise<McpPrepareSubscriptionResponse>;
+  mcpResolveSubscriptionKey?(input: McpResolveSubscriptionKeyInput): Promise<McpResolveSubscriptionKeyResponse | null>;
+  mcpResolveResponseContext?(input: McpResolveResponseContextInput): Promise<McpResolveResponseContextResponse | null>;
+  mcpValidateResponseContext?(input: { readonly event_id: string; readonly principal_id: string; readonly response_token?: string; readonly room: string; readonly subscription_id: string }): Promise<boolean>;
 }
 
 export interface ReadRoomInput {
@@ -1033,6 +1036,7 @@ export interface McpPostMessageInput {
 
 export interface McpResponseOrigin {
   readonly event_id: string;
+  readonly response_token?: string;
   readonly subscription_id: string;
 }
 
@@ -1070,6 +1074,39 @@ export interface McpSubscribeResponse {
   readonly refreshBefore: string | null;
   readonly cursor: string | null;
   readonly truncated: boolean;
+}
+
+export interface McpPrepareSubscriptionInput {
+  readonly room: string;
+}
+
+export interface McpPrepareSubscriptionResponse {
+  readonly expires_at: string;
+  readonly subscription_key: string;
+}
+
+export interface McpResolveSubscriptionKeyInput {
+  readonly renew: boolean;
+  readonly room: string;
+  readonly subscription_key: string;
+}
+
+export interface McpResolveSubscriptionKeyResponse {
+  readonly expires_at: string;
+  readonly grant_id: string;
+  readonly principal_id: string;
+}
+
+export interface McpResolveResponseContextInput {
+  readonly event_id: string;
+  readonly response_token: string;
+  readonly room: string;
+  readonly subscription_id: string;
+}
+
+export interface McpResolveResponseContextResponse {
+  readonly grant_id: string;
+  readonly principal_id: string;
 }
 
 export interface McpUnsubscribeInput {

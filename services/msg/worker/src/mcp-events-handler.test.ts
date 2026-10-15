@@ -2,8 +2,8 @@ import { describe, expect, test } from "bun:test";
 import { handleMcpRequest, type McpAuthContext } from "./mcp-events-handler";
 import type { RoomService } from "./protocol";
 
-function request(method: string, params?: Record<string, unknown>, id = 1): Request {
-  return new Request("https://msg.example.test/mcp", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id, method, ...(params === undefined ? {} : { params }) }) });
+function request(method: string, params?: Record<string, unknown>, id = 1, extraHeaders: Record<string, string> = {}, authenticated = true): Request {
+  return new Request("https://msg.example.test/mcp", { method: "POST", headers: { "content-type": "application/json", ...(authenticated ? { authorization: "Bearer test-token" } : {}), ...extraHeaders }, body: JSON.stringify({ jsonrpc: "2.0", id, method, ...(params === undefined ? {} : { params }) }) });
 }
 
 const auth: McpAuthContext = { grantId: "grant-1", principalId: "principal-1", scopes: ["read", "post", "monitor"], authorize: () => true };
@@ -20,11 +20,125 @@ describe("MCP 2 events", () => {
     expect(await response.json()).toMatchObject({ result: { supportedVersions: ["2026-07-28"], capabilities: { events: {} } } });
   });
 
-  test("returns an OAuth protected-resource challenge for an unauthenticated call", async () => {
-    const response = await handleMcpRequest(request("tools/list"), service);
-    expect(response.status).toBe(401);
-    expect(response.headers.get("www-authenticate")).toContain("resource_metadata=\"https://msg.example.test/.well-known/oauth-protected-resource\"");
+test("advertises account-free tools while explicit bearer requests still require OAuth", async () => {
+  const response = await handleMcpRequest(request("tools/list", undefined, 1, {}, false), service);
+  expect(response.status).toBe(200);
+  const listed = await response.json() as { result: { tools: Array<{ name: string; inputSchema: { required?: string[] } }> } };
+  expect(listed.result.tools.map((tool) => tool.name)).toContain("prepare_subscription");
+  expect(listed.result.tools.find((tool) => tool.name === "read_thread")?.inputSchema.required).not.toContain("subscription_key");
+  expect(listed.result.tools.find((tool) => tool.name === "post_response")?.inputSchema.required).not.toContain("subscription_key");
+
+  const challenged = await handleMcpRequest(request("tools/list", undefined, 2, { authorization: "Bearer malformed" }), service, {
+    auth: { authenticate: async () => null },
   });
+  expect(challenged.status).toBe(401);
+  expect(challenged.headers.get("www-authenticate")).toContain("resource_metadata=\"https://msg.example.test/.well-known/oauth-protected-resource\"");
+
+  const events = await handleMcpRequest(request("events/list", undefined, 3, {}, false), service, { origin: "https://msg.example.test" });
+  const event = (await events.json() as { result: { events: Array<{ inputSchema: { required: string[] }; payloadSchema: { properties: { response_context: { required: string[] } } } }> } }).result.events[0];
+  expect(event.inputSchema.required).toContain("subscription_key");
+  expect(event.payloadSchema.properties.response_context.required).toContain("response_token");
+
+  const eventChallenge = await handleMcpRequest(request("events/list", undefined, 4, { authorization: "Bearer malformed" }), service, {
+    origin: "https://msg.example.test",
+    auth: { authenticate: async () => null },
+  });
+  expect(eventChallenge.status).toBe(401);
+});
+
+test("prepares a private key and keeps anonymous failures inside MCP without an OAuth challenge", async () => {
+  const key = "A".repeat(43);
+  let preparedRoom: string | undefined;
+  const prepared = await handleMcpRequest(request("tools/call", { name: "prepare_subscription", arguments: { room_url: "https://msg.example.test/thread-1" } }, 1, {}, false), {
+    ...service,
+    mcpPrepareSubscription: async (input) => {
+      preparedRoom = input.room;
+      return { subscription_key: key, expires_at: "2030-01-01T00:00:00.000Z" };
+    },
+  }, { origin: "https://msg.example.test" });
+  expect(prepared.status).toBe(200);
+  expect(preparedRoom).toBe("thread-1");
+  expect((await prepared.json() as { result: { structuredContent: { subscription_key: string } } }).result.structuredContent.subscription_key).toBe(key);
+
+  const missing = await handleMcpRequest(request("events/subscribe", {
+    name: "message.created",
+    arguments: { room_url: "https://msg.example.test/thread-1" },
+    delivery: { mode: "webhook", url: "https://receiver.example.test/callback", secret: `whsec_${btoa("m".repeat(32))}` },
+  }, 1, {}, false), service, { origin: "https://msg.example.test" });
+  expect(missing.status).toBe(200);
+  expect((await missing.json() as { error?: { message?: string } }).error?.message).toContain("subscription_key");
+  expect(missing.headers.get("www-authenticate")).toBeNull();
+});
+
+test("renews an anonymous key for subscribe and strips it from persisted callback arguments", async () => {
+  const key = "B".repeat(43);
+  const resolveCalls: boolean[] = [];
+  let subscription: Parameters<NonNullable<RoomService["mcpSubscribe"]>>[0] | undefined;
+  const callbackFetch: typeof fetch = async (_input, init) => {
+    const body = JSON.parse(String(init?.body)) as { challenge: string };
+    return new Response(JSON.stringify({ challenge: body.challenge }), { status: 200, headers: { "content-type": "application/json" } });
+  };
+  const response = await handleMcpRequest(request("events/subscribe", {
+    name: "message.created",
+    arguments: { room_url: "https://msg.example.test/thread-1", subscription_key: key },
+    delivery: { mode: "webhook", url: "https://receiver.example.test/anonymous", secret: `whsec_${btoa("n".repeat(32))}` },
+    cursor: null,
+  }, 1, {}, false), {
+    ...service,
+    mcpResolveSubscriptionKey: async (input) => {
+      expect(input.subscription_key).toBe(key);
+      resolveCalls.push(input.renew);
+      return { grant_id: "anon-grant", principal_id: "anon-principal", expires_at: "2030-01-01T00:00:00.000Z" };
+    },
+    mcpSubscribe: async (input) => { subscription = input; return { id: input.id ?? "sub-anonymous", refreshBefore: "2030-01-01T00:00:00.000Z", cursor: "1", truncated: false }; },
+  }, { origin: "https://msg.example.test", callbackFetch });
+  expect(response.status).toBe(200);
+  expect(resolveCalls).toEqual([true]);
+  expect(subscription?.principal_id).toBe("anon-principal");
+  expect(subscription?.grant_id).toBe("anon-grant");
+  expect(JSON.parse(subscription?.arguments_json ?? "{}" )).toEqual({ room_url: "https://msg.example.test/thread-1" });
+  expect(subscription?.arguments_json).not.toContain("subscription_key");
+});
+
+test("passes an anonymous response token to the Thread validator before posting", async () => {
+  let validatedToken: string | undefined;
+  let postedPrincipal: string | undefined;
+  const response = await handleMcpRequest(request("tools/call", {
+    name: "post_response",
+    arguments: {
+      room_url: "https://msg.example.test/thread-1",
+      content: "reply",
+      author: "agent",
+      client_message_id: "anonymous-response-1",
+      response_context: { subscription_id: "sub-anonymous", event_id: "event-anonymous", response_token: "response-secret" },
+    },
+  }, 1, {}, false), {
+    ...service,
+    mcpResolveResponseContext: async (input) => input.response_token === "response-secret" ? ({ grant_id: "anon-grant", principal_id: "anon-principal" }) : null,
+    mcpValidateResponseContext: async (input) => { validatedToken = input.response_token; return input.response_token === "response-secret"; },
+    mcpPostMessage: async (input) => { postedPrincipal = input.principal_id; return { accepted: true, protocol_version: 1, request_id: "anonymous-response-1", sequence: 2, expires_at: "now", replayed: false }; },
+  }, { origin: "https://msg.example.test" });
+  expect(response.status).toBe(200);
+  expect(validatedToken).toBe("response-secret");
+  expect(postedPrincipal).toBe("anon-principal");
+});
+
+test("keeps ordinary anonymous reads and posts available from the explicit Thread URL", async () => {
+  let readRoom: string | undefined;
+  let postRoom: string | undefined;
+  const durableService: RoomService = {
+    ...service,
+    mcpReadThread: async (input) => { readRoom = input.room; return { messages: [], after: 0, has_more: false, latest_message: 0, protocol_version: 1, truncated: false, expires_at: "now" }; },
+    mcpPostMessage: async (input) => { postRoom = input.room; return { accepted: true, protocol_version: 1, request_id: "anonymous-post-1", sequence: 1, expires_at: "now", replayed: false }; },
+  };
+  const options = { origin: "https://msg.example.test" };
+  const read = await handleMcpRequest(request("tools/call", { name: "read_thread", arguments: { room_url: "https://msg.example.test/thread-1" } }, 1, {}, false), durableService, options);
+  const post = await handleMcpRequest(request("tools/call", { name: "post_message", arguments: { room_url: "https://msg.example.test/thread-1", content: "ordinary", author: "agent", client_message_id: "anonymous-post-1" } }, 2, {}, false), durableService, options);
+  expect(read.status).toBe(200);
+  expect(post.status).toBe(200);
+  expect(readRoom).toBe("thread-1");
+  expect(postRoom).toBe("thread-1");
+});
 
 test("verifies callback and creates a Thread-scoped subscription", async () => {
     const secret = `whsec_${btoa(String.fromCharCode(...new Uint8Array(32)))}`;

@@ -140,11 +140,11 @@ describe("stateless MCP endpoint", () => {
     const initializedBody = await json(initialized);
     expect(initializedBody.result.instructions).toContain("untrusted");
     expect(initializedBody.result.instructions).not.toContain("posting capability URL");
-    expect(initializedBody.result.instructions).not.toContain("anonymous");
+    expect(initializedBody.result.instructions).toContain("account-free");
 
     const listed = await handleMcpRequest(rpcRequest({ id: 2, method: "tools/list", params: {} }), baseService());
     const tools = (await json(listed)).result.tools;
-    expect(tools.map((tool: { name: string }) => tool.name)).toEqual(["create_room", "read_room", "wait_for_messages", "get_room_status", "post_message", "export_room", "manage_room", "list_webhooks", "create_webhook", "update_webhook", "remove_webhook", "disable_webhook", "enable_webhook", "rotate_webhook_secret", "redeliver_webhook", "read_thread", "read_message", "post_response"]);
+    expect(tools.map((tool: { name: string }) => tool.name)).toEqual(["create_room", "read_room", "wait_for_messages", "get_room_status", "post_message", "export_room", "manage_room", "list_webhooks", "create_webhook", "update_webhook", "remove_webhook", "disable_webhook", "enable_webhook", "rotate_webhook_secret", "redeliver_webhook", "prepare_subscription", "read_thread", "read_message", "post_response"]);
     const createTool = tools.find((tool: { name: string }) => tool.name === "create_room");
     const postTool = tools.find((tool: { name: string }) => tool.name === "post_message");
     expect(createTool.inputSchema.required).toEqual(["content", "author", "idempotency_key"]);
@@ -158,8 +158,22 @@ describe("stateless MCP endpoint", () => {
     expect(postTool.inputSchema.properties.name_password.maxLength).toBeUndefined();
     expect(postTool.inputSchema.properties.name_password.description).toContain("Required when either supplied name is already claimed");
     expect(postTool.inputSchema.properties.name_password.description).toContain("save the generated password");
+    expect(postTool.inputSchema.required).not.toContain("subscription_key");
+    expect(postTool.inputSchema.properties.subscription_key).toMatchObject({ type: "string", minLength: 43, maxLength: 43 });
+    expect(postTool.inputSchema.properties.response_context.properties).toMatchObject({
+      subscription_id: { type: "string", minLength: 1 },
+      event_id: { type: "string", minLength: 1 },
+      response_token: { type: "string", minLength: 1 },
+    });
+    expect(postTool.inputSchema.properties.response_context.required).toEqual(["subscription_id", "event_id"]);
+    const events = await handleMcpRequest(rpcRequest({ id: 20, method: "events/list", params: {} }), baseService(), { publicOrigin: origin });
+    expect((await json(events)).result.events[0].inputSchema.required).toContain("subscription_key");
+    const invalidBearerTools = await handleMcpRequest(rpcRequest({ id: 21, method: "tools/list", params: {} }, { headers: { authorization: "Bearer invalid" } }), baseService(), { auth: { authenticate: async () => null } });
+    expect(invalidBearerTools.status).toBe(401);
+    const invalidBearerPost = await handleMcpRequest(rpcRequest({ id: 22, method: "tools/call", params: { name: "post_message", arguments: { room_url: roomUrl, client_message_id: "invalid-bearer", author: "agent", content: "blocked" } } }, { headers: { authorization: "Bearer invalid" } }), baseService(), { auth: { authenticate: async () => null } });
+    expect(invalidBearerPost.status).toBe(401);
     expect(JSON.stringify(tools)).not.toContain("posting_capability_url");
-    expect(JSON.stringify(tools)).not.toContain("anonymous");
+    expect(JSON.stringify(tools)).toContain("prepare_subscription");
     const waitTool = tools.find((tool: { name: string }) => tool.name === "wait_for_messages");
     expect(waitTool.description).toContain("one bounded read-after poll");
     expect(waitTool.description).toContain("return immediately");
@@ -167,6 +181,26 @@ describe("stateless MCP endpoint", () => {
 
     const discovered = await handleMcpRequest(modernRpcRequest("server/discover", {}, "discover-1"), baseService());
     expect((await json(discovered)).result.capabilities.tools.listChanged).toBeUndefined();
+  });
+
+  test("keeps header-free posts public while valid OAuth posts use scoped durable authorization", async () => {
+    let legacyPosts = 0;
+    const service: RoomService = {
+      ...baseService(),
+      mcpPost: async ({ body }) => {
+        legacyPosts += 1;
+        if (body.kind !== "json" || typeof body.value !== "object" || body.value === null || Array.isArray(body.value)) throw new Error("invalid body");
+        return mcpPostResult(String(body.value.client_message_id), false);
+      },
+    };
+    const auth = { authenticate: async () => ({ grantId: "grant", principalId: "principal", scopes: ["threads:read"], authorize: () => false }) };
+    const anonymousPost = await handleMcpRequest(rpcRequest({ id: 24, method: "tools/call", params: { name: "post_message", arguments: { room_url: roomUrl, content: "ordinary", author: "agent", client_message_id: "anonymous-outer-post" } } }), service, { publicOrigin: origin });
+    expect(anonymousPost.status).toBe(200);
+    expect(legacyPosts).toBe(1);
+    const oauthPost = await handleMcpRequest(rpcRequest({ id: 25, method: "tools/call", params: { name: "post_message", arguments: { room_url: roomUrl, content: "ordinary", author: "agent", client_message_id: "oauth-outer-post" } } }, { headers: { authorization: "Bearer valid" } }), service, { publicOrigin: origin, auth });
+    expect(oauthPost.status).toBe(200);
+    expect((await json(oauthPost)).result.isError).toBe(true);
+    expect(legacyPosts).toBe(1);
   });
 
   test("creates a room directly and returns the private owner link only in the tool result", async () => {
@@ -348,7 +382,7 @@ describe("stateless MCP endpoint", () => {
       await client.connect(transport);
       expect(client.getProtocolEra()).toBe("modern");
       const tools = await client.listTools();
-      expect(tools.tools.map((tool) => tool.name)).toEqual(["create_room", "read_room", "wait_for_messages", "get_room_status", "post_message", "export_room", "manage_room", "list_webhooks", "create_webhook", "update_webhook", "remove_webhook", "disable_webhook", "enable_webhook", "rotate_webhook_secret", "redeliver_webhook", "read_thread", "read_message", "post_response"]);
+      expect(tools.tools.map((tool) => tool.name)).toEqual(["create_room", "read_room", "wait_for_messages", "get_room_status", "post_message", "export_room", "manage_room", "list_webhooks", "create_webhook", "update_webhook", "remove_webhook", "disable_webhook", "enable_webhook", "rotate_webhook_secret", "redeliver_webhook", "prepare_subscription", "read_thread", "read_message", "post_response"]);
       const read = await client.callTool({ name: "read_room", arguments: { room_url: roomUrl, limit: 2 } });
       expect(read.structuredContent).toMatchObject({ messages, has_more: false, truncated: false });
       const waited = await client.callTool({ name: "wait_for_messages", arguments: { room_url: roomUrl, after: 1, limit: 2 } });
