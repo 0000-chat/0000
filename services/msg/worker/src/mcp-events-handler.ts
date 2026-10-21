@@ -1,3 +1,5 @@
+import { SUPPORTED_PROTOCOL_VERSIONS } from "@modelcontextprotocol/server";
+
 import { ProtocolError } from "./errors";
 import { publicConversationUrl, type McpPostMessageInput, type McpResponseOrigin, type McpSubscribeResponse, type RoomService } from "./protocol";
 import { validateReadLimit, validateThrough } from "./room-domain";
@@ -124,6 +126,7 @@ const serverInstructions = "Msg exposes selected temporary Threads. For account-
 const MCP_CALLBACK_VERIFICATION_TTL_MS = 5 * 60 * 1_000;
 const MCP_CALLBACK_VERIFICATION_CACHE_LIMIT = 512;
 const callbackVerificationCache = new Map<string, number>();
+const supportedProtocolVersions = [MCP_PROTOCOL_VERSION, ...SUPPORTED_PROTOCOL_VERSIONS];
 
 export async function handleMcpRequest(request: Request, service: RoomService, options: McpRequestOptions = {}): Promise<Response> {
   if (request.method !== "POST") return new Response(null, { headers: { allow: "POST, OPTIONS" }, status: request.method === "OPTIONS" ? 204 : 405 });
@@ -141,7 +144,9 @@ export async function handleMcpRequest(request: Request, service: RoomService, o
   const params = rpc.params ?? {};
 
   if (rpc.method === "initialize") return mcpRpcResponse(rpc.id, {
-    protocolVersion: MCP_PROTOCOL_VERSION,
+    protocolVersion: typeof params.protocolVersion === "string" && supportedProtocolVersions.includes(params.protocolVersion)
+      ? params.protocolVersion
+      : MCP_PROTOCOL_VERSION,
     capabilities: { tools: { listChanged: false }, events: {} },
     serverInfo: { name: "0000-msg", version: MCP_SERVER_VERSION },
     instructions: serverInstructions,

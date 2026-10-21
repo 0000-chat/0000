@@ -30,6 +30,7 @@ function rpcRequest(message: unknown, init: RequestInit = {}): Request {
   const headers = new Headers(init.headers);
   headers.set("accept", accept);
   headers.set("content-type", "application/json");
+  if (!headers.has("mcp-protocol-version")) headers.set("mcp-protocol-version", "2025-06-18");
   return new Request(`${origin}/mcp`, {
     ...init,
     headers,
@@ -133,6 +134,51 @@ function baseService(): RoomService {
 }
 
 describe("stateless MCP endpoint", () => {
+  test.each(["2024-10-07", "2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25", "2026-07-28"])("negotiates %s and accepts its header for tool requests", async (protocolVersion) => {
+    const initialized = await handleMcpRequest(rpcRequest({
+      id: 1,
+      method: "initialize",
+      params: { protocolVersion, capabilities: {}, clientInfo: { name: "version-test", version: "1" } },
+    }), baseService());
+    expect(initialized.status).toBe(200);
+    expect(await initialized.json()).toMatchObject({ jsonrpc: "2.0", id: 1, result: { protocolVersion } });
+    const listRequest = protocolVersion === "2026-07-28"
+      ? modernRpcRequest("tools/list", {}, 2)
+      : rpcRequest({ id: 2, method: "tools/list" }, { headers: { "MCP-Protocol-Version": protocolVersion } });
+    const listed = await handleMcpRequest(listRequest, baseService());
+    expect(listed.status).toBe(200);
+    expect(await listed.json()).toMatchObject({ result: { tools: expect.arrayContaining([expect.objectContaining({ name: "read_thread", title: "Read Thread messages", inputSchema: expect.objectContaining({ type: "object" }), annotations: expect.any(Object) })]) } });
+  });
+
+  test.each(["1999-01-01", undefined])("falls back to the latest protocol for %s", async (protocolVersion) => {
+    const response = await handleMcpRequest(rpcRequest({ id: 1, method: "initialize", params: { protocolVersion, capabilities: {}, clientInfo: { name: "version-test", version: "1" } } }), baseService());
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ result: { protocolVersion: "2026-07-28" } });
+  });
+
+  test.each(["2024-11-05", "2025-03-26", undefined])("returns readable tool data for pre-structured-content clients using %s", async (protocolVersion) => {
+    const request = rpcRequest({ id: 3, method: "tools/call", params: { name: "read_room", arguments: { room_url: roomUrl } } });
+    if (protocolVersion === undefined) request.headers.delete("mcp-protocol-version");
+    else request.headers.set("MCP-Protocol-Version", protocolVersion);
+    const response = await handleMcpRequest(request, baseService());
+    expect(response.status).toBe(200);
+    const body = await json(response);
+    expect(body.result.content).toHaveLength(2);
+    expect(body.result.content[0]).toEqual({ type: "text", text: "Room read complete." });
+    expect(body.result.content[1].type).toBe("text");
+    expect(JSON.parse(body.result.content[1].text)).toEqual({
+      after: 0, expires_at: "2026-09-30T00:00:00.000Z", has_more: false,
+      latest_message: 0, messages: [], protocol_version: 1, truncated: false,
+    });
+    expect(body.result.structuredContent).toEqual(JSON.parse(body.result.content[1].text));
+  });
+
+  test("rejects unsupported protocol headers on subsequent tool requests", async () => {
+    const response = await handleMcpRequest(rpcRequest({ id: 2, method: "tools/list" }, { headers: { "MCP-Protocol-Version": "1999-01-01" } }), baseService());
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ error: { message: expect.stringContaining("Unsupported protocol version: 1999-01-01") } });
+  });
+
   test("advertises the direct room, export, owner, and webhook tools without private posting inputs", async () => {
     const initialized = await handleMcpRequest(initializeRequest(), baseService());
     expect(initialized.status).toBe(200);
@@ -421,17 +467,20 @@ describe("stateless MCP endpoint", () => {
     expect(JSON.stringify(result)).not.toContain("secret invitation");
   });
 
-  test("returns complete maximum-size messages and caps the full JSON-RPC wire response", async () => {
+  test.each(["2025-03-26", "2025-06-18"])("returns complete maximum-size messages within the wire limit for %s", async (protocolVersion) => {
     const content = "\u0000".repeat(64 * 1024);
     const messages = [1, 2].map((sequence) => ({ content, created_at: "2026-09-22T00:00:00.000Z", id: `message-${sequence}`, sequence }));
     const service = {
       ...baseService(),
       read: async ({ after }: { after: number }) => readResult(after === 0 ? messages : [messages[1]!]),
     } satisfies RoomService;
-    const response = await handleMcpRequest(rpcRequest({ id: 30, method: "tools/call", params: { name: "read_room", arguments: { room_url: roomUrl, limit: 3 } } }), service);
+    const response = await handleMcpRequest(rpcRequest({ id: 30, method: "tools/call", params: { name: "read_room", arguments: { room_url: roomUrl, limit: 3 } } }, { headers: { "MCP-Protocol-Version": protocolVersion } }), service);
+    expect(response.status).toBe(200);
     const raw = await response.text();
     const body = JSON.parse(raw) as Record<string, any>;
-    const output = body.result.structuredContent as Record<string, any>;
+    const output = protocolVersion === "2025-03-26"
+      ? JSON.parse(body.result.content.at(-1).text)
+      : body.result.structuredContent;
     expect(new TextEncoder().encode(raw).byteLength).toBeLessThanOrEqual(MAX_MCP_WIRE_RESPONSE_BYTES);
     expect(output.messages).toHaveLength(1);
     expect(output.messages[0].content).toBe(content);

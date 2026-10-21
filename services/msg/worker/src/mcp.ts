@@ -244,7 +244,8 @@ export async function handleMcpRequest(
   }
 
   let response: Response;
-  if (await isLegacyRequest(request)) {
+  const legacyRequest = await isLegacyRequest(request);
+  if (legacyRequest) {
     const server = buildMcpServer(request, service, publicOrigin, options, acceptedOrigins);
     const transport = new WebStandardStreamableHTTPServerTransport({
       enableJsonResponse: true,
@@ -273,6 +274,9 @@ export async function handleMcpRequest(
     }
   }
   if (specialMethod === "tools-list") response = await appendDurableToolDefinitions(response);
+  if (legacyRequest && (request.headers.get("mcp-protocol-version") ?? "2025-03-26") < "2025-06-18") {
+    response = await legacyToolContent(response);
+  }
   response = await enforceMcpWireLimit(response);
   return applyMcpCors(response, origin);
 }
@@ -1207,6 +1211,23 @@ export async function enforceMcpWireLimit(response: Response): Promise<Response>
   const body = await response.arrayBuffer();
   if (body.byteLength <= MAX_MCP_WIRE_RESPONSE_BYTES) return new Response(body, response);
   return mcpHttpError(500, "The MCP response exceeded the maximum wire size.");
+}
+
+async function legacyToolContent(response: Response): Promise<Response> {
+  if (!response.ok || response.status === 204) return response;
+  let envelope: unknown;
+  try { envelope = await response.clone().json(); } catch { return response; }
+  if (envelope === null || typeof envelope !== "object" || !("result" in envelope)) return response;
+  const result = envelope.result;
+  if (result === null || typeof result !== "object" || !("content" in result) || !Array.isArray(result.content) || !("structuredContent" in result)) return response;
+  const { structuredContent, ...legacyResult } = result;
+  const content = [...result.content, { type: "text", text: JSON.stringify(structuredContent) }];
+  const withStructuredContent = JSON.stringify({ ...envelope, result: { ...result, content } });
+  if (byteLength(withStructuredContent) <= MAX_MCP_WIRE_RESPONSE_BYTES) return new Response(withStructuredContent, response);
+  return new Response(JSON.stringify({
+    ...envelope,
+    result: { ...legacyResult, content },
+  }), response);
 }
 
 type SpecialMcpMethod = "initialize" | "server/discover" | "notifications/initialized" | "events/list" | "events/subscribe" | "events/unsubscribe" | "durable-tool" | "tools-list";
