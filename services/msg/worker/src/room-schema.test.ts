@@ -25,6 +25,24 @@ function storage(database: Database) {
   };
 }
 
+function createSchema21RoomWithoutPlatformSchema(database: Database) {
+  const roomStorage = storage(database);
+  migrateRoomSchema(roomStorage);
+  database.query("INSERT INTO room_state (singleton, schema_version, protocol_version, created_at, last_message_at, inactivity_expires_at, absolute_expires_at, next_sequence, message_count, total_bytes, status, tombstone_expires_at, management_hash, notification_id, get_post_hash, get_post_enabled, mcp_post_enabled, coordination_cursor, published_revision) VALUES (1, 21, 1, 1000, 1000, 7000, 7000, 2, 1, 5, 'active', NULL, 'management-hash', 'notification-1', NULL, 0, 1, 0, 0)").run();
+  database.query("INSERT INTO messages (sequence, id, content, author, display_name, client, semantic_type, reply_to, created_at, client_message_id, byte_count, idempotency_key, source_browser_id) VALUES (1, 'message-1', 'synthetic', 'agent', 'Agent', NULL, 'message', NULL, 1000, NULL, 9, NULL, NULL)").run();
+  database.exec(`
+    DROP TABLE room_acl;
+    DROP TABLE claim_receipts;
+    ALTER TABLE room_state DROP COLUMN creation_guest_id;
+    ALTER TABLE room_state DROP COLUMN owner_guest_id;
+    ALTER TABLE room_state DROP COLUMN owner_organization_id;
+    ALTER TABLE room_state DROP COLUMN owner_subject_id;
+    ALTER TABLE room_state DROP COLUMN links_revoked;
+  `);
+  database.query("UPDATE room_schema SET version = 21 WHERE singleton = 1").run();
+  return roomStorage;
+}
+
 class DurableTestContext {
   readonly storage: ReturnType<typeof storage>;
   constructor(database: Database) {
@@ -208,6 +226,60 @@ test("adds the hashed anonymous MCP grant table when upgrading schema 20", () =>
     expect.objectContaining({ name: "response_secret" }),
     expect.objectContaining({ name: "expires_at" }),
   ]));
+});
+
+test("repairs Platform schema omitted from an already-recorded schema 21 room", () => {
+  const database = new Database(":memory:");
+  const roomStorage = createSchema21RoomWithoutPlatformSchema(database);
+
+  expect(() => database.query("SELECT capabilities, active, grant_id FROM room_acl WHERE guest_id = ?").all("synthetic")).toThrow("no such table");
+
+  migrateRoomSchema(roomStorage);
+
+  const assertRepaired = () => {
+    expect(database.query("SELECT version FROM room_schema").get()).toEqual({ version: 22 });
+    expect(database.query("SELECT schema_version FROM room_state").get()).toEqual({ schema_version: 22 });
+    expect(database.query("SELECT creation_guest_id, owner_guest_id, owner_organization_id, owner_subject_id, links_revoked FROM room_state").get()).toEqual({
+      creation_guest_id: null,
+      owner_guest_id: null,
+      owner_organization_id: null,
+      owner_subject_id: null,
+      links_revoked: 0,
+    });
+    expect(database.query("SELECT capabilities, active, grant_id FROM room_acl").all()).toEqual([]);
+    expect(database.query("SELECT idempotency_key FROM claim_receipts").all()).toEqual([]);
+    expect(database.query("SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'room_acl_room_guest'").all()).toEqual([{ name: "room_acl_room_guest" }]);
+    expect(database.query("SELECT id, content, sequence FROM messages").all()).toEqual([{ id: "message-1", content: "synthetic", sequence: 1 }]);
+  };
+  assertRepaired();
+
+  migrateRoomSchema(roomStorage);
+  assertRepaired();
+});
+
+test("admits a public grant on a schema 21 room repaired during Durable Object construction", async () => {
+  const database = new Database(":memory:");
+  createSchema21RoomWithoutPlatformSchema(database);
+  const [{ ConversationRoom }, { DurableRoomService }, { createWorker }] = await Promise.all([
+    import("./conversation-room"),
+    import("./room-service"),
+    import("./worker"),
+  ]);
+  const durable = new ConversationRoom(new DurableTestContext(database) as never, {} as never, () => 3_000);
+  const service = new DurableRoomService({ getByName: () => ({ fetch: (request: Request) => durable.fetch(request) }) } as never, "https://msg.0000.chat");
+  expect(await service.findGrant({ room: "old-room", guestId: "public-guest", source: "public" })).toBeNull();
+  await service.recordGrant({ room: "old-room", guestId: "public-guest", source: "public", capabilities: ["msg:read", "msg:write"], grantId: "public-grant" });
+  expect(await service.findGrant({ room: "old-room", guestId: "public-guest", source: "public" })).toEqual({
+    source: "public",
+    grantId: "public-grant",
+    capabilities: ["msg:read", "msg:write"],
+    active: true,
+  });
+  const read = await service.read({ room: "old-room", after: 0 });
+  expect(read.messages).toEqual([expect.objectContaining({ id: "message-1", content: "synthetic", sequence: 1 })]);
+  const page = await createWorker(service).fetch(new Request("https://msg.0000.chat/old-room", { headers: { accept: "text/html" } }));
+  expect(page.status).toBe(200);
+  expect(page.headers.get("content-type")).toContain("text/html");
 });
 
 test("upgrades the Platform v6 schema and adds notification state", () => {

@@ -1,7 +1,7 @@
 import { ROOM_LIMITS } from "./room-domain";
 import { WEBHOOK_RETRY_INITIAL_DELAY_MS, WEBHOOK_RETRY_WINDOW_MS } from "./webhook-policy";
 
-export const CURRENT_ROOM_SCHEMA_VERSION = 21;
+export const CURRENT_ROOM_SCHEMA_VERSION = 22;
 
 interface SqlStorage {
   exec(query: string, ...values: unknown[]): Iterable<unknown>;
@@ -558,6 +558,11 @@ function applyMigration(sql: SqlStorage, version: number, inactivityTtlMs: numbe
       );
       CREATE INDEX IF NOT EXISTS mcp_anonymous_grants_active ON mcp_anonymous_grants(expires_at, revoked_at);
     `);
+    sql.exec("UPDATE room_state SET schema_version = ? WHERE singleton = 1", CURRENT_ROOM_SCHEMA_VERSION);
+    return;
+  }
+  if (version === 22) {
+    ensurePlatformSchema(sql);
     sql.exec("UPDATE room_state SET schema_version = ? WHERE singleton = 1", CURRENT_ROOM_SCHEMA_VERSION);
     return;
   }
