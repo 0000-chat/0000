@@ -128,6 +128,16 @@ checks that each selected Thread is active and belongs to this service origin.
 advertises MCP `2026-07-28`, `server/discover`, and the event methods
 `events/list`, `events/subscribe`, and `events/unsubscribe`.
 
+`initialize` echoes a supported client `protocolVersion`. Supported versions
+are `2026-07-28` and the installed MCP SDK's versions, including `2024-11-05`,
+`2025-03-26`, `2025-06-18`, and `2025-11-25`. A missing or unsupported version
+falls back to `2026-07-28`. Subsequent requests accept the negotiated
+`MCP-Protocol-Version` header. `server/discover` advertises the modern revision.
+Tool definitions retain optional metadata and output schemas. For versions
+before `2025-06-18`, tool results include the payload as JSON text so clients
+that ignore `structuredContent` can still read it. A missing protocol header
+uses the `2025-03-26` tool result format.
+
 The protected tools are:
 
 - `get_room_status` reads status and retention metadata for one selected
