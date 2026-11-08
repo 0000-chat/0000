@@ -10,6 +10,8 @@ const env = runtimeEnv as typeof runtimeEnv & {
 };
 
 const applicationTables = [
+  "tenant_wakeup_bootstrap",
+  "tenant_wakeup_targets",
   "tenants",
   "principals",
   "memberships",
@@ -135,6 +137,8 @@ async function dropControlDirectorySchema(db: D1Database) {
   }
 
   for (const table of [
+    "tenant_wakeup_targets",
+    "tenant_wakeup_bootstrap",
     "group_dispatch_claims",
     "group_authority_intents",
     "contact_dispatch_claims",

@@ -30,7 +30,7 @@ EVIDENCE_STATUSES = {
     "implementation_defect",
 }
 SENSITIVE_KEY = re.compile(
-    r"(?:access.?token|bearer|client.?secret|cookie|password|refresh.?token|secret|api.?key|credential|private.?key)",
+    r"(?:access.?token|bearer|client.?secret|cookie|password|refresh.?token|secret|api.?key|credential|private.?key|download.?grant$)",
     re.IGNORECASE,
 )
 PLACEHOLDER = re.compile(
@@ -62,9 +62,16 @@ EVIDENCE_FIELD_KINDS: dict[str, str] = {
     "age_preserved": "bool",
     "grant_count": "count",
     "history_message_count": "count",
+    "attachment_size": "count",
+    "download_authorized": "bool",
+    "request_id": "id",
+    "operation_scope": "token",
+    "chat_scope": "token",
+    "availability": "token",
+    "receipt_status": "token",
     "attempt_count": "count",
     "cancelled_pending_count": "count",
-    "content_generation": "count",
+    "content_generation": "version",
     "deletion_epoch": "count",
     "saved_at": "timestamp",
     "retry_deadline": "timestamp",
@@ -432,6 +439,20 @@ SCENARIOS: tuple[Scenario, ...] = (
         ),
     ),
     Scenario(
+        "permission_inspection_request",
+        ("#35", "#36"),
+        "Inspect scoped grants and request review without acquiring authority",
+        (
+            _requirement("inspect_grants", "permissions", "inspect_grants", ("grant_id", "identity_id", "account_id", "operation_scope", "chat_scope"), actor="agent", statuses=(200,), bindings=("identity_ids", "account_ids")),
+            _requirement("request_permissions", "permissions", "request_permissions", ("request_id", "identity_id", "account_id", "status"), actor="agent", statuses=(200, 201), bindings=("identity_ids", "account_ids"), expected=(("status", "pending"),)),
+            _requirement("inspect_requests", "permissions", "inspect_requests", ("request_id", "identity_id", "account_id", "status"), actor="agent", statuses=(200,), bindings=("identity_ids", "account_ids")),
+        ),
+        (
+            _relation("equal", "inspect_grants", "request_permissions", "identity_id", "account_id"),
+            _relation("equal", "request_permissions", "inspect_requests", "request_id", "identity_id", "account_id"),
+        ),
+    ),
+    Scenario(
         "history_context_attachment",
         ("#35",),
         "Stored history, context, and authenticated attachment reads",
@@ -456,11 +477,18 @@ SCENARIOS: tuple[Scenario, ...] = (
                     "attachment_id",
                     "sha256",
                     "mime_type",
-                    "download_grant",
+                    "download_authorized",
+                    "attachment_size",
                 ),
                 actor="agent",
                 statuses=(200,),
                 bindings=("account_ids", "chat_ids", "grant_ids"),
+                expected=(("download_authorized", True),),
+                observations=(
+                    ("scope", ("account_id", "chat_id", "message_id")),
+                    ("metadata", ("message_id", "attachment_id", "sha256", "mime_type", "download_authorized", "attachment_size")),
+                    ("bytes", ("sha256", "attachment_size")),
+                ),
             ),
         ),
     ),
@@ -584,6 +612,11 @@ SCENARIOS: tuple[Scenario, ...] = (
                 actor="agent",
                 statuses=(200, 201),
                 bindings=("account_ids", "grant_ids"),
+                observations=(
+                    ("subscription", ("subscription_id", "destination_version")),
+                    ("delivery", ("subscription_id", "destination_version", "delivery_id", "source_event_id", "delivery_status")),
+                    ("receiver", ("receiver_id", "source_event_id", "revision")),
+                ),
             ),
             _requirement(
                 "subscription_two_initial",
@@ -601,6 +634,11 @@ SCENARIOS: tuple[Scenario, ...] = (
                 actor="agent",
                 statuses=(200, 201),
                 bindings=("account_ids", "grant_ids"),
+                observations=(
+                    ("subscription", ("subscription_id", "destination_version")),
+                    ("delivery", ("subscription_id", "destination_version", "delivery_id", "source_event_id", "delivery_status")),
+                    ("receiver", ("receiver_id", "source_event_id", "revision")),
+                ),
             ),
             _requirement(
                 "revision_removal",
@@ -617,6 +655,10 @@ SCENARIOS: tuple[Scenario, ...] = (
                 actor="agent",
                 statuses=(200,),
                 bindings=("grant_ids",),
+                observations=(
+                    ("delivery", ("subscription_id", "source_event_id", "delivery_id")),
+                    ("receiver", ("revision", "removal_event_id", "content_status")),
+                ),
             ),
             _requirement(
                 "retry",
@@ -633,6 +675,10 @@ SCENARIOS: tuple[Scenario, ...] = (
                 actor="agent",
                 statuses=(200,),
                 bindings=("grant_ids",),
+                observations=(
+                    ("retry_result", ("subscription_id", "delivery_id", "source_event_id", "attempt_count", "retry_deadline")),
+                    ("receiver", ("delivery_id", "manual_retry_actor")),
+                ),
             ),
             _requirement(
                 "cutover",
@@ -647,6 +693,11 @@ SCENARIOS: tuple[Scenario, ...] = (
                 actor="admin",
                 statuses=(200,),
                 bindings=("grant_ids",),
+                observations=(
+                    ("before", ("subscription_id", "old_destination_version")),
+                    ("cutover_result", ("subscription_id", "new_destination_version")),
+                    ("cancellation", ("subscription_id", "cancelled_pending_count")),
+                ),
             ),
         ),
         (
@@ -670,9 +721,10 @@ SCENARIOS: tuple[Scenario, ...] = (
                     "account_id",
                     "chat_id",
                     "message_id",
-                    "requested_status",
-                    "observed_status",
-                    "result_class",
+                    "receipt_status",
+                    "matrix_status",
+                    "bridge_status",
+                    "provider_status",
                 ),
                 actor="agent",
                 statuses=(200, 201),
@@ -694,6 +746,10 @@ SCENARIOS: tuple[Scenario, ...] = (
                 actor="admin",
                 statuses=(200, 201),
                 bindings=("account_ids", "chat_ids"),
+                observations=(
+                    ("authority", ("removal_id", "message_id", "content_generation", "deletion_epoch")),
+                    ("suppression", ("active_read_status", "attachment_status", "delivery_status")),
+                ),
             ),
             _requirement(
                 "restore_anti_resurrection",
@@ -710,6 +766,11 @@ SCENARIOS: tuple[Scenario, ...] = (
                 actor="admin",
                 statuses=(200,),
                 bindings=("account_ids", "chat_ids"),
+                observations=(
+                    ("restore", ("restore_id", "deletion_epoch")),
+                    ("retained", ("retained_message_id", "retained_revision")),
+                    ("suppression", ("removal_id", "deletion_epoch", "stale_work_rejected")),
+                ),
             ),
         ),
         (
@@ -721,6 +782,10 @@ SCENARIOS: tuple[Scenario, ...] = (
         ("#35", "#36"),
         "Wrong resource, expired or revoked installation, missing grant, and account mismatch",
         (
+            _requirement(
+                "wrong_issuer", "authorization_negative", "wrong_issuer",
+                ("error_code",), actor="agent", statuses=(401,),
+            ),
             _requirement(
                 "wrong_resource",
                 "authorization_negative",
@@ -1370,8 +1435,112 @@ MCP_UNVERIFIED_CONTRACTS: dict[tuple[str, str], tuple[str, ...]] = {
     ("grok_bot_identity", "bot_member_binding"): ("list_identities",),
 }
 
+# These transports return the same service schema. Keep response fields in one
+# place, adding only the SDK's structuredContent envelope for MCP. None means
+# the named external/receiver observation has no service response contract:
+# the operation can be recorded as unverified, but cannot satisfy that gate.
+SERVICE_OBSERVATIONS: dict[tuple[str, str, str], tuple[str, str, tuple[str, ...], dict[str, Any] | None]] = {
+    ("permission_inspection_request", "inspect_grants", "response"): ("GET", r"/api/v1/grants", ("list_grants",), {
+        "grant_id": "/items/0/id", "identity_id": "/items/0/identity_id", "account_id": "/items/0/account_id", "operation_scope": "/items/0/operation_scope", "chat_scope": "/items/0/chat_scope",
+    }),
+    ("permission_inspection_request", "request_permissions", "response"): ("POST", r"/api/v1/permission-requests", ("request_permissions",), {
+        "request_id": "/id", "identity_id": "/identity_id", "account_id": "/account_id", "status": "/status",
+    }),
+    ("permission_inspection_request", "inspect_requests", "response"): ("GET", r"/api/v1/permission-requests", ("list_permission_requests",), {
+        "request_id": "/items/0/id", "identity_id": "/items/0/identity_id", "account_id": "/items/0/account_id", "status": "/items/0/status",
+    }),
+    ("history_context_attachment", "stored_history", "response"): ("GET", r"/api/v1/conversations/[^/]+/messages", ("list_messages",), {
+        "account_id": "/items/0/account_id", "chat_id": "/items/0/conversation_id", "message_id": "/items/0/id", "revision": "/items/0/revision", "history_range_status": "/history/state",
+    }),
+    ("history_context_attachment", "attachment_read", "scope"): ("GET", r"/api/v1/conversations/[^/]+/messages", ("list_messages",), {
+        "account_id": "/items/0/account_id", "chat_id": "/items/0/conversation_id", "message_id": "/items/0/id",
+    }),
+    ("history_context_attachment", "attachment_read", "metadata"): ("GET", r"/api/v1/attachments/[^/]+", ("get_attachment",), {
+        "message_id": "/message_id", "attachment_id": "/attachment_id", "sha256": "/sha256", "mime_type": "/mime_type", "attachment_size": "/size_bytes", "download_authorized": {"pointer": "/download_grant", "transform": "present"},
+    }),
+    ("history_context_attachment", "attachment_read", "bytes"): ("GET", r"/api/v1/attachments/[^/]+/download", ("download_attachment",), None),
+    ("direct_chat_and_group", "contact_resolution", "response"): ("POST", r"/api/v1/contacts/resolve", ("resolve_contact",), {
+        "account_id": "/candidate/account_id", "contact_id": "/candidate/contact_id", "provider_contact_id": "/candidate/provider_id", "resolution_status": "/status",
+    }),
+    ("direct_chat_and_group", "direct_chat_creation", "response"): ("POST", r"/api/v1/conversations", ("create_direct_chat",), {
+        "account_id": "/account_id", "chat_id": "/conversation_id", "contact_id": "/contact_id", "provider_chat_id": "/provider_id", "provider_status": "/status",
+    }),
+    ("direct_chat_and_group", "group_creation", "response"): ("POST", r"/api/v1/groups", ("create_group",), {
+        "account_id": "/account_id", "chat_id": "/conversation_id", "group_operation_id": "/operation_id", "provider_group_id": "/provider_group_id", "provider_status": "/status",
+    }),
+    ("direct_chat_and_group", "group_management", "response"): ("PATCH|POST|DELETE", r"/api/v1/groups/[^/]+(?:/participants)?", ("rename_group", "add_group_participants", "remove_group_participants"), {
+        "account_id": "/account_id", "chat_id": "/conversation_id", "provider_group_id": "/provider_group_id", "group_revision": "/result_revision", "member_ids_digest": {"pointer": "/result_member_provider_ids", "transform": "sha256_list"}, "provider_status": "/status",
+    }),
+    ("webhook_subscriptions", "revision_removal", "delivery"): ("GET", r"/api/v1/webhook-deliveries/[^/]+", ("get_webhook_delivery",), {
+        "subscription_id": "/subscription_id", "source_event_id": "/source_event_id", "delivery_id": "/id",
+    }),
+    ("webhook_subscriptions", "revision_removal", "receiver"): ("GET", r"/api/v1/webhook-deliveries/[^/]+", ("get_webhook_delivery",), None),
+    ("webhook_subscriptions", "retry", "retry_result"): ("POST", r"/api/v1/webhook-deliveries/[^/]+/retry", ("retry_webhook_delivery",), {
+        "subscription_id": "/subscription_id", "delivery_id": "/id", "source_event_id": "/source_event_id", "attempt_count": "/attempt_count", "retry_deadline": "/retry_deadline",
+    }),
+    ("webhook_subscriptions", "retry", "receiver"): ("GET", r"/api/v1/webhook-deliveries/[^/]+", ("get_webhook_delivery",), None),
+    ("webhook_subscriptions", "cutover", "before"): ("GET", r"/api/v1/webhook-subscriptions/[^/]+", ("get_webhook_subscription",), {"subscription_id": "/id", "old_destination_version": "/destination_version"}),
+    ("webhook_subscriptions", "cutover", "cutover_result"): ("POST", r"/api/v1/webhook-subscriptions/[^/]+/cutover", ("cutover_webhook_subscription",), {"subscription_id": "/id", "new_destination_version": "/destination_version"}),
+    ("webhook_subscriptions", "cutover", "cancellation"): ("GET", r"/api/v1/webhook-subscriptions/[^/]+", ("get_webhook_subscription",), None),
+    ("receipt_and_restore", "explicit_receipt", "response"): ("POST", r"/api/v1/conversations/[^/]+/receipts/read", ("mark_read",), {
+        "receipt_id": "/operation_id", "account_id": "/account_id", "chat_id": "/conversation_id", "message_id": "/message_id", "receipt_status": "/status", "matrix_status": "/matrix_stage", "bridge_status": "/bridge_stage", "provider_status": "/provider_stage",
+    }),
+    ("receipt_and_restore", "active_removal", "authority"): ("POST", r"/api/v1/removals", ("record_removal",), {
+        "removal_id": "/id", "message_id": "/resource_id", "content_generation": "/content_generation", "deletion_epoch": "/deletion_epoch",
+    }),
+    ("receipt_and_restore", "active_removal", "suppression"): ("GET", r"/api/v1/removals", ("get_removal_status",), None),
+    ("receipt_and_restore", "restore_anti_resurrection", "restore"): ("POST", r"/api/v1/removals/restore-projection", (), {"restore_id": "/rebuild_id", "deletion_epoch": "/deletion_epoch"}),
+    ("receipt_and_restore", "restore_anti_resurrection", "retained"): ("GET", r"/api/v1/conversations/[^/]+/messages", ("list_messages",), {"retained_message_id": "/items/0/id", "retained_revision": "/items/0/revision"}),
+    ("receipt_and_restore", "restore_anti_resurrection", "suppression"): ("GET", r"/api/v1/removals/restore-authority", ("get_restore_authority",), None),
+}
 
-def _mcp_contract_tools(scenario: str, requirement: Requirement) -> tuple[str, ...]:
+for _subscription_case in ("subscription_one_initial", "subscription_two_initial"):
+    SERVICE_OBSERVATIONS[("webhook_subscriptions", _subscription_case, "subscription")] = ("POST", r"/api/v1/webhook-subscriptions", ("create_webhook_subscription",), {"subscription_id": "/id", "destination_version": "/destination_version"})
+    SERVICE_OBSERVATIONS[("webhook_subscriptions", _subscription_case, "delivery")] = ("GET", r"/api/v1/webhook-deliveries/[^/]+", ("get_webhook_delivery",), {"subscription_id": "/subscription_id", "destination_version": "/destination_version", "delivery_id": "/id", "source_event_id": "/source_event_id", "delivery_status": "/status"})
+    SERVICE_OBSERVATIONS[("webhook_subscriptions", _subscription_case, "receiver")] = ("GET", r"/api/v1/webhook-deliveries/[^/]+", ("get_webhook_delivery",), None)
+
+for _negative_case in ("wrong_issuer", "wrong_resource", "expired_installation", "revoked_installation", "missing_grant", "account_mismatch"):
+    _path = r"/api/v1/conversations/[^/]+/messages" if _negative_case in {"missing_grant", "account_mismatch"} else r"/api/v1/identities"
+    _tools = ("list_messages",) if _negative_case in {"missing_grant", "account_mismatch"} else ("list_identities",)
+    SERVICE_OBSERVATIONS[("authorization_negative_matrix", _negative_case, "response")] = ("GET", _path, _tools, {"error_code": "/error/code"})
+
+for _key, (_methods, _path, _tools, _pointers) in SERVICE_OBSERVATIONS.items():
+    REST_ROUTE_CONTRACTS[_key] = ((_methods, _path),)
+    if _pointers is not None:
+        REST_CANONICAL_POINTERS[_key] = _pointers
+        for _tool in _tools:
+            MCP_CANONICAL_POINTERS[(*_key, _tool)] = {
+                name: ("/result/structuredContent" + spec if isinstance(spec, str) else {**spec, "pointer": "/result/structuredContent" + spec["pointer"]})
+                for name, spec in _pointers.items()
+            }
+
+REST_CANONICAL_POINTERS[("history_context_attachment", "attachment_read", "bytes")] = {
+    "sha256": {"pointer": "", "transform": "raw_sha256"}, "attachment_size": {"pointer": "", "transform": "raw_size"},
+}
+MCP_CANONICAL_POINTERS[("history_context_attachment", "attachment_read", "bytes", "download_attachment")] = {
+    "sha256": {"pointer": "/result/content/0/resource/blob", "transform": "base64_sha256"}, "attachment_size": {"pointer": "/result/content/0/resource/blob", "transform": "base64_size"},
+}
+for _negative_case in ("wrong_issuer", "wrong_resource", "expired_installation", "revoked_installation"):
+    MCP_CANONICAL_POINTERS[("authorization_negative_matrix", _negative_case, "response", "list_identities")] = {"error_code": "/error/code"}
+for _negative_case in ("missing_grant", "account_mismatch"):
+    MCP_CANONICAL_POINTERS[("authorization_negative_matrix", _negative_case, "response", "list_messages")] = {"error_code": {"pointer": "/result/content/0/text", "transform": "tool_error_code"}}
+REST_REQUEST_CONTRACTS[("permission_inspection_request", "request_permissions", "response")] = RestRequestContract(
+    body_required=True, body_keys=frozenset({"identity_id", "account_id", "operation_scope", "chat_scope", "chat_ids", "reason", "idempotency_key"}), required_body_keys=frozenset({"identity_id", "account_id", "operation_scope", "chat_scope", "chat_ids", "reason", "idempotency_key"}),
+)
+REST_REQUEST_CONTRACTS[("receipt_and_restore", "restore_anti_resurrection", "restore")] = RestRequestContract(
+    body_required=True, body_keys=frozenset({"rebuild_id", "expected_generation", "started_at"}), required_body_keys=frozenset({"rebuild_id", "expected_generation", "started_at"}),
+)
+# A receiver/read observation is not a mutation. Do not inherit old action-body
+# requirements from the former single-response cases.
+for _key, (_methods, _path, _tools, _pointers) in SERVICE_OBSERVATIONS.items():
+    if _methods == "GET":
+        REST_REQUEST_CONTRACTS[_key] = RestRequestContract()
+
+
+def _mcp_contract_tools(scenario: str, requirement: Requirement, observation: str = "response") -> tuple[str, ...]:
+    shared = SERVICE_OBSERVATIONS.get((scenario, requirement.identifier, observation))
+    if shared is not None:
+        return shared[2]
     return requirement.mcp_tools or MCP_CONTRACTS.get(
         (scenario, requirement.identifier),
         MCP_UNVERIFIED_CONTRACTS.get((scenario, requirement.identifier), ()),
@@ -1576,18 +1745,43 @@ def _validate_extract_spec(spec: Any, label: str) -> None:
         return
     if not isinstance(spec, dict) or set(spec) != {"pointer", "transform"}:
         raise ConfigError(f"{label} must be a JSON pointer or a declared transform")
-    if not isinstance(spec["pointer"], str) or not spec["pointer"].startswith("/"):
+    if not isinstance(spec["pointer"], str) or (spec["pointer"] != "" and not spec["pointer"].startswith("/")):
         raise ConfigError(f"{label}.pointer must be a JSON pointer")
-    if spec["transform"] != "count":
+    if spec["transform"] not in {"count", "present", "sha256_list", "raw_sha256", "raw_size", "base64_sha256", "base64_size", "tool_error_code"}:
         raise ConfigError(f"{label}.transform is unsupported")
 
 
-def _extract_evidence_value(body: Any, spec: Any) -> Any:
+def _extract_evidence_value(body: Any, spec: Any, raw: bytes | None = None) -> Any:
     if isinstance(spec, str):
         return json_pointer(body, spec)
-    if isinstance(spec, dict) and spec.get("transform") == "count":
-        value = json_pointer(body, spec["pointer"])
+    if not isinstance(spec, dict):
+        return None
+    value = json_pointer(body, spec["pointer"])
+    transform = spec.get("transform")
+    if transform == "count":
         return len(value) if isinstance(value, list) else None
+    if transform == "present":
+        return isinstance(value, str) and 32 <= len(value) <= 512
+    if transform == "sha256_list":
+        return sha256_json(sorted(value)) if isinstance(value, list) and len(value) <= 128 and all(isinstance(item, str) for item in value) else None
+    if transform == "tool_error_code":
+        if json_pointer(body, "/result/isError") is not True or not isinstance(value, str):
+            return None
+        try:
+            return json_pointer(json.loads(value), "/error/code")
+        except json.JSONDecodeError:
+            return None
+    if transform in {"base64_sha256", "base64_size"}:
+        if not isinstance(value, str) or len(value) > 4 * ((8 * 1024 * 1024 + 2) // 3):
+            return None
+        try:
+            raw = base64.b64decode(value, validate=True)
+        except ValueError:
+            return None
+    if transform in {"raw_sha256", "raw_size", "base64_sha256", "base64_size"}:
+        if raw is None or len(raw) > 8 * 1024 * 1024:
+            return None
+        return sha256_bytes(raw) if transform.endswith("sha256") else len(raw)
     return None
 
 
@@ -1760,7 +1954,7 @@ def _request_contract_errors(
             if request.get("method") != "initialize":
                 errors.append("MCP initialize proof must invoke initialize")
         else:
-            tools = _mcp_contract_tools(scenario, requirement)
+            tools = _mcp_contract_tools(scenario, requirement, observation)
             tool = request.get("tool")
             if not tools or tool not in tools:
                 errors.append(f"MCP tool {tool!r} is not a {requirement.case} entrypoint")
@@ -1792,7 +1986,7 @@ def _evidence_contract_errors(
 ) -> list[str]:
     expected = _canonical_evidence_pointers(requirement, scenario, observation, request, transport)
     if expected is None:
-        if transport == "mcp" or requirement.identifier == "provider_delivery":
+        if transport == "mcp" or requirement.identifier == "provider_delivery" or (scenario, requirement.identifier, observation) in SERVICE_OBSERVATIONS:
             return [
                 f"no canonical evidence mapping exists for {transport} {requirement.case}"
             ]
@@ -2470,6 +2664,9 @@ def response_summary(response: HttpResponse) -> dict[str, Any]:
                 "jsonrpc_has_result": "result" in payload,
             }
         )
+        result = payload.get("result")
+        if isinstance(result, dict) and "isError" in result:
+            summary["mcp_is_error"] = result["isError"] is True
     return summary
 
 
@@ -2502,7 +2699,7 @@ def _jsonrpc_payload(response: HttpResponse) -> dict[str, Any] | None:
     return None
 
 
-def _validate_mcp_response(response: HttpResponse) -> str | None:
+def _validate_mcp_response(response: HttpResponse, *, allow_tool_error: bool = False) -> str | None:
     payload = _jsonrpc_payload(response)
     if payload is None:
         return "MCP response is not a JSON-RPC object"
@@ -2517,6 +2714,8 @@ def _validate_mcp_response(response: HttpResponse) -> str | None:
         return "MCP returned a JSON-RPC error"
     if "result" not in payload:
         return "MCP response has neither result nor an accepted error"
+    if json_pointer(payload, "/result/isError") is True and not allow_tool_error:
+        return "MCP tool returned an error"
     return None
 
 
@@ -2609,10 +2808,11 @@ def classify_response(
     missing_bindings = [name for name in requirement.bindings if not _binding_has_value(context, name)]
     if missing_bindings:
         return "unverified", f"required target bindings are absent: {', '.join(missing_bindings)}", {}
-    if requirement.statuses and response.status not in requirement.statuses:
+    mcp_denial = operation["transport"] == "mcp" and requirement.role == "authorization_negative" and requirement.statuses == (403,) and response.status == 200 and json_pointer(response.body, "/result/isError") is True
+    if requirement.statuses and response.status not in requirement.statuses and not mcp_denial:
         return "unverified", f"status {response.status} is outside the {requirement.case} contract", {}
-    if operation["transport"] == "mcp":
-        mcp_error = _validate_mcp_response(response)
+    if operation["transport"] == "mcp" and (requirement.role != "authorization_negative" or response.status == 200):
+        mcp_error = _validate_mcp_response(response, allow_tool_error=mcp_denial)
         if mcp_error:
             return "implementation_defect", mcp_error, {}
 
@@ -2632,7 +2832,7 @@ def classify_response(
         return "unverified", "; ".join(evidence_contract_errors), {}
     extracted: dict[str, Any] = {}
     for name, pointer in evidence.get("extract", {}).items():
-        value = _extract_evidence_value(_response_body_for_extraction(response), pointer)
+        value = _extract_evidence_value(_response_body_for_extraction(response), pointer, response.raw)
         try:
             extracted[name] = _safe_evidence_value(name, value)
         except EvidenceError as error:
@@ -2641,6 +2841,20 @@ def classify_response(
     missing = list(dict.fromkeys(missing))
     if missing:
         return "unverified", f"required evidence fields are absent: {', '.join(missing)}", extracted
+
+    if requirement.role == "permissions":
+        submitted = (request or operation["request"]).get(
+            "arguments" if operation["transport"] == "mcp"
+            else "body" if requirement.case == "request_permissions" else "query",
+            {},
+        )
+        for field in ("identity_id", "account_id"):
+            if extracted.get(field) not in context["binding"][f"{field}s"]:
+                return "implementation_defect", f"{field} is outside the configured target bindings", extracted
+            if requirement.case == "request_permissions" and field not in submitted:
+                return "unverified", f"permission request lacks submitted {field}", extracted
+            if field in submitted and extracted.get(field) != submitted[field]:
+                return "implementation_defect", f"{field} does not match the submitted permission subject", extracted
 
     expected_errors = []
     for field_name, expected in requirement.expected:
@@ -2724,6 +2938,8 @@ def evaluate_scenario(
                 )
             elif not observation_candidates:
                 obs_status, obs_reason = "unverified", f"no operation was configured for observation {observation}"
+            elif not passing and any(record.get("status") == "implementation_defect" for record in observation_candidates):
+                obs_status, obs_reason = aggregate_status(observation_candidates)
             elif missing:
                 obs_status, obs_reason = (
                     "unverified",
@@ -2892,6 +3108,8 @@ class AcceptanceRunner:
         self.preflight: list[dict[str, Any]] = []
         self.observed_bindings: list[dict[str, Any]] = []
         self.observed: dict[str, dict[str, Any]] = {}
+        # Download authority is transient, separate from persisted scalar evidence.
+        self._attachment_grants: dict[str, tuple[str, str, str, str]] = {}
         self.preflight_blocked = False
 
     def _context(self) -> dict[str, Any]:
@@ -3014,6 +3232,24 @@ class AcceptanceRunner:
         context = self._context()
         request = resolve_templates(operation["request"], context)
         transport_name = operation["transport"]
+        download_error = None
+        download_source = None
+        proof = operation["proof"]
+        if proof["case"] == "authenticated_attachment" and proof.get("observation") == "bytes":
+            source = request.pop("download_from", None)
+            download_source = source if isinstance(source, str) else None
+            grant = self._attachment_grants.get(source) if isinstance(source, str) else None
+            if grant is None or grant[:2] != (actor, transport_name):
+                download_error = "attachment bytes require authenticated metadata from the same actor and transport"
+            elif transport_name == "rest":
+                if request["path"] != f"/api/v1/attachments/{grant[2]}/download":
+                    download_error = "attachment download does not match its metadata"
+                else:
+                    request["query"] = {"download_grant": grant[3]}
+            elif request.get("arguments", {}).get("attachment_id") != grant[2]:
+                download_error = "attachment download does not match its metadata"
+            else:
+                request["arguments"]["download_grant"] = grant[3]
         request_summary: dict[str, Any] = {"transport": transport_name}
         if transport_name == "rest":
             method = str(request["method"]).upper()
@@ -3092,7 +3328,9 @@ class AcceptanceRunner:
             self.records.append(base_record)
             return base_record
 
-        if transport_name == "rest":
+        if download_error is not None:
+            response = HttpResponse(None, {}, None, b"", error=download_error)
+        elif transport_name == "rest":
             response = self.transport.rest(
                 request["method"],
                 request["path"],
@@ -3104,6 +3342,16 @@ class AcceptanceRunner:
         else:
             response = self.transport.mcp(request, token, self.target["client"])
         status, reason, extracted = classify_response(response, operation, context, request)
+        if status == "pass" and download_source is not None:
+            metadata = self.observed.get(download_source, {})
+            if any(extracted.get(name) != metadata.get(name) for name in ("sha256", "attachment_size")):
+                status, reason = "implementation_defect", "downloaded bytes disagree with authenticated attachment metadata"
+        if status == "pass" and proof["case"] == "authenticated_attachment" and proof.get("observation") == "metadata":
+            prefix = "/result/structuredContent" if transport_name == "mcp" else ""
+            grant = json_pointer(response.body, prefix + "/download_grant")
+            attachment_id = extracted.get("attachment_id")
+            if isinstance(grant, str) and 32 <= len(grant) <= 512 and isinstance(attachment_id, str):
+                self._attachment_grants[identifier] = (actor, transport_name, attachment_id, grant)
         if status == "pass" and extracted:
             self.observed[identifier] = dict(extracted)
             for name, value in extracted.items():
@@ -3261,6 +3509,7 @@ def _validate_bundle_response(value: Any, label: str) -> None:
             "jsonrpc_id",
             "jsonrpc_request_id",
             "jsonrpc_has_result",
+            "mcp_is_error",
         },
         label,
     )
@@ -3288,6 +3537,8 @@ def _validate_bundle_response(value: Any, label: str) -> None:
         raise EvidenceError(f"{label}.jsonrpc_request_id must be a scalar or null")
     if "jsonrpc_has_result" in response and not isinstance(response["jsonrpc_has_result"], bool):
         raise EvidenceError(f"{label}.jsonrpc_has_result must be a boolean")
+    if "mcp_is_error" in response and not isinstance(response["mcp_is_error"], bool):
+        raise EvidenceError(f"{label}.mcp_is_error must be a boolean")
 
 
 def _validate_bundle_request(value: Any, label: str, transport: str) -> None:
@@ -3391,12 +3642,22 @@ def _validate_passing_response(
         raise EvidenceError(f"{label}.body_sha256 is required for passing evidence")
     if response.get("error") is not None or response.get("jsonrpc_error") is not None:
         raise EvidenceError(f"{label} contains a transport or JSON-RPC error")
+    mcp_denial = (
+        transport == "mcp"
+        and requirement is not None
+        and requirement.role == "authorization_negative"
+        and requirement.statuses == (403,)
+        and status == 200
+        and response.get("mcp_is_error") is True
+    )
     if requirement is not None and requirement.statuses:
-        if status not in requirement.statuses:
+        if status not in requirement.statuses and not mcp_denial:
             raise EvidenceError(f"{label}.http_status is outside the declared requirement statuses")
     elif not 200 <= status < 300:
         raise EvidenceError(f"{label}.http_status must be a successful HTTP status")
     if transport == "mcp":
+        if response.get("mcp_is_error") is True and not mcp_denial:
+            raise EvidenceError(f"{label} contains an unexpected MCP tool error")
         if response.get("jsonrpc_version") != "2.0":
             raise EvidenceError(f"{label} does not prove JSON-RPC 2.0")
         if response.get("jsonrpc_id") is None or response.get("jsonrpc_has_result") is not True:

@@ -3,10 +3,12 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import {
   WebhookDeliverySchema,
+  WebhookDeliveryPageSchema,
   WebhookSubscriptionSchema,
 } from "@communicator/contracts";
 import { beforeEach, describe, expect, it } from "vitest";
 import { createApp } from "../app";
+import { recordRemoval } from "../removals/ledger";
 import type { VerifiedSubject } from "../auth/oidc";
 import {
   createOAuthAccessTokenVerifier,
@@ -35,6 +37,12 @@ const app = createApp({
         return {
           issuer: "https://issuer.example/",
           subject: "human-subject",
+        };
+      }
+      if (token === "other-tenant-token") {
+        return {
+          issuer: "https://issuer.example/",
+          subject: "other-tenant-subject",
         };
       }
       if (token === "agent-token") {
@@ -118,6 +126,119 @@ const installationToken = async (scope = "communicator.read") =>
   });
 
 describe("webhook subscription production entrypoints", () => {
+  it("discovers only the selected subscription with bounded scoped cursors and current authority", async () => {
+    const create = async (key: string) => {
+      const response = await request("/api/v1/webhook-subscriptions", {
+        method: "POST",
+        body: JSON.stringify({
+          destination: { url: "https://hooks.example.test/discovery" },
+          idempotency_key: key,
+        }),
+      });
+      expect(response.status).toBe(201);
+      return WebhookSubscriptionSchema.parse(await response.json());
+    };
+    const first = await create("discovery-first");
+    const second = await create("discovery-second");
+    const path = `/api/v1/webhook-subscriptions/${first.id}/deliveries`;
+    expect(
+      WebhookDeliveryPageSchema.parse(await (await request(path)).json()),
+    ).toEqual({ items: [], next_cursor: null });
+    for (const [id, subscriptionId, status] of [
+      ["delivery_c", first.id, "cancelled"],
+      ["delivery_a", first.id, "failed"],
+      ["delivery_b", second.id, "uncertain"],
+      ["delivery_d", first.id, "delivered"],
+    ]) {
+      await workerEnv.CONTROL_DB.prepare(`INSERT INTO webhook_deliveries
+        (id, tenant_id, subscription_id, source_event_id, destination_version, status,
+         first_pending_at, retry_deadline, attempt_count, last_response_body, payload_json,
+         cancelled_at, uncertain_at, uncertainty_reason)
+        VALUES (?, 'tenant_pilot', ?, ?, 1, ?, ?, ?, 2, 'receiver-private-body', 'private-payload', ?, ?, ?)`)
+        .bind(
+          id,
+          subscriptionId,
+          `${id}_source`,
+          status,
+          fixedNow.toISOString(),
+          "2026-09-14T00:00:00.000Z",
+          status === "cancelled" ? fixedNow.toISOString() : null,
+          status === "uncertain" ? fixedNow.toISOString() : null,
+          status === "uncertain" ? "response_lost" : null,
+        )
+        .run();
+    }
+    const response = await request(`${path}?limit=2`);
+    expect(response.status).toBe(200);
+    const page = WebhookDeliveryPageSchema.parse(await response.json());
+    expect(page.items.map((row) => row.id)).toEqual([
+      "delivery_a",
+      "delivery_c",
+    ]);
+    expect(JSON.stringify(page)).not.toMatch(
+      /receiver-private-body|private-payload|last_response_body|payload_json/,
+    );
+    expect(page.next_cursor).not.toBeNull();
+    const cursor = encodeURIComponent(page.next_cursor ?? "");
+    const last = WebhookDeliveryPageSchema.parse(
+      await (await request(`${path}?cursor=${cursor}&limit=2`)).json(),
+    );
+    expect(last.items.map((row) => row.id)).toEqual(["delivery_d"]);
+    expect(last.next_cursor).toBeNull();
+    expect(
+      (
+        await request(
+          `/api/v1/webhook-subscriptions/${second.id}/deliveries?cursor=${cursor}`,
+        )
+      ).status,
+    ).toBe(400);
+    expect((await request(`${path}?cursor=not-base64`)).status).toBe(400);
+    expect((await request(`${path}?limit=101`)).status).toBe(400);
+    expect((await request(path, {}, "agent-token")).status).toBe(403);
+    await workerEnv.CONTROL_DB.batch([
+      workerEnv.CONTROL_DB.prepare(
+        "INSERT INTO tenants (id, slug, display_name, status, created_at, updated_at) VALUES ('tenant_other', 'other', 'Other', 'active', ?, ?)",
+      ).bind(fixedNow.toISOString(), fixedNow.toISOString()),
+      workerEnv.CONTROL_DB.prepare(
+        "INSERT INTO principals (id, issuer, subject, principal_type, display_name, status, created_at, updated_at) VALUES ('principal_other', 'https://issuer.example/', 'other-tenant-subject', 'human', 'Other', 'active', ?, ?)",
+      ).bind(fixedNow.toISOString(), fixedNow.toISOString()),
+      workerEnv.CONTROL_DB.prepare(
+        "INSERT INTO memberships (id, tenant_id, principal_id, role, status, created_at, updated_at) VALUES ('membership_other', 'tenant_other', 'principal_other', 'owner', 'active', ?, ?)",
+      ).bind(fixedNow.toISOString(), fixedNow.toISOString()),
+    ]);
+    expect((await request(path, {}, "other-tenant-token")).status).toBe(404);
+    expect(
+      (await request(`${path}?cursor=${cursor}`, {}, "other-tenant-token"))
+        .status,
+    ).toBe(404);
+    expect(
+      (await request(path, { headers: { Authorization: "Bearer invalid" } }))
+        .status,
+    ).toBe(401);
+    expect(
+      (
+        await request(
+          "/api/v1/webhook-subscriptions/webhook_missing/deliveries",
+        )
+      ).status,
+    ).toBe(404);
+    await recordRemoval(workerEnv.CONTROL_DB, {
+      tenant_id: "tenant_pilot",
+      resource_type: "message",
+      resource_id: "message_removed_discovery",
+      content_generation: "generation_one",
+      reason: "requested",
+      removed_at: fixedNow.toISOString(),
+    });
+    expect((await request(`${path}?cursor=${cursor}`)).status).toBe(409);
+    expect((await request(path)).status).toBe(200);
+    expect(
+      await workerEnv.CONTROL_DB.prepare(
+        "SELECT COUNT(*) AS count FROM audit_events WHERE action = 'webhook.delivery.retry'",
+      ).first("count"),
+    ).toBe(0);
+  });
+
   it("creates through the API, evaluates precedence, and reads the same result through MCP", async () => {
     const create = await request("/api/v1/webhook-subscriptions", {
       method: "POST",
@@ -809,6 +930,18 @@ describe("webhook subscription production entrypoints", () => {
     expect(subscription.ownership_mode).toBe("shared_installation");
     expect(subscription.logical_agent_id).toBeNull();
 
+    const discoveryPath = `/api/v1/webhook-subscriptions/${subscription.id}/deliveries`;
+    expect((await request(discoveryPath, {}, token)).status).toBe(200);
+    await workerEnv.CONTROL_DB.prepare(
+      "UPDATE account_grants SET status = 'revoked', revoked_at = ? WHERE id = 'grant_webhook_agent'",
+    )
+      .bind(fixedNow.toISOString())
+      .run();
+    expect((await request(discoveryPath, {}, token)).status).toBe(403);
+    await workerEnv.CONTROL_DB.prepare(
+      "UPDATE account_grants SET status = 'active', revoked_at = NULL WHERE id = 'grant_webhook_agent'",
+    ).run();
+
     const inspected = await request(
       `/api/v1/webhook-subscriptions/${subscription.id}`,
       {},
@@ -841,6 +974,7 @@ describe("webhook subscription production entrypoints", () => {
       token,
     );
     expect(afterTransfer.status).toBe(403);
+    expect((await request(discoveryPath, {}, token)).status).toBe(403);
 
     await workerEnv.CONTROL_DB.prepare(
       "UPDATE oauth_client_installations SET status = 'revoked', revoked_at = ?, updated_at = ? WHERE id = ?",
@@ -857,6 +991,7 @@ describe("webhook subscription production entrypoints", () => {
       token,
     );
     expect(revokedInstallation.status).toBe(401);
+    expect((await request(discoveryPath, {}, token)).status).toBe(401);
     const administratorRecovery = await request(
       `/api/v1/webhook-subscriptions/${subscription.id}`,
     );

@@ -138,6 +138,7 @@ const expectedColumns: Record<
     ["last_rebuild_failure_code", "TEXT", 0, 0, null],
     ["initialized_at", "TEXT", 1, 0, null],
     ["updated_at", "TEXT", 1, 0, null],
+    ["realtime_revalidation_due_at_ms", "INTEGER", 0, 0, null],
   ],
   connection_bindings: [
     ["account_id", "TEXT", 1, 1, null],
@@ -378,6 +379,11 @@ const expectedColumns: Record<
     ["authority_capability_kind", "TEXT", 0, 0, null],
     ["authority_capability_id", "TEXT", 0, 0, null],
     ["authority_capability_epoch", "INTEGER", 0, 0, null],
+    ["next_wakeup_at_ms", "INTEGER", 0, 0, null],
+    ["authority_saved", "TEXT", 0, 0, null],
+    ["recovery_attempts", "INTEGER", 1, 0, "0"],
+    ["recovery_deadline_ms", "INTEGER", 0, 0, null],
+    ["recovery_next_attempt_at_ms", "INTEGER", 0, 0, null],
   ],
   outbound_evidence: [
     ["id", "TEXT", 1, 1, null],
@@ -628,6 +634,7 @@ const expectedIndexes = [
   "idx_outbound_command_decisions_tenant_decided",
   "idx_outbound_dispatches_transaction",
   "idx_outbound_dispatches_authority_reservation",
+  "idx_outbound_dispatches_wakeup",
   "idx_outbound_evidence_command_observed",
   "idx_outbound_actions_command_at",
   "idx_event_tombstones_conversation_owner",
@@ -700,6 +707,8 @@ const expectedIndexSql: Record<string, string> = {
     "CREATE INDEX idx_outbound_dispatches_transaction ON outbound_dispatches(tenant_id, transaction_id, request_digest)",
   idx_outbound_dispatches_authority_reservation:
     "CREATE INDEX idx_outbound_dispatches_authority_reservation ON outbound_dispatches(tenant_id, authority_reservation_id)",
+  idx_outbound_dispatches_wakeup:
+    "CREATE INDEX idx_outbound_dispatches_wakeup ON outbound_dispatches(next_wakeup_at_ms, id) WHERE next_wakeup_at_ms IS NOT NULL",
   idx_outbound_evidence_command_observed:
     "CREATE INDEX idx_outbound_evidence_command_observed ON outbound_evidence(tenant_id, command_id, observed_at, id)",
   idx_outbound_actions_command_at:
@@ -815,7 +824,7 @@ describe("tenant projection SQLite schema", () => {
       .map((row) => row.name)
       .sort();
     expect(indexNames).toEqual([...expectedIndexes].sort());
-    expect(indexNames).toHaveLength(39);
+    expect(indexNames).toHaveLength(40);
     for (const indexName of expectedIndexes) {
       const index = catalog.objects.find((row) => row.name === indexName);
       expect(normalizeSql(index?.sql ?? "")).toBe(
@@ -883,6 +892,21 @@ describe("tenant projection SQLite schema", () => {
         version: 7,
         name: privateDispatchAuthorityMigrationName,
         applied_at: privateDispatchAuthorityMigrationAppliedAt,
+      },
+      {
+        version: 8,
+        name: "durable_outbound_scheduling",
+        applied_at: "2026-09-14T02:00:00.000Z",
+      },
+      {
+        version: 9,
+        name: "saved_send_authority",
+        applied_at: "2026-11-07T00:00:00.000Z",
+      },
+      {
+        version: 10,
+        name: "bounded_outbound_recovery",
+        applied_at: "2026-11-07T01:00:00.000Z",
       },
     ]);
     expect(
@@ -1620,7 +1644,7 @@ describe("tenant projection initialization and status", () => {
     expect(status).toEqual({
       schema_version: 1,
       tenant_id: tenantId,
-      schema_generation: 7,
+      schema_generation: 10,
       state: "ready",
       generation: 1,
       rebuild_id: null,
@@ -1650,6 +1674,7 @@ describe("tenant projection initialization and status", () => {
         last_rebuild_failure_code: null,
         initialized_at: initializedAt,
         updated_at: initializedAt,
+        realtime_revalidation_due_at_ms: null,
       },
     ]);
   });

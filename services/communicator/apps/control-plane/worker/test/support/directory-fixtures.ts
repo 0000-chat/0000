@@ -318,7 +318,10 @@ export async function seedDirectory(db: D1Database): Promise<void> {
 }
 
 /** Seed the account registry and durable grants used by stored-read fixtures. */
-export async function seedAccountAccess(db: D1Database): Promise<void> {
+export async function seedAccountAccess(
+  db: D1Database,
+  gatewayPrincipalId = "principal_operator",
+): Promise<void> {
   await db.batch([
     db
       .prepare(
@@ -326,7 +329,7 @@ export async function seedAccountAccess(db: D1Database): Promise<void> {
       )
       .bind(
         "gateway_route_human",
-        "principal_operator",
+        gatewayPrincipalId,
         fixtureTimestamp,
         fixtureTimestamp,
       ),
@@ -336,7 +339,7 @@ export async function seedAccountAccess(db: D1Database): Promise<void> {
       )
       .bind(
         "gateway_route_agent",
-        "principal_operator",
+        gatewayPrincipalId,
         fixtureTimestamp,
         fixtureTimestamp,
       ),
@@ -409,6 +412,10 @@ export async function clearDirectory(db: D1Database): Promise<void> {
     // Acceptance reservations and provider claims retain exact directory
     // bindings in production. Test fixtures clear these children first so
     // the directory rows can be rebuilt without weakening those constraints.
+    db.prepare("DELETE FROM tenant_wakeup_targets"),
+    db.prepare(
+      "UPDATE tenant_wakeup_bootstrap SET directory_cursor = '', discovery_complete = 0",
+    ),
     db.prepare("DELETE FROM connection_lifecycle_operations"),
     db.prepare("DELETE FROM group_dispatch_claims"),
     db.prepare("DELETE FROM receipt_dispatch_claims"),

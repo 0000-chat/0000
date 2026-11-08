@@ -9,7 +9,7 @@ import {
   type RestoreProjectionActivationResult,
 } from "@communicator/contracts";
 import type { RemovalAuthority } from "../../../../packages/contracts/src/removals";
-import { readRestoreReplayPage } from "../archive/replay";
+import { readRestoreReplayPageForActivation } from "../archive/replay";
 import { listArchivePurgeOperations } from "../archive/purge";
 import { getTenantProjection } from "../projection/routing";
 import type { TenantProjectionDO } from "../projection/tenant-projection";
@@ -154,8 +154,8 @@ const abortRebuild = async (
 
 /**
  * Run the real archive-to-projection restore path.  Authority and controlled
- * store readiness are loaded before beginRebuild; every page is read through
- * readRestoreReplayPage, which rechecks the primary authority after R2 I/O;
+ * store readiness are loaded before beginRebuild; the activation reader
+ * rechecks the primary authority after R2 I/O and separates source from view;
  * completeRebuild fences restored outbound rows before publishing ready.
  */
 export const restoreProjectionFromArchive = async (
@@ -269,7 +269,7 @@ export const restoreProjectionFromArchive = async (
       ) {
         throw new Error("restore activation lease expired during replay");
       }
-      const page = await readRestoreReplayPage(
+      const page = await readRestoreReplayPageForActivation(
         input.bucket,
         database,
         tenantId,
@@ -281,7 +281,7 @@ export const restoreProjectionFromArchive = async (
       for (const eventId of page.evidence.changed_event_ids)
         changedEventIds.add(eventId);
       const pageAccountIds = new Set(
-        page.events.map((event) => event.account_id),
+        page.immutable_page.events.map((event) => event.account_id),
       );
       const pageConnections = connections.filter((connection) =>
         pageAccountIds.has(connection.account_id),
@@ -296,9 +296,9 @@ export const restoreProjectionFromArchive = async (
           schema_version: 1,
           replay_mode: "projection_only",
           tenant_id: tenantId,
-          manifests: page.manifests,
-          events: page.events,
-          next_cursor: page.next_cursor,
+          manifests: page.immutable_page.manifests,
+          events: page.immutable_page.events,
+          next_cursor: page.immutable_page.next_cursor,
         },
         authorization: rebuildAuthorization,
       });

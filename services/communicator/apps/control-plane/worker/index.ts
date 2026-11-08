@@ -2,6 +2,7 @@ import app from "./app";
 import { consumeIngestionQueue } from "./ingestion/consumer";
 import { runHistoryImportTick } from "./history/runner";
 import { getTenantProjection } from "./projection/routing";
+import { runDormantTenantBootstrapTick } from "./tenant-wakeup-bootstrap";
 import {
   runWebhookRetryTick,
   type WebhookCredentialStore,
@@ -29,6 +30,9 @@ const worker: ExportedHandler<Cloudflare.Env, unknown> = {
   fetch: app.fetch.bind(app),
   queue: consumeIngestionQueue,
   scheduled: (_controller, env, context) => {
+    const bootstrap = runDormantTenantBootstrapTick(env).catch(() => {
+      console.error({ event: "tenant_wakeup_bootstrap_error" });
+    });
     const retentionAdapters = createConfiguredControlledCopyAdapters(
       env as unknown as Record<string, unknown>,
     );
@@ -90,7 +94,7 @@ const worker: ExportedHandler<Cloudflare.Env, unknown> = {
           error: error instanceof Error ? error.name : "unknown",
         });
       });
-    context.waitUntil(Promise.all([history, webhooks, removals]));
+    context.waitUntil(Promise.all([bootstrap, history, webhooks, removals]));
   },
 };
 

@@ -46,6 +46,8 @@ export type ReadHandlerContext = {
   env: Cloudflare.Env;
   authorization: SessionResponse;
   delegated?: boolean;
+  credential?: string | undefined;
+  platformCapabilities?: readonly string[] | undefined;
 };
 
 export type ListConnectionsInput = {

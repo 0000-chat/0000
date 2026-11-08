@@ -38,6 +38,82 @@ function client(fetch: typeof globalThis.fetch) {
   });
 }
 
+describe("saved operation client", () => {
+  const authorization = {
+    id: "saved-1", authority: validPrincipal.authority,
+    subjectId: validPrincipal.subjectId, organizationId: validPrincipal.organizationId,
+    audience: validPrincipal.audience, operationId: "job-1", capability: "resource:read",
+  };
+  const input = { credential: "original-actor-bearer", operationId: "job-1", capability: "resource:read" };
+
+  it("captures a bound descriptor and revalidates without forwarding an actor bearer", async () => {
+    const shared = client(async (url, init) => {
+      const request = new Request(url, init);
+      const body = await request.json();
+      expect(request.headers.get("authorization")).toBe("Bearer service-verifier-only");
+      if (request.url.endsWith("/capture")) {
+        expect(body).toEqual(input);
+        return Response.json({ status: "allowed", authorization });
+      }
+      expect(body).toEqual(authorization);
+      expect(JSON.stringify(body)).not.toContain(input.credential);
+      return Response.json({ status: "allowed", principal: validPrincipal });
+    });
+    expect(await shared.captureSavedOperation(input)).toEqual({ status: "allowed", authorization });
+    expect(await shared.revalidateSavedOperation(authorization)).toEqual({ status: "allowed", principal: validPrincipal });
+  });
+
+  it("preserves only confirmed denials and rejects inconsistent, redirected, or malformed outcomes", async () => {
+    for (const [httpStatus, status, expected] of [
+      [403, "denied", "denied"], [503, "authority_unavailable", "authority_unavailable"],
+      [200, "denied", "authority_unavailable"], [403, "allowed", "authority_unavailable"],
+      [401, "denied", "authority_unavailable"], [429, "denied", "authority_unavailable"],
+    ] as const) {
+      const shared = client(async () => Response.json({ status }, { status: httpStatus }));
+      expect((await shared.captureSavedOperation(input)).status).toBe(expected);
+      expect((await shared.revalidateSavedOperation(authorization)).status).toBe(expected);
+    }
+    for (const response of [
+      () => new Response(null, { status: 302, headers: { location: "https://untrusted.test" } }),
+      () => new Response("not-json"),
+      () => Response.json({ status: "allowed" }),
+    ]) {
+      expect((await client(async () => response()).revalidateSavedOperation(authorization)).status).toBe("authority_unavailable");
+    }
+  });
+
+  it("rejects mismatched capture bindings and revalidated actor authority", async () => {
+    for (const field of ["authority", "audience", "operationId", "capability"] as const) {
+      expect((await client(async () => Response.json({ status: "allowed",
+        authorization: { ...authorization, [field]: "other" },
+      })).captureSavedOperation(input)).status).toBe("authority_unavailable");
+    }
+    for (const principal of [
+      { ...validPrincipal, subjectId: "other-user" },
+      { ...validPrincipal, organizationId: "other-org" },
+      { ...validPrincipal, capabilities: ["resource:write"] },
+      { ...validPrincipal, kind: "service", grantId: "scheduler-grant" },
+    ]) {
+      expect((await client(async () => Response.json({ status: "allowed", principal }))
+        .revalidateSavedOperation(authorization)).status).toBe("authority_unavailable");
+    }
+  });
+
+  it("applies the existing deadline through capture and revalidation body parsing", async () => {
+    const shared = createPlatformClient({
+      baseUrl: "https://platform.test", authority: authorization.authority,
+      audience: authorization.audience, serviceVerifier: "service-verifier", timeoutMs: 5,
+      fetch: async () => {
+        const response = Response.json({ status: "allowed", authorization, principal: validPrincipal });
+        response.json = async () => { await wait(30); return { status: "allowed", authorization, principal: validPrincipal }; };
+        return response;
+      },
+    });
+    expect(await shared.captureSavedOperation(input)).toEqual({ status: "authority_unavailable" });
+    expect(await shared.revalidateSavedOperation(authorization)).toEqual({ status: "authority_unavailable" });
+  });
+});
+
 describe("Platform verification client", () => {
   it("sends the presented credential separately from the verifier and accepts a valid principal", async () => {
     let call: { url: URL; init: RequestInit } | undefined;

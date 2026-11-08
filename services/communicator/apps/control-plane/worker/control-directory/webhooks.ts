@@ -4,6 +4,9 @@ import {
   WebhookEventFilterSchema,
   WebhookOwnershipModeSchema,
   WebhookDeliverySchema,
+  WebhookDeliveryPageSchema,
+  WebhookDeliverySummarySchema,
+  MAX_WEBHOOK_PAGE_SIZE,
   WebhookSubscriptionEvaluationSchema,
   WebhookSubscriptionPageSchema,
   WebhookSubscriptionSchema,
@@ -18,6 +21,8 @@ import {
   type WebhookSubscriptionEvaluation,
   type WebhookSubscriptionUpdate,
 } from "@communicator/contracts";
+import { z } from "zod/v4";
+import { readTenantDeletionEpoch } from "../removals/ledger";
 
 export type WebhookRepositoryErrorCode =
   | "webhook_not_found"
@@ -1445,6 +1450,86 @@ export async function authorizeWebhookDeliveryInspection(
     );
     await requireSubscriptionAuthority(db, actor, subscription);
     return mapDelivery(row);
+  } catch (error) {
+    if (error instanceof WebhookRepositoryError) throw error;
+    throw webhookError("webhook_unavailable", error);
+  }
+}
+
+const deliveryCursorSchema = z
+  .object({
+    version: z.literal(1),
+    tenant: z.string(),
+    subscription: z.string(),
+    principal: z.string(),
+    membership: z.string(),
+    epoch: z.number().int().nonnegative(),
+    after: z.string().min(1).max(128),
+  })
+  .strict();
+
+export async function listWebhookDeliveryPage(
+  db: D1DatabaseSession,
+  actor: WebhookActor,
+  subscriptionId: string,
+  cursor?: string,
+  limit = 50,
+): Promise<ReturnType<typeof WebhookDeliveryPageSchema.parse>> {
+  try {
+    await authorizeWebhookInspection(db, actor, subscriptionId);
+    const epoch = await readTenantDeletionEpoch(db, actor.tenantId);
+    let after = "";
+    if (cursor !== undefined) {
+      let parsed: z.infer<typeof deliveryCursorSchema>;
+      try {
+        parsed = deliveryCursorSchema.parse(JSON.parse(atob(cursor)));
+      } catch {
+        throw webhookError("webhook_invalid");
+      }
+      if (
+        parsed.tenant !== actor.tenantId ||
+        parsed.subscription !== subscriptionId ||
+        parsed.principal !== actor.principalId ||
+        parsed.membership !== actor.membershipId
+      )
+        throw webhookError("webhook_invalid");
+      if (parsed.epoch !== epoch) throw webhookError("webhook_conflict");
+      after = parsed.after;
+    }
+    const pageSize = Math.min(Math.max(limit, 1), MAX_WEBHOOK_PAGE_SIZE);
+    const rows = await db
+      .prepare(
+        `${deliveryQuery} WHERE tenant_id = ? AND subscription_id = ? AND id > ?
+       ORDER BY id ASC LIMIT ?`,
+      )
+      .bind(actor.tenantId, subscriptionId, after, pageSize + 1)
+      .all<DeliveryRow>();
+    // Recheck current authority and removal state after the page read, including
+    // cursor continuations. A cursor never confers permission or freezes content.
+    await authorizeWebhookInspection(db, actor, subscriptionId);
+    if ((await readTenantDeletionEpoch(db, actor.tenantId)) !== epoch)
+      throw webhookError("webhook_conflict");
+    const visible = rows.results.slice(0, pageSize);
+    const last = visible.at(-1);
+    return WebhookDeliveryPageSchema.parse({
+      items: visible.map(({ last_response_body: _body, ...row }) =>
+        WebhookDeliverySummarySchema.parse(row),
+      ),
+      next_cursor:
+        rows.results.length > pageSize && last
+          ? btoa(
+              JSON.stringify({
+                version: 1,
+                tenant: actor.tenantId,
+                subscription: subscriptionId,
+                principal: actor.principalId,
+                membership: actor.membershipId,
+                epoch,
+                after: last.id,
+              }),
+            )
+          : null,
+    });
   } catch (error) {
     if (error instanceof WebhookRepositoryError) throw error;
     throw webhookError("webhook_unavailable", error);

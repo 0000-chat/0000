@@ -44,10 +44,38 @@ export function MessageComposer({
           idempotencyKey.current ??
           (idempotencyKey.current = makeIdempotencyKey()),
       }),
-    onSuccess: () => {
+    onMutate: () => setResultMessage(null),
+    onSuccess: (command) => {
       idempotencyKey.current = null;
       setBody("");
-      setResultMessage("Accepted — awaiting messaging confirmation");
+      switch (command.status) {
+        case "accepted":
+          setResultMessage("Accepted — awaiting messaging confirmation");
+          break;
+        case "submitted_to_matrix":
+          setResultMessage(
+            "Submitted to messaging service — delivery not confirmed",
+          );
+          break;
+        case "matrix_confirmed":
+        case "bridged":
+          setResultMessage(
+            "Messaging service accepted — provider delivery not confirmed",
+          );
+          break;
+        case "delivered":
+          setResultMessage("Delivered — confirmed by provider evidence");
+          break;
+        case "delivery_uncertain":
+          setResultMessage(
+            "Delivery uncertain — review Activity before any deliberate resend.",
+          );
+          break;
+        default:
+          setResultMessage(
+            `Command saved (${command.status}) — review Activity for its current state.`,
+          );
+      }
       void queryClient.invalidateQueries({
         queryKey: queryKeys.commands(identityId),
       });
@@ -62,13 +90,18 @@ export function MessageComposer({
       setResultMessage(
         error instanceof ApiError && error.code === "chat_paused"
           ? "This chat is paused while delivery remains uncertain. Review Activity to choose cancel, continue, or deliberate resend."
-          : "The simulated command could not be accepted.",
+          : isDefinitiveRequestRejection(error)
+            ? "Request rejected — no new command accepted. Review the request and your permissions."
+            : "Acceptance uncertain — check Activity before retrying. Retrying reuses the same key and may submit the original message if it was not accepted.",
       );
     },
   });
 
   const isDisabled = mutation.isPending || !canSend;
-  const canSubmit = body.trim().length > 0 && !isDisabled;
+  const acceptanceUncertain =
+    mutation.isError && !isDefinitiveRequestRejection(mutation.error);
+  const canSubmit =
+    body.trim().length > 0 && deliveryMode === "direct" && !isDisabled;
 
   return (
     <form
@@ -89,9 +122,12 @@ export function MessageComposer({
         <Textarea
           id="message-body"
           value={body}
-          onChange={(event) => setBody(event.target.value)}
-          placeholder="Write a simulated message"
-          disabled={isDisabled}
+          onChange={(event) => {
+            setBody(event.target.value);
+            setResultMessage(null);
+          }}
+          placeholder="Write a message"
+          disabled={isDisabled || acceptanceUncertain}
         />
       </div>
       <div className="flex flex-wrap items-end justify-between gap-3">
@@ -106,29 +142,37 @@ export function MessageComposer({
             id="delivery-mode"
             aria-label="Delivery mode"
             value={deliveryMode}
-            onChange={(event) =>
-              setDeliveryMode(event.target.value as "direct" | "paced")
-            }
-            disabled={isDisabled}
+            onChange={(event) => {
+              if (
+                event.target.value === "direct" ||
+                event.target.value === "paced"
+              ) {
+                setDeliveryMode(event.target.value);
+                setResultMessage(null);
+              }
+            }}
+            disabled={isDisabled || acceptanceUncertain}
             className="h-9 rounded-md border border-input bg-background px-3 text-sm shadow-xs outline-none focus-visible:ring-2 focus-visible:ring-ring"
           >
             <option value="direct">Direct</option>
-            <option value="paced">Human-paced</option>
+            <option value="paced">Human-paced (unavailable)</option>
           </select>
         </div>
         <Button type="submit" disabled={!canSubmit}>
-          Send message
+          {mutation.isPending
+            ? "Submitting request…"
+            : acceptanceUncertain
+              ? "Retry same request"
+              : "Send message"}
         </Button>
       </div>
       {deliveryMode === "paced" && (
         <div className="border-l-2 border-primary/40 pl-3 text-sm">
-          <p className="font-semibold">Human-paced preview</p>
-          <ol className="mt-2 list-decimal space-y-1 pl-5 text-muted-foreground">
-            <li>Mark read (when supported)</li>
-            <li>Reading delay</li>
-            <li>Typing indicator</li>
-            <li>Send message</li>
-          </ol>
+          <p className="font-semibold">Human pacing is unavailable</p>
+          <p className="mt-2 text-muted-foreground">
+            Nothing will be sent in this mode. Select Direct to send without
+            reading delays or typing simulation.
+          </p>
         </div>
       )}
       {!canSend && unavailableReason && (

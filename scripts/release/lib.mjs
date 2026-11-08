@@ -805,6 +805,15 @@ export function assertReleaseConfig(config) {
     if (unit.build !== undefined) {
       if (unit.build.type === "cloudflare-worker") assertWorkerBuildConfig(unit, unit.build);
       else if (unit.build.type === "bun-runtime") assertBunRuntimeBuildConfig(unit, unit.build);
+      else if (unit.build.type === "communicator") {
+        const roles = { worker: "control-plane", native: "matrix-gateway", bridge: "bridge-images" };
+        const role = unit.build.role;
+        if (!Object.hasOwn(roles, role) || unit.name !== `communicator-${roles[role]}` ||
+            unit.kind !== `communicator-${role}-bundle` ||
+            Object.keys(unit.build).some((key) => !["type", "role"].includes(key))) {
+          throw new Error(`invalid Communicator build contract: ${unit.name}`);
+        }
+      }
       else throw new Error(`unsupported release build type: ${unit.name}`);
     }
     for (const [pathKind, paths] of [["runtime", unit.runtime_paths], ["archive", unit.archive_paths]]) {
@@ -863,10 +872,19 @@ const GLOBAL_RUNTIME_INPUTS = new Set([
   "turbo.json",
   "scripts/release/event.mjs",
   "scripts/release/lib.mjs",
+  "scripts/release/build.mjs",
+  "scripts/release/record.mjs",
+  "scripts/release/migrations.mjs",
+  "scripts/release/worker.mjs",
+  "scripts/release/modules.mjs",
+  "scripts/release/communicator.mjs",
+  "scripts/release/verify-communicator.mjs",
 ]);
-const GLOBAL_RUNTIME_INPUT_PREFIXES = ["packages/platform-client/"];
+const GLOBAL_RUNTIME_INPUT_PREFIXES = ["packages/platform-client/", "packages/contracts/"];
+const COMMUNICATOR_COMPOSITION = ["communicator-control-plane", "communicator-matrix-gateway", "communicator-bridge-images", "platform-worker"];
 const RUNTIME_COMPANIONS = new Map([
   ["msg-worker", ["msg-webhook-dispatcher"]],
+  ...COMMUNICATOR_COMPOSITION.filter((name) => name.startsWith("communicator-")).map((name) => [name, COMMUNICATOR_COMPOSITION]),
 ]);
 
 function additiveUnitRegistrations(config, previousConfig) {
@@ -965,8 +983,9 @@ function pathInside(file, root) {
 function isValidationOnlyPath(file) {
   if (isDocumentationPath(file)) return true;
 
-  if (pathInside(file, "packages/platform-client")) {
-    const relative = file.slice("packages/platform-client/".length);
+  const sharedPackage = GLOBAL_RUNTIME_INPUT_PREFIXES.find((prefix) => file.startsWith(prefix));
+  if (sharedPackage) {
+    const relative = file.slice(sharedPackage.length);
     const segments = relative.split("/");
     const basename = segments.at(-1);
     if (segments.some((segment) => VALIDATION_ONLY_DIRECTORY_NAMES.has(segment))) return true;

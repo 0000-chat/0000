@@ -39,6 +39,13 @@ import {
   RealtimeTicketRequestSchema,
   RealtimeTicketResponseSchema,
   SessionResponseSchema,
+  WebhookSubscriptionPageSchema,
+  WebhookDeliverySchema,
+  WebhookDeliveryPageSchema,
+  type WebhookDeliveryPage,
+  WebhookDeliveryRetrySchema,
+  type WebhookSubscriptionPage,
+  type WebhookDelivery,
   type Command,
   type AccountGrant,
   type AccountGrantPage,
@@ -700,6 +707,51 @@ export class ApiClient {
 
   getHealth(): Promise<HealthResponse> {
     return this.request("/api/v1/health", HealthResponseSchema);
+  }
+
+  getWebhookSubscriptions(cursor?: string): Promise<WebhookSubscriptionPage> {
+    const search = new URLSearchParams({ limit: "20" });
+    if (cursor !== undefined) search.set("cursor", cursor);
+    return this.request(
+      `/api/v1/webhook-subscriptions?${search}`,
+      WebhookSubscriptionPageSchema,
+    );
+  }
+
+  getWebhookDeliveries(
+    subscriptionId: string,
+    cursor?: string,
+  ): Promise<WebhookDeliveryPage> {
+    const search = new URLSearchParams({ limit: "20" });
+    if (cursor !== undefined) search.set("cursor", cursor);
+    return this.request(
+      `/api/v1/webhook-subscriptions/${encodeURIComponent(subscriptionId)}/deliveries?${search}`,
+      WebhookDeliveryPageSchema,
+    );
+  }
+
+  getWebhookDelivery(deliveryId: string): Promise<WebhookDelivery> {
+    return this.request(
+      `/api/v1/webhook-deliveries/${encodeURIComponent(deliveryId)}`,
+      WebhookDeliverySchema,
+    );
+  }
+
+  retryWebhookDelivery(
+    deliveryId: string,
+    idempotencyKey: string,
+  ): Promise<WebhookDelivery> {
+    return this.request(
+      `/api/v1/webhook-deliveries/${encodeURIComponent(deliveryId)}/retry`,
+      WebhookDeliverySchema,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(
+          WebhookDeliveryRetrySchema.parse({ idempotency_key: idempotencyKey }),
+        ),
+      },
+    );
   }
 
   createRealtimeTicket(

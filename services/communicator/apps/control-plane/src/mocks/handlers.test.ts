@@ -318,35 +318,38 @@ describe("simulated API handlers", () => {
     },
   );
 
-  it("rejects missing idempotency and unsupported delivery modes", async () => {
-    const missingKey = await fetch(
-      "http://example.test/api/v1/conversations/conversation_human_whatsapp_alex/messages",
-      {
-        method: "POST",
-        headers: jsonHeaders,
-        body: JSON.stringify({
-          identity_id: "identity_human",
-          body: "A safe simulated message",
-          delivery_mode: "direct",
-        }),
-      },
-    );
-    expect(missingKey.status).toBe(400);
+  it.each(["instant", "paced"])(
+    "rejects missing idempotency and unsupported delivery mode %s",
+    async (deliveryMode) => {
+      const missingKey = await fetch(
+        "http://example.test/api/v1/conversations/conversation_human_whatsapp_alex/messages",
+        {
+          method: "POST",
+          headers: jsonHeaders,
+          body: JSON.stringify({
+            identity_id: "identity_human",
+            body: "A safe simulated message",
+            delivery_mode: "direct",
+          }),
+        },
+      );
+      expect(missingKey.status).toBe(400);
 
-    const unsupportedMode = await fetch(
-      "http://example.test/api/v1/conversations/conversation_human_whatsapp_alex/messages",
-      {
-        method: "POST",
-        headers: { ...jsonHeaders, "Idempotency-Key": "test-key-invalid" },
-        body: JSON.stringify({
-          identity_id: "identity_human",
-          body: "A safe simulated message",
-          delivery_mode: "instant",
-        }),
-      },
-    );
-    expect(unsupportedMode.status).toBe(400);
-  });
+      const unsupportedMode = await fetch(
+        "http://example.test/api/v1/conversations/conversation_human_whatsapp_alex/messages",
+        {
+          method: "POST",
+          headers: { ...jsonHeaders, "Idempotency-Key": "test-key-invalid" },
+          body: JSON.stringify({
+            identity_id: "identity_human",
+            body: "A safe simulated message",
+            delivery_mode: deliveryMode,
+          }),
+        },
+      );
+      expect(unsupportedMode.status).toBe(400);
+    },
+  );
 
   it("returns one command for a repeated idempotency key", async () => {
     const init = {
@@ -355,7 +358,7 @@ describe("simulated API handlers", () => {
       body: JSON.stringify({
         identity_id: "identity_human",
         body: "A safe simulated message",
-        delivery_mode: "paced",
+        delivery_mode: "direct",
       }),
     };
     const first = await fetch(

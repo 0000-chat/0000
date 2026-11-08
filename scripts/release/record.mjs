@@ -27,6 +27,7 @@ export function createReleaseRecord(plan, metadata) {
       };
       for (const key of [
         "artifact_format",
+        "manifest_digest",
         "entrypoint",
         "config",
         "files",

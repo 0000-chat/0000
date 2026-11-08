@@ -1,6 +1,11 @@
 import { env, runInDurableObject } from "cloudflare:test";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { CallToolResultSchema } from "@modelcontextprotocol/sdk/types.js";
+import { Buffer } from "node:buffer";
 import {
   AttachmentMetadataSchema,
+  MAX_ATTACHMENT_BYTES,
   ApiErrorResponseSchema,
   MessagePageResultSchema,
   type ProjectionEventEnvelope,
@@ -73,6 +78,33 @@ const request = async (
     },
     workerEnv,
   );
+
+async function callAttachmentTool(
+  app: ReturnType<typeof createApp>,
+  name: string,
+  args: Record<string, unknown>,
+  token = "human-token",
+) {
+  const client = new Client({ name: "attachment-parity-test", version: "1" });
+  const transport = new StreamableHTTPClientTransport(
+    new URL("http://example.test/mcp"),
+    {
+      requestInit: { headers: { Authorization: `Bearer ${token}` } },
+      fetch: async (input, init) =>
+        app.fetch(new Request(input, init), workerEnv),
+    },
+  );
+  await client.connect(
+    transport as unknown as Parameters<Client["connect"]>[0],
+  );
+  try {
+    return CallToolResultSchema.parse(
+      await client.callTool({ name, arguments: args }),
+    );
+  } finally {
+    await client.close();
+  }
+}
 
 const fixtureEvents = async (
   attachmentOverrides: Record<string, unknown> = {},
@@ -256,6 +288,111 @@ describe("authenticated attachment reads", () => {
         download_grant: expect.any(String),
       },
     ]);
+  });
+
+  it("returns actual authenticated MCP bytes and denies mismatched or revoked grants before provider I/O", async () => {
+    await seedProjection();
+    const provider: AttachmentProvider = {
+      read: vi.fn<AttachmentProvider["read"]>(async (input) => ({
+        status: "available",
+        bytes,
+        mime_type: input.expected_mime_type ?? "application/octet-stream",
+        sha256: await sha256Hex(bytes),
+      })),
+    };
+    const app = createTestApp(provider);
+    const metadataResult = await callAttachmentTool(app, "get_attachment", {
+      attachment_id: attachmentId,
+      identity_id: identityId,
+      account_id: accountId,
+    });
+    expect(metadataResult.isError).not.toBe(true);
+    const metadata = AttachmentMetadataSchema.parse(
+      metadataResult.structuredContent,
+    );
+    const args = {
+      attachment_id: attachmentId,
+      download_grant: metadata.download_grant,
+    };
+    expect(provider.read).not.toHaveBeenCalled();
+    const downloaded = await callAttachmentTool(
+      app,
+      "download_attachment",
+      args,
+    );
+    expect(downloaded.isError).not.toBe(true);
+    const resource = downloaded.content.find(
+      (item) => item.type === "resource",
+    );
+    expect(resource).toBeDefined();
+    if (resource?.type !== "resource" || !("blob" in resource.resource))
+      throw new Error("Expected embedded bytes, not metadata");
+    expect(resource.resource.mimeType).toBe("image/png");
+    expect(Buffer.from(resource.resource.blob, "base64")).toEqual(
+      Buffer.from(bytes),
+    );
+    expect(provider.read).toHaveBeenCalledTimes(1);
+    expect(
+      (
+        await callAttachmentTool(app, "download_attachment", {
+          ...args,
+          attachment_id: "attachment_other",
+        })
+      ).isError,
+    ).toBe(true);
+    expect(
+      (
+        await callAttachmentTool(
+          app,
+          "download_attachment",
+          args,
+          "agent-token",
+        )
+      ).isError,
+    ).toBe(true);
+    expect(
+      (
+        await callAttachmentTool(
+          app,
+          "get_attachment",
+          {
+            attachment_id: attachmentId,
+            identity_id: "identity_agent",
+            account_id: accountId,
+          },
+          "agent-token",
+        )
+      ).isError,
+    ).toBe(true);
+    expect(provider.read).toHaveBeenCalledTimes(1);
+    await workerEnv.CONTROL_DB.prepare(
+      "UPDATE account_grants SET status = 'revoked', revoked_at = '2026-09-07T00:00:00.000Z' WHERE account_id = ?",
+    )
+      .bind(accountId)
+      .run();
+    expect(
+      (await callAttachmentTool(app, "download_attachment", args)).isError,
+    ).toBe(true);
+    expect(provider.read).toHaveBeenCalledTimes(1);
+  });
+
+  it("preserves unavailable/oversize MCP metadata without provider I/O", async () => {
+    await seedProjection({ size_bytes: MAX_ATTACHMENT_BYTES + 1 });
+    const provider: AttachmentProvider = {
+      read: vi.fn<AttachmentProvider["read"]>(async () => ({
+        status: "unavailable",
+        reason: "provider_rejected",
+      })),
+    };
+    const app = createTestApp(provider);
+    const unavailable = await callAttachmentTool(app, "get_attachment", {
+      attachment_id: attachmentId,
+      identity_id: identityId,
+    });
+    expect(
+      AttachmentMetadataSchema.parse(unavailable.structuredContent),
+    ).toMatchObject({ availability: "unavailable", download_grant: null });
+    expect(provider.read).not.toHaveBeenCalled();
   });
 
   it("denies a delegated reader without the human account grant", async () => {
@@ -602,48 +739,65 @@ describe("authenticated attachment reads", () => {
     expect(JSON.stringify(errorBody)).not.toContain("fixture attachment bytes");
   });
 
-  it("rechecks removal authority after provider I/O before releasing bytes", async () => {
-    await seedProjection();
-    const provider: AttachmentProvider = {
-      read: vi.fn(async () => {
-        await recordRemoval(workerEnv.CONTROL_DB, {
-          tenant_id: tenantId,
-          resource_type: "attachment",
-          resource_id: attachmentId,
-          content_generation: attachmentId,
-          account_id: accountId,
-          conversation_id: conversationId,
-          source_event_id: "event_attachment_removed_during_read",
-          source_object_key: null,
-          reason: "requested",
-          removed_at: "2026-09-07T00:00:00.000Z",
+  it.each(["rest", "mcp"])(
+    "rechecks removal authority after provider I/O before releasing %s bytes",
+    async (transport) => {
+      await seedProjection();
+      const provider: AttachmentProvider = {
+        read: vi.fn(async () => {
+          await recordRemoval(workerEnv.CONTROL_DB, {
+            tenant_id: tenantId,
+            resource_type: "attachment",
+            resource_id: attachmentId,
+            content_generation: attachmentId,
+            account_id: accountId,
+            conversation_id: conversationId,
+            source_event_id: "event_attachment_removed_during_read",
+            source_object_key: null,
+            reason: "requested",
+            removed_at: "2026-09-07T00:00:00.000Z",
+          });
+          return {
+            status: "available" as const,
+            bytes,
+            mime_type: "image/png",
+            sha256: await sha256Hex(bytes),
+          };
+        }),
+      };
+      const app = createTestApp(provider);
+      const metadataResponse = await request(
+        app,
+        `/api/v1/attachments/${attachmentId}?identity_id=${identityId}`,
+      );
+      const metadata = AttachmentMetadataSchema.parse(
+        await metadataResponse.json(),
+      );
+      if (transport === "mcp") {
+        const result = await callAttachmentTool(app, "download_attachment", {
+          attachment_id: attachmentId,
+          download_grant: metadata.download_grant,
         });
-        return {
-          status: "available" as const,
-          bytes,
-          mime_type: "image/png",
-          sha256: await sha256Hex(bytes),
-        };
-      }),
-    };
-    const app = createTestApp(provider);
-    const metadataResponse = await request(
-      app,
-      `/api/v1/attachments/${attachmentId}?identity_id=${identityId}`,
-    );
-    const metadata = AttachmentMetadataSchema.parse(
-      await metadataResponse.json(),
-    );
-    const response = await request(
-      app,
-      `/api/v1/attachments/${attachmentId}/download?download_grant=${encodeURIComponent(metadata.download_grant ?? "")}`,
-    );
-    expect(response.status).toBe(410);
-    expect(ApiErrorResponseSchema.parse(await response.json()).error.code).toBe(
-      "attachment_removed",
-    );
-    expect(provider.read).toHaveBeenCalledTimes(1);
-  });
+        expect(result.isError).toBe(true);
+        expect(result.content).toEqual([
+          expect.objectContaining({
+            type: "text",
+            text: expect.stringContaining('"attachment_removed"'),
+          }),
+        ]);
+      } else {
+        const response = await request(
+          app,
+          `/api/v1/attachments/${attachmentId}/download?download_grant=${encodeURIComponent(metadata.download_grant ?? "")}`,
+        );
+        expect(response.status).toBe(410);
+        expect(
+          ApiErrorResponseSchema.parse(await response.json()).error.code,
+        ).toBe("attachment_removed");
+      }
+      expect(provider.read).toHaveBeenCalledTimes(1);
+    },
+  );
 
   it("revalidates account identity state after provider I/O", async () => {
     await seedProjection();

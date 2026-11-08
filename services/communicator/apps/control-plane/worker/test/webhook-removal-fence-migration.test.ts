@@ -32,6 +32,8 @@ const resetSchema = async (): Promise<void> => {
     await env.CONTROL_DB.prepare(`DROP TRIGGER IF EXISTS "${row.name}"`).run();
   }
   const tables = [
+    "tenant_wakeup_targets",
+    "tenant_wakeup_bootstrap",
     // Keep this teardown ordered from foreign-key children to their parents.
     // These tables are created by migrations after the schema under test, so
     // they may still exist when this fixture is reused by another test file.

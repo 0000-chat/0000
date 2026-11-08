@@ -386,6 +386,52 @@ def _credential_material_findings(value, path=()):
         yield ("value", path)
 
 
+def _unapproved_projection_scheduling_calls(source):
+    deadline = """
+        let timeout: ReturnType<typeof setTimeout> | undefined;
+        try {
+          available = await Promise.race([
+            observation,
+            new Promise<boolean>((resolve) => {
+              timeout = setTimeout(() => resolve(false), stopAt - Date.now());
+            }),
+          ]);
+        } finally {
+          clearTimeout(timeout);
+        }
+    """
+    expected = [(kind, value) for kind, value, _, _ in _typescript_tokens(deadline)]
+    tokens = _typescript_tokens(source)
+    for index in range(2, len(tokens)):
+        if [token[1] for token in tokens[index - 2:index + 1]] != [
+            "async", "#", "processOutboundAlarm"
+        ]:
+            continue
+        opening = next(
+            position for position in range(index + 1, len(tokens))
+            if tokens[position][:2] == ("punctuation", "{")
+        )
+        depth = 1
+        closing = opening
+        while depth:
+            closing += 1
+            if tokens[closing][:2] == ("punctuation", "{"):
+                depth += 1
+            elif tokens[closing][:2] == ("punctuation", "}"):
+                depth -= 1
+        for position in range(opening + 1, closing - len(expected) + 1):
+            candidate = tokens[position:position + len(expected)]
+            if [(kind, value) for kind, value, _, _ in candidate] == expected:
+                source = source[:candidate[0][2]] + source[candidate[-1][3]:]
+                break
+        break
+    return re.findall(
+        r"(?<!async )\b(?:setTimeout|setInterval|queueMicrotask|enqueue|schedule|alarm|waitUntil)\s*\(",
+        source,
+        flags=re.IGNORECASE,
+    )
+
+
 class RepositoryContractTests(unittest.TestCase):
     def test_generated_member_parser_handles_all_property_key_forms_and_nested_types(self):
         interface_body = r'''
@@ -807,7 +853,6 @@ class RepositoryContractTests(unittest.TestCase):
             r"(?<!async )\b(?:fetch|globalThis\s*\.\s*fetch|this\s*\??\.\s*fetch|"
             r"(?:ctx|context|env)\s*\??\.\s*fetch)\s*\(",
             r"\b(?:new\s+)?(?:WebSocket|EventSource)\s*\(",
-            r"(?<!async )\b(?:setTimeout|setInterval|queueMicrotask|enqueue|schedule|alarm|waitUntil)\s*\(",
             r"\b(?:[A-Za-z_$][\w$]*\.)*[A-Za-z_$]*(?:queue|queues)[A-Za-z0-9_$]*\s*"
             r"(?:\?\.\s*|\.\s*)(?:send|sendBatch)\s*\(",
             r"\b(?:[A-Za-z_$][\w$]*\.)*[A-Za-z_$]*(?:queue|queues)[A-Za-z0-9_$]*\s*"
@@ -826,6 +871,7 @@ class RepositoryContractTests(unittest.TestCase):
         )
         for pattern in side_effect_patterns:
             self.assertIsNone(re.search(pattern, projection_code, flags=re.IGNORECASE), pattern)
+        self.assertEqual([], _unapproved_projection_scheduling_calls(projection_code))
         self.assertIsNone(
             re.search(
                 r"\b(?:EVENT_ARCHIVE|INGESTION_QUEUE|Queue|R2Bucket|R2Object)\b",
@@ -842,6 +888,24 @@ class RepositoryContractTests(unittest.TestCase):
             r"e2ee_key",
         ):
             self.assertIsNone(re.search(pattern, projection_text, flags=re.IGNORECASE))
+
+    def test_projection_scheduling_guard_allows_only_scoped_awaited_lookup_deadline(self):
+        source = (ROOT / "apps/control-plane/worker/projection/tenant-projection.ts").read_text()
+        source = re.sub(r"/\*.*?\*/|//[^\n]*", "", source, flags=re.DOTALL)
+        self.assertEqual([], _unapproved_projection_scheduling_calls(source))
+        for changed in (
+            source + "\nsetTimeout(() => unrelatedWork(), 1);",
+            source.replace(
+                "const stopAt = Date.now() + 1_000;",
+                "const stopAt = Date.now() + 1_000; setTimeout(() => unrelatedWork(), 1);",
+            ),
+            source.replace("async #processOutboundAlarm", "async #unrelatedMethod"),
+            source.replace("() => resolve(false)", "() => unrelatedWork()"),
+            source.replace("available = await Promise.race", "available = Promise.race"),
+            source.replace("clearTimeout(timeout);", "unrelatedWork();"),
+        ):
+            with self.subTest(changed=changed[-100:]):
+                self.assertTrue(_unapproved_projection_scheduling_calls(changed))
 
     def test_realtime_ticket_storage_is_digest_only_and_single_use(self):
         migration = (ROOT / "apps/control-plane/migrations/0004_realtime_tickets.sql").read_text()

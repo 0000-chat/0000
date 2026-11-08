@@ -30,6 +30,8 @@ async function resetSchema() {
     ).run();
   }
   for (const table of [
+    "tenant_wakeup_targets",
+    "tenant_wakeup_bootstrap",
     "group_dispatch_claims",
     "group_authority_intents",
     "contact_dispatch_claims",

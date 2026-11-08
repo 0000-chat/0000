@@ -28,7 +28,6 @@ use communicator_matrix_gateway::{
         restore_matrix_processor,
     },
     matrix_http::ReqwestMatrixTransport,
-    outbound::{MatrixSdkGroupManager, MatrixSdkTextSender},
     provisioning::{
         GatewayRouteMetadata, ProvisioningGatewayServer, WhatsAppProvisioningClient,
         serve_private_gateway,
@@ -228,7 +227,7 @@ async fn run_provisioning(config_path: &Path) -> Result<(), SafeError> {
             max_bytes: MAX_TEXT_SECRET_BYTES,
         },
     )?;
-    let matrix_client = restore_matrix_client(
+    let (matrix_client, matrix_context) = restore_matrix_client(
         config.homeserver_url(),
         config.matrix_user_id(),
         config.matrix_store_dir(),
@@ -246,7 +245,8 @@ async fn run_provisioning(config_path: &Path) -> Result<(), SafeError> {
         store,
         Arc::new(transport),
         gateway_transport_secret.as_str(),
-    )?;
+    )?
+    .with_matrix_context(matrix_context);
     let authority = AuthorityClaimClient::new(
         provisioning.authority_base_url(),
         authority_credential,
@@ -260,7 +260,7 @@ async fn run_provisioning(config_path: &Path) -> Result<(), SafeError> {
         Duration::from_secs(config.request_timeout_secs()),
     )
     .map_err(|error| SafeError::new(error.code()))?;
-    let server = ProvisioningGatewayServer::new(
+    let server = ProvisioningGatewayServer::new_with_matrix_runtime(
         client,
         gateway_transport_secret,
         GatewayRouteMetadata {
@@ -269,19 +269,12 @@ async fn run_provisioning(config_path: &Path) -> Result<(), SafeError> {
             matrix_user_id: provisioning.matrix_user_id().to_owned(),
             matrix_room_namespace: provisioning.matrix_room_namespace().to_owned(),
         },
+        history,
+        matrix_client,
+        Arc::new(authority),
+        Duration::from_secs(config.request_timeout_secs()),
     )
     .map_err(|error| SafeError::new(error.code()))?;
-    let server = server
-        .with_history(history)
-        .with_outbound_sender(Arc::new(MatrixSdkTextSender::new(
-            matrix_client.clone(),
-            Duration::from_secs(config.request_timeout_secs()),
-        )))
-        .with_group_manager(Arc::new(MatrixSdkGroupManager::new(
-            matrix_client,
-            Duration::from_secs(config.request_timeout_secs()),
-        )))
-        .with_outbound_authority(Arc::new(authority));
     serve_private_gateway(server, provisioning.listen_addr())
         .await
         .map_err(|_| SafeError::new("provisioning_listen_failed"))

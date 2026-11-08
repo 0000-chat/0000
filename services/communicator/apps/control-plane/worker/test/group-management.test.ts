@@ -817,6 +817,7 @@ describe("group management gateway envelope", () => {
     expect(sent).toMatchObject({
       action: "rename",
       name: "Renamed Team",
+      participant_provider_ids: [],
       operation_created_at: timestamp,
       expected_revision: "1",
       membership_id: "membership_human",

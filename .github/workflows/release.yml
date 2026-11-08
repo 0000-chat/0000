@@ -36,6 +36,11 @@ jobs:
       - run: bun install --frozen-lockfile
       - run: bun run check
       - run: bun run test:release
+      - name: Verify isolated Communicator release consumer
+        run: |
+          pnpm --dir services/communicator install --frozen-lockfile
+          rustup toolchain install 1.93.0 --profile minimal --no-self-update
+          bun run test:release:communicator
       - run: bun run check:turbo
       - run: bun run check:turbo:dry
       - name: Check Brain service
@@ -48,7 +53,7 @@ jobs:
     name: Record and publish immutable release
     needs: quality
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 45
     permissions:
       contents: read
       id-token: write
@@ -70,6 +75,17 @@ jobs:
         env:
           RELEASE_PLAN: ${{ runner.temp }}/0000-release-plan.json
         run: node scripts/release/plan.mjs --base "${{ github.event.before }}" --head "$GITHUB_SHA" --output "$RELEASE_PLAN" --github-output "$GITHUB_OUTPUT"
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.14.0
+      - name: Install Communicator build inputs when selected
+        env:
+          RELEASE_PLAN: ${{ runner.temp }}/0000-release-plan.json
+        run: |
+          if jq -e '.affected_units | index("communicator-control-plane") != null' "$RELEASE_PLAN" >/dev/null; then
+            pnpm --dir services/communicator install --frozen-lockfile
+            rustup toolchain install 1.93.0 --profile minimal --no-self-update
+          fi
       - name: Build deterministic affected artifacts
         env:
           RELEASE_PLAN: ${{ runner.temp }}/0000-release-plan.json
@@ -81,6 +97,17 @@ jobs:
           ARTIFACT_DIR: ${{ runner.temp }}/0000-release-artifacts
           RELEASE_RECORD: ${{ runner.temp }}/0000-release-record.json
         run: node scripts/release/record.mjs --plan "$RELEASE_PLAN" --artifact-dir "$ARTIFACT_DIR" --output "$RELEASE_RECORD"
+      - name: Check Communicator composition before attestation
+        env:
+          RELEASE_PLAN: ${{ runner.temp }}/0000-release-plan.json
+          RELEASE_RECORD: ${{ runner.temp }}/0000-release-record.json
+          ARTIFACT_DIR: ${{ runner.temp }}/0000-release-artifacts
+        run: |
+          if jq -e '.affected_units | index("communicator-control-plane") != null' "$RELEASE_PLAN" >/dev/null; then
+            node scripts/release/verify-communicator.mjs --record "$RELEASE_RECORD" \
+              --artifact-dir "$ARTIFACT_DIR" --commit "$GITHUB_SHA" --api v1 --config v1 \
+              --local-integrity-only
+          fi
       - name: Validate public release App configuration
         env:
           PUBLIC_RELEASE_APP_CLIENT_ID: ${{ vars.PUBLIC_RELEASE_APP_CLIENT_ID }}

@@ -620,6 +620,19 @@ pub struct OutboundTextCompletion {
     pub updated_at: DateTime<Utc>,
 }
 
+/// Body-free journal context for authenticated, read-only bridge observations.
+pub struct OutboundEvidenceContext {
+    pub account_id: String,
+    pub connection_id: String,
+    pub identity_id: String,
+    pub conversation_id: String,
+    pub request_digest: String,
+    pub session_generation: String,
+    pub projection_generation: u64,
+    pub matrix_room_id: String,
+    pub matrix_event_id: String,
+}
+
 struct StoredOutboundTextRow {
     transaction_id: String,
     idempotency_key: String,
@@ -822,6 +835,55 @@ impl Store {
         &self.pragmas
     }
 
+    pub fn outbound_evidence_context(
+        &self,
+        tenant_id: &str,
+        transaction_id: &str,
+    ) -> Result<OutboundEvidenceContext, SafeError> {
+        let row = self
+            .connection
+            .query_row(
+                "SELECT transaction_id, idempotency_key, request_digest, body_digest,
+                    tenant_id, account_id, connection_id, identity_id,
+                    conversation_id, message_id, event_id, matrix_room_id,
+                    session_generation, projection_generation,
+                    body_cipher, body_nonce, body_key_version, state,
+                    response_cipher, response_nonce, response_key_version, response_sha256
+             FROM outbound_transactions WHERE tenant_id = ?1 AND transaction_id = ?2",
+                params![tenant_id, transaction_id],
+                read_stored_outbound_row,
+            )
+            .optional()
+            .map_err(|_| SafeError::new(STORE_OUTBOUND_CORRUPT))?
+            .ok_or_else(|| SafeError::new(crate::evidence::EVIDENCE_CONFLICT))?;
+        let response = open_outbound_response(&self.keyring, &row)?
+            .ok_or_else(|| SafeError::new(crate::evidence::EVIDENCE_UNSUPPORTED))?;
+        let value: serde_json::Value = serde_json::from_slice(&response)
+            .map_err(|_| SafeError::new(STORE_OUTBOUND_CORRUPT))?;
+        let matrix_event_id = value["evidence"]
+            .as_array()
+            .and_then(|items| {
+                items
+                    .iter()
+                    .find(|item| item["source"] == "matrix" && item["status"] == "confirmed")
+            })
+            .and_then(|item| item["evidence_id"].as_str())
+            .ok_or_else(|| SafeError::new(crate::evidence::EVIDENCE_UNSUPPORTED))?
+            .to_owned();
+        Ok(OutboundEvidenceContext {
+            account_id: row.account_id,
+            connection_id: row.connection_id,
+            identity_id: row.identity_id,
+            conversation_id: row.conversation_id,
+            request_digest: row.request_digest,
+            session_generation: row.session_generation,
+            projection_generation: u64::try_from(row.projection_generation)
+                .map_err(|_| SafeError::new(STORE_OUTBOUND_CORRUPT))?,
+            matrix_room_id: row.matrix_room_id,
+            matrix_event_id,
+        })
+    }
+
     /// Commit one outbound request before any Matrix or bridge I/O occurs.
     ///
     /// The transaction ID is the provider-neutral idempotency key. A matching
@@ -931,6 +993,24 @@ impl Store {
             .commit()
             .map_err(|_| SafeError::new(STORE_OUTBOUND_CORRUPT))?;
         Ok(OutboundTextPreparation::Created)
+    }
+
+    /// Remove only a newly prepared request explicitly refused before the
+    /// one-shot authority claim. Never use this for a lost claim response.
+    pub(crate) fn forget_unclaimed_outbound_text(
+        &mut self,
+        tenant_id: &str,
+        transaction_id: &str,
+        request_digest: &str,
+    ) -> Result<bool, SafeError> {
+        self.connection
+            .execute(
+                "DELETE FROM outbound_transactions WHERE tenant_id = ?1 AND transaction_id = ?2
+             AND request_digest = ?3 AND state = 'pending' AND response_cipher IS NULL",
+                params![tenant_id, transaction_id, request_digest],
+            )
+            .map(|changed| changed == 1)
+            .map_err(|_| SafeError::new(STORE_OUTBOUND_CORRUPT))
     }
 
     /// Persist the result of the one authorized outbound attempt. Once this

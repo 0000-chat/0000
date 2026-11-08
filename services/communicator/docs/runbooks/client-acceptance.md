@@ -51,8 +51,10 @@ Fill every target field from the actual run:
   Administrator-only operations may use a separate
   `admin_access_token_env` or `admin_access_token_file`.
 
-The operator must obtain the token through the documented OAuth authorization
-code flow. The runner can create the authorization URL and exchange the
+Obtain the token through the approved Platform flow described in
+[Platform-backed authentication](oauth-remote-mcp.md). Do not bootstrap the
+retired Worker-local issuer. No public Communicator MCP address is established
+by this runner. The runner can create the authorization URL and exchange the
 callback code with PKCE S256:
 
 ```sh
@@ -98,10 +100,10 @@ exact MCP tool and its published response pointers. A REST operation uses a
 relative path; mutating routes must declare their exact JSON body for the
 method and path, and linking disconnect additionally requires an
 `Idempotency-Key`. An MCP operation uses a declared tool or the `initialize`
-method. The current Worker-bound mappings cover `list_messages`,
-`send_text_reply`, and `get_text_reply_status`; a tool without a published
-canonical response mapping remains unverified and cannot pass through an
-arbitrary successful response. Template values use `${target...}`, `${binding...}`,
+method. Worker-bound mappings include the shared permission, history,
+attachment, direct-chat, group, webhook, receipt, and removal schemas listed
+below. A tool without a canonical response mapping remains unverified and
+cannot pass through an arbitrary successful response. Template values use `${target...}`, `${binding...}`,
 `${vars...}`, and validated IDs from earlier passing operations as
 `${observed...}`. The runner hashes request bodies and stores only bounded
 scalar response fields.
@@ -110,12 +112,13 @@ The existing Communicator entrypoints used by the plan include:
 
 | Acceptance area | REST entrypoint examples | MCP entrypoint examples |
 | --- | --- | --- |
+| Permission inspection and requests | `GET /api/v1/grants`, `GET/POST /api/v1/permission-requests` | `list_grants`, `list_permission_requests`, `request_permissions` |
 | Stored read and context | `GET /api/v1/identities/{id}/conversations`, `GET /api/v1/conversations/{id}/messages`, `GET /api/v1/search/messages` | `list_messages` |
-| Attachment access | `GET /api/v1/attachments/{id}`, `GET /api/v1/attachments/{id}/download` | Use the documented attachment read tool when the target exposes it |
-| Text and direct chat | `POST /api/v1/conversations/{id}/messages`, `POST /api/v1/contacts/resolve`, `POST /api/v1/conversations` | `send_text_reply`, `get_text_reply_status` |
-| Groups | `POST /api/v1/groups`, `PATCH /api/v1/groups/{conversation_id}`, `POST/DELETE /api/v1/groups/{conversation_id}/participants` | A tool requires an explicit Worker schema and canonical response mapping before it can pass |
-| Webhooks | `/api/v1/webhook-subscriptions` and `/api/v1/webhook-deliveries/{id}` | A tool requires an explicit Worker schema and canonical response mapping before it can pass |
-| Receipts and removals | `POST /api/v1/conversations/{id}/receipts/read`, `/api/v1/receipts`, `/api/v1/removals` | A tool requires an explicit Worker schema and canonical response mapping before it can pass |
+| Attachment access | `GET /api/v1/attachments/{id}`, `GET /api/v1/attachments/{id}/download` | `get_attachment`, `download_attachment` |
+| Text and direct chat | `POST /api/v1/conversations/{id}/messages`, `POST /api/v1/contacts/resolve`, `POST /api/v1/conversations` | `send_text_reply`, `get_text_reply_status`, `resolve_contact`, `create_direct_chat` |
+| Groups | `POST /api/v1/groups`, `PATCH /api/v1/groups/{conversation_id}`, `POST/DELETE /api/v1/groups/{conversation_id}/participants` | `create_group`, `rename_group`, `add_group_participants`, `remove_group_participants` |
+| Webhooks | `/api/v1/webhook-subscriptions` and `/api/v1/webhook-deliveries/{id}` | `create_webhook_subscription`, `get_webhook_subscription`, `get_webhook_delivery`, `retry_webhook_delivery`, `cutover_webhook_subscription` |
+| Receipts and removals | `POST /api/v1/conversations/{id}/receipts/read`, `/api/v1/receipts`, `/api/v1/removals` | `mark_read`, `record_removal`, `get_removal_status`, `get_restore_authority` |
 | Linking | Administrator-only `/api/v1/identities/{id}/link-sessions`, `/api/v1/connections/{id}/relink-sessions`, `/api/v1/connections/{id}/disconnect`, grant, and stored-read routes | Agent MCP has no linking authority |
 
 Use the target's OpenAPI document and current MCP tool schemas to fill request
@@ -144,6 +147,82 @@ unexpected response. Use `unverified` when the target could not be tested or
 the available response does not prove the behavior. The harness does not allow
 a configuration to label an unexpected response as a pass.
 
+### Separate metadata from authenticated bytes
+
+`attachment_read` requires `scope`, `metadata`, and `bytes` observations.
+`scope` binds the account, chat, and message through a stored-message read.
+`metadata` returns the same message ID plus attachment ID, MIME type, SHA-256,
+size, and short-lived download authority. It does not retrieve bytes.
+
+On the `bytes` request, set `download_from` to the earlier metadata operation
+ID. Use its attachment ID in the REST download path or MCP `attachment_id`
+argument. The runner injects the transient grant for the same actor and
+transport. It never adds the grant to `${observed...}` or the evidence bundle.
+Do not put a grant in the configuration, URL path, or extracted fields.
+
+REST byte evidence hashes the actual response body with `raw_sha256` and
+counts it with `raw_size`, both using the empty root pointer. MCP byte
+evidence decodes `/result/content/0/resource/blob` with `base64_sha256` and
+`base64_size`. Record the results as `sha256` and `attachment_size`. Both must
+match metadata. Metadata-only success leaves the case `unverified`; changed
+bytes produce `implementation_defect`. Reads remain bounded to 8 MiB before
+base64 encoding.
+
+The installed SDK represents MCP bytes as an embedded resource with an opaque
+`communicator:attachment/{id}` URI. This is not a public download URL. Local
+SDK tests do not establish that ChatGPT Work or any Grok client accepts the
+representation. Removed, expired, unavailable, oversized, or unsupported
+results must remain explicit rather than being counted as retrieved files.
+
+### Keep receiver and restore proof independent
+
+Webhook subscription creation proves an ID and destination version, not a
+receiver observation. Each initial subscription case separates `subscription`,
+known-ID `delivery`, and `receiver`. Retry separates `retry_result` from
+`receiver`; cutover separates `before`, `cutover_result`, and `cancellation`.
+`revision_removal` inspects a delivery, never deletes a subscription as a
+substitute for proving content removal. Retry is webhook notification retry,
+not message or provider resend, and does not reset the retry deadline.
+
+To discover deliveries, request
+`GET /api/v1/webhook-subscriptions/{subscription_id}/deliveries` with an optional
+`limit` from 1 to 100 and the previous page's opaque `cursor`. The default is
+50. The response contains `items` in ascending delivery-ID order and a nullable
+`next_cursor`. Items contain delivery metadata, not payloads or receiver response
+bodies. The existing subscription authority and `webhook.manage` ceiling apply.
+Each subscription has independent pages and selections in System.
+
+A cursor belongs to one tenant, subscription, principal, membership, and removal
+epoch. Malformed or wrong-scope cursors return 400. A changed removal epoch returns
+409. Refresh by discarding all pages and the cursor, then requesting the first
+page again. Refresh also clears the UI's selected delivery. A cursor does not
+grant access or freeze delivery status. Selecting a delivery reads its current
+details through the existing delivery-by-ID route.
+
+Discovery does not prove receiver processing. The Worker has no receiver-observation
+response contract. Keep receiver observations `unverified` and retain separately
+captured receiver evidence for review. The automatic retry deadline remains 24
+hours after first pending. An explicit authorized manual retry may occur later
+without resetting that deadline. It does not resend a provider message.
+
+`explicit_receipt` maps the real operation status and Matrix, bridge, and
+provider stages. Stored reads never imply a provider read receipt.
+`active_removal` separates recorded `authority` from suppression evidence.
+`restore_anti_resurrection` separates REST `restore-projection`, a `retained`
+message read, and stale-work `suppression`. MCP has authority inspection but
+no restore mutation tool. An authority record or a retained-message read
+alone cannot prove absence of every stale controlled copy. Suppression proof
+without a canonical response remains `unverified`; physical purge is not
+claimed complete.
+
+Authentication failures use the actual HTTP error envelope. MCP local-scope
+denials may instead use HTTP 200 with `isError: true` and a structured error
+inside text content. Successful tool results cannot satisfy a denial case.
+The error envelope alone does not identify the expired/revoked installation
+or account mismatch, so those missing fields remain unverified. Use separate
+negative-credential runs and retain the authority test provenance. A mocked
+authority response is not cryptographic issuer or external-client proof.
+
 ## Cover the ticket scenarios
 
 The configuration must include operations for each scenario below. One run
@@ -154,12 +233,13 @@ mobile, and Bot surface, then review the bundles together.
 | --- | --- | --- |
 | `oauth_connection` | #35, #36 | Protected-resource metadata, authorization-server metadata, PKCE S256, and a real MCP initialize plus scoped tool call with the configured resource and installation. |
 | `linking_identity_lifecycle` | #35 | Start unlinked, administrator identity verification and grant, same-identity relink with stable IDs, explicit disconnect preserving history, and a different identity with a new account and no inherited grant. |
+| `permission_inspection_request` | #35, #36 | Inspect own grants and permission requests. Request administrator review and observe pending status without acquiring a grant. |
 | `history_context_attachment` | #35 | Stored history/context and an authenticated attachment read, with account and chat binding and no provider credential in the response. |
 | `text_send_and_route` | #35, #36 | Durable saved text, account-owned route, Matrix/bridge/provider stages, and provider evidence. A saved or HTTP-accepted command alone does not prove WhatsApp delivery. |
 | `direct_chat_and_group` | #35 | Contact or phone resolution, direct chat creation, group creation, rename, and member changes with the required provider identifiers and grants. |
 | `webhook_subscriptions` | #35 | Two independent subscriptions, receiver IDs, current revision, content-free removal, retry age, manual retry, cutover, and revocation behavior. |
-| `receipt_and_restore` | #35 | Explicit receipt result class plus active removal and restore evidence showing no stale body, file, command, or delivery resurrection. |
-| `authorization_negative_matrix` | #35, #36 | Wrong resource, expired or revoked installation, missing grant, wrong account/chat, and no silent account failover. |
+| `receipt_and_restore` | #35 | Explicit receipt status/stages plus active removal and separate restore/suppression evidence showing no stale body, file, command, or delivery resurrection. |
+| `authorization_negative_matrix` | #35, #36 | Wrong issuer or resource, expired or revoked installation, missing grant, wrong account/chat, and no silent account failover. |
 | `grok_surface_read` | #36 | Exact Grok surface authenticates to MCP and reads only its administrator-granted account/chat scope. |
 | `grok_surface_send` | #36 | Exact Grok surface submits text, observes saved/dispatch state, and records distinct provider evidence. |
 | `grok_bot_identity` | #36 | Signed-in member and OAuth installation are recorded. A shared Bot connection does not gain invented per-Bot ownership. |

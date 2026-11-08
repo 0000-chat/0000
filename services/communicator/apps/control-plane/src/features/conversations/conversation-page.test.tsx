@@ -9,6 +9,129 @@ import { server } from "@/mocks/server";
 import { pilotScenario } from "@communicator/test-fixtures";
 
 describe("conversation journeys", () => {
+  it.each([
+    [
+      "submitted_to_matrix",
+      "Submitted to messaging service — delivery not confirmed",
+    ],
+    [
+      "matrix_confirmed",
+      "Messaging service accepted — provider delivery not confirmed",
+    ],
+    ["delivered", "Delivered — confirmed by provider evidence"],
+    [
+      "delivery_uncertain",
+      "Delivery uncertain — review Activity before any deliberate resend.",
+    ],
+    [
+      "failed",
+      "Command saved (failed) — review Activity for its current state.",
+    ],
+  ])(
+    "describes a returned %s command without relabeling it accepted or delivered",
+    async (status, message) => {
+      server.use(
+        http.post("*/api/v1/conversations/:conversationId/messages", () =>
+          HttpResponse.json(
+            {
+              ...pilotScenario.commands[0],
+              status,
+            },
+            { status: 202 },
+          ),
+        ),
+      );
+      const user = userEvent.setup();
+      renderApp(
+        "/conversations/conversation_human_telegram_alex?identity=identity_human&channel=connection_human_telegram",
+      );
+      await user.type(
+        await screen.findByRole("textbox", { name: "Message" }),
+        "Local status fixture",
+      );
+      await user.click(screen.getByRole("button", { name: "Send message" }));
+      expect(await screen.findByText(message)).toBeVisible();
+    },
+  );
+
+  it("freezes an ambiguous request and checks the same key and body only on explicit action", async () => {
+    const requests: Array<{ key: string | null; body: unknown }> = [];
+    server.use(
+      http.post(
+        "*/api/v1/conversations/:conversationId/messages",
+        async ({ request }) => {
+          requests.push({
+            key: request.headers.get("Idempotency-Key"),
+            body: await request.json(),
+          });
+          return requests.length === 1
+            ? HttpResponse.json(
+                {
+                  error: {
+                    code: "service_unavailable",
+                    message: "Service unavailable",
+                  },
+                },
+                { status: 502 },
+              )
+            : HttpResponse.json(
+                { ...pilotScenario.commands[0], status: "accepted" },
+                { status: 202 },
+              );
+        },
+      ),
+    );
+    const user = userEvent.setup();
+    renderApp(
+      "/conversations/conversation_human_telegram_alex?identity=identity_human&channel=connection_human_telegram",
+    );
+    const body = await screen.findByRole("textbox", { name: "Message" });
+    await user.type(body, "Keep this exact request");
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+    const check = await screen.findByRole("button", {
+      name: "Retry same request",
+    });
+    expect(body).toBeDisabled();
+    expect(
+      screen.getByRole("combobox", { name: "Delivery mode" }),
+    ).toBeDisabled();
+    expect(screen.getByText(/Acceptance uncertain/)).toBeVisible();
+    expect(requests).toHaveLength(1);
+    await user.click(check);
+    expect(
+      await screen.findByText("Accepted — awaiting messaging confirmation"),
+    ).toBeVisible();
+    expect(requests).toHaveLength(2);
+    expect(requests[0]?.key).toBeTruthy();
+    expect(requests[1]).toEqual(requests[0]);
+    expect(body).toBeEnabled();
+  });
+
+  it("describes a definitive rejection without clearing the editable draft", async () => {
+    server.use(
+      http.post("*/api/v1/conversations/:conversationId/messages", () =>
+        HttpResponse.json(
+          {
+            error: { code: "forbidden", message: "Forbidden" },
+          },
+          { status: 403 },
+        ),
+      ),
+    );
+    const user = userEvent.setup();
+    renderApp(
+      "/conversations/conversation_human_telegram_alex?identity=identity_human&channel=connection_human_telegram",
+    );
+    const body = await screen.findByRole("textbox", { name: "Message" });
+    await user.type(body, "Keep the rejected draft");
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+    expect(
+      await screen.findByText(/Request rejected — no new command accepted/),
+    ).toBeVisible();
+    expect(body).toBeEnabled();
+    expect(body).toHaveValue("Keep the rejected draft");
+  });
+
   it("labels the active thread with identity, provider, and account", async () => {
     renderApp(
       "/conversations/conversation_human_telegram_alex?identity=identity_human&channel=connection_human_telegram&message=message_conversation_human_telegram_alex_outbound",
@@ -225,7 +348,7 @@ describe("conversation journeys", () => {
     expect(screen.queryByText("Alex Rivera")).not.toBeInTheDocument();
   });
 
-  it("accepts one simulated direct command and previews Human-paced delivery", async () => {
+  it("accepts direct commands but disables unsupported pacing without creating a command", async () => {
     const user = userEvent.setup();
     simulatedStore.reset();
     renderApp(
@@ -270,14 +393,21 @@ describe("conversation journeys", () => {
       screen.getByRole("combobox", { name: "Delivery mode" }),
       "paced",
     );
-    expect(screen.getByText("Human-paced preview")).toBeVisible();
-    for (const phase of [
-      "Mark read (when supported)",
-      "Reading delay",
-      "Typing indicator",
-      "Send message",
-    ]) {
-      expect(screen.getAllByText(phase).length).toBeGreaterThan(0);
-    }
+    await user.type(
+      screen.getByRole("textbox", { name: "Message" }),
+      "Do not send this paced draft",
+    );
+    expect(
+      screen.queryByText("Accepted — awaiting messaging confirmation"),
+    ).not.toBeInTheDocument();
+    expect(screen.getByText("Human pacing is unavailable")).toBeVisible();
+    expect(sendButton).toBeDisabled();
+    await user.click(sendButton);
+    expect(simulatedStore.commands("identity_human")).toHaveLength(3);
+    await user.selectOptions(
+      screen.getByRole("combobox", { name: "Delivery mode" }),
+      "direct",
+    );
+    expect(sendButton).toBeEnabled();
   });
 });

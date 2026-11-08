@@ -2,7 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import {
   CommunicatorIdSchema,
-  DeliveryModeSchema,
+  TextReplyRequestSchema,
   MessageSearchDirectionSchema,
   WebhookEventFilterSchema,
   WebhookDeliveryRetrySchema,
@@ -17,6 +17,7 @@ import {
   GroupParticipantsRequestSchema,
   GroupRenameRequestSchema,
   ReadReceiptRequestSchema,
+  PermissionRequestCreateSchema,
   type TextReplyRequest,
 } from "@communicator/contracts";
 import type { Context } from "hono";
@@ -42,7 +43,19 @@ import {
   type ReadHandlerContext,
 } from "./read/handlers";
 import { ReadError, readErrorResponse } from "./read/errors";
-import { listConnectedAccounts } from "./control-directory/grants";
+import {
+  listConnectedAccounts,
+  GrantRepositoryError,
+} from "./control-directory/grants";
+import { hasPlatformCapabilities } from "./auth/capability";
+import {
+  inspectGrants,
+  inspectPermissionRequests,
+  requestPermissions,
+  PermissionDeniedError,
+} from "./permissions/service";
+import { registerAttachmentMcpTools } from "./attachments/mcp";
+import type { AttachmentRouteServices } from "./attachments/routes";
 import {
   authorizeWebhookInspection,
   createWebhookSubscription,
@@ -212,7 +225,7 @@ const sendTextReplyInput = {
   conversation_id: boundedId,
   account_id: optionalId,
   body: z.string().trim().min(1).max(20_000),
-  delivery_mode: DeliveryModeSchema,
+  delivery_mode: TextReplyRequestSchema.shape.delivery_mode,
   idempotency_key: z.string().trim().min(1).max(200),
   attachments: z.array(z.unknown()).max(0).optional(),
 };
@@ -295,6 +308,11 @@ const contextForRead = (context: McpContext): ReadHandlerContext => ({
   env: context.env,
   authorization: context.get("authorization"),
   delegated: context.get("delegated"),
+  credential: context.get("authorizationCredential"),
+  platformCapabilities:
+    context.get("platformPrincipal") === undefined
+      ? undefined
+      : (context.get("platformCapabilities") ?? []),
 });
 
 const contextForContacts = (
@@ -324,6 +342,11 @@ const webhookActorFor = (context: ReadHandlerContext): WebhookActor => ({
 
 const webhookDatabase = (context: ReadHandlerContext): D1Database => {
   if (
+    !hasPlatformCapabilities(context.platformCapabilities, "webhook.manage")
+  ) {
+    throw new ReadError("forbidden");
+  }
+  if (
     context.env.CONTROL_DB === undefined ||
     typeof context.env.CONTROL_DB.withSession !== "function"
   ) {
@@ -348,6 +371,40 @@ const requireDelegatedGrant = async (
 };
 
 const errorResult = (error: unknown) => {
+  if (
+    error instanceof PermissionDeniedError ||
+    error instanceof GrantRepositoryError
+  ) {
+    const code =
+      error instanceof PermissionDeniedError
+        ? "forbidden"
+        : error.code === "grant_invalid" || error.code === "grant_conflict"
+          ? "invalid_request"
+          : error.code === "grant_not_found"
+            ? "not_found"
+            : "service_unavailable";
+    return {
+      isError: true,
+      content: [
+        {
+          type: "text" as const,
+          text: JSON.stringify({
+            error: {
+              code,
+              message:
+                code === "forbidden"
+                  ? "Forbidden"
+                  : code === "invalid_request"
+                    ? "Invalid grant data"
+                    : code === "not_found"
+                      ? "Grant not found"
+                      : "Grant directory unavailable",
+            },
+          }),
+        },
+      ],
+    };
+  }
   if (error instanceof WebhookRepositoryError) {
     const code =
       error.code === "webhook_invalid"
@@ -471,6 +528,11 @@ const listAccounts = async (
     limit: number | undefined;
   },
 ) => {
+  if (
+    !hasPlatformCapabilities(context.platformCapabilities, "directory.read")
+  ) {
+    throw new ReadError("forbidden");
+  }
   const targetIdentityId =
     input.identity_id ?? context.authorization.identities[0]?.identity_id;
   if (targetIdentityId === undefined) {
@@ -517,11 +579,51 @@ const registerTools = (
   contactServices: ContactRouteServices,
   groupServices: GroupRouteServices,
   receiptServices: ReceiptServices,
+  attachmentServices: AttachmentRouteServices,
 ): void => {
   registerRemovalMcpTools(server, {
     env: context.env,
     authorization: context.authorization,
+    platformCapabilities: context.platformCapabilities,
   });
+  registerAttachmentMcpTools(server, context, attachmentServices);
+
+  server.registerTool(
+    "list_grants",
+    {
+      description:
+        "Inspect only your own account/chat permissions; administrators may inspect tenant grants",
+      inputSchema: {
+        ...listAccountsInput,
+        account_id: optionalId,
+        status: z.enum(["active", "revoked"]).optional(),
+      },
+    },
+    (input) => withReadErrors(() => inspectGrants(context, input)),
+  );
+  server.registerTool(
+    "list_permission_requests",
+    {
+      description:
+        "Inspect pending and decided requests without granting access",
+      inputSchema: {
+        ...listAccountsInput,
+        status: z
+          .enum(["pending", "approved", "rejected", "cancelled"])
+          .optional(),
+      },
+    },
+    (input) => withReadErrors(() => inspectPermissionRequests(context, input)),
+  );
+  server.registerTool(
+    "request_permissions",
+    {
+      description:
+        "Request administrator review for your own identity; a pending request never grants permissions",
+      inputSchema: PermissionRequestCreateSchema,
+    },
+    (input) => withReadErrors(() => requestPermissions(context, input)),
+  );
 
   server.registerTool(
     "list_identities",
@@ -1108,6 +1210,7 @@ const registerTools = (
           {
             env: context.env,
             authorization: context.authorization,
+            credential: context.credential,
           },
           request,
           input.idempotency_key,
@@ -1139,6 +1242,7 @@ export async function handleMcpRequest(
   contactServices: ContactRouteServices = {},
   groupServices: GroupRouteServices = {},
   receiptServices: ReceiptServices = {},
+  attachmentServices: AttachmentRouteServices = {},
 ): Promise<Response> {
   if (!validMcpRequestHeaders(context.req.raw)) {
     return new Response(
@@ -1159,6 +1263,7 @@ export async function handleMcpRequest(
     contactServices,
     groupServices,
     receiptServices,
+    attachmentServices,
   );
   const requestUrl = new URL(context.req.url);
   const transport = new WebStandardStreamableHTTPServerTransport({

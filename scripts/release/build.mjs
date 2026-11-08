@@ -17,6 +17,7 @@ import {
 import { neutralWranglerConfig, workerArtifactManifest } from "./worker.mjs";
 import { assertAppendOnlyD1Migrations, migrationMetadata } from "./migrations.mjs";
 import { copyGeneratedModules } from "./modules.mjs";
+import { buildCommunicatorUnit } from "./communicator.mjs";
 
 function argument(name, fallback = undefined) {
   const index = process.argv.indexOf(name);
@@ -339,7 +340,9 @@ for (const name of plan.affected_units) {
   if (!unit) throw new Error(`plan references unknown release unit: ${name}`);
 
   const built = unit.build
-    ? unit.build.type === "cloudflare-worker"
+    ? unit.build.type === "communicator"
+      ? buildCommunicatorUnit(unit, plan, repositoryRoot)
+      : unit.build.type === "cloudflare-worker"
       ? buildWorkerUnit(unit, plan)
       : buildBunRuntimeUnit(unit, plan)
     : { bytes: archiveUnit(unit, plan.source_commit), metadata: {} };

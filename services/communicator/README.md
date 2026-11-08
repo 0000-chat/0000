@@ -74,8 +74,12 @@ Cloudflare is the public ingress and normal runtime class. Communicator uses
 `0000-platform` for common identity and authentication. Standalone public use
 does not require a hosted 0000 account.
 
-This service README does not establish a direct public MCP endpoint for
-Communicator. If a future public Communicator contract exposes one, it must be
-recorded in the [MCP topology contract](../../docs/architecture/mcp-topology.md)
-and follow that service's authentication and resource-authorization rules.
+The standalone MCP target is `https://communicator.0000.chat/mcp`, following
+the [MCP topology contract](../../docs/architecture/mcp-topology.md#communicator-discovery-and-authentication).
+Its registered resource and audience are `https://communicator.0000.chat`,
+without the MCP transport path. Self-hosted clients use their operator's
+registered resource from discovery. The
+[authentication runbook](docs/runbooks/oauth-remote-mcp.md) describes the
+Platform-backed flow and local authorization checks. This target contract
+does not establish a live endpoint, registration, or Gateway catalog entry.
 Gateway catalog inclusion, if enabled later, would not grant direct access.

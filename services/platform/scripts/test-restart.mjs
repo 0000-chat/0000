@@ -9,7 +9,9 @@ import {
 } from "@0000/platform-client";
 import { readD1Migrations } from "@cloudflare/vitest-plugin";
 import { convertV4MiniflareOptions, Miniflare } from "miniflare";
-import { opaqueSecret } from "../src/platform-state.ts";
+import { opaqueSecret, hashOpaque } from "../src/platform-state.ts";
+import { revokeAgentGrant } from "../src/agent-state.ts";
+import { provisionSavedAgent } from "../worker/test/fixtures/saved-agent.ts";
 import { PLATFORM_TEST_MINIFLARE_RATE_LIMITS } from "./test-rate-limits.ts";
 import { handleResourceRequest } from "../worker/test/fixtures/resource-service.ts";
 import { registerTestService } from "../worker/test/fixtures/provision.ts";
@@ -84,6 +86,7 @@ const persistenceDirectory = await mkdtemp(join(tmpdir(), "platform-t01-d1-"));
 const workerScript = await buildWorkerScript();
 let first;
 let second;
+let third;
 let failed = false;
 let failure;
 
@@ -152,6 +155,23 @@ try {
     "grant authenticates before runtime disposal",
   );
 
+  const savedActor = await provisionSavedAgent(database, {
+    ...service,
+    verifierHash: await hashOpaque(service.verifier),
+  });
+  const savedInput = {
+    credential: savedActor.credential,
+    operationId: "restart-saved-operation",
+    capability: "resource:read",
+  };
+  const captured = await beforeRestart.captureSavedOperation(savedInput);
+  assert.equal(
+    captured.status,
+    "allowed",
+    "saved operation captured before restart",
+  );
+  if (captured.status !== "allowed") throw new Error("saved capture failed");
+
   await first.dispose();
   first = undefined;
 
@@ -208,12 +228,59 @@ try {
     },
   );
   await expectStatus(resourceResponse, 200, "persisted resource authorization");
+  assert.equal(
+    (await afterRestart.revalidateSavedOperation(captured.authorization))
+      .status,
+    "allowed",
+    "saved operation survives fresh runtime without the actor bearer",
+  );
+  assert.deepEqual(
+    await afterRestart.captureSavedOperation(savedInput),
+    captured,
+    "lost capture response retries to the same authority after restart",
+  );
+  assert.equal(
+    await revokeAgentGrant(persistedDatabase.withSession("first-primary"), {
+      actorUserId: savedActor.userId,
+      organizationId: savedActor.organizationId,
+      agentId: savedActor.agentId,
+      grantId: savedActor.grantId,
+    }),
+    true,
+    "native grant revoked",
+  );
+  assert.deepEqual(
+    await afterRestart.revalidateSavedOperation(captured.authorization),
+    { status: "denied" },
+    "scheduler service still valid but saved grant revoked",
+  );
+  await second.dispose();
+  second = undefined;
+  third = createRuntime(workerScript, persistenceDirectory);
+  await third.ready;
+  const afterRevocationRestart = createPlatformClient({
+    baseUrl: platformBaseUrl,
+    authority,
+    audience,
+    serviceVerifier: service.verifier,
+    fetch: (input, init) => third.dispatchFetch(input, init),
+  });
+  assert.deepEqual(
+    await afterRevocationRestart.revalidateSavedOperation(
+      captured.authorization,
+    ),
+    { status: "denied" },
+    "revoked saved work stays denied after another fresh runtime",
+  );
+  console.log(
+    "Saved-operation binding, idempotent capture and native grant revocation survived runtime restarts.",
+  );
   console.log("Miniflare D1 runtime restart persistence probe passed.");
 } catch (error) {
   failed = true;
   failure = error;
 } finally {
-  for (const runtime of [second, first]) {
+  for (const runtime of [third, second, first]) {
     try {
       await runtime?.dispose();
     } catch (error) {

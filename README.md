@@ -79,8 +79,10 @@ Public release planning and artifact rules are documented in
 `bun run test:release` for the deterministic affected-unit and release-record
 tests. The public release workflow runs for every merge pushed to `main` and
 publishes an immutable release record. The release map registers the Gateway,
-Msg Worker, Database Worker, Platform Worker, and self-hosted Msg webhook
-dispatcher bundles.
+Msg Worker, Database Worker, Platform Worker, self-hosted Msg webhook
+dispatcher, and [Communicator bundles](services/communicator/docs/release-bundles.md).
+Run `bun run test:release:communicator` after installing the nested pnpm
+workspace and pinned Rust toolchain to verify the clean consumer composition.
 Adding a unit publishes its first artifact without redeploying existing units;
 Database's first activation selects only its artifact. Shared runtime inputs
 still select every configured unit. Non-runtime changes remain Cloud-silent.

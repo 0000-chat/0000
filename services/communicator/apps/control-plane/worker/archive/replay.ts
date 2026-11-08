@@ -332,6 +332,33 @@ export const readRestoreReplayPage = async (
   next_cursor: string | null;
   evidence: RestoreReplayEvidence;
 }> => {
+  const { immutable_page: _immutablePage, ...view } =
+    await readRestoreReplayPageForActivation(
+      bucket,
+      database,
+      tenantId,
+      options,
+    );
+  return view;
+};
+
+/**
+ * Internal activation seam: retain the immutable validated source separately
+ * from the sanitized view. Only the immutable page satisfies applyReplayPage's
+ * raw integrity contract; the DO independently sanitizes before persistence.
+ */
+export const readRestoreReplayPageForActivation = async (
+  bucket: R2Bucket,
+  database: D1Database | D1DatabaseSession,
+  tenantId: string,
+  options?: { cursor?: string; pageSize?: number },
+): Promise<{
+  manifests: Awaited<ReturnType<typeof readReplayPage>>["manifests"];
+  events: CanonicalEventEnvelope[];
+  next_cursor: string | null;
+  evidence: RestoreReplayEvidence;
+  immutable_page: Awaited<ReturnType<typeof readReplayPage>>;
+}> => {
   const authority = await loadRestoreAuthority(database, tenantId);
   const page = await readReplayPage(bucket, tenantId, options);
   // A removal may be recorded while the R2 page is being listed and decoded.
@@ -368,5 +395,6 @@ export const readRestoreReplayPage = async (
     events,
     next_cursor: page.next_cursor,
     evidence,
+    immutable_page: page,
   };
 };

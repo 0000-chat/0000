@@ -58,7 +58,7 @@ impl ReqwestMatrixTransport {
     /// The homeserver must be an HTTPS origin with no credentials, query,
     /// fragment, or non-root path. The fixed private Synapse origin used by
     /// the deployment is the sole production HTTP exception; loopback HTTP
-    /// remains available only to the crate's unit-test constructor.
+    /// remains available only to unit tests and the explicit loopback-test feature.
     pub fn new(
         homeserver_url: &str,
         access_token: SecretBytes,
@@ -74,8 +74,9 @@ impl ReqwestMatrixTransport {
         )
     }
 
-    #[cfg(test)]
-    pub(crate) fn new_for_test(
+    /// Construct a local controlled transport; never present in normal builds.
+    #[cfg(any(test, feature = "loopback-test"))]
+    pub fn new_for_test(
         homeserver_url: &str,
         access_token: SecretBytes,
         request_timeout: Duration,

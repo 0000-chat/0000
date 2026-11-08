@@ -727,6 +727,15 @@ describe("T06 production OAuth installation", () => {
     expect(authenticated.status, JSON.stringify(authenticated)).toBe(
       "authenticated",
     );
+    const saved = await sharedClient.captureSavedOperation({
+      credential: tokenBody.access_token,
+      operationId: "saved-harness-operation",
+      capability: "resource:read",
+    });
+    if (saved.status !== "allowed") throw new Error("harness capture failed");
+    expect(
+      (await sharedClient.revalidateSavedOperation(saved.authorization)).status,
+    ).toBe("allowed");
     const refresh = await SELF.fetch("http://localhost/api/auth/oauth2/token", {
       method: "POST",
       headers: { "content-type": "application/x-www-form-urlencoded" },
@@ -751,6 +760,9 @@ describe("T06 production OAuth installation", () => {
     expect(
       (await sharedClient.authenticate(tokenBody.access_token)).status,
     ).toBe("authenticated");
+    expect(
+      (await sharedClient.revalidateSavedOperation(saved.authorization)).status,
+    ).toBe("allowed");
     await testEnv.IDENTITY_DB.prepare(
       "UPDATE organization SET suspendedAt = ? WHERE id = ?",
     )
@@ -858,6 +870,9 @@ describe("T06 production OAuth installation", () => {
     expect(
       (await sharedClient.authenticate(tokenBody.access_token)).status,
     ).toBe("invalid_credential");
+    expect(
+      await sharedClient.revalidateSavedOperation(saved.authorization),
+    ).toEqual({ status: "denied" });
     await testEnv.IDENTITY_DB.prepare(
       "INSERT INTO member (id, organizationId, userId, role, createdAt) VALUES (?, ?, ?, 'owner', ?)",
     )

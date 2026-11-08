@@ -1,4 +1,6 @@
 import { Hono } from "hono";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { env as runtimeEnv, evictDurableObject } from "cloudflare:test";
 import {
   REALTIME_SUBPROTOCOL,
@@ -111,6 +113,20 @@ function createPlatformFixture() {
         }),
       });
     }
+    if (body?.credential === "platform-pilot-admin") {
+      return context.json({
+        status: "authenticated",
+        principal: principal("platform-user", {
+          capabilities: [
+            "conversation.read",
+            "retention.manage",
+            "webhook.manage",
+            "directory.read",
+            "directory.request",
+          ],
+        }),
+      });
+    }
     if (body?.credential === "platform-browser-credential") {
       return context.json({
         status: "authenticated",
@@ -128,6 +144,22 @@ function createPlatformFixture() {
         ),
       });
     }
+    if (body?.credential === "platform-requesting-agent") {
+      return context.json({
+        status: "authenticated",
+        principal: machinePrincipal(
+          "agent",
+          "platform-agent",
+          "platform-agent-grant",
+          [
+            "conversation.read",
+            "directory.read",
+            "directory.request",
+            "retention.manage",
+          ],
+        ),
+      });
+    }
     if (body?.credential === "platform-service") {
       return context.json({
         status: "authenticated",
@@ -140,6 +172,15 @@ function createPlatformFixture() {
       });
     }
     if (body?.credential === "platform-revoked") {
+      return context.json({ status: "invalid_credential" }, 401);
+    }
+    if (
+      [
+        "platform-wrong-issuer",
+        "platform-wrong-resource",
+        "platform-expired",
+      ].includes(String(body?.credential))
+    ) {
       return context.json({ status: "invalid_credential" }, 401);
     }
     if (body?.credential === "platform-unbound") {
@@ -583,6 +624,32 @@ async function request(
   );
 }
 
+async function callPlatformTool(
+  app: ReturnType<typeof createApp>,
+  credential: string,
+  name: string,
+  args: Record<string, unknown> = {},
+) {
+  const client = new Client({ name: "platform-parity-test", version: "1" });
+  const transport = new StreamableHTTPClientTransport(
+    new URL("https://communicator.test/mcp"),
+    {
+      requestInit: { headers: { Authorization: `Bearer ${credential}` } },
+      fetch: async (input, init) =>
+        app.fetch(new Request(input, init), platformEnvironment()),
+    },
+  );
+  // SDK 1.25.2 declares sessionId as string|undefined rather than optional.
+  await client.connect(
+    transport as unknown as Parameters<Client["connect"]>[0],
+  );
+  try {
+    return await client.callTool({ name, arguments: args });
+  } finally {
+    await client.close();
+  }
+}
+
 beforeEach(async () => {
   await clearDirectory(env.CONTROL_DB);
   await seedPlatformBinding();
@@ -964,6 +1031,306 @@ describe("Platform to Communicator adoption boundary", () => {
       "/api/v1/grant-targets",
     );
     expect(permitted.status).toBe(200);
+    const discoveryPath =
+      "/api/v1/webhook-subscriptions/webhook_missing/deliveries";
+    expect((await request(app, "platform-human", discoveryPath)).status).toBe(
+      403,
+    );
+    // The permitted credential reaches subscription lookup; no blanket admin
+    // role bypass or new endpoint-specific capability is introduced.
+    expect(
+      (await request(app, "platform-pilot-admin", discoveryPath)).status,
+    ).toBe(404);
+  });
+
+  it("applies the same narrowed owner ceilings to REST and MCP before writes", async () => {
+    const { app } = createPlatformFixture();
+    const providerNetwork = vi
+      .spyOn(globalThis, "fetch")
+      .mockRejectedValue(new Error("Unexpected provider I/O"));
+    try {
+      const input = {
+        tenant_id: "tenant_pilot",
+        resource_type: "message",
+        resource_id: "message_ceiling",
+        content_generation: "generation_ceiling",
+        reason: "requested",
+      };
+      const before = await env.CONTROL_DB.prepare(
+        "SELECT COUNT(*) AS count FROM removal_authority",
+      ).first("count");
+      const rest = await app.request(
+        "https://communicator.test/api/v1/removals",
+        {
+          method: "POST",
+          headers: {
+            Authorization: "Bearer platform-human",
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify(input),
+        },
+        platformEnvironment(),
+      );
+      expect(rest.status).toBe(403);
+      const result = await callPlatformTool(
+        app,
+        "platform-human",
+        "record_removal",
+        input,
+      );
+      expect(result.isError).toBe(true);
+      expect(result.content).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            text: expect.stringContaining('"forbidden"'),
+          }),
+        ]),
+      );
+      expect(
+        await env.CONTROL_DB.prepare(
+          "SELECT COUNT(*) AS count FROM removal_authority",
+        ).first("count"),
+      ).toBe(before);
+      for (const { path, tool } of [
+        { path: "/api/v1/accounts", tool: "list_accounts" },
+        {
+          path: "/api/v1/webhook-subscriptions",
+          tool: "list_webhook_subscriptions",
+        },
+        { path: "/api/v1/removals", tool: "get_removal_status" },
+      ]) {
+        expect((await request(app, "platform-human", path)).status).toBe(403);
+        expect(
+          (await callPlatformTool(app, "platform-human", tool)).isError,
+        ).toBe(true);
+        expect((await request(app, "platform-pilot-admin", path)).status).toBe(
+          200,
+        );
+        expect(
+          (await callPlatformTool(app, "platform-pilot-admin", tool)).isError,
+        ).not.toBe(true);
+      }
+      const allowed = await callPlatformTool(
+        app,
+        "platform-pilot-admin",
+        "record_removal",
+        input,
+      );
+      expect(allowed.isError).not.toBe(true);
+      expect(
+        await env.CONTROL_DB.prepare(
+          "SELECT COUNT(*) AS count FROM removal_authority",
+        ).first("count"),
+      ).toBe(Number(before) + 1);
+      expect(providerNetwork).not.toHaveBeenCalled();
+    } finally {
+      providerNetwork.mockRestore();
+    }
+  });
+
+  it("keeps permission requests pending and agent identity/admin boundaries identical across transports", async () => {
+    await seedPlatformMachineBindings();
+    await seedAccountAccess(env.CONTROL_DB);
+    const { app } = createPlatformFixture();
+    const body = {
+      identity_id: "identity_agent",
+      account_id: "account_human",
+      operation_scope: "message.send",
+      chat_scope: "selected_chats",
+      chat_ids: ["conversation_pilot"],
+      reason: "Request controlled project access",
+      idempotency_key: "parity-permission-request",
+    };
+    const before = await env.CONTROL_DB.prepare(
+      "SELECT COUNT(*) AS count FROM account_grants",
+    ).first("count");
+    const rest = await app.request(
+      "https://communicator.test/api/v1/permission-requests",
+      {
+        method: "POST",
+        headers: {
+          Authorization: "Bearer platform-requesting-agent",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(body),
+      },
+      platformEnvironment(),
+    );
+    expect(rest.status).toBe(201);
+    const requested = await rest.json();
+    expect(requested).toMatchObject({
+      identity_id: "identity_agent",
+      status: "pending",
+    });
+    const replay = await callPlatformTool(
+      app,
+      "platform-requesting-agent",
+      "request_permissions",
+      body,
+    );
+    expect(replay.isError).not.toBe(true);
+    expect(replay.structuredContent).toEqual(requested);
+    const elevated = { ...body, status: "approved" };
+    expect(
+      (
+        await callPlatformTool(
+          app,
+          "platform-requesting-agent",
+          "request_permissions",
+          elevated,
+        )
+      ).isError,
+    ).toBe(true);
+    const invalidRest = await app.request(
+      "https://communicator.test/api/v1/permission-requests",
+      {
+        method: "POST",
+        headers: {
+          Authorization: "Bearer platform-requesting-agent",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(elevated),
+      },
+      platformEnvironment(),
+    );
+    expect(invalidRest.status).toBe(400);
+    for (const { path, tool } of [
+      {
+        path: "/api/v1/grants?identity_id=identity_agent",
+        tool: "list_grants",
+      },
+      {
+        path: "/api/v1/permission-requests?identity_id=identity_agent",
+        tool: "list_permission_requests",
+      },
+    ]) {
+      const restList = await request(app, "platform-requesting-agent", path);
+      expect(restList.status).toBe(200);
+      expect(
+        (
+          await callPlatformTool(app, "platform-requesting-agent", tool, {
+            identity_id: "identity_agent",
+          })
+        ).structuredContent,
+      ).toEqual(await restList.json());
+      expect(
+        (
+          await request(
+            app,
+            "platform-requesting-agent",
+            path.replace("identity_agent", "identity_human"),
+          )
+        ).status,
+      ).toBe(403);
+      expect(
+        (
+          await callPlatformTool(app, "platform-requesting-agent", tool, {
+            identity_id: "identity_human",
+          })
+        ).isError,
+      ).toBe(true);
+    }
+    const crossIdentity = {
+      ...body,
+      identity_id: "identity_human",
+      idempotency_key: "must-not-request-for-human",
+    };
+    expect(
+      (
+        await callPlatformTool(
+          app,
+          "platform-requesting-agent",
+          "request_permissions",
+          crossIdentity,
+        )
+      ).isError,
+    ).toBe(true);
+    expect(
+      (
+        await callPlatformTool(
+          app,
+          "platform-agent",
+          "request_permissions",
+          body,
+        )
+      ).isError,
+    ).toBe(true);
+    expect(
+      (
+        await callPlatformTool(
+          app,
+          "platform-requesting-agent",
+          "record_removal",
+          {
+            tenant_id: "tenant_pilot",
+            resource_type: "message",
+            resource_id: "message_agent_denied",
+            content_generation: "generation_agent",
+            reason: "requested",
+          },
+        )
+      ).isError,
+    ).toBe(true);
+    expect(
+      await env.CONTROL_DB.prepare(
+        "SELECT COUNT(*) AS count FROM account_grants",
+      ).first("count"),
+    ).toBe(before);
+    expect(
+      await env.CONTROL_DB.prepare(
+        "SELECT COUNT(*) AS count FROM permission_requests",
+      ).first("count"),
+    ).toBe(1);
+    expect(
+      await env.CONTROL_DB.prepare(
+        "SELECT COUNT(*) AS count FROM removal_authority",
+      ).first("count"),
+    ).toBe(0);
+  });
+
+  it("rejects authority-reported wrong issuer/resource, expired and revoked credentials on both transports", async () => {
+    const { app } = createPlatformFixture();
+    for (const credential of [
+      "platform-wrong-issuer",
+      "platform-wrong-resource",
+      "platform-expired",
+      "platform-revoked",
+    ]) {
+      expect((await request(app, credential, "/api/v1/grants")).status).toBe(
+        401,
+      );
+      const response = await app.request(
+        "https://communicator.test/mcp",
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${credential}`,
+            "Content-Type": "application/json",
+            Accept: "application/json, text/event-stream",
+          },
+          body: JSON.stringify({
+            jsonrpc: "2.0",
+            id: 1,
+            method: "tools/call",
+            params: { name: "request_permissions", arguments: {} },
+          }),
+        },
+        platformEnvironment(),
+      );
+      expect(response.status).toBe(401);
+    }
+    expect(
+      await env.CONTROL_DB.prepare(
+        "SELECT COUNT(*) AS count FROM permission_requests",
+      ).first("count"),
+    ).toBe(0);
+    expect(
+      (await request(app, "platform-pilot-admin", "/api/v1/grants")).status,
+    ).toBe(200);
+    expect(
+      (await callPlatformTool(app, "platform-pilot-admin", "list_grants"))
+        .isError,
+    ).not.toBe(true);
   });
 
   it("returns fixed boundary statuses for invalid, unbound, and incoherent authority results", async () => {

@@ -6,7 +6,7 @@ use chrono::Utc;
 use communicator_matrix_gateway::{
     authority::{
         AuthorityClaimClient, AuthorityClaimFailure, AuthorityClaimOutcome, AuthorityClaimRequest,
-        MessageAuthorityClaim, OutboundAuthority, OutboundCapability,
+        MessageAuthorityClaim, OutboundAuthority, OutboundCapability, SendRoute,
     },
     ingestion::{
         BatchSink, Delivery, DeliveryErrorClass, IngestionClient, PendingBatch, SecretString,
@@ -38,6 +38,13 @@ fn batch(path: &str) -> PendingBatch {
 
 fn message_claim(suffix: &str) -> AuthorityClaimRequest {
     AuthorityClaimRequest::Message(MessageAuthorityClaim {
+        session_generation: "2026-09-20T00:00:00.000Z".to_owned(),
+        route: SendRoute {
+            gateway_route_id: "gateway_route_t11_rust".to_owned(),
+            bridge_instance_id: "bridge_t11_rust".to_owned(),
+            matrix_user_id: "@t11:example.test".to_owned(),
+            matrix_room_namespace: "example.test".to_owned(),
+        },
         tenant_id: "tenant_t11_rust".to_owned(),
         membership_id: "membership_t11_rust".to_owned(),
         actor_identity_id: "identity_t11_rust".to_owned(),

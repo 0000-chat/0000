@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   AuthorizedIdentitySchema,
+  AcceptTextReplyInputSchema,
   ApiErrorResponseSchema,
   ChannelSummarySchema,
   CommandSchema,
@@ -14,10 +15,57 @@ import {
   RealtimeEventSchema,
   RealtimeTicketRequestSchema,
   SessionResponseSchema,
+  TextReplyRequestSchema,
   type ChannelSummary,
 } from "../src/index";
 
 describe("directory authorization schemas", () => {
+  it("rejects paced admission while keeping historical paced commands readable", () => {
+    const request = {
+      identity_id: "identity_human",
+      conversation_id: "conversation_one",
+      body: "Local contract fixture",
+      delivery_mode: "direct",
+    };
+    expect(TextReplyRequestSchema.safeParse(request).success).toBe(true);
+    expect(
+      TextReplyRequestSchema.safeParse({ ...request, delivery_mode: "paced" })
+        .success,
+    ).toBe(false);
+    const internal = {
+      ...request,
+      schema_version: 1,
+      tenant_id: "tenant_pilot",
+      actor_principal_id: "principal_human",
+      actor_identity_id: "identity_human",
+      idempotency_key: "local-contract-key",
+      accepted_at: "2026-09-14T00:00:00.000Z",
+    };
+    const { identity_id: _identityId, ...internalRequest } = internal;
+    expect(AcceptTextReplyInputSchema.safeParse(internalRequest).success).toBe(
+      true,
+    );
+    expect(
+      AcceptTextReplyInputSchema.safeParse({
+        ...internalRequest,
+        delivery_mode: "paced",
+      }).success,
+    ).toBe(false);
+    expect(
+      CommandSchema.safeParse({
+        id: "command_historical",
+        tenant_id: "tenant_pilot",
+        identity_id: request.identity_id,
+        conversation_id: request.conversation_id,
+        operation: "message.send",
+        delivery_mode: "paced",
+        status: "accepted",
+        created_at: internal.accepted_at,
+        updated_at: internal.accepted_at,
+      }).success,
+    ).toBe(true);
+  });
+
   it("accepts invalid_request and rejects unknown API error codes", () => {
     expect(
       ApiErrorResponseSchema.safeParse({

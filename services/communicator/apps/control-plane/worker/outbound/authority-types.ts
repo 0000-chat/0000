@@ -1,3 +1,5 @@
+import type { SavedSendAuthority } from "@communicator/contracts";
+
 /**
  * A capability is bound to one mutable authority head.  The discriminant is
  * intentional: an owner/admin authority never carries an account-grant id,
@@ -30,6 +32,7 @@ export type OutboundCapabilityTuple = OutboundTuple & {
 };
 
 export type ReserveOutboundAcceptanceInput = OutboundTuple & {
+  saved?: SavedSendAuthority;
   idempotency_key: string;
   request_digest: string;
   body_digest: string;
@@ -41,6 +44,7 @@ export type ReserveOutboundAcceptanceInput = OutboundTuple & {
 export type OutboundAcceptanceStatus = "reserved" | "committed" | "uncertain";
 
 export type OutboundAcceptanceReservation = OutboundCapabilityTuple & {
+  saved?: SavedSendAuthority;
   id: string;
   idempotency_key: string;
   request_digest: string;
@@ -118,6 +122,7 @@ export type MarkAcceptanceReservationUncertainResult =
     };
 
 export type ClaimOutboundDispatchInput = OutboundCapabilityTuple & {
+  saved?: SavedSendAuthority;
   reservation_id: string;
   command_id: string;
   dispatch_id: string;
@@ -132,6 +137,8 @@ export type ClaimOutboundDispatchInput = OutboundCapabilityTuple & {
 export type OutboundDispatchClaimStatus = "claimed" | "uncertain";
 
 export type OutboundDispatchClaim = OutboundCapabilityTuple & {
+  session_generation?: string;
+  route?: SavedSendAuthority["route"];
   id: string;
   reservation_id: string;
   command_id: string;

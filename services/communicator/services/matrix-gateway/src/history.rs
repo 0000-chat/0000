@@ -10,6 +10,7 @@
 use std::{fmt, net::SocketAddr, sync::Arc};
 
 use chrono::{DateTime, SecondsFormat, TimeZone, Utc};
+use matrix_sdk_base::BaseClient;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::{
@@ -22,7 +23,10 @@ use crate::{
     batch::{self, BackfillCheckpoint, WindowSource},
     canonical,
     ledger::{BackfillState, NewBackfillJob, STORE_BACKFILL_NOT_READY},
-    matrix::{MatrixTransport, observed_backfill_state_event, observed_backfill_timeline_event},
+    matrix::{
+        MatrixTransport, RawBackfillPage, observed_backfill_state_event,
+        observed_backfill_timeline_event,
+    },
     model::{self, Provider},
     provisioning::{HttpRequest, read_http_request, response, write_http_response},
     secret::{SafeError, SecretBytes},
@@ -44,17 +48,39 @@ const HISTORY_PROVIDER_ERROR: &str = "provider_error";
 const HISTORY_MALFORMED_RANGE: &str = "malformed_range";
 const HISTORY_CONFLICT: &str = "history_conflict";
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone, Deserialize, Serialize)]
 struct HistoryPagination {
     schema_version: u8,
     range_id: String,
     input_cursor: Option<String>,
     source_cursor: String,
     public_cursor: String,
-    page_start: u64,
-    page_length: u64,
-    history_terminal: bool,
+    #[serde(flatten)]
+    contents: HistoryPageContents,
+}
+
+// The accepted variant preserves the existing encrypted checkpoint format.
+// A blocked raw page stays encrypted at rest, never in the canonical archive.
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(untagged)]
+enum HistoryPageContents {
+    WaitingForKeys {
+        waiting_page: PendingHistoryPage,
+    },
+    Accepted {
+        page_start: u64,
+        page_length: u64,
+        history_terminal: bool,
+    },
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+enum PendingHistoryPage {
+    // A string preserves RawValue bytes through the untagged serde boundary.
+    Retained(String),
+    // Large pages retain their exact Matrix start token instead of exceeding
+    // the ledger's encrypted pagination bound. Never restart from the live head.
+    AtSourceCursor,
 }
 
 /// The exact Worker owner tuple used to resolve a Matrix room.
@@ -109,6 +135,7 @@ pub struct HistoryGatewayServer {
     transport: Arc<dyn MatrixTransport>,
     gateway_token: String,
     attachments: AttachmentGateway,
+    matrix_context: Option<BaseClient>,
 }
 
 impl fmt::Debug for HistoryGatewayServer {
@@ -135,7 +162,14 @@ impl HistoryGatewayServer {
             transport,
             gateway_token,
             attachments,
+            matrix_context: None,
         })
+    }
+
+    /// Share the same activated SDK/device context used by production senders.
+    pub fn with_matrix_context(mut self, context: BaseClient) -> Self {
+        self.matrix_context = Some(context);
+        self
     }
 
     /// Share the exclusively opened state store with the authenticated
@@ -332,11 +366,16 @@ impl HistoryGatewayServer {
 
             if let Some(cursor) = stored_pagination(stored.pagination())
                 && cursor.input_cursor.as_deref() == request.source_cursor.as_deref()
+                && let HistoryPageContents::Accepted {
+                    page_start,
+                    page_length,
+                    history_terminal,
+                } = cursor.contents
             {
                 let events = match store.backfill_page_events(
                     &request.owner.import_id,
-                    cursor.page_start,
-                    cursor.page_length,
+                    page_start,
+                    page_length,
                 ) {
                     Ok(value) => value,
                     Err(error) => return response(503, json!({ "error": error.code() })),
@@ -352,13 +391,13 @@ impl HistoryGatewayServer {
                 return response(
                     200,
                     json!({
-                        "status": if cursor.history_terminal {
+                        "status": if history_terminal {
                             "completed"
                         } else {
                             "active"
                         },
                         "events": events,
-                        "next_cursor": if cursor.history_terminal {
+                        "next_cursor": if history_terminal {
                             Value::Null
                         } else {
                             json!(cursor.public_cursor)
@@ -371,8 +410,15 @@ impl HistoryGatewayServer {
             if stored.state() == BackfillState::Completed {
                 return response(409, json!({ "error": HISTORY_CONFLICT }));
             }
-            if stored_pagination(stored.pagination()).is_some_and(|cursor| cursor.history_terminal)
-            {
+            if stored_pagination(stored.pagination()).is_some_and(|cursor| {
+                matches!(
+                    cursor.contents,
+                    HistoryPageContents::Accepted {
+                        history_terminal: true,
+                        ..
+                    }
+                )
+            }) {
                 return response(409, json!({ "error": HISTORY_CONFLICT }));
             }
             (binding, stored)
@@ -385,13 +431,27 @@ impl HistoryGatewayServer {
         let from = from_source
             .as_ref()
             .map(|value| SecretBytes::new(value.as_bytes().to_vec()));
-        let page = match self
-            .transport
-            .backfill_page(binding.matrix_room_id(), from.as_ref(), PAGE_LIMIT)
-            .await
+        let page = if let Some(HistoryPagination {
+            contents:
+                HistoryPageContents::WaitingForKeys {
+                    waiting_page: PendingHistoryPage::Retained(waiting_page),
+                },
+            ..
+        }) = stored_cursor
         {
-            Ok(page) => page,
-            Err(error) => return response(502, json!({ "error": error.code() })),
+            match serde_json::from_str::<RawBackfillPage>(&waiting_page) {
+                Ok(page) => page,
+                Err(_) => return response(503, json!({ "error": HISTORY_PROVIDER_ERROR })),
+            }
+        } else {
+            match self
+                .transport
+                .backfill_page(binding.matrix_room_id(), from.as_ref(), PAGE_LIMIT)
+                .await
+            {
+                Ok(page) => page,
+                Err(error) => return response(502, json!({ "error": error.code() })),
+            }
         };
         if page.chunk().len() > MAX_PAGE_EVENTS as usize {
             return response(502, json!({ "error": HISTORY_PROVIDER_ERROR }));
@@ -419,8 +479,17 @@ impl HistoryGatewayServer {
         }
         let mut timeline_events = Vec::with_capacity(page.chunk().len());
         for event in page.chunk() {
-            match observed_backfill_timeline_event(binding.matrix_room_id(), event) {
+            match observed_backfill_timeline_event(
+                binding.matrix_room_id(),
+                event,
+                self.matrix_context.as_ref(),
+            )
+            .await
+            {
                 Ok(value) => timeline_events.push(value),
+                Err(error) if error.code() == "matrix_missing_room_key" => {
+                    return self.wait_for_keys(&request, &stored, page).await;
+                }
                 Err(error) => return history_partial_response(error.code()),
             }
         }
@@ -541,9 +610,11 @@ impl HistoryGatewayServer {
                 input_cursor: request.source_cursor.clone(),
                 source_cursor: source_cursor.to_owned(),
                 public_cursor,
-                page_start: batch_ordinal,
-                page_length: u64::try_from(window.batches.len()).unwrap_or(u64::MAX),
-                history_terminal: page.end().is_none(),
+                contents: HistoryPageContents::Accepted {
+                    page_start: batch_ordinal,
+                    page_length: u64::try_from(window.batches.len()).unwrap_or(u64::MAX),
+                    history_terminal: page.end().is_none(),
+                },
             };
             let pagination = match serde_json::to_vec(&value) {
                 Ok(value) => Some(SecretBytes::new(value)),
@@ -587,6 +658,73 @@ impl HistoryGatewayServer {
             }),
         )
     }
+
+    async fn wait_for_keys(
+        &self,
+        request: &HistoryAdvanceRequest,
+        stored: &crate::ledger::StoredBackfillJob,
+        page: RawBackfillPage,
+    ) -> (u16, Vec<u8>) {
+        let mut store = self.store.lock().await;
+        let result = (|| -> Result<String, SafeError> {
+            let public_cursor = store.history_cursor_token(
+                &request.owner.import_id,
+                &request.range_id,
+                page.start(),
+            )?;
+            let mut pagination = HistoryPagination {
+                schema_version: 1,
+                range_id: request.range_id.clone(),
+                input_cursor: request.source_cursor.clone(),
+                source_cursor: page.start().to_owned(),
+                public_cursor: public_cursor.clone(),
+                contents: HistoryPageContents::WaitingForKeys {
+                    waiting_page: PendingHistoryPage::Retained(
+                        serde_json::to_string(&page)
+                            .map_err(|_| SafeError::new(HISTORY_PROVIDER_ERROR))?,
+                    ),
+                },
+            };
+            let mut bytes = serde_json::to_vec(&pagination)
+                .map_err(|_| SafeError::new(HISTORY_PROVIDER_ERROR))?;
+            if bytes.len() > crate::ledger::MAX_BACKFILL_PAGINATION_BYTES {
+                pagination.contents = HistoryPageContents::WaitingForKeys {
+                    waiting_page: PendingHistoryPage::AtSourceCursor,
+                };
+                bytes = serde_json::to_vec(&pagination)
+                    .map_err(|_| SafeError::new(HISTORY_PROVIDER_ERROR))?;
+            }
+            let pagination = SecretBytes::new(bytes);
+            let checkpoint = BackfillCheckpoint::new(
+                stored.job().job_id(),
+                stored.job().room_id(),
+                stored.job().start_at(),
+                stored.job().end_at(),
+                stored.job().max_events(),
+                store.backfill_batch_count(&request.owner.import_id)?,
+            )
+            .map_err(|_| SafeError::new(HISTORY_PROVIDER_ERROR))?;
+            let window = batch::build_window(WindowSource::backfill(checkpoint), utc_now(), &[])
+                .map_err(|_| SafeError::new(HISTORY_PROVIDER_ERROR))?;
+            store.checkpoint_backfill_page(
+                &request.owner.import_id,
+                Some(&pagination),
+                &window,
+                stored.accepted_events(),
+            )?;
+            Ok(public_cursor)
+        })();
+        match result {
+            Ok(cursor) => response(
+                200,
+                json!({
+                    "status": "partial", "events": [], "next_cursor": cursor,
+                    "gap_code": "matrix_missing_room_key", "error_code": HISTORY_PROVIDER_ERROR,
+                }),
+            ),
+            Err(error) => response(503, json!({ "error": error.code() })),
+        }
+    }
 }
 
 impl Clone for HistoryGatewayServer {
@@ -595,6 +733,7 @@ impl Clone for HistoryGatewayServer {
             store: Arc::clone(&self.store),
             transport: Arc::clone(&self.transport),
             gateway_token: self.gateway_token.clone(),
+            matrix_context: self.matrix_context.clone(),
             attachments: AttachmentGateway::new(
                 Arc::clone(&self.store),
                 Arc::clone(&self.transport),
@@ -1401,7 +1540,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn encrypted_page_surfaces_gap_without_checkpointing() {
+    async fn encrypted_page_without_sdk_context_fails_closed_without_checkpointing() {
         let (server, transport, _directory) = server(true, true).await;
         let owner = owner();
         let started = server
@@ -1417,7 +1556,7 @@ mod tests {
         assert_eq!(advance["status"], "partial");
         assert_eq!(advance["events"].as_array().map(Vec::len), Some(0));
         assert_eq!(advance["next_cursor"], Value::Null);
-        assert_eq!(advance["gap_code"], "matrix_unable_to_decrypt");
+        assert_eq!(advance["gap_code"], "matrix_sdk_failed");
         assert_eq!(advance["error_code"], "provider_error");
         assert_eq!(transport.calls.load(Ordering::SeqCst), 1);
 
@@ -1427,4 +1566,6 @@ mod tests {
         assert_eq!(retry.0, 200, "{}", String::from_utf8_lossy(&retry.1));
         assert_eq!(transport.calls.load(Ordering::SeqCst), 2);
     }
+
+    include!("history_encrypted_tests.rs");
 }

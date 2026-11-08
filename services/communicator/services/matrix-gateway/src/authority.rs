@@ -37,6 +37,8 @@ pub enum OutboundCapability {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MessageAuthorityClaim {
+    pub session_generation: String,
+    pub route: SendRoute,
     pub tenant_id: String,
     pub membership_id: String,
     pub actor_identity_id: String,
@@ -50,6 +52,15 @@ pub struct MessageAuthorityClaim {
     pub request_digest: String,
     pub body_digest: String,
     pub capability: OutboundCapability,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SendRoute {
+    pub gateway_route_id: String,
+    pub bridge_instance_id: String,
+    pub matrix_user_id: String,
+    pub matrix_room_namespace: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -126,7 +137,7 @@ impl AuthorityClaimRequest {
                 connection_id: &value.connection_id,
                 reservation_id: &value.reservation_id,
                 request_hash: &value.request_digest,
-                session_generation: None,
+                session_generation: Some(&value.session_generation),
                 capability: &value.capability,
             },
             Self::Operation(value) => AuthorityClaimCommon {
@@ -162,6 +173,7 @@ struct AuthorityClaimCommon<'a> {
 pub enum AuthorityClaimOutcome {
     Allowed { expires_at: String },
     Denied { reason: String },
+    Unavailable,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -306,6 +318,8 @@ impl AuthorityClaimClient {
             body["session_generation"] = Value::String(session_generation.to_owned());
         }
         if let AuthorityClaimRequest::Message(value) = request {
+            body["route"] = serde_json::to_value(&value.route)
+                .map_err(|_| AuthorityClaimFailure::InvalidRequest)?;
             body["command_id"] = Value::String(value.command_id.clone());
             body["dispatch_id"] = Value::String(value.dispatch_id.clone());
             body["transaction_id"] = Value::String(value.transaction_id.clone());
@@ -389,6 +403,8 @@ fn is_loopback(url: &Url) -> bool {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ResponseClaim {
+    #[serde(default)]
+    route: Option<SendRoute>,
     id: String,
     tenant_id: String,
     reservation_id: String,
@@ -448,6 +464,13 @@ fn parse_response(
 ) -> Result<AuthorityClaimOutcome, AuthorityClaimFailure> {
     let envelope: ResponseEnvelope =
         serde_json::from_value(value).map_err(|_| AuthorityClaimFailure::Uncertain)?;
+    if status == StatusCode::SERVICE_UNAVAILABLE
+        && envelope.status == "authority_unavailable"
+        && envelope.provider_allowed == Some(false)
+        && envelope.claim.is_none()
+    {
+        return Ok(AuthorityClaimOutcome::Unavailable);
+    }
     if envelope.status == "denied" {
         let reason = envelope
             .reason
@@ -505,7 +528,8 @@ fn validate_claim(
     }
     match request {
         AuthorityClaimRequest::Message(value) => {
-            if claim.operation_scope.is_some()
+            if claim.route.as_ref() != Some(&value.route)
+                || claim.operation_scope.is_some()
                 || claim.operation_id.is_some()
                 || claim.request_hash.is_some()
                 || claim.status.as_deref() != Some("claimed")
@@ -546,6 +570,13 @@ mod tests {
 
     fn message_request() -> AuthorityClaimRequest {
         AuthorityClaimRequest::Message(MessageAuthorityClaim {
+            session_generation: "2026-09-14T00:00:00.000Z".to_owned(),
+            route: SendRoute {
+                gateway_route_id: "gateway_1".to_owned(),
+                bridge_instance_id: "bridge_1".to_owned(),
+                matrix_user_id: "@user:example.test".to_owned(),
+                matrix_room_namespace: "!rooms:example.test".to_owned(),
+            },
             tenant_id: "tenant_1".to_owned(),
             membership_id: "membership_1".to_owned(),
             actor_identity_id: "identity_1".to_owned(),
@@ -567,6 +598,13 @@ mod tests {
 
     fn claim_json() -> Value {
         json!({
+            "session_generation": "2026-09-14T00:00:00.000Z",
+            "route": {
+                "gateway_route_id": "gateway_1",
+                "bridge_instance_id": "bridge_1",
+                "matrix_user_id": "@user:example.test",
+                "matrix_room_namespace": "!rooms:example.test"
+            },
             "id": "claim_transaction_1",
             "tenant_id": "tenant_1",
             "reservation_id": "reservation_1",
@@ -626,28 +664,70 @@ mod tests {
 
     #[tokio::test]
     async fn mismatched_claim_echo_is_uncertain() {
-        let server = MockServer::start().await;
-        let mut claim = claim_json();
-        claim["account_id"] = Value::String("other-account".to_owned());
-        Mock::given(matchers::method("POST"))
-            .and(matchers::path(CLAIM_PATH))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "status": "claimed",
-                "replayed": false,
-                "provider_allowed": true,
-                "claim": claim
-            })))
-            .mount(&server)
-            .await;
-        let client = AuthorityClaimClient::new_for_test(
-            format!("{}/", server.uri()),
-            SecretString::new("authority-claim-service-credential"),
-            Duration::from_secs(2),
-        )
-        .expect("authority test client");
-        assert_eq!(
-            client.claim(message_request()).await,
-            Err(AuthorityClaimFailure::Uncertain)
-        );
+        for field in ["account_id", "session_generation", "route"] {
+            let server = MockServer::start().await;
+            let mut claim = claim_json();
+            if field == "route" {
+                claim["route"]["bridge_instance_id"] = Value::String("other-bridge".to_owned());
+            } else {
+                claim[field] = Value::String("other-binding".to_owned());
+            }
+            Mock::given(matchers::method("POST"))
+                .and(matchers::path(CLAIM_PATH))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "status": "claimed",
+                    "replayed": false,
+                    "provider_allowed": true,
+                    "claim": claim
+                })))
+                .mount(&server)
+                .await;
+            let client = AuthorityClaimClient::new_for_test(
+                format!("{}/", server.uri()),
+                SecretString::new("authority-claim-service-credential"),
+                Duration::from_secs(2),
+            )
+            .expect("authority test client");
+            assert_eq!(
+                client.claim(message_request()).await,
+                Err(AuthorityClaimFailure::Uncertain)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn only_explicit_preclaim_unavailability_is_retryable() {
+        for (body, expected) in [
+            (
+                json!({ "status": "authority_unavailable", "provider_allowed": false }),
+                Ok(AuthorityClaimOutcome::Unavailable),
+            ),
+            (
+                json!({ "error": "service_unavailable" }),
+                Err(AuthorityClaimFailure::Uncertain),
+            ),
+            (
+                json!({ "status": "authority_unavailable", "provider_allowed": true }),
+                Err(AuthorityClaimFailure::Uncertain),
+            ),
+            (
+                json!({ "status": "authority_unavailable", "provider_allowed": false, "claim": claim_json() }),
+                Err(AuthorityClaimFailure::Uncertain),
+            ),
+        ] {
+            let server = MockServer::start().await;
+            Mock::given(matchers::method("POST"))
+                .and(matchers::path(CLAIM_PATH))
+                .respond_with(ResponseTemplate::new(503).set_body_json(body))
+                .mount(&server)
+                .await;
+            let client = AuthorityClaimClient::new_for_test(
+                format!("{}/", server.uri()),
+                SecretString::new("authority-claim-service-credential"),
+                Duration::from_secs(2),
+            )
+            .expect("authority test client");
+            assert_eq!(client.claim(message_request()).await, expected);
+        }
     }
 }

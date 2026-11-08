@@ -13,6 +13,8 @@
     "check": "./scripts/check",
     "check:application": "pnpm check:rust && pnpm -r --if-present check",
     "test": "pnpm test:rust && pnpm -r --if-present test",
-    "test:python": "python3 -m unittest discover -s tests -v"
+    "test:python": "python3 -m unittest discover -s tests -v",
+    "proof:integrated": "node scripts/integrated-proof/run.mjs",
+    "proof:ui": "pnpm --filter @communicator/control-plane exec playwright test --config ../../scripts/integrated-proof/ui.config.mjs"
   }
 }

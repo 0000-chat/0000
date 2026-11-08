@@ -366,6 +366,7 @@ export class HttpGroupProvider implements GroupProvider {
       expected_revision: input.expected_revision,
       action: input.action,
       name,
+      participant_provider_ids: [],
     });
     return mapManagedGroup(value, input, "provider");
   }

@@ -21,15 +21,18 @@ import type { AuthorizationVariables } from "../auth/middleware";
 import type { IngestionAuthorizationVariables } from "../auth/ingestion-middleware";
 import {
   createAccountGrant,
-  createPermissionRequest,
   GrantRepositoryError,
-  listAccountGrants,
   listAccountGrantTargets,
   listConnectedAccounts,
-  listPermissionRequests,
   revokeAccountGrant,
   updateAccountGrant,
 } from "../control-directory/grants";
+import {
+  inspectGrants,
+  inspectPermissionRequests,
+  requestPermissions,
+  PermissionDeniedError,
+} from "../permissions/service";
 
 type GrantRouteEnv = {
   Bindings: Cloudflare.Env;
@@ -209,6 +212,9 @@ const publicError = (
   );
 
 const grantFailure = (context: Context<GrantRouteEnv>, error: unknown) => {
+  if (error instanceof PermissionDeniedError) {
+    return publicError(context, 403, "forbidden", error.message);
+  }
   if (error instanceof GrantRepositoryError) {
     if (error.code === "grant_invalid")
       return publicError(context, 400, "invalid_request", "Invalid grant data");
@@ -276,45 +282,14 @@ export const grantsHandler: Handler<
   }
 > = async (context) => {
   try {
-    const query = context.req.valid("query");
-    const admin = isAdministrator(context);
-    if (
-      !admin &&
-      query.identity_id !== undefined &&
-      !ownIdentity(context, query.identity_id)
-    ) {
-      return publicError(
-        context,
-        403,
-        "forbidden",
-        "An agent may inspect only its own grants",
-      );
-    }
-    const visibleIdentityId = admin
-      ? query.identity_id
-      : (query.identity_id ??
-        context.get("authorization").identities[0]?.identity_id);
-    if (!admin && visibleIdentityId === undefined) {
-      return context.json({ items: [], next_cursor: null }, 200);
-    }
     return context.json(
-      await listAccountGrants(
-        context.env.CONTROL_DB.withSession("first-primary"),
+      await inspectGrants(
         {
-          tenantId: context.get("authorization").tenant.id,
-          ...(admin
-            ? {}
-            : { membershipId: context.get("authorization").membership.id }),
-          ...(visibleIdentityId === undefined
-            ? {}
-            : { identityId: visibleIdentityId }),
-          ...(query.account_id === undefined
-            ? {}
-            : { accountId: query.account_id }),
-          ...(query.status === undefined ? {} : { status: query.status }),
-          ...(query.cursor === undefined ? {} : { cursor: query.cursor }),
-          ...(query.limit === undefined ? {} : { limit: query.limit }),
+          env: context.env,
+          authorization: context.get("authorization"),
+          platformCapabilities: context.get("platformCapabilities"),
         },
+        context.req.valid("query"),
       ),
       200,
     );
@@ -504,45 +479,14 @@ export const permissionRequestsHandler: Handler<
   }
 > = async (context) => {
   try {
-    const query = context.req.valid("query");
-    const admin = isAdministrator(context);
-    if (
-      !admin &&
-      query.identity_id !== undefined &&
-      !ownIdentity(context, query.identity_id)
-    ) {
-      return publicError(
-        context,
-        403,
-        "forbidden",
-        "An agent may inspect only its own requests",
-      );
-    }
-    const visibleIdentityId = admin
-      ? query.identity_id
-      : (query.identity_id ??
-        context.get("authorization").identities[0]?.identity_id);
-    if (!admin && visibleIdentityId === undefined) {
-      return context.json({ items: [], next_cursor: null }, 200);
-    }
     return context.json(
-      await listPermissionRequests(
-        context.env.CONTROL_DB.withSession("first-primary"),
+      await inspectPermissionRequests(
         {
-          tenantId: context.get("authorization").tenant.id,
-          ...(admin
-            ? {}
-            : {
-                requesterMembershipId:
-                  context.get("authorization").membership.id,
-              }),
-          ...(visibleIdentityId === undefined
-            ? {}
-            : { identityId: visibleIdentityId }),
-          ...(query.status === undefined ? {} : { status: query.status }),
-          ...(query.cursor === undefined ? {} : { cursor: query.cursor }),
-          ...(query.limit === undefined ? {} : { limit: query.limit }),
+          env: context.env,
+          authorization: context.get("authorization"),
+          platformCapabilities: context.get("platformCapabilities"),
         },
+        context.req.valid("query"),
       ),
       200,
     );
@@ -557,29 +501,15 @@ export const createPermissionRequestHandler: Handler<
   { out: { json: PermissionRequestCreate } }
 > = async (context) => {
   try {
-    const body = context.req.valid("json");
-    if (!ownIdentity(context, body.identity_id)) {
-      return publicError(
-        context,
-        403,
-        "forbidden",
-        "A principal may request access only for its own identity",
-      );
-    }
     return context.json(
-      await createPermissionRequest(context.env.CONTROL_DB, {
-        idempotencyKey: body.idempotency_key,
-        tenantId: context.get("authorization").tenant.id,
-        requesterPrincipalId: context.get("authorization").principal.id,
-        requesterMembershipId: context.get("authorization").membership.id,
-        identityId: body.identity_id,
-        accountId: body.account_id,
-        operationScope: body.operation_scope,
-        chatScope: body.chat_scope,
-        chatIds: body.chat_ids,
-        reason: body.reason,
-        occurredAt: new Date().toISOString(),
-      }),
+      await requestPermissions(
+        {
+          env: context.env,
+          authorization: context.get("authorization"),
+          platformCapabilities: context.get("platformCapabilities"),
+        },
+        context.req.valid("json"),
+      ),
       201,
     );
   } catch (error) {

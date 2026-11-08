@@ -157,6 +157,7 @@ impl FetchedMatrixMedia {
 /// Event bodies stay in Ruma's raw wrapper until the history boundary decides
 /// how to normalize them. The transport layer does not deserialize provider
 /// or projection payloads.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct RawBackfillPage {
     start: String,
     end: Option<String>,
@@ -287,18 +288,18 @@ async fn open_restored_base_client(
     Ok(base)
 }
 
-/// Restore the one high-level SDK client used by the private outbound route.
+/// Restore the shared SDK context used by private senders and history.
 ///
 /// The client is built around one unactivated `BaseClient` and restores the
-/// persisted session exactly once. The returned client therefore shares the
-/// activated Olm machine and SQLite stores with no second crypto client.
+/// persisted session exactly once. Both returned handles share the activated
+/// Olm machine and SQLite stores; history never opens a second crypto client.
 pub async fn restore_matrix_client(
     homeserver_url: &str,
     expected_user_id: &str,
     sdk_store_path: &Path,
     sdk_store_passphrase: &SecretBytes,
     state_store: &Store,
-) -> Result<Client, SafeError> {
+) -> Result<(Client, BaseClient), SafeError> {
     let expected_user_id = parse_matrix_user_id(expected_user_id)?;
     validate_bootstrap_homeserver_url(homeserver_url)?;
     let session_bytes = state_store
@@ -345,7 +346,7 @@ pub async fn restore_matrix_client(
         let _ = base.close_stores().await;
         return Err(SafeError::new(MATRIX_SESSION_INVALID));
     }
-    Ok(client)
+    Ok((client, base))
 }
 
 /// Public SDK-backed Matrix processing seam used after bootstrap or restore.
@@ -1821,20 +1822,48 @@ fn observed_event(
 
 /// Convert one raw `/messages` timeline event into the same protected
 /// observation boundary used by the receive-only sync path. Encrypted raw
-/// events are retained as an explicit retry marker and can never be silently
-/// checkpointed as if they were clear text.
-pub(crate) fn observed_backfill_timeline_event(
+/// events use the already activated SDK crypto store, without syncing, key
+/// requests, backup downloads, or receipt I/O.
+pub(crate) async fn observed_backfill_timeline_event(
     room_id: &str,
     event: &Raw<AnyTimelineEvent>,
+    context: Option<&BaseClient>,
 ) -> Result<ObservedMatrixEvent, SafeError> {
     let event_type = event
         .get_field::<String>("type")
         .map_err(|_| SafeError::new(MATRIX_RESPONSE_INVALID))?
         .ok_or_else(|| SafeError::new(MATRIX_RESPONSE_INVALID))?;
+    if event_type == "m.room.encrypted" {
+        let context = context.ok_or_else(|| SafeError::new(MATRIX_SDK_FAILED))?;
+        let guard = context.olm_machine().await;
+        let machine = guard
+            .as_ref()
+            .ok_or_else(|| SafeError::new(MATRIX_SDK_FAILED))?;
+        let room =
+            ruma::RoomId::parse(room_id).map_err(|_| SafeError::new(MATRIX_RESPONSE_INVALID))?;
+        let settings = DecryptionSettings {
+            sender_device_trust_requirement: TrustRequirement::Untrusted,
+        };
+        return match machine
+            .decrypt_room_event(event.cast_ref_unchecked(), &room, &settings)
+            .await
+        {
+            Ok(decrypted) => Ok(ObservedMatrixEvent::Timeline(ObservedRoomEvent::new(
+                SecretBytes::from_slice(room_id.as_bytes()),
+                event_json(&decrypted.event)?,
+                false,
+            )?)),
+            Err(MegolmError::MissingRoomKey(_))
+            | Err(MegolmError::Decryption(
+                matrix_sdk_crypto::vodozemac::megolm::DecryptionError::UnknownMessageIndex(_, _),
+            )) => Err(SafeError::new("matrix_missing_room_key")),
+            Err(_) => Err(SafeError::new(MATRIX_SDK_FAILED)),
+        };
+    }
     Ok(ObservedMatrixEvent::Timeline(ObservedRoomEvent::new(
         SecretBytes::from_slice(room_id.as_bytes()),
         event_json(event)?,
-        event_type == "m.room.encrypted",
+        false,
     )?))
 }
 

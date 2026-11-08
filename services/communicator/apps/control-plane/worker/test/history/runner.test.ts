@@ -144,6 +144,132 @@ beforeEach(async () => {
 });
 
 describe("background history import runner", () => {
+  it("keeps missing keys recoverable beyond ordinary retry exhaustion with a capped durable delay", async () => {
+    const clock = makeClock();
+    let calls = 0;
+    let keysAvailable = false;
+    const provider = providerWith(async () => {
+      calls += 1;
+      if (calls === 11) throw new HistoryProviderError("runtime_unavailable");
+      if (keysAvailable) return completedPage();
+      return {
+        status: "partial",
+        events: [],
+        next_cursor: "opaque-blocked-page",
+        gap_code: "matrix_missing_room_key",
+        error_code: "provider_error",
+      };
+    }, 1);
+    const started = await startImport(
+      provider,
+      clock,
+      "scheduler-missing-key-cap",
+    );
+    for (let attempt = 1; attempt <= 12; attempt += 1) {
+      expect(
+        await runHistoryImportTick(workerEnv, {
+          createProvider: () => provider,
+          now: clock.now,
+        }),
+      ).toEqual({ claimed: 1, advanced: 1 });
+      const detail = await getDetail(
+        workerEnv.CONTROL_DB,
+        tenantId,
+        started.detail.import.import_id,
+        accountId,
+      );
+      const range = detail.ranges[0];
+      expect(range).toMatchObject({
+        status: "partial",
+        attempt_count: Math.min(10, attempt),
+        source_cursor: "opaque-blocked-page",
+        completed_at: null,
+      });
+      const wake = await readSchedulerRow(range?.range_id ?? "");
+      const delay =
+        Date.parse(wake.next_attempt_at ?? "") - clock.now().getTime();
+      expect(delay).toBe(Math.min(15 * 60_000, 60_000 * 2 ** (attempt - 1)));
+      expect(
+        await runHistoryImportTick(workerEnv, {
+          createProvider: () => provider,
+          now: clock.now,
+        }),
+      ).toEqual({ claimed: 0, advanced: 0 });
+      clock.advance(delay);
+    }
+    expect(calls).toBe(12);
+    keysAvailable = true;
+    expect(
+      await runHistoryImportTick(workerEnv, {
+        createProvider: () => provider,
+        now: clock.now,
+      }),
+    ).toEqual({ claimed: 1, advanced: 1 });
+    const recovered = await getDetail(
+      workerEnv.CONTROL_DB,
+      tenantId,
+      started.detail.import.import_id,
+      accountId,
+    );
+    expect(recovered.import.status).toBe("completed");
+    expect(recovered.ranges[0]).toMatchObject({
+      status: "completed",
+      attempt_count: 0,
+      gap_code: null,
+    });
+  });
+
+  it.each([
+    { gap_code: "provider_gap", next_cursor: "opaque-permanent" },
+    { gap_code: "matrix_sdk_failed", next_cursor: null },
+    { gap_code: "matrix_missing_room_key", next_cursor: null },
+  ])(
+    "does not reopen a permanent partial or a missing-key gap without a replay cursor: $gap_code",
+    async (gap) => {
+      const clock = makeClock();
+      let calls = 0;
+      const provider = providerWith(async () => {
+        calls += 1;
+        return {
+          status: "partial",
+          events: [],
+          error_code: "provider_error",
+          ...gap,
+        };
+      }, 1);
+      const started = await startImport(
+        provider,
+        clock,
+        `scheduler-permanent-${gap.gap_code}`,
+      );
+      expect(
+        await runHistoryImportTick(workerEnv, {
+          createProvider: () => provider,
+          now: clock.now,
+        }),
+      ).toEqual({ claimed: 1, advanced: 1 });
+      clock.advance(24 * 60 * 60_000);
+      expect(
+        await runHistoryImportTick(workerEnv, {
+          createProvider: () => provider,
+          now: clock.now,
+        }),
+      ).toEqual({ claimed: 0, advanced: 0 });
+      await started.service.advance({
+        env: workerEnv,
+        tenantId,
+        importId: started.detail.import.import_id,
+        accountId,
+        identityId,
+      });
+      expect(calls).toBe(1);
+      expect(
+        (await readSchedulerRow(started.detail.ranges[0]?.range_id ?? ""))
+          .next_attempt_at,
+      ).toBeNull();
+    },
+  );
+
   it("advances legacy NULL wakes without a browser", async () => {
     const clock = makeClock();
     const calls: string[] = [];

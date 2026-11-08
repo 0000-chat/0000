@@ -265,6 +265,48 @@
           ]
         }
       }
+    },
+    {
+      "name": "communicator-control-plane",
+      "kind": "communicator-worker-bundle",
+      "runtime_paths": [
+        "services/communicator/apps/control-plane/**",
+        "services/communicator/packages/**",
+        "services/communicator/package.json",
+        "services/communicator/pnpm-lock.yaml",
+        "services/communicator/pnpm-workspace.yaml",
+        "services/communicator/tsconfig.base.json"
+      ],
+      "archive_paths": ["services/communicator/apps/control-plane"],
+      "build": { "type": "communicator", "role": "worker" }
+    },
+    {
+      "name": "communicator-matrix-gateway",
+      "kind": "communicator-native-bundle",
+      "runtime_paths": [
+        "services/communicator/services/matrix-gateway/**",
+        "services/communicator/Cargo.toml",
+        "services/communicator/Cargo.lock",
+        "services/communicator/rust-toolchain.toml",
+        "services/communicator/deploy/matrix-gateway/**"
+      ],
+      "archive_paths": ["services/communicator/services/matrix-gateway"],
+      "build": { "type": "communicator", "role": "native" }
+    },
+    {
+      "name": "communicator-bridge-images",
+      "kind": "communicator-bridge-bundle",
+      "runtime_paths": [
+        "services/communicator/compose.yaml",
+        "services/communicator/deploy/images.lock.env",
+        "services/communicator/deploy/caddy/**",
+        "services/communicator/deploy/synapse/**",
+        "services/communicator/scripts/init-*",
+        "services/communicator/scripts/render-*",
+        "services/communicator/scripts/validate*"
+      ],
+      "archive_paths": ["services/communicator/compose.yaml", "services/communicator/deploy"],
+      "build": { "type": "communicator", "role": "bridge" }
     }
   ]
 }

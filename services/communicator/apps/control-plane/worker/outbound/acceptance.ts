@@ -1,5 +1,6 @@
 import {
   AcceptTextReplyInputSchema,
+  OUTBOUND_DISPATCH_LEASE_MS,
   type AcceptTextReplyResult,
   type OutboundDispatch,
   type OutboundDispatchPayload,
@@ -14,6 +15,7 @@ import {
   TextReplyRequestSchema,
 } from "@communicator/contracts";
 import { getTenantProjection } from "../projection/routing";
+import type { TenantProjectionDO } from "../projection/tenant-projection";
 import { hasAccountOperationGrant } from "../control-directory/grants";
 import { canonicalJsonStringify } from "../archive/canonical-json";
 import { sha256Hex } from "../archive/codec";
@@ -23,14 +25,18 @@ import { readAuthorizedMessageRemoval } from "../removals/service";
 import { defaultWhatsAppTextAdapter } from "./whatsapp-adapter";
 import {
   finalizeOutboundAcceptance,
+  readOutboundAcceptanceReservation,
   readOutboundAcceptanceReservationByKey,
   reserveOutboundAcceptance,
 } from "./authority";
 import type { OutboundCapability } from "./authority-types";
+import { captureSavedSend } from "./saved-authority";
 
 export type OutboundAcceptanceContext = {
   env: Cloudflare.Env;
   authorization: SessionResponse;
+  /** Request-scoped only; never persisted with saved work. */
+  credential?: string | undefined;
 };
 
 export type OutboundAcceptanceServices = {
@@ -65,6 +71,7 @@ export type OutboundAdapterEvidence = {
 };
 
 export type OutboundAdapterResult =
+  | { type: "deferred"; reason: "authority_unavailable" }
   | {
       type: "uncertain";
       reason: string;
@@ -304,7 +311,7 @@ export async function acceptTextReply(
   }
 
   const acceptedAt = (
-    services.now === undefined ? new Date() : services.now()
+    services.now === undefined ? new Date(Date.now()) : services.now()
   ).toISOString();
   const initialDispatchStatus = connectionAvailable
     ? "pending"
@@ -377,8 +384,21 @@ export async function acceptTextReply(
       await services.beforeAcceptanceReservation();
     }
 
+    const saved = await captureSavedSend(
+      context,
+      {
+        tenant_id: context.authorization.tenant.id,
+        membership_id: context.authorization.membership.id,
+        identity_id: parsed.identity_id,
+        account_id: owner.account_id,
+        conversation_id: parsed.conversation_id,
+        connection_id: owner.connection_id,
+      },
+      requestDigest,
+    );
     try {
       reservation = await reserveOutboundAcceptance(dbSession, {
+        ...(saved === undefined ? {} : { saved }),
         tenant_id: context.authorization.tenant.id,
         membership_id: context.authorization.membership.id,
         identity_id: parsed.identity_id,
@@ -426,6 +446,7 @@ export async function acceptTextReply(
         membership_id: reservation.reservation.membership_id,
         identity_id: reservation.reservation.identity_id,
         capability: reservation.reservation.capability,
+        saved: reservation.reservation.saved,
       },
     }),
   );
@@ -473,24 +494,14 @@ export async function acceptTextReply(
       accepted.dispatch.status === "pending" &&
       configuredAdapter !== undefined
     ) {
-      const now = acceptanceNow(services);
-      const leaseExpiresAt = new Date(Date.parse(now) + 30_000).toISOString();
-      const claimed = await projection.claimOutboundDispatch({
-        tenant_id: context.authorization.tenant.id,
-        command_id: accepted.command.id,
-        lease_id: `lease_${accepted.dispatch.transaction_id}_${Date.parse(now)}`,
-        lease_expires_at: leaseExpiresAt,
-        now,
-      });
-      if (claimed.status === "dispatching") {
-        const reconciled = await dispatchClaimedOutbound(
-          context,
-          accepted.command.id,
-          claimed,
-          configuredAdapter,
-          services,
-          now,
-        );
+      const reconciled = await executeOutboundCommand(
+        context.env,
+        projection,
+        context.authorization.tenant.id,
+        accepted.command.id,
+        { ...services, dispatchOutbound: configuredAdapter },
+      );
+      if (reconciled !== undefined) {
         return {
           ...accepted,
           command: reconciled.command,
@@ -520,10 +531,13 @@ export async function acceptTextReply(
 }
 
 const acceptanceNow = (services: OutboundAcceptanceServices): string =>
-  (services.now === undefined ? new Date() : services.now()).toISOString();
+  (services.now === undefined
+    ? new Date(Date.now())
+    : services.now()
+  ).toISOString();
 
 const configuredOutboundAdapter = (
-  context: OutboundAcceptanceContext,
+  context: Pick<OutboundAcceptanceContext, "env">,
   services: OutboundAcceptanceServices,
 ): DispatchAdapter | undefined =>
   services.dispatchOutbound ??
@@ -535,13 +549,112 @@ const configuredOutboundAdapter = (
           adapter.dispatch(dispatch, payload);
   })();
 
+export const outboundExecutionConfigured = (env: Cloudflare.Env): boolean =>
+  defaultWhatsAppTextAdapter({ env }) !== undefined;
+
 type DispatchAdapter = (
   dispatch: OutboundDispatch,
   payload: OutboundDispatchPayload,
 ) => Promise<OutboundAdapterResult>;
 
+type ExecutionProjection = Pick<
+  TenantProjectionDO,
+  | "prepareOutboundExecution"
+  | "claimOutboundDispatch"
+  | "getOutboundDispatchPayload"
+  | "failOutboundDispatch"
+  | "reconcileOutbound"
+>;
+
+type ExecutionContext = { env: Cloudflare.Env; tenantId: string };
+
+/** One session-independent executor for acceptance, decisions and alarms. */
+export async function executeOutboundCommand(
+  env: Cloudflare.Env,
+  projection: ExecutionProjection,
+  tenantId: string,
+  commandId: string,
+  services: OutboundAcceptanceServices = {},
+): Promise<OutboundDecisionResult | undefined> {
+  const adapter = configuredOutboundAdapter({ env }, services);
+  if (adapter === undefined) return undefined;
+  const now = acceptanceNow(services);
+  const candidate = await projection.prepareOutboundExecution({
+    schema_version: 1,
+    tenant_id: tenantId,
+    command_id: commandId,
+    now,
+  });
+  if (candidate === null) return undefined;
+  const authority = candidate.authority;
+  const bodyDigest = candidate.body_digest;
+  if (authority === undefined || bodyDigest === undefined) return undefined;
+  try {
+    const database = env.CONTROL_DB.withSession("first-primary");
+    const reservation = await readOutboundAcceptanceReservation(
+      database,
+      tenantId,
+      authority.reservation_id,
+    );
+    if (
+      reservation === null ||
+      JSON.stringify(reservation.saved) !== JSON.stringify(authority.saved)
+    )
+      return undefined;
+    const finalized = await finalizeOutboundAcceptance(database, {
+      tenant_id: tenantId,
+      membership_id: authority.membership_id,
+      identity_id: authority.identity_id,
+      account_id: candidate.account_id,
+      conversation_id: candidate.conversation_id,
+      connection_id: candidate.connection_id,
+      capability: authority.capability,
+      grant_id:
+        authority.capability.kind === "account_grant"
+          ? authority.capability.grant_id
+          : null,
+      reservation_id: authority.reservation_id,
+      idempotency_key:
+        candidate.resend_of_command_id == null
+          ? candidate.idempotency_key
+          : `resend_${candidate.request_digest.slice(0, 48)}`,
+      request_digest: candidate.request_digest,
+      body_digest: bodyDigest,
+      command_id: candidate.command_id,
+      message_id: candidate.message_id,
+      dispatch_id: candidate.id,
+      transaction_id: candidate.transaction_id,
+      now,
+    });
+    if (finalized.status !== "committed") return undefined;
+  } catch {
+    // Preparation persisted the next bounded retry before this pre-I/O read.
+    return undefined;
+  }
+  const claimNow = acceptanceNow(services);
+  const claimed = await projection.claimOutboundDispatch({
+    tenant_id: tenantId,
+    command_id: commandId,
+    lease_id: `lease_${crypto.randomUUID().replaceAll("-", "")}`,
+    lease_expires_at: new Date(
+      Date.parse(claimNow) + OUTBOUND_DISPATCH_LEASE_MS,
+    ).toISOString(),
+    now: claimNow,
+  });
+  if (claimed.outcome !== "acquired") return undefined;
+  return dispatchClaimedOutbound(
+    { env, tenantId },
+    projection,
+    commandId,
+    claimed.dispatch,
+    adapter,
+    services,
+    claimNow,
+  );
+}
+
 const outboundRemoval = async (
-  context: OutboundAcceptanceContext,
+  context: ExecutionContext,
   dispatch: OutboundDispatch,
 ) => {
   const database = context.env.CONTROL_DB;
@@ -550,7 +663,7 @@ const outboundRemoval = async (
   }
   try {
     return await readAuthorizedMessageRemoval(database, {
-      tenantId: context.authorization.tenant.id,
+      tenantId: context.tenantId,
       messageId: dispatch.message_id,
       accountId: dispatch.account_id,
       conversationId: dispatch.conversation_id,
@@ -561,15 +674,15 @@ const outboundRemoval = async (
 };
 
 const failRemovedOutbound = (
-  projection: ReturnType<typeof getTenantProjection>,
-  context: OutboundAcceptanceContext,
+  projection: ExecutionProjection,
+  context: ExecutionContext,
   commandId: string,
   claimed: OutboundDispatch,
   now: string,
 ) =>
   projection.failOutboundDispatch({
     schema_version: 1,
-    tenant_id: context.authorization.tenant.id,
+    tenant_id: context.tenantId,
     command_id: commandId,
     lease_id: claimed.dispatch_lease_id ?? "",
     now,
@@ -577,39 +690,26 @@ const failRemovedOutbound = (
   });
 
 const dispatchClaimedOutbound = async (
-  context: OutboundAcceptanceContext,
+  context: ExecutionContext,
+  projection: ExecutionProjection,
   commandId: string,
   claimed: OutboundDispatch,
   adapter: DispatchAdapter,
   services: OutboundAcceptanceServices,
   now: string,
 ): Promise<OutboundDecisionResult> => {
-  const projection = getTenantProjection(
-    context.env,
-    context.authorization.tenant.id,
-  );
   if ((await outboundRemoval(context, claimed)) !== null) {
     return failRemovedOutbound(projection, context, commandId, claimed, now);
   }
-  let payload: OutboundDispatchPayload;
-  try {
-    payload = await projection.getOutboundDispatchPayload({
-      schema_version: 1,
-      tenant_id: context.authorization.tenant.id,
-      command_id: commandId,
-      lease_id: claimed.dispatch_lease_id ?? "",
-      now,
-    });
-  } catch {
-    return projection.failOutboundDispatch({
-      schema_version: 1,
-      tenant_id: context.authorization.tenant.id,
-      command_id: commandId,
-      lease_id: claimed.dispatch_lease_id ?? "",
-      now,
-      failure_code: "deleted_message",
-    });
-  }
+  // A failed payload RPC is not proof of deletion. An interrupted owner keeps
+  // its lease; expiry fences it as uncertain instead of making it retryable.
+  const payload = await projection.getOutboundDispatchPayload({
+    schema_version: 1,
+    tenant_id: context.tenantId,
+    command_id: commandId,
+    lease_id: claimed.dispatch_lease_id ?? "",
+    now,
+  });
   if ((await outboundRemoval(context, claimed)) !== null) {
     return failRemovedOutbound(projection, context, commandId, claimed, now);
   }
@@ -622,14 +722,17 @@ const dispatchClaimedOutbound = async (
       reason: error instanceof Error ? "adapter_error" : "adapter_timeout",
     };
   }
-  if (adapterResult.type === "failure") {
+  if (adapterResult.type === "failure" || adapterResult.type === "deferred") {
     return projection.failOutboundDispatch({
       schema_version: 1,
-      tenant_id: context.authorization.tenant.id,
+      tenant_id: context.tenantId,
       command_id: commandId,
       lease_id: claimed.dispatch_lease_id ?? "",
       now,
-      failure_code: adapterResult.failure_code,
+      failure_code:
+        adapterResult.type === "deferred"
+          ? "authority_unavailable"
+          : adapterResult.failure_code,
     });
   }
   const evidences = adapterResultEvidence(
@@ -654,12 +757,13 @@ const dispatchClaimedOutbound = async (
         );
   let reconciled: OutboundDecisionResult | undefined;
   for (const evidence of effectiveEvidences) {
-    reconciled = await reconcileTrustedOutboundEvidence(
-      context,
-      commandId,
-      services,
+    reconciled = await projection.reconcileOutbound({
+      schema_version: 1,
+      tenant_id: context.tenantId,
+      command_id: commandId,
+      now: acceptanceNow(services),
       evidence,
-    );
+    });
   }
   if (reconciled === undefined) throw new ReadError("service_unavailable");
   return reconciled;
@@ -700,7 +804,7 @@ export const reconcileTrustedOutboundEvidence = async (
 
 const adapterResultEvidence = (
   result: OutboundAdapterResult,
-  context: OutboundAcceptanceContext,
+  context: ExecutionContext,
   commandId: string,
   dispatch: OutboundDispatch,
   observedAt: string,
@@ -709,7 +813,7 @@ const adapterResultEvidence = (
     return [
       {
         schema_version: 1,
-        tenant_id: context.authorization.tenant.id,
+        tenant_id: context.tenantId,
         command_id: commandId,
         source: "provider",
         evidence_id:
@@ -733,7 +837,7 @@ const adapterResultEvidence = (
         : [];
   return sourceEvidence.map((evidence) => ({
     schema_version: 1,
-    tenant_id: context.authorization.tenant.id,
+    tenant_id: context.tenantId,
     command_id: commandId,
     source: evidence.source,
     evidence_id: evidence.evidence_id,
@@ -919,7 +1023,20 @@ export async function decideOutboundCommand(
         current.dispatch.conversation_id,
       );
       if (capability === null) throw new ReadError("forbidden");
+      const saved = await captureSavedSend(
+        context,
+        {
+          tenant_id: context.authorization.tenant.id,
+          membership_id: context.authorization.membership.id,
+          identity_id: actorIdentity,
+          account_id: current.dispatch.account_id,
+          conversation_id: current.dispatch.conversation_id,
+          connection_id: current.dispatch.connection_id,
+        },
+        resendRequestDigest,
+      );
       const reserved = await reserveOutboundAcceptance(dbSession, {
+        ...(saved === undefined ? {} : { saved }),
         tenant_id: context.authorization.tenant.id,
         membership_id: context.authorization.membership.id,
         identity_id: actorIdentity,
@@ -965,6 +1082,7 @@ export async function decideOutboundCommand(
                 membership_id: resendReservation.reservation.membership_id,
                 identity_id: resendReservation.reservation.identity_id,
                 capability: resendReservation.reservation.capability,
+                saved: resendReservation.reservation.saved,
               },
             }),
       }),
@@ -1005,28 +1123,19 @@ export async function decideOutboundCommand(
     }
     const adapter = configuredOutboundAdapter(context, services);
     if (
-      decision === "confirm" &&
+      (decision === "confirm" || decision === "resend") &&
       !result.replayed &&
       result.dispatch.status === "pending" &&
       adapter !== undefined
     ) {
-      const now = acceptanceNow(services);
-      const claimed = await projection.claimOutboundDispatch({
-        tenant_id: context.authorization.tenant.id,
-        command_id: commandId,
-        lease_id: `lease_${result.dispatch.transaction_id}_${Date.parse(now)}`,
-        lease_expires_at: new Date(Date.parse(now) + 30_000).toISOString(),
-        now,
-      });
-      if (claimed.status === "dispatching") {
-        const dispatched = await dispatchClaimedOutbound(
-          context,
-          commandId,
-          claimed,
-          adapter,
-          services,
-          now,
-        );
+      const dispatched = await executeOutboundCommand(
+        context.env,
+        projection,
+        context.authorization.tenant.id,
+        result.command.id,
+        { ...services, dispatchOutbound: adapter },
+      );
+      if (dispatched !== undefined) {
         return {
           ...result,
           command: dispatched.command,

@@ -28,6 +28,13 @@ deployedApp.post("/claims", dispatchClaimHandler);
 const messageClaim = (overrides: Record<string, unknown> = {}) => ({
   schema_version: 1,
   operation: "message.send",
+  session_generation: workerNow.toISOString(),
+  route: {
+    gateway_route_id: "gateway_test",
+    bridge_instance_id: "bridge_test",
+    matrix_user_id: "user_test",
+    matrix_room_namespace: "room_test",
+  },
   tenant_id: "tenant_test",
   membership_id: "membership_test",
   identity_id: "identity_test",
@@ -83,7 +90,8 @@ describe("private dispatch claim route", () => {
     );
     expect(response.status).toBe(503);
     await expect(response.json()).resolves.toEqual({
-      error: "service_unavailable",
+      status: "authority_unavailable",
+      provider_allowed: false,
     });
   });
 

@@ -1,4 +1,43 @@
 {
+  "permission_request": {
+    "methods": ["POST"],
+    "path": "/api/v1/permission-requests",
+    "valid": {
+      "identity_id": "identity_one",
+      "account_id": "account_one",
+      "operation_scope": "conversation.read",
+      "chat_scope": "all_chats",
+      "chat_ids": [],
+      "reason": "Controlled access review",
+      "idempotency_key": "request-review-001"
+    },
+    "invalid": {
+      "identity_id": "identity_one",
+      "account_id": "account_one",
+      "operation_scope": "conversation.read",
+      "chat_scope": "all_chats",
+      "chat_ids": [],
+      "reason": "Controlled access review",
+      "idempotency_key": "request-review-001",
+      "status": "approved"
+    }
+  },
+  "restore_projection": {
+    "methods": ["POST"],
+    "path": "/api/v1/removals/restore-projection",
+    "valid": {
+      "rebuild_id": "rebuild_one",
+      "expected_generation": 1,
+      "started_at": "2026-09-14T00:00:00Z"
+    },
+    "invalid": {
+      "tenant_id": "tenant_one",
+      "resource_type": "message",
+      "resource_id": "message_one",
+      "content_generation": "2",
+      "reason": "requested"
+    }
+  },
   "group_rename": {
     "methods": ["PATCH"],
     "path": "/api/v1/groups/conversation_one",

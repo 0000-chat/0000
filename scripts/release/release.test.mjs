@@ -31,7 +31,7 @@ const legacyGatewayWorkflow = fs.readFileSync(path.join(repositoryRoot, ".github
 
 test("release configuration activates Worker and Bun runtime units", () => {
   assert.doesNotThrow(() => assertReleaseConfig(config));
-  assert.deepEqual(config.units.map((unit) => unit.name), ["msg-worker", "gateway", "database-worker", "platform-worker", "msg-webhook-dispatcher"]);
+  assert.deepEqual(config.units.map((unit) => unit.name), ["msg-worker", "gateway", "database-worker", "platform-worker", "msg-webhook-dispatcher", "communicator-control-plane", "communicator-matrix-gateway", "communicator-bridge-images"]);
 
   const msg = config.units[0];
   assert.equal(msg.kind, "cloudflare-worker-bundle");
@@ -490,7 +490,8 @@ test("Platform D1 migration metadata is ordered and content-addressed", () => {
     { name: "migrations/0009_guest_permission_grants.sql", digest: "sha256:aabe862138e1121ee0b0147df7048c5b850e3c53f5d77cefd7ed9a0b33fb1bf6" },
     { name: "migrations/0010_oauth_refresh.sql", digest: "sha256:50340870c588f9fb6ba231eb1e8e30b95644f18cdabed8c4d68be09879ec0b0a" },
     { name: "migrations/0011_machine_kinds.sql", digest: "sha256:9c45071f74aa45646411c5415a8355fadb7b014e5adb9c35ef5d15012dcbecee" },
-    { name: "migrations/0012_browser_purpose.sql", digest: "sha256:c7a57c01ed187961fadf68405650386769e5b590c8aa1ada5f75798583ec5c1a" }
+    { name: "migrations/0012_browser_purpose.sql", digest: "sha256:c7a57c01ed187961fadf68405650386769e5b590c8aa1ada5f75798583ec5c1a" },
+    { name: "migrations/0013_saved_operation_authority.sql", digest: "sha256:28e81235f76a1545ea0ded70259248d168587883c6eee1fafcff3573a1143fdf" }
   ]);
 });
 
@@ -703,7 +704,7 @@ test("Worker changes select their configured release units", () => {
   );
   assert.deepEqual(affectedUnits(config, ["services/gateway/src/worker.ts"]).map((unit) => unit.name), ["gateway"]);
   assert.deepEqual(affectedUnits(config, ["services/database/src/worker.ts"]).map((unit) => unit.name), ["database-worker"]);
-  assert.deepEqual(affectedUnits(config, ["bun.lock"]).map((unit) => unit.name), ["database-worker", "gateway", "msg-webhook-dispatcher", "msg-worker", "platform-worker"]);
+  assert.deepEqual(affectedUnits(config, ["bun.lock"]).map((unit) => unit.name), ["communicator-bridge-images", "communicator-control-plane", "communicator-matrix-gateway", "database-worker", "gateway", "msg-webhook-dispatcher", "msg-worker", "platform-worker"]);
   assert.deepEqual(affectedUnits(config, [".github/workflows/release.yml"]).map((unit) => unit.name), ["msg-webhook-dispatcher", "msg-worker"]);
 });
 
@@ -792,7 +793,7 @@ test("unit registration retains simultaneous runtime and global inputs", () => {
   );
   assert.deepEqual(
     affectedUnits(config, ["release-units.json", "bun.lock"], previousConfig).map((unit) => unit.name),
-    ["database-worker", "gateway", "msg-webhook-dispatcher", "msg-worker", "platform-worker"]
+    ["communicator-bridge-images", "communicator-control-plane", "communicator-matrix-gateway", "database-worker", "gateway", "msg-webhook-dispatcher", "msg-worker", "platform-worker"]
   );
 });
 
@@ -805,7 +806,7 @@ test("changes to existing unit definitions remain conservative", () => {
   };
   assert.deepEqual(
     affectedUnits(config, ["release-units.json"], previousConfig).map((unit) => unit.name),
-    ["database-worker", "gateway", "msg-webhook-dispatcher", "msg-worker", "platform-worker"]
+    ["communicator-bridge-images", "communicator-control-plane", "communicator-matrix-gateway", "database-worker", "gateway", "msg-webhook-dispatcher", "msg-worker", "platform-worker"]
   );
 });
 
@@ -817,7 +818,7 @@ test("a release contract change alongside a new unit remains conservative", () =
   };
   assert.deepEqual(
     affectedUnits(config, ["release-units.json"], previousConfig).map((unit) => unit.name),
-    ["database-worker", "gateway", "msg-webhook-dispatcher", "msg-worker", "platform-worker"]
+    ["communicator-bridge-images", "communicator-control-plane", "communicator-matrix-gateway", "database-worker", "gateway", "msg-webhook-dispatcher", "msg-worker", "platform-worker"]
   );
 });
 
@@ -863,7 +864,7 @@ test("release planner reads the unit map from the push base commit", () => {
   assert.deepEqual(
     affectedUnits(config, ["release-units.json"], readBaseReleaseConfig(head, () => "not json"))
       .map((unit) => unit.name),
-    ["database-worker", "gateway", "msg-webhook-dispatcher", "msg-worker", "platform-worker"]
+    ["communicator-bridge-images", "communicator-control-plane", "communicator-matrix-gateway", "database-worker", "gateway", "msg-webhook-dispatcher", "msg-worker", "platform-worker"]
   );
 });
 

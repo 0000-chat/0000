@@ -4,6 +4,10 @@ import {
   parseGuestResolveResult,
   parseAuthenticationResult,
   parsePrincipal,
+  parseSavedOperationAuthorization,
+  type SavedOperationAuthorization,
+  type SavedOperationCaptureResult,
+  type SavedOperationRevalidationResult,
   type AuthenticationResult,
   type AuthenticationWireResult,
   type GuestCreateResult,
@@ -24,6 +28,14 @@ export interface PlatformClientOptions {
 
 export interface PlatformClient {
   authenticate(presentedCredential: string): Promise<AuthenticationResult>;
+  captureSavedOperation(input: {
+    credential: string;
+    operationId: string;
+    capability: string;
+  }): Promise<SavedOperationCaptureResult>;
+  revalidateSavedOperation(
+    authorization: SavedOperationAuthorization,
+  ): Promise<SavedOperationRevalidationResult>;
 }
 
 export interface PlatformGuestClientOptions {
@@ -245,7 +257,69 @@ export function createPlatformClient(
       : { status: "authority_unavailable" };
   };
 
-  return { authenticate };
+  async function savedOperationRequest(path: string, body: unknown) {
+    const endpoint = resolveEndpoint(path, options.baseUrl);
+    if (!endpoint) return { status: "authority_unavailable" } as const;
+    const result = await transport(endpoint, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${options.serviceVerifier}`,
+        "content-type": "application/json",
+        accept: "application/json",
+      },
+      body: JSON.stringify(body),
+    });
+    if (!result.response) return { status: "authority_unavailable" } as const;
+    const value = result.value;
+    if (!value || typeof value !== "object" || !("status" in value)) {
+      return { status: "authority_unavailable" } as const;
+    }
+    if (result.response.status === 403 && value.status === "denied") {
+      return { status: "denied" } as const;
+    }
+    if (result.response.status !== 200 || value.status !== "allowed") {
+      return { status: "authority_unavailable" } as const;
+    }
+    return { status: "allowed", value } as const;
+  }
+
+  return {
+    authenticate,
+    async captureSavedOperation(input) {
+      const result = await savedOperationRequest(
+        "/internal/v1/saved-operations/capture", input,
+      );
+      if (result.status !== "allowed") return result;
+      const authorization = parseSavedOperationAuthorization(
+        "authorization" in result.value ? result.value.authorization : null,
+      );
+      return authorization &&
+        authorization.authority === options.authority &&
+        authorization.audience === options.audience &&
+        authorization.operationId === input.operationId &&
+        authorization.capability === input.capability
+        ? { status: "allowed", authorization }
+        : { status: "authority_unavailable" };
+    },
+    async revalidateSavedOperation(authorization) {
+      if (authorization.authority !== options.authority ||
+          authorization.audience !== options.audience) return { status: "denied" };
+      const result = await savedOperationRequest(
+        "/internal/v1/saved-operations/revalidate", authorization,
+      );
+      if (result.status !== "allowed") return result;
+      const principal = parsePrincipal(
+        "principal" in result.value ? result.value.principal : null,
+        { authority: options.authority, audience: options.audience },
+      );
+      return principal && (principal.kind === "human" || principal.kind === "agent") &&
+        principal.subjectId === authorization.subjectId &&
+        principal.organizationId === authorization.organizationId &&
+        principal.capabilities.includes(authorization.capability)
+        ? { status: "allowed", principal }
+        : { status: "authority_unavailable" };
+    },
+  };
 }
 
 function unavailable<T>(): T {

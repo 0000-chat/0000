@@ -9,6 +9,7 @@ pub mod config;
 pub mod credentials;
 pub mod crypto;
 pub mod crypto_outbox;
+pub mod evidence;
 pub mod health;
 pub mod history;
 pub mod ingestion;
