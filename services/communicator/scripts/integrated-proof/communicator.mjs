@@ -11,6 +11,7 @@ import { handleRetentionFixture } from "./retention-fixture.mjs";
 import { handleRecoveryFixture } from "./recovery-fixture.mjs";
 import { handleBootstrapFixture } from "./bootstrap-fixture.mjs";
 import { archiveCanonicalEventBatch } from "../../apps/control-plane/worker/archive/writer.ts";
+import { recordRemoval } from "../../apps/control-plane/worker/removals/ledger.ts";
 
 export { LinkSessionDO };
 export class TenantProjectionDO extends ProductionTenantProjectionDO {
@@ -54,6 +55,10 @@ export default {
       return handleRemovalFixture(request, env);
     if (pathname === "/__fixture/claim-traces")
       return Response.json(claimTraces);
+    if (pathname === "/__fixture/outbound-removal")
+      return Response.json(
+        await recordRemoval(env.CONTROL_DB, await request.json()),
+      );
     if (pathname === "/internal/v1/outbound/dispatch-claims") {
       const result = await worker.fetch(request, env, context);
       claimTraces.push({

@@ -42,6 +42,19 @@ export function archiveFiles(bytes) {
   return files;
 }
 
+function assertMigrationLedger(files, ledger) {
+  assert.ok(Array.isArray(ledger) && ledger.length > 0, "missing D1 migration ledger");
+  assert.deepEqual([...files.keys()].filter((file) => file.startsWith("migrations/")).sort(), ledger.map((file) => file.name).sort(), "incomplete migration ledger");
+  let previousNumber = -1;
+  for (const file of ledger) {
+    assert.match(file.name, /^migrations\/[0-9]{4,}_[a-z0-9_]+\.sql$/);
+    const number = Number(path.basename(file.name).split("_")[0]);
+    assert.ok(Number.isSafeInteger(number) && number > previousNumber, "unordered migrations");
+    previousNumber = number;
+    assert.equal(digest(files.get(file.name).bytes), file.digest, `migration checksum mismatch: ${file.name}`);
+  }
+}
+
 export function assertForwardState(previous, current) {
   assert.equal(current.state.compatibility, previous.state.compatibility, "incompatible persistent-state version");
   assert.equal(current.state.migration_policy, "forward-only", "missing forward-migration policy");
@@ -127,16 +140,7 @@ export function verifyComposition({ record, directory, commit, compatibility, at
         assert.ok(manifest.dependencies.every((entry) => entry.delivery === "bundled" && entry.source_files?.length > 0), "unbundled workspace dependency");
         assert.ok(files.has("worker.js") && files.has("assets/index.html") && files.has("wrangler.json"), "missing Worker/UI inputs");
         assert.deepEqual(JSON.parse(files.get("wrangler.json").bytes), manifest.bindings, "binding contract mismatch");
-        assert.deepEqual([...files.keys()].filter((file) => file.startsWith("migrations/")).sort(), manifest.migration_files.map((file) => file.name).sort(), "incomplete migration ledger");
-        let previousNumber = -1;
-        assert.ok(manifest.migration_files.length > 0, "missing D1 migration ledger");
-        for (const file of manifest.migration_files) {
-          assert.match(file.name, /^migrations\/[0-9]{4,}_[a-z0-9_]+\.sql$/);
-          const number = Number(path.basename(file.name).split("_")[0]);
-          assert.ok(number > previousNumber, "unordered migrations");
-          previousNumber = number;
-          assert.equal(digest(files.get(file.name)?.bytes ?? Buffer.alloc(0)), file.digest, `migration checksum mismatch: ${file.name}`);
-        }
+        assertMigrationLedger(files, manifest.migration_files);
       }
       if (role === "native") {
         assert.equal(manifest.native.target, "x86_64-unknown-linux-gnu", "unsupported native target");
@@ -161,6 +165,12 @@ export function verifyComposition({ record, directory, commit, compatibility, at
       assert.equal(artifact.kind, "cloudflare-worker-bundle");
       assert.equal(artifact.artifact_format, "0000-cloudflare-worker-bundle-v1");
       assert.equal(digest(files.get("worker.js")?.bytes ?? Buffer.alloc(0)), artifact.entrypoint_digest, "Platform entrypoint mismatch");
+      assertMigrationLedger(files, manifest.migration_files);
+      if (previous) {
+        assert.ok(previous[name], `previous state missing: ${name}`);
+        const old = previous[name].migration_files;
+        assert.deepEqual(manifest.migration_files.slice(0, old.length), old, "Platform migration history is not append-only");
+      }
     }
     manifests[name] = manifest;
     verified.push({ name, files });

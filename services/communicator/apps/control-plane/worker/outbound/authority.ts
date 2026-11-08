@@ -802,6 +802,16 @@ export async function claimOutboundDispatch(
          AND a.transaction_id = ?
          AND a.request_digest = ?
          AND a.body_digest = ?
+         AND NOT EXISTS (
+           SELECT 1 FROM removal_authority AS r
+           WHERE r.tenant_id = a.tenant_id
+             AND (r.account_id IS NULL OR r.account_id = a.account_id)
+             AND (r.conversation_id IS NULL OR r.conversation_id = a.conversation_id)
+             AND (
+               (r.resource_type = 'message' AND r.resource_id = a.message_id)
+               OR (r.resource_type = 'conversation' AND r.resource_id = a.conversation_id)
+             )
+         )
          AND (? IS NULL OR (
            a.saved_authority = ?
            AND c.updated_at = json_extract(a.saved_authority, '$.session_generation')

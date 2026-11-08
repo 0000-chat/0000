@@ -1,6 +1,7 @@
 import { env as runtimeEnv } from "cloudflare:workers";
 import type { D1Migration } from "@cloudflare/vitest-plugin";
 import { describe, expect, it } from "vitest";
+import { recordRemoval } from "../../removals/ledger";
 import {
   claimOutboundDispatch,
   finalizeOutboundAcceptance,
@@ -516,6 +517,103 @@ const privateClaimInput = (
   ...overrides,
 });
 
+describe.each(["message", "conversation"])(
+  "%s removal at final claim",
+  (resourceType) => {
+    it.each([
+      ["exact", "active", true],
+      ["exact", "completed", true],
+      ["exact", "failed", true],
+      ["broad", "active", true],
+      ["wrong-account", "active", false],
+      ["wrong-conversation", "active", false],
+      ["wrong-tenant", "active", false],
+      ["wrong-resource", "active", false],
+    ])(
+      "%s scope with %s status suppresses=%s",
+      async (scope, status, suppresses) => {
+        const fixture = await seedFixture();
+        const reservation = requireReservation(
+          await reserveOutboundAcceptance(
+            env.CONTROL_DB,
+            reserveInput(fixture),
+          ),
+        );
+        const finalization = finalizeInput(fixture, reservation);
+        expect(
+          (await finalizeOutboundAcceptance(env.CONTROL_DB, finalization))
+            .status,
+        ).toBe("committed");
+        const other = scope === "wrong-tenant" ? await seedFixture() : fixture;
+        const resourceId =
+          resourceType === "message"
+            ? finalization.message_id
+            : fixture.conversation_id;
+        const authority = await recordRemoval(env.CONTROL_DB, {
+          tenant_id: other.tenant_id,
+          resource_type: resourceType,
+          resource_id:
+            scope === "wrong-resource" ? `${resourceId}-other` : resourceId,
+          content_generation: resourceId,
+          account_id:
+            scope === "broad"
+              ? null
+              : scope === "wrong-account"
+                ? fixture.owner_account_id
+                : fixture.account_id,
+          conversation_id:
+            scope === "broad"
+              ? null
+              : scope === "wrong-conversation"
+                ? fixture.owner_conversation_id
+                : fixture.conversation_id,
+          reason: "requested",
+        });
+        await env.CONTROL_DB.prepare(
+          "UPDATE removal_authority SET status = ? WHERE id = ?",
+        )
+          .bind(status, authority.id)
+          .run();
+        const input = claimInput(fixture, reservation);
+        const result = await claimOutboundDispatch(env.CONTROL_DB, input);
+        if (suppresses) {
+          expect(result).toEqual({
+            status: "denied",
+            reason: "authorization_revoked",
+          });
+          expect(await claimOutboundDispatch(env.CONTROL_DB, input)).toEqual(
+            result,
+          );
+          expect(
+            await env.CONTROL_DB.prepare(
+              "SELECT id FROM outbound_dispatch_claims WHERE reservation_id = ?",
+            )
+              .bind(reservation.id)
+              .first(),
+          ).toBeNull();
+          expect(
+            (
+              await readOutboundAcceptanceReservation(
+                env.CONTROL_DB,
+                fixture.tenant_id,
+                reservation.id,
+              )
+            )?.status,
+          ).toBe("committed");
+        } else {
+          expect(result).toMatchObject({
+            status: "claimed",
+            provider_allowed: true,
+          });
+          expect(
+            await claimOutboundDispatch(env.CONTROL_DB, input),
+          ).toMatchObject({ status: "replayed", provider_allowed: false });
+        }
+      },
+    );
+  },
+);
+
 describe("outbound authority migration", () => {
   it("preserves populated pre-fence grants and retains epochs across regrant", async () => {
     const fixture = await seedFixture();
@@ -682,6 +780,13 @@ describe("outbound authority migration", () => {
     );
     expect(first.status).toBe("claimed");
     if (first.status !== "claimed") throw new Error("claim was denied");
+    await recordRemoval(env.CONTROL_DB, {
+      tenant_id: fixture.tenant_id,
+      resource_type: "conversation",
+      resource_id: fixture.conversation_id,
+      content_generation: fixture.conversation_id,
+      reason: "requested",
+    });
     const duplicate = await claimOutboundDispatch(
       env.CONTROL_DB,
       claimInput(fixture, reservation, { claim_id: "different-claim-id" }),

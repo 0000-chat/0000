@@ -685,6 +685,53 @@ try {
       additional_matrix_sends: 0,
     };
   });
+  const removalBoundary = (resourceType) => {
+    let authority;
+    const id = `final-boundary-${resourceType}-removal`;
+    return [
+      id,
+      async (db) => {
+        const acceptance = await db
+          .prepare(
+            "SELECT * FROM outbound_acceptance_intents WHERE status = 'committed' AND idempotency_key = ?",
+          )
+          .bind(id)
+          .first();
+        assert.ok(acceptance?.message_id);
+        const response = await runtime.dispatchFetch(
+          "http://localhost/__fixture/outbound-removal",
+          {
+            method: "POST",
+            body: JSON.stringify({
+              tenant_id: acceptance.tenant_id,
+              resource_type: resourceType,
+              resource_id:
+                resourceType === "message"
+                  ? acceptance.message_id
+                  : acceptance.conversation_id,
+              content_generation:
+                resourceType === "message"
+                  ? acceptance.message_id
+                  : acceptance.conversation_id,
+              account_id: acceptance.account_id,
+              conversation_id: acceptance.conversation_id,
+              reason: "requested",
+            }),
+          },
+        );
+        assert.equal(response.status, 200);
+        authority = await response.json();
+      },
+      async (db) => {
+        // This is a disposable local fixture, not a production ledger reset.
+        if (authority)
+          await db
+            .prepare("DELETE FROM removal_authority WHERE id = ?")
+            .bind(authority.id)
+            .run();
+      },
+    ];
+  };
   for (const [id, mutate, restore] of [
     [
       "final-boundary-grant-revocation",
@@ -701,6 +748,8 @@ try {
       "UPDATE connections SET updated_at = '2026-08-30T00:00:00.000Z' WHERE id = 'connection_human_whatsapp'",
       "UPDATE connections SET updated_at = '2026-08-29T00:00:00.000Z' WHERE id = 'connection_human_whatsapp'",
     ],
+    removalBoundary("message"),
+    removalBoundary("conversation"),
   ])
     await observe(id, async () => {
       const db = await database();
@@ -714,7 +763,8 @@ try {
       ).length;
       beforeGateway = async () => {
         crossedBoundary = true;
-        await db.prepare(mutate).run();
+        if (typeof mutate === "function") await mutate(db);
+        else await db.prepare(mutate).run();
       };
       try {
         const result = await send(id);
@@ -792,10 +842,11 @@ try {
           result.body.transaction_id,
         );
         assert.equal(boundary.ledger_claim_count, 0);
-        assert.equal((await calls()).send_requests, before.send_requests);
+        assert.deepEqual(boundary.calls_after, before);
       } finally {
         beforeGateway = undefined;
-        await db.prepare(restore).run();
+        if (typeof restore === "function") await restore(db);
+        else await db.prepare(restore).run();
       }
       return {
         saved_before_mutation: true,

@@ -161,6 +161,58 @@ test("clean consumer verifies, extracts and restarts the actual release composit
       const native = structuredClone(manifests["communicator-matrix-gateway"]);
       native.state.embedded_schema[0].digest = `sha256:${"c".repeat(64)}`;
       assert.throws(() => assertForwardState(manifests[native.name], native), /migration review required/);
+      for (const mutate of [
+        (ledger) => { ledger[0].digest = `sha256:${"d".repeat(64)}`; },
+        (ledger) => { ledger.push({ name: "migrations/9999_future.sql", digest: `sha256:${"e".repeat(64)}` }); },
+      ]) {
+        const previous = structuredClone(manifests);
+        mutate(previous["platform-worker"].migration_files);
+        assert.throws(() => verifyComposition({ ...inputs, previous }), /not append-only/);
+      }
+    });
+
+    await t.test("Platform SQL must match its complete ordered ledger before extraction", () => {
+      const artifact = record.artifacts.find((entry) => entry.name === "platform-worker");
+      const archive = path.join(artifacts, artifact.asset_name);
+      const original = fs.readFileSync(archive);
+      const files = archiveFiles(original);
+      const repack = path.join(temporary, "platform-repack");
+      const destination = path.join(temporary, "invalid-platform-extraction");
+      const mutations = [
+        (manifest) => { fs.appendFileSync(path.join(repack, manifest.migration_files[0].name), "\n-- changed SQL bytes\n"); },
+        (manifest) => { fs.rmSync(path.join(repack, manifest.migration_files[0].name)); },
+        () => { fs.writeFileSync(path.join(repack, "migrations/9999_undeclared.sql"), "SELECT 1;\n"); },
+        (manifest) => { manifest.migration_files.reverse(); },
+        (manifest) => { manifest.migration_files.push(manifest.migration_files[0]); },
+      ];
+      try {
+        for (const mutate of mutations) {
+          fs.rmSync(repack, { recursive: true, force: true });
+          for (const [name, file] of files) {
+            fs.mkdirSync(path.dirname(path.join(repack, name)), { recursive: true });
+            fs.writeFileSync(path.join(repack, name), file.bytes, { mode: file.mode });
+          }
+          const manifest = structuredClone(manifests[artifact.name]);
+          mutate(manifest);
+          fs.writeFileSync(path.join(repack, "artifact-manifest.json"), stableJson(manifest));
+          const changed = gzipSync(run("tar", ["--format=ustar", "-cf", "-", "-C", repack, ...fs.readdirSync(repack)]));
+          fs.writeFileSync(archive, changed);
+          const modified = structuredClone(record);
+          modified.artifacts.find((entry) => entry.name === artifact.name).digest = `sha256:${sha256(changed)}`;
+          assert.throws(() => verifyComposition({ ...inputs, record: modified, extract: destination }), /migration/);
+          assert.equal(fs.existsSync(destination), false);
+        }
+        const appended = structuredClone(manifests[artifact.name]);
+        const sql = Buffer.from("CREATE TABLE release_upgrade_control (id TEXT);\n");
+        appended.migration_files.push({ name: "migrations/9999_future.sql", digest: `sha256:${sha256(sql)}` });
+        fs.writeFileSync(path.join(repack, "migrations/9999_future.sql"), sql);
+        fs.writeFileSync(path.join(repack, "artifact-manifest.json"), stableJson(appended));
+        const changed = gzipSync(run("tar", ["--format=ustar", "-cf", "-", "-C", repack, ...fs.readdirSync(repack)]));
+        fs.writeFileSync(archive, changed);
+        const modified = structuredClone(record);
+        modified.artifacts.find((entry) => entry.name === artifact.name).digest = `sha256:${sha256(changed)}`;
+        assert.doesNotThrow(() => verifyComposition({ ...inputs, record: modified, previous: manifests }));
+      } finally { fs.writeFileSync(archive, original); }
     });
 
     await t.test("extracted Worker boots with real D1/SQLite DO and retains state across runtime restart", async () => {
