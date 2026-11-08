@@ -18,6 +18,9 @@ import { OidcVerificationError } from "../../auth/oidc";
 import { recordRemovalWithSuppression } from "../../removals/service";
 import { evidenceOutboundHandler } from "../../routes/outbound";
 import { Hono } from "hono";
+import { archiveCanonicalEventBatch } from "../../archive/writer";
+import { readRestoreReplayPageForActivation } from "../../archive/replay";
+import { cleanupArchiveTenant } from "../archive/support";
 
 const tenant = "tenant_pilot";
 const timestamp = "2026-08-29T00:00:00.000Z";
@@ -159,6 +162,17 @@ const post = (
 
 async function fixture() {
   const stub = await initialize(tenant);
+  const ownerEvent = event(
+    "event_evidence_conversation",
+    { title: "Evidence", archived: false, muted: false },
+    "conversation.updated",
+    {
+      tenant_id: tenant,
+      identity_id: "identity_human",
+      account_id: "account_human",
+      conversation_id: "conversation_evidence",
+    },
+  );
   await stub.applyBatch({
     schema_version: 1,
     tenant_id: tenant,
@@ -172,19 +186,7 @@ async function fixture() {
         "identity_human",
       ),
     ],
-    events: [
-      event(
-        "event_evidence_conversation",
-        { title: "Evidence", archived: false, muted: false },
-        "conversation.updated",
-        {
-          tenant_id: tenant,
-          identity_id: "identity_human",
-          account_id: "account_human",
-          conversation_id: "conversation_evidence",
-        },
-      ),
-    ],
+    events: [ownerEvent],
     checkpoint: null,
   });
   const accepted = await stub.acceptTextReply({
@@ -237,7 +239,7 @@ async function fixture() {
       observed_at: new Date().toISOString(),
     },
   });
-  return { stub, accepted };
+  return { stub, accepted, ownerEvent };
 }
 
 beforeEach(async () => {
@@ -249,13 +251,16 @@ beforeEach(async () => {
   const previous = await initialize(tenant);
   await runInDurableObject(previous, async (_instance, state) => {
     await state.storage.deleteAlarm();
-    state.storage.sql.exec("DELETE FROM outbound_evidence");
-    state.storage.sql.exec("DELETE FROM outbound_actions");
-    state.storage.sql.exec("DELETE FROM outbound_command_decisions");
-    state.storage.sql.exec("DELETE FROM outbound_dispatches");
-    state.storage.sql.exec("DELETE FROM commands");
-    state.storage.sql.exec("DELETE FROM messages");
+    const tables = state.storage.sql
+      .exec<{ name: string }>(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name NOT GLOB '_cf_*' AND name != '_sql_schema_migrations'",
+      )
+      .toArray();
+    for (const { name } of tables) {
+      state.storage.sql.exec(`DELETE FROM "${name.replaceAll('"', '""')}"`);
+    }
   });
+  await initialize(tenant);
   await clearDirectory(env.CONTROL_DB);
   await seedDirectory(env.CONTROL_DB);
   await env.CONTROL_DB.prepare(
@@ -267,6 +272,7 @@ beforeEach(async () => {
 });
 afterEach(async () => {
   vi.restoreAllMocks();
+  await cleanupArchiveTenant(env.EVENT_ARCHIVE, tenant);
   await runInDurableObject(
     env.TENANT_PROJECTION.getByName(tenant),
     async (_instance, state) => {
@@ -383,59 +389,209 @@ describe("private trusted provider evidence in real Worker/D1/SQLite DO", () => 
     ).toBe("bridge_fail_permanent");
     expect((await post(accepted.command.id)).status).toBe(200);
   });
-  it("reconciles old-attempt evidence after an explicit resend without attributing it to the new attempt", async () => {
-    const { stub, accepted } = await fixture();
-    const resend = await stub.decideOutbound({
-      schema_version: 1,
-      tenant_id: tenant,
-      command_id: accepted.command.id,
-      decision: "resend",
-      idempotency_key: "explicit-resend",
-      actor_principal_id: "principal_human",
-      actor_identity_id: "identity_human",
-      decided_at: new Date().toISOString(),
-      connection_available: true,
-      duplicate_risk_acknowledged: true,
-      resend_authority: {
-        reservation_id: "reservation_resend",
-        membership_id: "membership_human",
-        identity_id: "identity_human",
-        capability: {
-          kind: "owner_admin",
-          authority_id: "authority_resend",
-          authority_epoch: 1,
+  it.each(["http", "direct"])(
+    "reconciles old-attempt evidence via %s after archive rebuild without attributing it to a later resend",
+    async (mode) => {
+      const { stub, accepted, ownerEvent } = await fixture();
+      const resend = await stub.decideOutbound({
+        schema_version: 1,
+        tenant_id: tenant,
+        command_id: accepted.command.id,
+        decision: "resend",
+        idempotency_key: "explicit-resend",
+        actor_principal_id: "principal_human",
+        actor_identity_id: "identity_human",
+        decided_at: new Date().toISOString(),
+        connection_available: true,
+        duplicate_risk_acknowledged: true,
+        resend_authority: {
+          reservation_id: "reservation_resend",
+          membership_id: "membership_human",
+          identity_id: "identity_human",
+          capability: {
+            kind: "owner_admin",
+            authority_id: "authority_resend",
+            authority_epoch: 1,
+          },
+          saved,
         },
-        saved,
-      },
-    });
-    await stub.claimOutboundDispatch({
-      tenant_id: tenant,
-      command_id: resend.command.id,
-      lease_id: "lease_resend",
-      lease_expires_at: new Date(Date.now() + 30_000).toISOString(),
-      now: new Date().toISOString(),
-    });
-    const before = await rows(
-      stub,
-      "SELECT * FROM outbound_dispatches WHERE command_id=?",
-      resend.command.id,
-    );
-    expect((await post(accepted.command.id)).status).toBe(200);
-    expect(
-      await rows(
+      });
+      await stub.claimOutboundDispatch({
+        tenant_id: tenant,
+        command_id: resend.command.id,
+        lease_id: "lease_resend",
+        lease_expires_at: new Date(Date.now() + 30_000).toISOString(),
+        now: new Date().toISOString(),
+      });
+      const before = await rows(
         stub,
         "SELECT * FROM outbound_dispatches WHERE command_id=?",
         resend.command.id,
-      ),
-    ).toEqual(before);
-    expect(
-      await stub.listOutboundEvidence({
+      );
+      const now = new Date().toISOString();
+      await archiveCanonicalEventBatch({
+        bucket: env.EVENT_ARCHIVE,
+        tenantId: tenant,
+        batchId: "batch_evidence_rebuild",
+        events: [ownerEvent],
+        archivedAt: now,
+        producerVersion: "provider-evidence-test/1",
+        sourceCheckpoint: null,
+      });
+      const authorization = auth(["projection.rebuild"], [], tenant);
+      await stub.beginRebuild({
         schema_version: 1,
         tenant_id: tenant,
-        command_id: resend.command.id,
-      }),
-    ).toEqual([]);
-  });
+        rebuild_id: "rebuild_evidence",
+        expected_generation: 1,
+        started_at: now,
+        authorization,
+      });
+      await runInDurableObject(stub, async (instance) => {
+        await expect(
+          instance.getProviderEvidenceTarget({
+            tenant_id: tenant,
+            command_id: accepted.command.id,
+          }),
+        ).rejects.toMatchObject({ code: "projection_rebuilding" });
+      });
+      const page = await readRestoreReplayPageForActivation(
+        env.EVENT_ARCHIVE,
+        env.CONTROL_DB,
+        tenant,
+      );
+      await stub.applyReplayPage({
+        schema_version: 1,
+        tenant_id: tenant,
+        rebuild_id: "rebuild_evidence",
+        source_cursor: null,
+        connections: [
+          bindingFor(
+            "account_human",
+            "connection_human_whatsapp",
+            "identity_human",
+          ),
+        ],
+        page: page.immutable_page,
+        authorization,
+      });
+      expect(
+        await stub.completeRebuild({
+          schema_version: 1,
+          tenant_id: tenant,
+          rebuild_id: "rebuild_evidence",
+          terminal_cursor: null,
+          completed_at: now,
+          authorization,
+        }),
+      ).toMatchObject({ state: "ready", generation: 2 });
+      await runInDurableObject(stub, async (instance) => {
+        await expect
+          .soft(
+            instance.getProviderEvidenceTarget({
+              tenant_id: tenant,
+              command_id: accepted.command.id,
+            }),
+          )
+          .resolves.toMatchObject({
+            status: "delivery_uncertain",
+            projection_generation: 1,
+          });
+      });
+      const reconciliation = {
+        schema_version: 1 as const,
+        tenant_id: tenant,
+        command_id: accepted.command.id,
+        now,
+        connection_available: true,
+        evidence: {
+          schema_version: 1 as const,
+          tenant_id: tenant,
+          command_id: accepted.command.id,
+          account_id: accepted.dispatch.account_id,
+          conversation_id: accepted.dispatch.conversation_id,
+          transaction_id: accepted.dispatch.transaction_id,
+          request_digest: accepted.dispatch.request_digest,
+          generation: 1,
+          source: "provider" as const,
+          status: "delivered" as const,
+          evidence_id: "$direct-late-delivery",
+          observed_at: now,
+        },
+        provider_context: {
+          dispatch_id: accepted.dispatch.id,
+          connection_id: accepted.dispatch.connection_id,
+          session_generation: saved.session_generation,
+        },
+      };
+      await runInDurableObject(stub, async (instance) => {
+        await expect(
+          instance.reconcileOutbound({
+            ...reconciliation,
+            evidence: { ...reconciliation.evidence, generation: 2 },
+          }),
+        ).rejects.toMatchObject({ code: "projection_conflict" });
+      });
+      mutate = (value) => {
+        value.projection_generation = 2;
+      };
+      expect((await post(accepted.command.id)).status).toBe(409);
+      mutate = undefined;
+      if (mode === "http") {
+        // The authenticated route supplies provider_context and the exact attempt tuple.
+        const response = await post(accepted.command.id);
+        expect.soft(response.status).toBe(200);
+        expect
+          .soft(await response.json())
+          .toMatchObject({ status: "delivered", provider_stage: "delivered" });
+      } else {
+        await runInDurableObject(stub, async (instance) => {
+          // Exercise the second guard independently, starting from uncertainty too.
+          await expect
+            .soft(instance.reconcileOutbound(reconciliation))
+            .resolves.toMatchObject({
+              command: { status: "delivered" },
+              dispatch: { projection_generation: 1 },
+            });
+        });
+      }
+      expect(
+        await rows(
+          stub,
+          "SELECT * FROM outbound_dispatches WHERE command_id=?",
+          resend.command.id,
+        ),
+      ).toEqual(before);
+      expect(
+        await stub.listOutboundEvidence({
+          schema_version: 1,
+          tenant_id: tenant,
+          command_id: resend.command.id,
+        }),
+      ).toEqual([]);
+      expect(
+        await rows(
+          stub,
+          "SELECT generation FROM outbound_evidence WHERE source='provider'",
+        ),
+      ).toEqual([{ generation: 1 }]);
+      const callsBeforeRemoval = calls;
+      await recordRemovalWithSuppression(env.CONTROL_DB, {
+        tenant_id: tenant,
+        resource_type: "message",
+        resource_id: accepted.message.id,
+        content_generation: accepted.message.id,
+        account_id: accepted.dispatch.account_id,
+        conversation_id: accepted.dispatch.conversation_id,
+        source_event_id: "event_remove_restored_evidence",
+        source_object_key: null,
+        reason: "requested",
+        removed_at: now,
+      });
+      expect((await post(accepted.command.id)).status).toBe(403);
+      expect(calls).toBe(callsBeforeRemoval);
+    },
+  );
   it("rejects conflicting replay of the same immutable observation", async () => {
     const { stub, accepted } = await fixture();
     expect((await post(accepted.command.id)).status).toBe(200);

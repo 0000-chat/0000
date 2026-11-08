@@ -64,6 +64,10 @@ export function assertForwardState(previous, current) {
   const next = current.migration_files ?? [];
   assert.deepEqual(next.slice(0, old.length), old, "migration history is not append-only");
   if (previous.images) assert.deepEqual(current.images, previous.images, "bridge image migration review required");
+  if (current.role === "worker") {
+    assert.deepEqual(current.bindings.durable_objects, previous.bindings.durable_objects, "Durable Object bindings changed: migration review required");
+    assert.deepEqual(current.bindings.exports, previous.bindings.exports, "Durable Object exports changed: migration review required");
+  }
 }
 
 export function verifyComposition({ record, directory, commit, compatibility, attest, previous, extract }) {

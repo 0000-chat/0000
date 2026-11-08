@@ -4537,7 +4537,10 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
     }
   }
 
-  /** Read immutable body-free correlation metadata, never acquire or send. */
+  /**
+   * Read immutable body-free attempt metadata, never acquire or send. A ready
+   * rebuilt projection retains the attempt's original generation for evidence.
+   */
   async getProviderEvidenceTarget(input: {
     tenant_id: string;
     command_id: string;
@@ -4564,8 +4567,7 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
       message.deleted_at !== null ||
       !["dispatching", "dispatched", "delivery_uncertain"].includes(
         dispatch.status,
-      ) ||
-      dispatch.projection_generation !== meta.generation
+      )
     )
       throw projectionError("projection_conflict");
     return structuredClone(mapOutboundDispatch(dispatch));
@@ -4648,6 +4650,13 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
             ?.connection_id ?? "",
         ));
       const result = await this.#outboundTransaction(() => {
+        // Connection availability may await D1. Recheck lifecycle at the write
+        // boundary, independently of the retained attempt's generation.
+        const transactionMeta = readProjectionMeta(this.ctx.storage);
+        if (transactionMeta === undefined)
+          throw projectionError("projection_not_found");
+        requireStoredTenant(transactionMeta, parsed.tenant_id);
+        this.#requireReadyState(transactionMeta);
         const dispatch = readOutboundDispatchByCommand(
           this.ctx.storage,
           parsed.command_id,
@@ -4672,7 +4681,6 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
               context.dispatch_id !== dispatch.id ||
               context.connection_id !== dispatch.connection_id ||
               saved?.session_generation !== context.session_generation ||
-              dispatch.projection_generation !== meta.generation ||
               message === undefined ||
               message.deleted_at !== null ||
               !["dispatching", "dispatched", "delivery_uncertain"].includes(

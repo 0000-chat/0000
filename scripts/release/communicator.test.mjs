@@ -171,6 +171,43 @@ test("clean consumer verifies, extracts and restarts the actual release composit
       }
     });
 
+    await t.test("Worker upgrades preserve Durable Object classes and exports before extraction", () => {
+      const artifact = record.artifacts.find((entry) => entry.name === "communicator-control-plane");
+      const archive = path.join(artifacts, artifact.asset_name);
+      const original = fs.readFileSync(archive);
+      const files = archiveFiles(original);
+      const repack = path.join(temporary, "worker-identity-repack");
+      const destination = path.join(temporary, "invalid-worker-identity-extraction");
+      const mutations = [
+        (bindings) => { bindings.durable_objects.bindings.find((entry) => entry.name === "TENANT_PROJECTION").class_name = "LinkSessionDO"; },
+        (bindings) => { bindings.durable_objects.bindings.find((entry) => entry.name === "TENANT_PROJECTION").script_name = "another-worker"; },
+        (bindings) => { bindings.exports.TenantProjectionDO.storage = "kv"; },
+        (bindings) => { delete bindings.exports.TenantProjectionDO; },
+      ];
+      try {
+        for (const mutate of mutations) {
+          fs.rmSync(repack, { recursive: true, force: true });
+          for (const [name, file] of files) {
+            fs.mkdirSync(path.dirname(path.join(repack, name)), { recursive: true });
+            fs.writeFileSync(path.join(repack, name), file.bytes, { mode: file.mode });
+          }
+          const manifest = structuredClone(manifests[artifact.name]);
+          mutate(manifest.bindings);
+          const configBytes = Buffer.from(stableJson(manifest.bindings));
+          fs.writeFileSync(path.join(repack, "wrangler.json"), configBytes);
+          manifest.files.find((entry) => entry.name === "wrangler.json").digest = `sha256:${sha256(configBytes)}`;
+          const manifestBytes = Buffer.from(stableJson(manifest));
+          fs.writeFileSync(path.join(repack, "artifact-manifest.json"), manifestBytes);
+          const changed = gzipSync(run("tar", ["--format=ustar", "-cf", "-", "-C", repack, ...fs.readdirSync(repack)]));
+          fs.writeFileSync(archive, changed);
+          const modified = structuredClone(record);
+          Object.assign(modified.artifacts.find((entry) => entry.name === artifact.name), { digest: `sha256:${sha256(changed)}`, manifest_digest: `sha256:${sha256(manifestBytes)}` });
+          assert.throws(() => verifyComposition({ ...inputs, record: modified, previous: manifests, extract: destination }), /Durable Object.*changed/);
+          assert.equal(fs.existsSync(destination), false);
+        }
+      } finally { fs.writeFileSync(archive, original); }
+    });
+
     await t.test("Platform SQL must match its complete ordered ledger before extraction", () => {
       const artifact = record.artifacts.find((entry) => entry.name === "platform-worker");
       const archive = path.join(artifacts, artifact.asset_name);
