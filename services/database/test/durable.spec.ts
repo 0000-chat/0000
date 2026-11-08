@@ -3,15 +3,18 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomBytes } from "node:crypto";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import {
   Client,
   StreamableHTTPClientTransport,
 } from "@modelcontextprotocol/client";
 import { convertV4MiniflareOptions, Miniflare } from "miniflare";
-import { expect, test } from "bun:test";
+import { expect, test } from "vitest";
 import { REGISTRY_ID } from "../src/global-admission";
 import { EXPORT_MAX_SNAPSHOT_BYTES } from "../src/export";
 
+const serialTest = test.sequential;
 const BASE_URL = "https://database.0000.chat";
 const DATABASES_PATH = "/v1/databases";
 const workerEntry = fileURLToPath(new URL("../src/worker.ts", import.meta.url));
@@ -113,23 +116,17 @@ async function workerScript(entryPoint = workerEntry): Promise<string> {
   let workerScriptPromise = workerScriptPromises.get(entryPoint);
   if (!workerScriptPromise) {
     workerScriptPromise = (async () => {
-      const build = await Bun.build({
-        entrypoints: [entryPoint],
-        external: ["cloudflare:workers"],
-        format: "esm",
-        target: "browser",
-      });
-      if (!build.success) {
-        throw new Error(build.logs.map((log) => log.message).join("\n"));
-      }
-      const output = build.outputs.find(
-        (candidate) => candidate.kind === "entry-point",
+      const { stdout } = await promisify(execFile)(
+        "bun",
+        [
+          "build",
+          entryPoint,
+          "--target=browser",
+          "--external=cloudflare:workers",
+        ],
+        { maxBuffer: 8 * 1024 * 1024 },
       );
-      if (!output)
-        throw new Error(
-          "The database Worker test build did not emit an entry point.",
-        );
-      return await output.text();
+      return stdout;
     })();
     workerScriptPromises.set(entryPoint, workerScriptPromise);
   }
@@ -804,9 +801,11 @@ async function inspectCapacityProjection(
     .__testCapacityProjection(databaseId);
 }
 
-test.serial(
+serialTest(
   "REST and MCP read the same shopping-list resources before and after a Worker restart",
-  { timeout: 60_000 },
+  {
+    timeout: 60_000,
+  },
   async () => {
     const persistenceDirectory = await createPersistenceDirectory();
     let runtime: Miniflare | undefined;
@@ -937,7 +936,7 @@ test.serial(
   },
 );
 
-test.serial(
+serialTest(
   "record version preconditions let only one concurrent update win",
   { timeout: 60_000 },
   async () => {
@@ -1013,7 +1012,7 @@ test.serial(
   },
 );
 
-test.serial(
+serialTest(
   "MCP can create databases, tables, typed columns, and records that REST reads",
   { timeout: 60_000 },
   async () => {
@@ -1116,7 +1115,7 @@ test.serial(
   },
 );
 
-test.serial(
+serialTest(
   "column replays preserve their original schema version across REST and MCP",
   { timeout: 60_000 },
   async () => {
@@ -1214,7 +1213,7 @@ test.serial(
   },
 );
 
-test.serial(
+serialTest(
   "mutation retries are shared across REST and MCP and changed arguments conflict",
   { timeout: 60_000 },
   async () => {
@@ -1298,7 +1297,7 @@ test.serial(
   },
 );
 
-test.serial(
+serialTest(
   "MCP delete and its REST replay return 204 and leave the record unavailable",
   { timeout: 60_000 },
   async () => {
@@ -1368,7 +1367,7 @@ test.serial(
   },
 );
 
-test.serial(
+serialTest(
   "creation retry recovers the same database after restart without public listing or deletion",
   { timeout: 60_000 },
   async () => {
@@ -1433,7 +1432,7 @@ test.serial(
   },
 );
 
-test.serial(
+serialTest(
   "creation retry recovers after Registry reserved a slug and the database committed",
   { timeout: 60_000 },
   async () => {
@@ -1501,7 +1500,7 @@ test.serial(
   },
 );
 
-test.serial(
+serialTest(
   "legacy create rows receive pessimistic global capacity before new writes are admitted",
   { timeout: 120_000 },
   async () => {
@@ -1611,7 +1610,7 @@ test.serial(
   },
 );
 
-test.serial(
+serialTest(
   "concurrent global admission at capacity allows one reservation and replays it after restart",
   { timeout: 120_000 },
   async () => {
@@ -1691,7 +1690,7 @@ test.serial(
   },
 );
 
-test.serial(
+serialTest(
   "health reports the admitted policy revision and fails closed for invalid policy",
   { timeout: 60_000 },
   async () => {
@@ -1759,7 +1758,7 @@ test.serial(
   },
 );
 
-test.serial(
+serialTest(
   "health fails closed for an invalid service clock returned by global admission",
   { timeout: 60_000 },
   async () => {
@@ -1788,7 +1787,7 @@ test.serial(
   },
 );
 
-test.serial(
+serialTest(
   "an expired database keeps global capacity reserved until physical cleanup completes",
   { timeout: 120_000 },
   async () => {
@@ -1874,7 +1873,7 @@ test.serial(
   },
 );
 
-test.serial(
+serialTest(
   "pending mutation and export reservations prevent retirement until reconciliation",
   { timeout: 120_000 },
   async () => {
@@ -1931,7 +1930,7 @@ test.serial(
   },
 );
 
-test.serial(
+serialTest(
   "service suspension pauses inactivity while the thirty-day write cutoff stays fixed",
   { timeout: 120_000 },
   async () => {
@@ -2027,7 +2026,7 @@ test.serial(
   },
 );
 
-test.serial(
+serialTest(
   "failed reads and successful mutation replays do not renew database inactivity",
   { timeout: 60_000 },
   async () => {
@@ -2107,7 +2106,7 @@ test.serial(
   },
 );
 
-test.serial(
+serialTest(
   "data remains accessible one millisecond before seven-day inactivity expiry and expires at the boundary",
   { timeout: 60_000 },
   async () => {
@@ -2173,7 +2172,7 @@ test.serial(
   },
 );
 
-test.serial(
+serialTest(
   "request and ordinary response byte caps are enforced in the Worker",
   { timeout: 60_000 },
   async () => {
@@ -2204,14 +2203,15 @@ test.serial(
         maxRequestBodyBytes + 1,
       );
       const tooLarge = await runtime.dispatchFetch(
-        new Request(new URL(DATABASES_PATH, BASE_URL), {
+        new URL(DATABASES_PATH, BASE_URL),
+        {
           method: "POST",
           headers: {
             "content-type": "application/json",
             "Idempotency-Key": retryKey("oversized-create"),
           },
           body: oversizedBody,
-        }),
+        },
       );
       await expectApiError(tooLarge, 413, "REQUEST_TOO_LARGE");
 
@@ -2329,7 +2329,7 @@ test.serial(
   },
 );
 
-test.serial(
+serialTest(
   "a near-limit record is readable over REST and MCP while an over-limit update rolls back",
   { timeout: 120_000 },
   async () => {
@@ -2466,7 +2466,7 @@ test.serial(
   },
 );
 
-test.serial(
+serialTest(
   "an inactivity alarm does not retire a database after a queued read renews activity",
   { timeout: 120_000 },
   async () => {
@@ -2582,7 +2582,7 @@ test.serial(
   },
 );
 
-test.serial(
+serialTest(
   "the request burst boundary is sixty reads per database",
   { timeout: 60_000 },
   async () => {
@@ -2622,7 +2622,7 @@ test.serial(
   },
 );
 
-test.serial(
+serialTest(
   "the daily request limit is shared by REST and MCP and resets at UTC rollover",
   { timeout: 300_000 },
   async () => {
@@ -2683,7 +2683,7 @@ test.serial(
   },
 );
 
-test.serial(
+serialTest(
   "the daily mutation boundary counts schema writes and is scoped to one database",
   { timeout: 200_000 },
   async () => {
@@ -2758,7 +2758,7 @@ test.serial(
   },
 );
 
-test.serial(
+serialTest(
   "the daily returned-byte limit is shared by REST and MCP and resets at UTC rollover",
   { timeout: 300_000 },
   async () => {
@@ -2890,7 +2890,7 @@ test.serial(
   },
 );
 
-test.serial(
+serialTest(
   "the exact thirty-day write cutoff keeps reads available and rejects schema and record writes",
   { timeout: 60_000 },
   async () => {
@@ -2990,7 +2990,7 @@ test.serial(
   },
 );
 
-test.serial(
+serialTest(
   "the ten-megabyte logical storage limit rejects the first over-limit record",
   { timeout: 240_000 },
   async () => {
@@ -3134,7 +3134,7 @@ test.serial(
   },
 );
 
-test.serial(
+serialTest(
   "REST and MCP read the same immutable bounded export across source changes, restart, and expiry",
   { timeout: 300_000 },
   async () => {
@@ -3414,7 +3414,7 @@ test.serial(
   },
 );
 
-test.serial(
+serialTest(
   "export recovery settles a committed snapshot after the global export cap is lowered",
   { timeout: 120_000 },
   async () => {
@@ -3497,7 +3497,7 @@ test.serial(
   },
 );
 
-test.serial(
+serialTest(
   "expired export capacity stays charged until the Object confirms snapshot cleanup",
   { timeout: 120_000 },
   async () => {
@@ -3573,7 +3573,7 @@ test.serial(
   },
 );
 
-test.serial(
+serialTest(
   "a per-database physical-cap rejection leaves the record and replay key available",
   { timeout: 120_000 },
   async () => {

@@ -14,7 +14,7 @@
     "check:application": "./scripts/check",
     "build": "wrangler deploy --dry-run --config wrangler.jsonc",
     "dev": "wrangler dev --config wrangler.jsonc",
-    "test": "bun test test/durable.spec.ts",
+    "test": "vitest run test/durable.spec.ts",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "lint": "oxlint --config .oxlintrc.json --deny-warnings --no-error-on-unmatched-pattern .",
     "lint:fix": "oxlint --config .oxlintrc.json --deny-warnings --no-error-on-unmatched-pattern --fix .",
@@ -29,6 +29,7 @@
     "miniflare": "5.20260916.0-alpha",
     "oxlint": "1.82.0",
     "typescript": "6.0.3",
+    "vitest": "4.1.11",
     "wrangler": "4.133.0"
   },
   "dependencies": {
