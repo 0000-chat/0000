@@ -4782,7 +4782,9 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
               parsed.now,
               dispatch.id,
             );
-            const continued = dispatch.last_action === "continue";
+            const pauseResolved =
+              dispatch.last_action === "continue" ||
+              dispatch.last_action === "resend";
             const matrixOrBridgeAcknowledgement =
               (evidence.source === "matrix" || evidence.source === "bridge") &&
               (evidence.status === "confirmed" ||
@@ -4825,7 +4827,7 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
               );
             } else if (
               evidence.status === "uncertain" &&
-              !continued &&
+              !pauseResolved &&
               dispatch.bridge_stage === "unknown" &&
               dispatch.provider_stage !== "delivered"
             ) {
@@ -4842,7 +4844,7 @@ export class TenantProjectionDO extends DurableObject<Cloudflare.Env> {
                 command.id,
               );
             } else if (
-              !continued &&
+              !pauseResolved &&
               dispatch.status !== "cancelled" &&
               dispatch.status !== "dispatched"
             ) {

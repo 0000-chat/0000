@@ -1,4 +1,4 @@
-import { screen, within } from "@testing-library/react";
+import { act, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -6,10 +6,110 @@ import { renderApp } from "@/test/render-app";
 import { simulatedStore } from "@/mocks/store";
 import { server } from "@/mocks/server";
 import { webhookSubscriptions } from "@/mocks/webhook-fixtures";
+import { queryKeys } from "@/lib/api/query-keys";
 
 afterEach(() => vi.restoreAllMocks());
 
 describe("webhook discovery and inspection", () => {
+  it.each(["binding", "tenant", "principal", "membership"] as const)(
+    "does not reuse webhook data or selection after a changed %s is accepted",
+    async (changed) => {
+      const user = userEvent.setup();
+      const original = {
+        ...simulatedStore.session(),
+        binding_id: "binding_webhook_original",
+      };
+      server.use(
+        http.get("*/api/v1/session", () => HttpResponse.json(original)),
+      );
+      const { queryClient } = renderApp("/system");
+      const audit = await screen.findByRole("article", {
+        name: "Subscription subscription_audit",
+      });
+      await user.click(
+        await within(audit).findByRole("button", {
+          name: /delivery_audit · uncertain/,
+        }),
+      );
+      expect(
+        await within(audit).findByLabelText("Webhook delivery details"),
+      ).toBeVisible();
+      let release = () => {};
+      const pending = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const next = {
+        ...original,
+        binding_id:
+          changed === "binding" ? "binding_webhook_next" : original.binding_id,
+        tenant: {
+          ...original.tenant,
+          id: changed === "tenant" ? "tenant_next" : original.tenant.id,
+        },
+        principal: {
+          ...original.principal,
+          id:
+            changed === "principal" ? "principal_next" : original.principal.id,
+        },
+        membership: {
+          ...original.membership,
+          id:
+            changed === "membership"
+              ? "membership_next"
+              : original.membership.id,
+        },
+      };
+      const subscription = webhookSubscriptions().find(
+        (item) => item.id === "subscription_audit",
+      )!;
+      server.use(
+        http.get("*/api/v1/session", () => HttpResponse.json(next)),
+        http.get("*/api/v1/webhook-subscriptions", async () => {
+          await pending;
+          return HttpResponse.json({
+            items: [subscription],
+            next_cursor: null,
+          });
+        }),
+        http.get("*/api/v1/webhook-subscriptions/:id/deliveries", () =>
+          HttpResponse.json({ items: [], next_cursor: null }),
+        ),
+      );
+      await act(async () => {
+        queryClient.setQueryData(queryKeys.session, next);
+      });
+      const resume = await screen.findByRole("button", {
+        name: "Review and continue",
+      });
+      expect(screen.queryByRole("article")).not.toBeInTheDocument();
+      try {
+        await user.click(resume);
+        expect(screen.queryByRole("article")).not.toBeInTheDocument();
+        expect(
+          screen.queryByLabelText("Webhook delivery details"),
+        ).not.toBeInTheDocument();
+      } finally {
+        release();
+      }
+      const nextAudit = await screen.findByRole("article", {
+        name: "Subscription subscription_audit",
+      });
+      expect(
+        await within(nextAudit).findByText(
+          "No deliveries for this subscription.",
+        ),
+      ).toBeVisible();
+      expect(
+        within(nextAudit).queryByLabelText("Webhook delivery details"),
+      ).not.toBeInTheDocument();
+      expect(
+        within(nextAudit).queryByRole("button", {
+          name: "Retry webhook delivery",
+        }),
+      ).not.toBeInTheDocument();
+    },
+  );
+
   it("rejects a selected delivery that now resolves to another subscription", async () => {
     const user = userEvent.setup();
     server.use(

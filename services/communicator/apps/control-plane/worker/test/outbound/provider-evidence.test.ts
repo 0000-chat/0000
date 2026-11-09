@@ -389,9 +389,16 @@ describe("private trusted provider evidence in real Worker/D1/SQLite DO", () => 
     ).toBe("bridge_fail_permanent");
     expect((await post(accepted.command.id)).status).toBe(200);
   });
-  it.each(["http", "direct"])(
-    "reconciles old-attempt evidence via %s after archive rebuild without attributing it to a later resend",
-    async (mode) => {
+  it.each([
+    { mode: "http", lateStatus: "uncertain" },
+    { mode: "http", lateStatus: "pending" },
+    { mode: "http", lateStatus: "fallback" },
+    { mode: "direct", lateStatus: "uncertain" },
+    { mode: "direct", lateStatus: "pending" },
+    { mode: "direct", lateStatus: "fallback" },
+  ])(
+    "keeps resend dispatchable after late $lateStatus evidence and reconciles delivery via $mode after archive rebuild",
+    async ({ mode, lateStatus }) => {
       const { stub, accepted, ownerEvent } = await fixture();
       const resend = await stub.decideOutbound({
         schema_version: 1,
@@ -416,18 +423,70 @@ describe("private trusted provider evidence in real Worker/D1/SQLite DO", () => 
           saved,
         },
       });
-      await stub.claimOutboundDispatch({
-        tenant_id: tenant,
-        command_id: resend.command.id,
-        lease_id: "lease_resend",
-        lease_expires_at: new Date(Date.now() + 30_000).toISOString(),
-        now: new Date().toISOString(),
-      });
-      const before = await rows(
-        stub,
-        "SELECT * FROM outbound_dispatches WHERE command_id=?",
-        resend.command.id,
-      );
+      const recordLateEvidence = async (observation: string) => {
+        if (lateStatus !== "fallback") {
+          mutate = (value) => {
+            value.status = "uncertain";
+            value.reason =
+              lateStatus === "pending"
+                ? "bridge_pending"
+                : "bridge_fail_permanent";
+          };
+          expect((await post(accepted.command.id, observation)).status).toBe(
+            200,
+          );
+          mutate = undefined;
+        } else {
+          // Refresh acceptance is neither bridge acknowledgement nor delivery,
+          // so it exercises the fallback reconciliation branch.
+          await stub.reconcileOutbound({
+            schema_version: 1,
+            tenant_id: tenant,
+            command_id: accepted.command.id,
+            connection_available: true,
+            now: new Date().toISOString(),
+            evidence: {
+              schema_version: 1,
+              tenant_id: tenant,
+              command_id: accepted.command.id,
+              account_id: accepted.dispatch.account_id,
+              conversation_id: accepted.dispatch.conversation_id,
+              transaction_id: accepted.dispatch.transaction_id,
+              request_digest: accepted.dispatch.request_digest,
+              generation: 1,
+              source: "refresh",
+              status: "accepted",
+              evidence_id: observation,
+              observed_at: new Date().toISOString(),
+              reason: "bridge_pending",
+            },
+          });
+        }
+        expect(
+          (
+            await stub.listOutboundEvidence({
+              schema_version: 1,
+              tenant_id: tenant,
+              command_id: accepted.command.id,
+            })
+          ).find((evidence) => evidence.evidence_id === observation),
+        ).toMatchObject({
+          status: lateStatus === "fallback" ? "accepted" : "uncertain",
+          generation: 1,
+          transaction_id: accepted.dispatch.transaction_id,
+          request_digest: accepted.dispatch.request_digest,
+        });
+        expect
+          .soft(
+            await rows(
+              stub,
+              "SELECT chat_paused,last_action FROM outbound_dispatches WHERE command_id=?",
+              accepted.command.id,
+            ),
+          )
+          .toEqual([{ chat_paused: 0, last_action: "resend" }]);
+      };
+      await recordLateEvidence("$late-before-rebuild");
       const now = new Date().toISOString();
       await archiveCanonicalEventBatch({
         bucket: env.EVENT_ARCHIVE,
@@ -485,6 +544,26 @@ describe("private trusted provider evidence in real Worker/D1/SQLite DO", () => 
           authorization,
         }),
       ).toMatchObject({ state: "ready", generation: 2 });
+      await recordLateEvidence("$late-after-rebuild");
+      expect
+        .soft(
+          await stub.claimOutboundDispatch({
+            tenant_id: tenant,
+            command_id: resend.command.id,
+            lease_id: "lease_resend",
+            lease_expires_at: new Date(Date.now() + 30_000).toISOString(),
+            now: new Date().toISOString(),
+          }),
+        )
+        .toMatchObject({
+          outcome: "acquired",
+          dispatch: { command_id: resend.command.id, status: "dispatching" },
+        });
+      const before = await rows(
+        stub,
+        "SELECT * FROM outbound_dispatches WHERE command_id=?",
+        resend.command.id,
+      );
       await runInDurableObject(stub, async (instance) => {
         await expect
           .soft(

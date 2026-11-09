@@ -24,12 +24,14 @@ function inspectionError(error: unknown) {
 
 function SubscriptionInspection({
   subscription,
+  authority,
 }: {
   subscription: WebhookSubscription;
+  authority: string;
 }) {
   const queryClient = useQueryClient();
   const [deliveryId, setDeliveryId] = useState("");
-  const deliveriesKey = ["webhook-deliveries", subscription.id];
+  const deliveriesKey = ["webhook-deliveries", authority, subscription.id];
   const deliveries = useInfiniteQuery({
     queryKey: deliveriesKey,
     queryFn: ({ pageParam }) =>
@@ -40,7 +42,7 @@ function SubscriptionInspection({
   const [retryKey, setRetryKey] = useState(
     () => `ui-webhook-${crypto.randomUUID()}`,
   );
-  const queryKey = ["webhook-delivery", subscription.id, deliveryId];
+  const queryKey = ["webhook-delivery", authority, subscription.id, deliveryId];
   const deliveryQuery = useQuery({
     queryKey,
     queryFn: async () => {
@@ -294,6 +296,14 @@ function SubscriptionInspection({
 
 export function WebhookInspection() {
   const { session, authStatus, isLoading } = useIdentityContext();
+  const authority = JSON.stringify([
+    session?.binding_id,
+    session?.tenant.id,
+    session?.principal.id,
+    session?.principal.type,
+    session?.membership.id,
+    session?.membership.role,
+  ]);
   const allowed =
     authStatus === "authenticated" &&
     (session?.membership.role === "owner" ||
@@ -301,7 +311,7 @@ export function WebhookInspection() {
     (session?.principal.type === "human" ||
       session?.principal.type === "operator");
   const subscriptions = useInfiniteQuery({
-    queryKey: ["webhook-subscriptions"],
+    queryKey: ["webhook-subscriptions", authority],
     queryFn: ({ pageParam }) =>
       apiClient.getWebhookSubscriptions(pageParam ?? undefined),
     initialPageParam: null as string | null,
@@ -347,8 +357,9 @@ export function WebhookInspection() {
           .flatMap((page) => page.items)
           .map((subscription) => (
             <SubscriptionInspection
-              key={subscription.id}
+              key={`${authority}:${subscription.id}`}
               subscription={subscription}
+              authority={authority}
             />
           ))}
       {allowed &&
