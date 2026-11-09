@@ -102,6 +102,7 @@ export const textReplyHandler =
         {
           env: context.env,
           authorization: context.get("authorization"),
+          credential: context.get("authorizationCredential"),
         },
         {
           ...body,
@@ -353,6 +354,7 @@ const decisionHandler =
         {
           env: context.env,
           authorization: context.get("authorization"),
+          credential: context.get("authorizationCredential"),
         },
         params.command_id,
         decision,

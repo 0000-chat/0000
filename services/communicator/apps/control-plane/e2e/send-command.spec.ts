@@ -72,9 +72,10 @@ test("retries an accepted direct command with the same key after response loss",
   const sendButton = page.getByRole("button", { name: "Send message" });
   await sendButton.click();
   await expect(
-    page.getByRole("status").filter({ hasText: "could not be accepted" }),
+    page.getByRole("status").filter({ hasText: "Acceptance uncertain" }),
   ).toBeVisible();
-  await sendButton.click();
+  await expect(page.getByRole("textbox", { name: "Message" })).toBeDisabled();
+  await page.getByRole("button", { name: "Retry same request" }).click();
 
   await expect(
     page
@@ -99,7 +100,7 @@ test("retries an accepted direct command with the same key after response loss",
   expect(idempotencyKeys[0]).toBe(idempotencyKeys[1]);
 });
 
-test("previews paced delivery and records its accepted command phase", async ({
+test("explains unsupported pacing and blocks sending until Direct is selected", async ({
   page,
 }) => {
   await page.goto(
@@ -112,14 +113,13 @@ test("previews paced delivery and records its accepted command phase", async ({
     .getByRole("combobox", { name: "Delivery mode" })
     .selectOption("paced");
 
-  for (const phase of [
-    "Mark read (when supported)",
-    "Reading delay",
-    "Typing indicator",
-    "Send message",
-  ]) {
-    await expect(page.getByText(phase, { exact: true }).first()).toBeVisible();
-  }
+  await expect(page.getByText("Human pacing is unavailable")).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Send message" }),
+  ).toBeDisabled();
+  await page
+    .getByRole("combobox", { name: "Delivery mode" })
+    .selectOption("direct");
   await page.getByRole("button", { name: "Send message" }).click();
   await expect(
     page
@@ -131,9 +131,7 @@ test("previews paced delivery and records its accepted command phase", async ({
     .getByRole("link", { name: "Activity", exact: true })
     .first()
     .click();
-  await expect(
-    page.getByText("Human-paced", { exact: true }).first(),
-  ).toBeVisible();
+  await expect(page.getByText("Direct", { exact: true }).first()).toBeVisible();
   await expect(page.getByText("Accepted", { exact: true })).toBeVisible();
 });
 

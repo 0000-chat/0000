@@ -33,6 +33,7 @@ import {
   paginateConversations,
   paginateMessages,
 } from "./conversation-pagination";
+import { webhookDeliveries } from "./webhook-fixtures";
 
 export type SimulatedScenario = "ready" | "attention_required";
 export type SimulatedMessageMode = "normal" | "pages" | "error";
@@ -91,8 +92,11 @@ export class SimulatedStore {
     this.historyImports.clear();
     this.historyIdempotency.clear();
     this.historyCounter = 0;
+    this.webhookDeliveries = webhookDeliveries();
     this.seedHistoryImports();
   }
+
+  webhookDeliveries = webhookDeliveries();
 
   private seedHistoryImports() {
     for (const account of this.connectedAccounts()) {

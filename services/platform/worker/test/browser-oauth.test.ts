@@ -1,5 +1,7 @@
 import {
   createPlatformBrowserClient,
+  createPlatformClient,
+  selectBrowserCredential,
   type BrowserOAuthTransaction,
 } from "@0000/platform-client";
 import { SELF, env } from "cloudflare:test";
@@ -274,6 +276,30 @@ describe("T11 shared browser OAuth consumer fixture", () => {
     expect(winner.returnTo).toBe("/dashboard");
     expect(winner).not.toHaveProperty("credential");
 
+    const selected = selectBrowserCredential(
+      new Request("https://fixture.test", {
+        headers: { cookie: cookiePair(winner.setCookie) },
+      }),
+    );
+    if (selected.status !== "present")
+      throw new Error("browser credential missing");
+    const shared = createPlatformClient({
+      baseUrl: testEnv.PLATFORM_BASE_URL,
+      authority: testEnv.PLATFORM_AUTHORITY_ID,
+      audience: service.audience,
+      serviceVerifier: service.verifier,
+      fetch: SELF.fetch,
+    });
+    const saved = await shared.captureSavedOperation({
+      credential: selected.credential,
+      operationId: `browser-installation-${suffix}`,
+      capability: "resource:read",
+    });
+    if (saved.status !== "allowed") throw new Error("browser capture denied");
+    expect(
+      (await shared.revalidateSavedOperation(saved.authorization)).status,
+    ).toBe("allowed");
+
     const resourceId = `t11-browser-resource-${suffix}`;
     await testEnv.IDENTITY_DB.prepare(
       `INSERT INTO fixture_resource (id, owner_kind, owner_id, created_at, audience)
@@ -333,6 +359,9 @@ describe("T11 shared browser OAuth consumer fixture", () => {
       },
     );
     expect(revoked.status).toBe(200);
+    expect(await shared.revalidateSavedOperation(saved.authorization)).toEqual({
+      status: "denied",
+    });
     const afterRevoke = await handleBrowserFixtureRequest(
       new Request(`https://fixture.test/resources/${resourceId}`, {
         headers: { cookie: cookiePair(winner.setCookie) },
@@ -350,6 +379,119 @@ describe("T11 shared browser OAuth consumer fixture", () => {
     );
     expect(afterRevoke.status).toBe(401);
   });
+
+  it.each(["sign-out", "session-expiry"] as const)(
+    "denies saved human work after %s without revoking the browser installation",
+    async (change) => {
+      const suffix = crypto.randomUUID().slice(0, 8);
+      const service = await registerService(testEnv.IDENTITY_DB, {
+        serviceId: `saved-browser-${suffix}`,
+        audience: `https://saved-browser-${suffix}.example.test`,
+        capabilities: ["resource:read"],
+      });
+      const user = await signIn();
+      const selectedOrganization = await organizationId(user.cookies);
+      const registration = await provisionTrustedOAuthClient(
+        testEnv.IDENTITY_DB,
+        testEnv.BETTER_AUTH_SECRET,
+        {
+          serviceId: service.serviceId,
+          redirectUri:
+            "https://t11-browser-fixture.example.test/oauth/callback",
+          capabilities: ["resource:read"],
+          authMethod: "client_secret_post",
+          purpose: "first_party_browser",
+        },
+      );
+      const browser = browserClient(
+        new D1BrowserOAuthTransactionStore(testEnv.IDENTITY_DB),
+        service,
+        registration,
+        Date.now.bind(Date),
+      );
+      const started = await browser.start({ returnTo: "/" });
+      if (started.status !== "started") throw new Error("browser start failed");
+      const callback = await completeWorkerAuthorization({
+        authorizationUrl: started.authorizationUrl,
+        cookies: user.cookies,
+        userId: user.userId,
+        organizationId: selectedOrganization,
+      });
+      const loggedIn = await browser.callback(
+        new Request(callback, {
+          headers: { cookie: cookiePair(started.setCookie) },
+        }),
+      );
+      if (loggedIn.status !== "authenticated")
+        throw new Error("browser callback failed");
+      const selected = selectBrowserCredential(
+        new Request("https://fixture.test", {
+          headers: { cookie: cookiePair(loggedIn.setCookie) },
+        }),
+      );
+      if (selected.status !== "present")
+        throw new Error("browser credential missing");
+      const shared = createPlatformClient({
+        baseUrl: testEnv.PLATFORM_BASE_URL,
+        authority: testEnv.PLATFORM_AUTHORITY_ID,
+        audience: service.audience,
+        serviceVerifier: service.verifier,
+        fetch: SELF.fetch,
+      });
+      const input = {
+        credential: selected.credential,
+        operationId: `saved-session-${suffix}`,
+        capability: "resource:read",
+      };
+      const saved = await shared.captureSavedOperation(input);
+      if (saved.status !== "allowed") throw new Error("browser capture failed");
+      expect(
+        (await shared.revalidateSavedOperation(saved.authorization)).status,
+      ).toBe("allowed");
+      const lineage = await testEnv.IDENTITY_DB.prepare(
+        "SELECT lineage_kind, lineage_id FROM platform_saved_operation WHERE id = ?",
+      )
+        .bind(saved.authorization.id)
+        .first<{ lineage_kind: string; lineage_id: string }>();
+      expect(lineage?.lineage_kind).toBe("session");
+      if (change === "sign-out") {
+        const signedOut = await SELF.fetch(
+          "http://localhost/api/auth/sign-out",
+          {
+            method: "POST",
+            headers: {
+              cookie: user.cookies,
+              origin: testEnv.PLATFORM_BASE_URL,
+            },
+          },
+        );
+        expect(signedOut.status).toBe(200);
+        expect(
+          await testEnv.IDENTITY_DB.prepare(
+            "SELECT id FROM session WHERE id = ?",
+          )
+            .bind(lineage!.lineage_id)
+            .first(),
+        ).toBeNull();
+      } else {
+        await testEnv.IDENTITY_DB.prepare(
+          "UPDATE session SET expiresAt = ? WHERE id = ?",
+        )
+          .bind(Date.now() - 1, lineage!.lineage_id)
+          .run();
+      }
+      // Normal OAuth semantics intentionally survive sign-out; saved human work must not.
+      expect((await shared.authenticate(selected.credential)).status).toBe(
+        "authenticated",
+      );
+      expect(
+        await shared.revalidateSavedOperation(saved.authorization),
+      ).toEqual({ status: "denied" });
+      expect(await shared.captureSavedOperation(input)).toEqual({
+        status: "denied",
+      });
+    },
+  );
 
   it("expires D1 records and removes them through bounded cleanup", async () => {
     const store = new D1BrowserOAuthTransactionStore(testEnv.IDENTITY_DB);

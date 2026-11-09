@@ -47,6 +47,8 @@ async function resetSchema(): Promise<void> {
     await env.CONTROL_DB.prepare(`DROP TRIGGER IF EXISTS "${name}"`).run();
   }
   const tables = [
+    "tenant_wakeup_targets",
+    "tenant_wakeup_bootstrap",
     "group_management_evidence",
     "group_management_operations",
     "group_management_groups",

@@ -14,9 +14,9 @@ remote account, or authorize a deployment.
 
 There is one Durable Object namespace instance per canonical tenant ID. Each
 instance owns a private SQLite database containing a query projection of
-canonical messaging events. The projection is disposable: it can be cleared
-and rebuilt without changing the systems that are authoritative for tenancy,
-raw history, or operational messaging.
+canonical messaging events and a retained outbound acceptance ledger. Derived
+query rows can be rebuilt. The outbound ledger must survive that rebuild;
+archive replay cannot recreate accepted commands or their original authority.
 
 The normal data relationships are:
 
@@ -25,16 +25,14 @@ The normal data relationships are:
 | Control Directory in D1 | Authoritative tenants, principals, memberships, identities, grants, and non-secret account-to-connection placement. |
 | Synapse | Operational messaging record and live Matrix history. It is not replaced by the projection. |
 | Ordinary R2 archive | Immutable, committed canonical event batches and the source for a rebuild. A manifest is the replay listing/commit view. |
-| `TenantProjectionDO` SQLite | Disposable tenant-scoped derived rows, query state, audit/change metadata, and replay checkpoints. It is not raw-event or authorization authority. |
+| `TenantProjectionDO` SQLite | Disposable query rows and replay checkpoints, plus the retained outbound acceptance ledger. Stored authority is a snapshot that requires fresh checks before dispatch. |
 | Authenticated ingestion Worker | Authenticates the service principal, resolves the tenant's route and immutable connection bindings from D1, and routes the committed batch to the exact tenant object. |
 
-The existing browser UI remains on its current path in this phase. There is no
-public projection route. The projection modules remain free of external I/O:
-they do not read or write R2, publish Queue work, call Matrix or a provider,
-send commands, open WebSockets, or run alarms/automation. The authenticated
-ingestion Worker and Queue consumer perform archive and delivery work outside
-the Durable Object transaction. A `command.updated` event records an observed
-command status; it never executes the command.
+The Durable Object serves authenticated projection reads and realtime sockets.
+Its combined alarm handles outbound recovery and realtime deadlines. The
+outbound executor can invoke the configured adapter after authority checks and
+fresh lease acquisition. Event projection remains separate: a
+`command.updated` event records an observed status and never executes a command.
 
 ## Authority boundaries and deterministic routing
 
@@ -66,14 +64,130 @@ uses no legacy Durable Object migration array and does not deploy or provision
 the namespace. The SQLite backend becomes a namespace property only when a
 later approved deployment provisions it.
 
-The constructor uses `blockConcurrencyWhile()` only to run the ordered
-`_sql_schema_migrations` setup. `initialize` is the only RPC that creates
-`projection_meta`; an uninitialized object returns `projection_not_found` for
-all other operations.
+The constructor uses `blockConcurrencyWhile()` to run ordered SQLite migrations
+and register the combined alarm in one storage transaction. `initialize` is
+the only RPC that creates `projection_meta`. Wakeup repair acknowledges pristine,
+uninitialized storage as `idle` without creating projection metadata. Missing
+metadata with retained application state remains a blocking inventory gap.
+
+## Dormant tenant wakeup repair
+
+The scheduled Worker invokes `runDormantTenantBootstrapTick` independently of
+history imports, webhook retries, and removals. Migration
+`0036_dormant_tenant_bootstrap.sql` stores a directory discovery cursor and
+per-tenant repair outcomes. Each tick discovers at most 32 existing directory
+tenants across all statuses and attempts at most eight repairs. An insert
+trigger registers subsequent directory admissions, including IDs behind the
+cursor. This trigger does not establish historical namespace coverage.
+
+Discovery and cursor advancement commit together in D1. Repair attempts use
+30-second claims, token-fenced acknowledgements, and normally at most three attempts.
+Transient failures wait two seconds after the first attempt and four seconds
+after the second. Expired claims become retryable or terminal gaps. A tick
+reclaims at most eight expired claims. Fresh targets precede retries, so a
+failing tenant cannot prevent later tenants from receiving repair attempts.
+
+Legacy `gap` targets with outcome `uninitialized` receive a bounded recheck
+through the same claim path, within the eight-repair tick limit. Claiming changes
+the outcome to `uninitialized_recheck`, consuming legacy eligibility even if the
+Worker crashes. The attempt count increases up to three. A legacy target already
+at three receives one additional attempt without resetting its budget. Transient
+failure or claim expiry uses any remaining ordinary attempts; exhausted targets
+remain blocked for operator reconciliation. This is not periodic polling of gaps.
+The corrected RPC's missing-metadata gap is recorded as
+`uninitialized_retained_state`, so permanent retained-state gaps are not rechecked.
+
+The internal `repairOutboundWakeup` RPC validates the named object identity
+and its stored tenant binding, then calls the existing combined scheduler in
+a storage transaction. The scheduler preserves the earliest outbound, socket,
+and Platform revalidation deadline. Repair never calls `initialize`, `alarm`,
+the executor, or a provider. It does not rebuild or rewrite the outbound ledger.
+An alarm registered by repair can subsequently run normal recovery. Expired
+or malformed dispatch leases become uncertain, not pending; original authority
+and explicit-resend rules remain unchanged.
+
+When metadata is missing, repair checks every SQLite application table for a
+retained row, including query state, bindings, rebuild history, checkpoints,
+outbound commands, decisions, actions, and evidence. Schema migration records
+are excluded. A positive SQLite autoincrement sequence also blocks pristine
+classification, even after application rows have been deleted. Future application
+tables are included automatically. Only storage without retained state returns
+`idle`; this path does not schedule, initialize, execute, or grant authority.
+Directory provisioning can legitimately precede first ingestion. Later ingestion
+still requires normal authorized initialization and writes, independently of the
+bootstrap acknowledgement.
+
+Each RPC wait has a two-second timeout. Timeout does not cancel the underlying
+RPC; repeated repair remains safe. D1 operations still await runtime completion,
+so the tick has no hard wall-clock bound under a permanently hung D1 call.
+These repair retries are separate from outbound retries and webhook retries.
+
+`readDormantTenantBootstrapReport(CONTROL_DB, { after: "", limit: 100 })`
+returns aggregate state counts, undiscovered directory counts, and a bounded
+page of tenant IDs, outcome codes, attempts, and deadlines. Use the last
+returned tenant ID as `after` for the next page. No bodies, display names,
+raw errors, or credentials enter this report.
+
+The report returns `gate: "ready"` and `blocking_reason: null` only when the
+directory scan has completed, every current directory tenant has a target,
+and every retained target is `idle` or `scheduled`. Otherwise it returns
+`gate: "blocked"` with the first applicable reason in this order:
+
+| `blocking_reason` | Condition |
+| --- | --- |
+| `directory_scan_incomplete` | Initial discovery has not completed. |
+| `directory_targets_missing` | At least one directory tenant has no target. |
+| `target_gaps` | At least one target has a gap, including missing metadata with retained state, mismatched storage, exhausted retries, or a legacy uninitialized target awaiting its recheck. |
+| `targets_pending` | At least one target is queued, running, or awaiting retry. Expired running claims remain blocked until a tick reclaims them. |
+
+The gate uses aggregate counts from the same D1 batch as discovery and target
+coverage. Target pagination cannot hide a pending or failed target. A new
+directory admission blocks readiness until repair finishes, even when its ID
+sorts behind the completed scan cursor. `scheduled` means repair acknowledged
+an alarm deadline, not that outbound work has executed or succeeded.
+`idle` can mean a pristine tenant has no work to wake, not that the tenant is
+initialized or authorized. The gate certifies bootstrap acknowledgement, not
+completion of future ingestion or outbound work.
+
+### Directory coverage assumptions
+
+The source and history audit found no supported production path that creates
+a tenant projection without a retained D1 tenant row. Supported ingestion,
+outbound acceptance, history import, and restore paths use the canonical raw
+tenant ID as the object name, starting with the first projection implementation.
+Production directory lifecycle operations retain tenant rows across statuses;
+they do not delete those rows. The all-status scan therefore covers the
+supported tenant population, including disabled and revoked tenants.
+
+The current source owners are
+[`projection/routing.ts`](../../apps/control-plane/worker/projection/routing.ts)
+for canonical raw-name routing,
+[`ingestion/consumer.ts`](../../apps/control-plane/worker/ingestion/consumer.ts)
+for directory-resolved ingestion,
+[`outbound/acceptance.ts`](../../apps/control-plane/worker/outbound/acceptance.ts)
+for directory-authorized outbound routing, and
+[`history/service.ts`](../../apps/control-plane/worker/history/service.ts) for
+history import initialization. Generic RPC helpers and local tests can address
+names without directory rows. That capability is not evidence of a supported
+production orphan-tenant path.
+
+Manual directory replacement, a partial restore that separates D1 from its
+namespace, or an out-of-band object creation violates these assumptions.
+Before rollout in an affected installation, reconcile its directory and
+namespace history. Known canonical names can remain supplemental `historical`
+targets without adding directory membership or authority. Unmapped names need
+identity reconciliation, not a fabricated tenant row or a gate override.
+These are operational exceptions, not an unconditional product block.
+
+This report does not enumerate the live namespace or certify actual production
+inventory. A ready local report proves scan and repair completion for the
+retained target population under the assumptions above. Operators still own
+installation-specific reconciliation and deployment approval. No public
+inventory-import API or release-gate bypass is provided.
 
 ## Local verification
 
-Run these commands from the repository root. They use the local test runtime
+Run these commands from `services/communicator`. They use the local test runtime
 and checked-in fixtures only:
 
 ```bash
@@ -148,8 +262,10 @@ runbook.
 
 ## RPC authorization and scopes
 
-Every RPC input carries `schema_version: 1`, `tenant_id`, and a narrow
-authorization context. The context contains:
+Projection query and mutation RPC inputs carry `schema_version: 1`, `tenant_id`,
+and a narrow authorization context. The internal repair-only RPC instead checks
+the object identity and stored tenant binding; it is not exposed over HTTP or
+MCP and grants no messaging authority. The projection context contains:
 
 - `tenant_id` and `principal_id`;
 - `allowed_identity_ids`, sorted and unique, with at most 500 IDs; and
@@ -477,8 +593,18 @@ attempt.
    transaction, increments the generation, and preserves schema, tenant
    binding, connection bindings, and rebuild history.
 3. Read committed R2 pages through the trusted replay reader and pass each
-   page to `applyReplayPage` with the active rebuild ID. Ordinary queries and
-   live apply are rejected while rebuilding; status remains available.
+   immutable page to `applyReplayPage` with the active rebuild ID. Activation
+   uses `readRestoreReplayPageForActivation` to retain the original events,
+   manifests, and cursor separately from the sanitized evidence view.
+   Activation selects connection bindings from the original page's accounts.
+   `readRestoreReplayPage` still exposes only sanitized events and evidence.
+   The DO validates original counts, bytes, bindings, and cursors and computes
+   the digest before applying current primary D1 removal authority through
+   `sanitizeArchiveEvents`. Removed bodies, commands, and attachment references
+   never reach projection writes. A fully filtered page still advances its
+   original source cursor; digest and checkpoint tuple use the immutable input.
+   Ordinary queries and live apply are rejected while rebuilding; status
+   remains available.
    A retry of `beginRebuild` with the same ID is status-only only when its
    `started_at` matches and `expected_generation` is the current generation
    minus one; a changed lifecycle request is a mismatch.
@@ -491,6 +617,12 @@ attempt.
    has value `terminal`, with the active rebuild ID and caller-supplied
    `completed_at`. Completion changes the state to `ready` and records bounded
    history. The exact completion retry is idempotent; another ID is a mismatch.
+   Completion first fences the retained outbound ledger with current primary
+   removal authority, then reconstructs only permitted message and command
+   views. Removed conversations need no replacement owner row. Missing or
+   mismatched owners for nonremoved conversations still fail closed. Removed
+   messages also remain absent from reconstruction; their dispatch ledger and
+   provider evidence remain available without recreating content or pointers.
 
 ### Abort an invalid or unrecoverable page
 

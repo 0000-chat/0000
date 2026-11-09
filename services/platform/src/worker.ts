@@ -131,6 +131,7 @@ import {
   type GuestIssuer,
 } from "./guest-state";
 import { emitPlatformDiagnostic } from "./diagnostics";
+import { savedOperationRequest } from "./saved-operations";
 import {
   classifyPlatformProtectedRoute,
   executePlatformProtectedRequest,
@@ -3584,7 +3585,20 @@ async function authenticateCredentialCore(
     return json(400, { error: "invalid_request" });
   }
 
-  const credentialHash = await hashOpaque(body.credential);
+  return authenticateCredentialHash(
+    database,
+    service,
+    await hashOpaque(body.credential),
+    env,
+  );
+}
+
+async function authenticateCredentialHash(
+  database: D1DatabaseSession,
+  service: ServiceRegistration,
+  credentialHash: string,
+  env: Cloudflare.Env,
+): Promise<Response> {
   const row = await database
     .prepare(
       `SELECT id, kind, subject_id, organization_id, membership_id, grant_id,
@@ -4813,6 +4827,24 @@ async function platformRoute(
     request.method === "POST"
   ) {
     return authenticateCredential(request, env);
+  }
+  if (
+    (url.pathname === "/internal/v1/saved-operations/capture" ||
+      url.pathname === "/internal/v1/saved-operations/revalidate") &&
+    request.method === "POST"
+  ) {
+    const database = env.IDENTITY_DB.withSession("first-primary");
+    const service = await findServiceByVerifier(database, request);
+    if (!service) return json(503, { status: "authority_unavailable" });
+    return savedOperationRequest({
+      request,
+      database,
+      service,
+      authority: env.PLATFORM_AUTHORITY_ID,
+      capture: url.pathname.endsWith("/capture"),
+      verifyHash: (hash) =>
+        authenticateCredentialHash(database, service, hash, env),
+    });
   }
   if (url.pathname === "/internal/v1/guests" && request.method === "POST") {
     return createGuestRoute(request, env);

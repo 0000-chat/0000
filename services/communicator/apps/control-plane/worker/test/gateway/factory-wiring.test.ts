@@ -371,7 +371,19 @@ describe("provider factories use the private gateway binding", () => {
       expect(bodyOf(init)).toMatchObject({
         operation_id: receiptInput.operation_id,
         matrix_event_id: receiptInput.matrix_event_id,
-        route,
+        tenant_id: route.tenant_id,
+        identity_id: route.identity_id,
+        account_id: route.account_id,
+        connection_id: route.connection_id,
+        provider: route.provider,
+        session_generation: route.session_generation,
+        route: {
+          gateway_route_id: route.gateway_route_id,
+          bridge_instance_id: route.bridge_instance_id,
+          matrix_user_id: route.matrix_user_id,
+          matrix_room_namespace: route.matrix_room_namespace,
+          provider_login_id: route.provider_login_id,
+        },
       });
       return new Response(
         JSON.stringify({

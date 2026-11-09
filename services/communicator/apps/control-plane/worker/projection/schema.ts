@@ -668,6 +668,35 @@ const privateDispatchAuthorityMigration: ProjectionMigration = Object.freeze({
   ],
 });
 
+const milliseconds = (column: string): string =>
+  `CAST(ROUND(unixepoch(${column}, 'subsec') * 1000) AS INTEGER)`;
+
+const outboundWakeupExpression = `CASE
+  WHEN status = 'dispatching' THEN COALESCE(${milliseconds("dispatch_lease_expires_at")}, ${milliseconds("updated_at")}, 0)
+  WHEN status = 'waiting_for_connection' AND confirmation_decision IS NULL THEN
+    MIN(COALESCE(${milliseconds("confirmation_due_at")}, ${milliseconds("created_at")} + 14400000), ${milliseconds("updated_at")} + 60000)
+  WHEN status = 'waiting_for_connection' THEN ${milliseconds("updated_at")} + 60000
+  WHEN status IN ('pending', 'wakeup_failed', 'delivery_uncertain') THEN ${milliseconds("updated_at")}
+  ELSE NULL END`;
+
+const durableOutboundSchedulingMigration: ProjectionMigration = Object.freeze({
+  version: 8,
+  name: "durable_outbound_scheduling",
+  appliedAt: "2026-09-14T02:00:00.000Z",
+  statements: [
+    "ALTER TABLE projection_meta ADD COLUMN realtime_revalidation_due_at_ms INTEGER CHECK(realtime_revalidation_due_at_ms IS NULL OR realtime_revalidation_due_at_ms >= 0)",
+    "ALTER TABLE outbound_dispatches ADD COLUMN next_wakeup_at_ms INTEGER CHECK(next_wakeup_at_ms IS NULL OR next_wakeup_at_ms >= 0)",
+    "CREATE INDEX idx_outbound_dispatches_wakeup ON outbound_dispatches(next_wakeup_at_ms, id) WHERE next_wakeup_at_ms IS NOT NULL",
+    `UPDATE outbound_dispatches SET next_wakeup_at_ms = ${outboundWakeupExpression}`,
+    `CREATE TRIGGER outbound_wakeup_insert AFTER INSERT ON outbound_dispatches BEGIN
+      UPDATE outbound_dispatches SET next_wakeup_at_ms = ${outboundWakeupExpression} WHERE id = NEW.id;
+    END`,
+    `CREATE TRIGGER outbound_wakeup_update AFTER UPDATE OF status, dispatch_lease_expires_at, confirmation_due_at, confirmation_decision, updated_at ON outbound_dispatches BEGIN
+      UPDATE outbound_dispatches SET next_wakeup_at_ms = ${outboundWakeupExpression} WHERE id = NEW.id;
+    END`,
+  ],
+});
+
 /** The complete immutable migration history for the projection database. */
 export const PROJECTION_MIGRATIONS: readonly ProjectionMigration[] =
   Object.freeze([
@@ -678,6 +707,31 @@ export const PROJECTION_MIGRATIONS: readonly ProjectionMigration[] =
     uncertaintyReconciliationMigration,
     attachmentExpiryMigration,
     privateDispatchAuthorityMigration,
+    durableOutboundSchedulingMigration,
+    Object.freeze({
+      version: 9,
+      name: "saved_send_authority",
+      appliedAt: "2026-11-07T00:00:00.000Z",
+      statements: [
+        "ALTER TABLE outbound_dispatches ADD COLUMN authority_saved TEXT",
+      ],
+    }),
+    Object.freeze({
+      version: 10,
+      name: "bounded_outbound_recovery",
+      appliedAt: "2026-11-07T01:00:00.000Z",
+      statements: [
+        "ALTER TABLE outbound_dispatches ADD COLUMN recovery_attempts INTEGER NOT NULL DEFAULT 0 CHECK(recovery_attempts >= 0)",
+        "ALTER TABLE outbound_dispatches ADD COLUMN recovery_deadline_ms INTEGER CHECK(recovery_deadline_ms IS NULL OR recovery_deadline_ms >= 0)",
+        "ALTER TABLE outbound_dispatches ADD COLUMN recovery_next_attempt_at_ms INTEGER CHECK(recovery_next_attempt_at_ms IS NULL OR recovery_next_attempt_at_ms >= 0)",
+        "DROP TRIGGER outbound_wakeup_update",
+        `CREATE TRIGGER outbound_wakeup_update AFTER UPDATE OF status, dispatch_lease_expires_at, confirmation_due_at, confirmation_decision, updated_at, recovery_next_attempt_at_ms ON outbound_dispatches BEGIN
+          UPDATE outbound_dispatches SET next_wakeup_at_ms = CASE
+            WHEN status IN ('pending', 'wakeup_failed') THEN MAX(COALESCE(recovery_next_attempt_at_ms, 0), (${outboundWakeupExpression}))
+            ELSE (${outboundWakeupExpression}) END WHERE id = NEW.id;
+        END`,
+      ],
+    }),
   ]);
 
 /** Alias retained for callers that use the generic schema-migration name. */

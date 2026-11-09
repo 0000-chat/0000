@@ -207,7 +207,10 @@ unrelated accounts.
 
 Signing out revokes the browser session only. It does not revoke API credentials,
 OAuth consent, refresh tokens or an installation. Those have explicit
-revocation controls. Organization administration must protect the final owner
+revocation controls. [Saved human operations](docs/saved-operations.md) are also
+bound to their originating browser session and become denied when that exact
+session ends. This does not change ordinary OAuth credential validity.
+Organization administration must protect the final owner
 and make concurrent membership changes safe.
 
 ## Request verification and service ownership

@@ -23,6 +23,7 @@ Every first-party MCP surface uses the `/mcp` path.
 | Database | `https://database.0000.chat/mcp` | [Database](../../services/database/README.md); target service surface |
 | Streams | `https://streams.0000.chat/mcp` | [Streams](../../services/streams/README.md); Worker MCP surface, hosted route unverified |
 | Brain | `https://brain.0000.chat/mcp` | [Brain](../../services/brain/README.md); target service surface |
+| Communicator | `https://communicator.0000.chat/mcp` | [Communicator](../../services/communicator/docs/runbooks/oauth-remote-mcp.md); standalone target following the service-host convention, Platform-backed Worker implementation; no deployment claim |
 
 The service-host pattern for a later first-party service is
 `https://<service>.0000.chat/mcp`. A service may also expose other HTTP
@@ -73,7 +74,57 @@ evidence:
 | Database | The public service remains a scaffold without a selected application API. | The direct address is a planned service surface. |
 | Streams | The Worker exposes browser, API, and MCP surfaces; route configuration exists. | The direct address is the target service contract; deployment remains unverified. |
 | Brain | The public service remains scaffold-only without an application API. | The direct address is a planned service surface. |
+| Communicator | The Worker implements Platform-backed discovery, authenticated stateless MCP POST, and service-owned resource authorization. Extracted-bundle tests exercise discovery and denial locally. | The standalone address is a target contract only. No public route, registration, Gateway inclusion, or deployment is verified here. |
 
 Planned contract, implemented code, configured route, and deployed or tested
 endpoint are separate states. Service READMEs and the operator's release
 evidence provide the more specific state for each surface.
+
+## Communicator discovery and authentication
+
+Communicator's standalone target follows the service-host convention above.
+Its MCP transport URL is `https://communicator.0000.chat/mcp`. The registered
+resource and audience for that target are `https://communicator.0000.chat`,
+without the `/mcp` transport path. This matches the public production
+[configuration](../../services/communicator/apps/control-plane/wrangler.jsonc).
+Self-hosted operators can register another origin and resource. Clients use
+the exact resource advertised by discovery rather than appending `/mcp` or
+assuming that every service uses the Msg resource contract.
+
+The [authentication runbook](../../services/communicator/docs/runbooks/oauth-remote-mcp.md)
+owns configuration and client preparation. The implemented discovery contract
+requires the complete Platform browser configuration:
+
+- An unauthenticated `/mcp` request returns `401` with a Bearer
+  `resource_metadata` challenge pointing at the request origin's
+  `/.well-known/oauth-protected-resource`.
+- Both that metadata path and `/.well-known/oauth-protected-resource/mcp`
+  advertise the configured `COMMUNICATOR_PLATFORM_BROWSER_RESOURCE`, Platform
+  base URL in `authorization_servers`, configured scopes, and the service
+  OpenAPI documentation URL. The alias does not change the resource.
+- `/.well-known/oauth-authorization-server` advertises the configured Platform
+  issuer and its `/api/auth/oauth2/authorize` and `/api/auth/oauth2/token`
+  endpoints with authorization-code PKCE S256. Communicator does not issue
+  these credentials. Missing browser configuration returns unavailable
+  metadata rather than falling back to the retired local issuer.
+- Authenticated MCP uses POST with the SDK's Streamable HTTP request headers.
+  Authenticated GET returns `405` with `Allow: POST`. Server clients can omit
+  `Origin`; an explicit `Origin` must equal the request origin. This contract
+  does not add cross-origin browser access or a persistent SSE session.
+
+Platform validates credentials. Communicator separately checks the immutable
+local principal binding and its tenant, identity, account, and chat grants.
+Platform capabilities limit those grants; neither discovery nor tool listing
+grants execution. The same registered resource protects API and MCP access.
+The [Platform verifier](../../services/communicator/apps/control-plane/worker/auth/platform.ts),
+[discovery routes](../../services/communicator/apps/control-plane/worker/auth/browser-routes.ts),
+and [MCP handler](../../services/communicator/apps/control-plane/worker/mcp.ts)
+own the implementation. Retired Worker-local OAuth issuance is not a consumer
+prerequisite.
+
+This is a public target and local implementation contract, not evidence of
+DNS, TLS, routes, Platform registrations, deployment, or external-client
+acceptance. Gateway catalog inclusion remains separate and is not established
+by this direct-service contract. Release consumers verify the
+[bundle composition](../../services/communicator/docs/release-bundles.md)
+before any separately authorized publication or deployment.

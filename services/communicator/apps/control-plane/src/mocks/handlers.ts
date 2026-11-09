@@ -2,7 +2,7 @@ import { http, HttpResponse, passthrough } from "msw";
 import { z } from "zod";
 import {
   CommunicatorIdSchema,
-  DeliveryModeSchema,
+  TextReplyRequestSchema,
   AccountGrantMutationSchema,
   AccountGrantPageSchema,
   AccountGrantSchema,
@@ -16,6 +16,7 @@ import {
   MAX_PROJECTION_CURSOR_CHARS,
   MAX_PROJECTION_PAGE_SIZE,
   MessagePageResultSchema,
+  WebhookDeliveryRetrySchema,
 } from "@communicator/contracts";
 import {
   simulatedStore,
@@ -23,15 +24,12 @@ import {
   type SimulatedScenario,
 } from "./store";
 import { paginateConversations } from "./conversation-pagination";
+import { webhookSubscriptions } from "./webhook-fixtures";
 import { runtimeRealtimeClient } from "@/lib/realtime/runtime-client";
 
-const sendMessageSchema = z
-  .object({
-    identity_id: CommunicatorIdSchema,
-    body: z.string().min(1).max(20_000),
-    delivery_mode: DeliveryModeSchema,
-  })
-  .strict();
+const sendMessageSchema = TextReplyRequestSchema.omit({
+  conversation_id: true,
+});
 
 const commandDecisionSchema = z
   .object({
@@ -128,6 +126,67 @@ function parseSingleQueryValue<T>(
 }
 
 export const handlers = [
+  http.get("*/api/v1/webhook-subscriptions", ({ request }) => {
+    const search = new URL(request.url).searchParams;
+    return HttpResponse.json(
+      pageByCursor(
+        webhookSubscriptions(),
+        search.get("cursor") ?? undefined,
+        1,
+        (item) => item.id,
+      ),
+    );
+  }),
+  http.get(
+    "*/api/v1/webhook-subscriptions/:subscriptionId/deliveries",
+    ({ params, request }) => {
+      if (
+        !webhookSubscriptions().some(
+          (item) => item.id === params.subscriptionId,
+        )
+      )
+        return errorResponse(404, "not_found");
+      const search = new URL(request.url).searchParams;
+      return HttpResponse.json(
+        pageByCursor(
+          simulatedStore.webhookDeliveries
+            .filter((item) => item.subscription_id === params.subscriptionId)
+            .sort((left, right) => left.id.localeCompare(right.id))
+            .map(({ last_response_body: _body, ...item }) => item),
+          search.get("cursor") ?? undefined,
+          1,
+          (item) => item.id,
+        ),
+      );
+    },
+  ),
+  http.get("*/api/v1/webhook-deliveries/:deliveryId", ({ params }) => {
+    const delivery = simulatedStore.webhookDeliveries.find(
+      (item) => item.id === params.deliveryId,
+    );
+    return delivery
+      ? HttpResponse.json(delivery)
+      : errorResponse(404, "not_found");
+  }),
+  http.post(
+    "*/api/v1/webhook-deliveries/:deliveryId/retry",
+    async ({ params, request }) => {
+      const input = WebhookDeliveryRetrySchema.safeParse(await request.json());
+      if (!input.success) return errorResponse(400, "invalid_request");
+      const delivery = simulatedStore.webhookDeliveries.find(
+        (item) => item.id === params.deliveryId,
+      );
+      if (!delivery) return errorResponse(404, "not_found");
+      if (!["failed", "uncertain"].includes(delivery.status))
+        return errorResponse(409, "invalid_request");
+      delivery.status = "pending";
+      delivery.next_attempt_at = new Date().toISOString();
+      delivery.uncertain_at = null;
+      delivery.uncertainty_reason = null;
+      delivery.error_code = "manual_retry_requested";
+      return HttpResponse.json(delivery);
+    },
+  ),
   http.get("*/api/v1/health", () => passthrough()),
 
   http.get("*/api/v1/session", () =>

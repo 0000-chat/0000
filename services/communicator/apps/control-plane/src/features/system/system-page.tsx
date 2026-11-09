@@ -8,6 +8,7 @@ import { runtimeConfig } from "@/lib/config/runtime";
 import { runtimeRealtimeClient } from "@/lib/realtime/runtime-client";
 import type { RealtimeStatus } from "@/lib/realtime/client";
 import { clearChannelOrderPreferences } from "@/features/conversations/channel-order";
+import { WebhookInspection } from "./webhook-inspection";
 
 const simulatedBuild = runtimeRealtimeClient !== null;
 
@@ -117,6 +118,8 @@ export function SystemPage() {
           value={String(connectionsQuery.data?.length ?? 0)}
         />
       </div>
+
+      <WebhookInspection />
 
       {simulatedBuild && (
         <div className="rounded-xl border border-dashed p-4">

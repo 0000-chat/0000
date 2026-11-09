@@ -5,6 +5,7 @@ import {
   ScheduleRemovalExpiryInputSchema,
 } from "../../../../packages/contracts/src/removals";
 import { isAdministratorSession } from "../read/authorization";
+import { hasPlatformCapabilities } from "../auth/capability";
 import { recordRemovalWithArchivePurge } from "../archive/lifecycle";
 import { removalStatusForTenant } from "./service";
 import { scheduleRemovalExpiry } from "./ledger";
@@ -15,6 +16,7 @@ import { createRestoreAuthorityExport } from "../restore/authority";
 export type RemovalMcpContext = {
   env: Cloudflare.Env;
   authorization: SessionResponse;
+  platformCapabilities?: readonly string[] | undefined;
 };
 
 const FORBIDDEN_MESSAGE = "Administrator permission required";
@@ -53,7 +55,13 @@ const requireAdministrator = (
   context: RemovalMcpContext,
   tenantId?: string,
 ): void => {
-  if (!isAdministratorSession(context.authorization)) {
+  if (
+    !hasPlatformCapabilities(
+      context.platformCapabilities,
+      "retention.manage",
+    ) ||
+    !isAdministratorSession(context.authorization)
+  ) {
     throw new RemovalMcpAuthorizationError();
   }
   if (tenantId !== undefined && tenantId !== context.authorization.tenant.id) {

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import importlib.util
+import base64
+import hashlib
 import json
 import os
 import sys
@@ -28,6 +30,10 @@ ACTION_REQUEST_VECTORS: dict[str, Any] = json.loads(
 
 
 REST_PATHS: dict[tuple[str, str], tuple[str, str]] = {
+    ("permission_inspection_request", "inspect_grants"): ("GET", "/api/v1/grants"),
+    ("permission_inspection_request", "request_permissions"): ("POST", "/api/v1/permission-requests"),
+    ("permission_inspection_request", "inspect_requests"): ("GET", "/api/v1/permission-requests"),
+    ("authorization_negative_matrix", "wrong_issuer"): ("GET", "/api/v1/identities"),
     ("oauth_connection", "protected_resource"): ("GET", "/.well-known/oauth-protected-resource"),
     ("oauth_connection", "authorization_server"): ("GET", "/.well-known/oauth-authorization-server"),
     ("linking_identity_lifecycle", "unlinked_start"): ("POST", "/api/v1/identities/identity_one/link-sessions"),
@@ -61,6 +67,21 @@ REST_PATHS: dict[tuple[str, str], tuple[str, str]] = {
 }
 
 REST_OBSERVATION_PATHS: dict[tuple[str, str, str], tuple[str, str]] = {
+    ("history_context_attachment", "attachment_read", "scope"): ("GET", "/api/v1/conversations/chat_one/messages"),
+    ("history_context_attachment", "attachment_read", "bytes"): ("GET", "/api/v1/attachments/attachment_one/download"),
+    ("webhook_subscriptions", "subscription_one_initial", "delivery"): ("GET", "/api/v1/webhook-deliveries/delivery_one"),
+    ("webhook_subscriptions", "subscription_one_initial", "receiver"): ("GET", "/api/v1/webhook-deliveries/delivery_one"),
+    ("webhook_subscriptions", "subscription_two_initial", "delivery"): ("GET", "/api/v1/webhook-deliveries/delivery_two"),
+    ("webhook_subscriptions", "subscription_two_initial", "receiver"): ("GET", "/api/v1/webhook-deliveries/delivery_two"),
+    ("webhook_subscriptions", "revision_removal", "delivery"): ("GET", "/api/v1/webhook-deliveries/delivery_one"),
+    ("webhook_subscriptions", "revision_removal", "receiver"): ("GET", "/api/v1/webhook-deliveries/delivery_one"),
+    ("webhook_subscriptions", "retry", "receiver"): ("GET", "/api/v1/webhook-deliveries/delivery_one"),
+    ("webhook_subscriptions", "cutover", "before"): ("GET", "/api/v1/webhook-subscriptions/subscription_one"),
+    ("webhook_subscriptions", "cutover", "cancellation"): ("GET", "/api/v1/webhook-subscriptions/subscription_one"),
+    ("receipt_and_restore", "active_removal", "suppression"): ("GET", "/api/v1/removals"),
+    ("receipt_and_restore", "restore_anti_resurrection", "restore"): ("POST", "/api/v1/removals/restore-projection"),
+    ("receipt_and_restore", "restore_anti_resurrection", "retained"): ("GET", "/api/v1/conversations/chat_one/messages"),
+    ("receipt_and_restore", "restore_anti_resurrection", "suppression"): ("GET", "/api/v1/removals/restore-authority"),
     ("linking_identity_lifecycle", "same_identity_relink", "relink_result"): ("POST", "/api/v1/connections/connection_one/relink-sessions"),
     ("linking_identity_lifecycle", "same_identity_relink", "relink_operation"): ("GET", "/api/v1/connections/connection_one/lifecycle-operations/lifecycle_relink_session_one"),
     ("linking_identity_lifecycle", "same_identity_relink", "relink_grant"): ("POST", "/api/v1/grants"),
@@ -371,11 +392,12 @@ def operation_for_requirement(
     expect: dict[str, Any] | None = None,
     actor: str | None = None,
     observation: str | None = None,
+    transport: str | None = None,
 ) -> dict[str, Any]:
     req = requirement(scenario, requirement_identifier)
-    selected_observation = observation or "response"
+    selected_observation = observation or ("metadata" if requirement_identifier == "attachment_read" else next(iter(client_acceptance._declared_observations(req))))
     observation_fields = client_acceptance._observation_fields(req, selected_observation)
-    transport = req.transports[0]
+    transport = transport or req.transports[0]
     if transport == "rest":
         default_method, default_path = REST_OBSERVATION_PATHS.get(
             (scenario, requirement_identifier, selected_observation),
@@ -449,6 +471,9 @@ def operation_for_requirement(
                 "content_generation": "2",
                 "reason": "requested",
                 "removed_at": "2026-09-14T00:00:00Z",
+                "rebuild_id": "rebuild_one",
+                "expected_generation": 1,
+                "started_at": "2026-09-14T00:00:00Z",
             }
             if request_contract.body_keys is None:
                 request["body"] = {}
@@ -474,7 +499,7 @@ def operation_for_requirement(
             }
         else:
             allowed = client_acceptance._mcp_contract_tools(
-                scenario, req
+                scenario, req, selected_observation
             )
             if not allowed:
                 raise client_acceptance.ConfigError(
@@ -517,6 +542,8 @@ def operation_for_requirement(
         "required": [name for name in observation_fields if name in pointers],
     }
     operation_expect = {"statuses": statuses or list(req.statuses)}
+    if (scenario, requirement_identifier, selected_observation) in client_acceptance.SERVICE_OBSERVATIONS and client_acceptance._canonical_evidence_pointers(req, scenario, selected_observation, request, transport) is None:
+        operation_expect.update({"outcome": "unverified", "reason": "A separate receiver or restore observation is required"})
     if expect:
         operation_expect.update(expect)
     return {
@@ -1078,6 +1105,211 @@ class ClientAcceptanceTest(unittest.TestCase):
                 operation["evidence"]["extract"][field] = "/result/structuredContent/not_canonical"
                 with self.assertRaises(client_acceptance.ConfigError):
                     client_acceptance.validate_config(config_with_operations([operation]))
+
+    def test_attachment_metadata_cannot_replace_authenticated_bytes(self) -> None:
+        payload = b"controlled attachment bytes\x00\xff"
+        digest = hashlib.sha256(payload).hexdigest()
+        download_grant = "private-download-authority-" + "a" * 40
+        owner = self
+
+        class AttachmentTransport(FakeTransport):
+            downloaded = 0
+            corrupt = False
+
+            def metadata(self) -> dict[str, Any]:
+                return {"attachment_id": "attachment_one", "message_id": "message_one", "sha256": digest, "mime_type": "application/octet-stream", "size_bytes": len(payload), "download_grant": download_grant}
+
+            def page(self) -> dict[str, Any]:
+                return {"items": [{"id": "message_one", "account_id": "account_one", "conversation_id": "chat_one"}]}
+
+            def rest(self, method: str, path: str, query: dict[str, Any], body: Any, token: str | None, headers: dict[str, str] | None = None) -> client_acceptance.HttpResponse:
+                if path.endswith("/download"):
+                    owner.assertEqual(query, {"download_grant": download_grant})
+                    owner.assertEqual(token, "controlled-token-value")
+                    self.downloaded += 1
+                    return client_acceptance.HttpResponse(200, {"content-type": "application/octet-stream"}, None, payload + (b"changed" if self.corrupt else b""))
+                result = self.page() if path.endswith("/messages") else self.metadata()
+                return client_acceptance.HttpResponse(200, {}, result, json.dumps(result).encode())
+
+            def mcp(self, request: dict[str, Any], token: str | None, client: dict[str, Any]) -> client_acceptance.HttpResponse:
+                tool = request.get("tool")
+                if tool == "download_attachment":
+                    owner.assertEqual(request["arguments"]["download_grant"], download_grant)
+                    owner.assertEqual(token, "controlled-token-value")
+                    self.downloaded += 1
+                    result = {"content": [{"type": "resource", "resource": {"uri": "communicator:attachment/attachment_one", "mimeType": "application/octet-stream", "blob": base64.b64encode(payload + (b"changed" if self.corrupt else b"")).decode()}}]}
+                else:
+                    result = {"structuredContent": self.page() if tool == "list_messages" else self.metadata()}
+                response = {"jsonrpc": "2.0", "id": 1, "result": result}
+                return client_acceptance.HttpResponse(200, {}, response, json.dumps(response).encode())
+
+        for transport in ("rest", "mcp"):
+            with self.subTest(transport=transport):
+                operations = [operation_for_requirement("history_context_attachment", "attachment_read", observation=name, transport=transport, identifier=name) for name in ("scope", "metadata", "bytes")]
+                operations[2]["request"]["download_from"] = "metadata"
+                if transport == "mcp":
+                    operations[1]["request"]["arguments"] = {"identity_id": "identity_one", "account_id": "account_one", "attachment_id": "attachment_one"}
+                    operations[2]["request"]["arguments"] = {"attachment_id": "attachment_one"}
+                fixture = AttachmentTransport()
+                partial = client_acceptance.AcceptanceRunner(config_with_operations(operations[:2]), transport=fixture).run()
+                history = next(item for item in partial["scenarios"] if item["id"] == "history_context_attachment")
+                self.assertEqual(next(item for item in history["coverage"] if item["requirement"] == "attachment_read")["status"], "unverified")
+                self.assertEqual(fixture.downloaded, 0)
+                complete = client_acceptance.AcceptanceRunner(config_with_operations(operations), transport=fixture).run()
+                history = next(item for item in complete["scenarios"] if item["id"] == "history_context_attachment")
+                self.assertEqual(next(item for item in history["coverage"] if item["requirement"] == "attachment_read")["status"], "pass")
+                self.assertEqual(fixture.downloaded, 1)
+                self.assertEqual(complete["operations"][-1]["extracted"], {"sha256": digest, "attachment_size": len(payload)})
+                self.assertNotIn(download_grant, json.dumps(complete))
+                self.assertNotIn("controlled attachment bytes", json.dumps(complete))
+                client_acceptance.validate_bundle(complete)
+                fixture.corrupt = True
+                corrupt = client_acceptance.AcceptanceRunner(config_with_operations(operations), transport=fixture).run()
+                history = next(item for item in corrupt["scenarios"] if item["id"] == "history_context_attachment")
+                self.assertEqual(next(item for item in history["coverage"] if item["requirement"] == "attachment_read")["status"], "implementation_defect")
+                operations[2]["request"]["download_from"] = "missing"
+                before = fixture.downloaded
+                unavailable = client_acceptance.AcceptanceRunner(config_with_operations(operations), transport=fixture).run()
+                self.assertEqual(unavailable["operations"][-1]["status"], "unverified")
+                self.assertEqual(fixture.downloaded, before)
+
+    def test_shared_service_mappings_use_real_result_fields(self) -> None:
+        cases = [
+            ("permission_inspection_request", "request_permissions", None, {"id": "permission_request_one", "identity_id": "identity_one", "account_id": "account_one", "status": "pending"}, {"request_id": "permission_request_one", "identity_id": "identity_one", "account_id": "account_one", "status": "pending"}),
+            ("direct_chat_and_group", "contact_resolution", None, {"status": "resolved", "candidate": {"account_id": "account_one", "contact_id": "contact_one", "provider_id": "provider_contact_one"}}, {"account_id": "account_one", "contact_id": "contact_one", "provider_contact_id": "provider_contact_one", "resolution_status": "resolved"}),
+            ("direct_chat_and_group", "group_creation", None, {"account_id": "account_one", "conversation_id": "chat_one", "operation_id": "group_operation_one", "provider_group_id": "provider_group_one", "status": "created"}, {"account_id": "account_one", "chat_id": "chat_one", "group_operation_id": "group_operation_one", "provider_group_id": "provider_group_one", "provider_status": "created"}),
+            ("receipt_and_restore", "explicit_receipt", None, {"operation_id": "receipt_one", "account_id": "account_one", "conversation_id": "chat_one", "message_id": "message_one", "status": "observed", "matrix_stage": "accepted", "bridge_stage": "observed", "provider_stage": "confirmed"}, {"receipt_id": "receipt_one", "account_id": "account_one", "chat_id": "chat_one", "message_id": "message_one", "receipt_status": "observed", "matrix_status": "accepted", "bridge_status": "observed", "provider_status": "confirmed"}),
+            ("webhook_subscriptions", "retry", "retry_result", {"id": "delivery_one", "subscription_id": "subscription_one", "source_event_id": "event_one", "attempt_count": 3, "retry_deadline": "2026-09-14T00:00:00Z"}, {"delivery_id": "delivery_one", "subscription_id": "subscription_one", "source_event_id": "event_one", "attempt_count": 3, "retry_deadline": "2026-09-14T00:00:00Z"}),
+        ]
+        for scenario, case, observation, body, expected in cases:
+            for transport in ("rest", "mcp"):
+                with self.subTest(case=case, transport=transport):
+                    operation = operation_for_requirement(scenario, case, observation=observation, transport=transport)
+                    if transport == "mcp":
+                        rest = operation_for_requirement(scenario, case, observation=observation)
+                        arguments = dict(rest["request"].get("body", {}))
+                        if case == "explicit_receipt":
+                            arguments["conversation_id"] = "chat_one"
+                        elif case == "retry":
+                            arguments["delivery_id"] = "delivery_one"
+                        operation["request"]["arguments"] = arguments
+                    config = client_acceptance.validate_config(config_with_operations([operation]))
+                    runner = client_acceptance.AcceptanceRunner(config, transport=FakeTransport())
+                    response_body = body if transport == "rest" else {"jsonrpc": "2.0", "id": 1, "result": {"structuredContent": body}}
+                    response = client_acceptance.HttpResponse(200, {}, response_body, json.dumps(response_body).encode())
+                    status, reason, extracted = client_acceptance.classify_response(response, operation, runner._context(), operation["request"])
+                    self.assertEqual((status, reason, extracted), ("pass", None, expected))
+                    field = next(iter(operation["evidence"]["extract"]))
+                    operation["evidence"]["extract"][field] = "/invented_alias"
+                    with self.assertRaises(client_acceptance.ConfigError):
+                        client_acceptance.validate_config(config_with_operations([operation]))
+
+    def test_webhook_and_restore_observations_cannot_use_unrelated_mutations(self) -> None:
+        for scenario, case, observation in [("webhook_subscriptions", "revision_removal", "receiver"), ("webhook_subscriptions", "cutover", "cancellation"), ("receipt_and_restore", "restore_anti_resurrection", "suppression")]:
+            operation = operation_for_requirement(scenario, case, observation=observation)
+            operation["expect"]["outcome"] = "pass"
+            with self.assertRaises(client_acceptance.ConfigError):
+                client_acceptance.validate_config(config_with_operations([operation]))
+        operation = operation_for_requirement("receipt_and_restore", "restore_anti_resurrection", observation="restore", path="/api/v1/removals")
+        with self.assertRaises(client_acceptance.ConfigError):
+            client_acceptance.validate_config(config_with_operations([operation]))
+        operation = operation_for_requirement("webhook_subscriptions", "revision_removal", observation="delivery", method="DELETE", path="/api/v1/webhook-subscriptions/subscription_one")
+        with self.assertRaises(client_acceptance.ConfigError):
+            client_acceptance.validate_config(config_with_operations([operation]))
+
+    def test_tool_error_is_not_success_but_can_record_an_explicit_denial(self) -> None:
+        operation = operation_for_requirement("authorization_negative_matrix", "missing_grant", transport="mcp", statuses=[200])
+        config = config_with_operations([operation])
+        runner = client_acceptance.AcceptanceRunner(config, transport=FakeTransport())
+        body = {"jsonrpc": "2.0", "id": 1, "result": {"isError": True, "content": [{"type": "text", "text": '{"error":{"code":"forbidden"}}'}]}}
+        response = client_acceptance.HttpResponse(200, {}, body, json.dumps(body).encode())
+        self.assertEqual(client_acceptance.classify_response(response, operation, runner._context(), operation["request"]), ("pass", None, {"error_code": "forbidden"}))
+        self.assertIsNotNone(client_acceptance._validate_mcp_response(response))
+        body["result"]["isError"] = False
+        self.assertEqual(client_acceptance.classify_response(response, operation, runner._context(), operation["request"])[0], "unverified")
+
+        class DenialTransport(FakeTransport):
+            def mcp(self, request: dict[str, Any], token: str | None, client: dict[str, str]) -> client_acceptance.HttpResponse:
+                return client_acceptance.HttpResponse(200, {}, body, json.dumps(body).encode())
+
+        for is_error, expected in ((True, "pass"), (False, "unverified"), ("true", "unverified")):
+            with self.subTest(is_error=is_error):
+                body["result"]["isError"] = is_error
+                bundle = client_acceptance.AcceptanceRunner(config, transport=DenialTransport()).run()
+                self.assertEqual(bundle["operations"][0]["status"], expected)
+                client_acceptance.validate_bundle(bundle)
+                if expected == "pass":
+                    bundle["operations"][0]["response"]["mcp_is_error"] = False
+                    with self.assertRaises(client_acceptance.EvidenceError):
+                        client_acceptance.validate_bundle(bundle)
+
+    def test_permission_evidence_correlates_requested_and_configured_subjects(self) -> None:
+        class PermissionTransport(FakeTransport):
+            def __init__(self, identity_id: str, account_id: str, wrong_grant: bool) -> None:
+                super().__init__()
+                self.identity_id = identity_id
+                self.account_id = account_id
+                self.wrong_grant = wrong_grant
+
+            def result(self, case: str) -> dict[str, Any]:
+                subject = {"identity_id": self.identity_id, "account_id": self.account_id}
+                if case == "inspect_grants":
+                    if self.wrong_grant:
+                        subject["identity_id"] = "identity_other"
+                    return {"items": [{"id": "grant_one", **subject, "operation_scope": "conversation.read", "chat_scope": "all_chats"}], "next_cursor": None}
+                pending = {"id": "request_one", **subject, "status": "pending"}
+                return pending if case == "request_permissions" else {"items": [pending], "next_cursor": None}
+
+            def rest(self, method: str, path: str, query: dict[str, Any], body: Any, token: str | None, headers: dict[str, str] | None = None) -> client_acceptance.HttpResponse:
+                case = "inspect_grants" if path.endswith("/grants") else "request_permissions" if method == "POST" else "inspect_requests"
+                result = self.result(case)
+                return client_acceptance.HttpResponse(200, {}, result, json.dumps(result).encode())
+
+            def mcp(self, request: dict[str, Any], token: str | None, client: dict[str, str]) -> client_acceptance.HttpResponse:
+                case = {"list_grants": "inspect_grants", "request_permissions": "request_permissions", "list_permission_requests": "inspect_requests"}[request["tool"]]
+                result = {"jsonrpc": "2.0", "id": 1, "result": {"structuredContent": self.result(case)}}
+                return client_acceptance.HttpResponse(200, {}, result, json.dumps(result).encode())
+
+        for transport in ("rest", "mcp"):
+            for identity, account, include_other, wrong_grant in (
+                ("identity_one", "account_one", False, False),
+                ("identity_other", "account_one", False, False),
+                ("identity_one", "account_other", False, False),
+                ("identity_other", "account_other", True, False),
+                ("identity_one", "account_one", True, True),
+            ):
+                with self.subTest(transport=transport, identity=identity, account=account, include_other=include_other, wrong_grant=wrong_grant):
+                    operations = [operation_for_requirement("permission_inspection_request", case, transport=transport) for case in ("inspect_grants", "request_permissions", "inspect_requests")]
+                    subject = {"identity_id": "identity_one", "account_id": "account_one"}
+                    for operation in operations:
+                        request = operation["request"]
+                        if transport == "mcp":
+                            request["arguments"] = dict(subject)
+                            if request["tool"] == "request_permissions":
+                                request["arguments"].update(operation_for_requirement("permission_inspection_request", "request_permissions")["request"]["body"])
+                        elif request["method"] == "GET":
+                            request["query"] = dict(subject)
+                    config = config_with_operations(operations)
+                    if include_other:
+                        config["target"]["bindings"]["identity_ids"].append("identity_other")
+                        config["target"]["bindings"]["account_ids"].append("account_other")
+                    bundle = client_acceptance.AcceptanceRunner(config, transport=PermissionTransport(identity, account, wrong_grant)).run()
+                    scenario = next(item for item in bundle["scenarios"] if item["id"] == "permission_inspection_request")
+                    expected = "pass" if (identity, account, wrong_grant) == ("identity_one", "account_one", False) else "implementation_defect"
+                    self.assertEqual(scenario["status"], expected)
+                    client_acceptance.validate_bundle(bundle)
+
+    def test_permission_and_restore_request_vectors_reject_elevation_or_removal_aliases(self) -> None:
+        for name, scenario, case, observation in [
+            ("permission_request", "permission_inspection_request", "request_permissions", "response"),
+            ("restore_projection", "receipt_and_restore", "restore_anti_resurrection", "restore"),
+        ]:
+            vector = ACTION_REQUEST_VECTORS[name]
+            operation = operation_for_requirement(scenario, case, observation=observation, path=vector["path"], body=vector["valid"])
+            client_acceptance.validate_config(config_with_operations([operation]))
+            operation["request"]["body"] = vector["invalid"]
+            with self.assertRaises(client_acceptance.ConfigError):
+                client_acceptance.validate_config(config_with_operations([operation]))
 
     def test_provider_delivery_requires_external_evidence_mapping(self) -> None:
         operation = operation_for_requirement("text_send_and_route", "provider_delivery")

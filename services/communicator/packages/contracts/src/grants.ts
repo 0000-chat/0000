@@ -23,12 +23,44 @@ export const OutboundCapabilitySchema = z.discriminatedUnion("kind", [
 ]);
 export type OutboundCapability = z.infer<typeof OutboundCapabilitySchema>;
 
+export const SavedSendRouteSchema = z
+  .object({
+    gateway_route_id: z.string().min(1),
+    bridge_instance_id: z.string().min(1),
+    matrix_user_id: z.string().min(1),
+    matrix_room_namespace: z.string().min(1),
+  })
+  .strict();
+
+/** Non-secret references; the Platform row, never this descriptor, grants authority. */
+export const SavedSendAuthoritySchema = z
+  .object({
+    platform: z
+      .object({
+        id: z.string().min(1),
+        authority: z.string().min(1),
+        subjectId: z.string().min(1),
+        organizationId: z.string().min(1),
+        audience: z.string().min(1),
+        operationId: z.string().min(1).max(256),
+        capability: z.literal("message.send"),
+      })
+      .strict(),
+    binding_id: CommunicatorIdSchema,
+    session_generation: TimestampSchema,
+    route_generation: TimestampSchema,
+    route: SavedSendRouteSchema,
+  })
+  .strict();
+export type SavedSendAuthority = z.infer<typeof SavedSendAuthoritySchema>;
+
 export const OutboundAuthorityMetadataSchema = z
   .object({
     reservation_id: CommunicatorIdSchema,
     membership_id: CommunicatorIdSchema,
     identity_id: CommunicatorIdSchema,
     capability: OutboundCapabilitySchema,
+    saved: SavedSendAuthoritySchema.optional(),
   })
   .strict();
 export type OutboundAuthorityMetadata = z.infer<

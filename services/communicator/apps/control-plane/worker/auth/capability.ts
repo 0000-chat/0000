@@ -6,6 +6,17 @@ type CapabilityEnvironment = {
   Variables: AuthorizationVariables;
 };
 
+export function hasPlatformCapabilities(
+  capabilities: readonly string[] | undefined,
+  ...required: readonly string[]
+): boolean {
+  // Undefined is reserved for legacy component fixtures, not deployed requests.
+  return (
+    capabilities === undefined ||
+    required.every((name) => capabilities.includes(name))
+  );
+}
+
 /**
  * Apply a route-level Platform capability ceiling after authentication. Local
  * identity grants remain the resource check performed by each handler; this
@@ -16,12 +27,14 @@ export function requirePlatformCapability(
   ...required: readonly string[]
 ): MiddlewareHandler<CapabilityEnvironment> {
   return async (context, next) => {
-    const capabilities = new Set(context.get("platformCapabilities") ?? []);
     // Legacy component fixtures do not carry Platform context. They retain
     // their pre-adoption route behavior while deployed requests always do.
     if (
       context.get("platformPrincipal") !== undefined &&
-      required.some((capability) => !capabilities.has(capability))
+      !hasPlatformCapabilities(
+        context.get("platformCapabilities") ?? [],
+        ...required,
+      )
     ) {
       return context.json(
         { error: { code: "forbidden", message: "Forbidden" } },
@@ -38,10 +51,12 @@ export function requirePlatformCapabilityForMethods(
 ): MiddlewareHandler<CapabilityEnvironment> {
   return async (context, next) => {
     const required = methods.get(context.req.method.toUpperCase()) ?? fallback;
-    const capabilities = new Set(context.get("platformCapabilities") ?? []);
     if (
       context.get("platformPrincipal") !== undefined &&
-      required.some((capability) => !capabilities.has(capability))
+      !hasPlatformCapabilities(
+        context.get("platformCapabilities") ?? [],
+        ...required,
+      )
     ) {
       return context.json(
         { error: { code: "forbidden", message: "Forbidden" } },

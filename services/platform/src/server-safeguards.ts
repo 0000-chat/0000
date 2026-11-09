@@ -95,7 +95,12 @@ export function classifyPlatformProtectedRoute(
     return null;
   }
 
-  if (pathname === "/internal/v1/authenticate" && request.method === "POST") {
+  if (
+    (pathname === "/internal/v1/authenticate" ||
+      pathname === "/internal/v1/saved-operations/capture" ||
+      pathname === "/internal/v1/saved-operations/revalidate") &&
+    request.method === "POST"
+  ) {
     return "verification";
   }
   if (isGuestControlPath(pathname) && request.method === "POST") {

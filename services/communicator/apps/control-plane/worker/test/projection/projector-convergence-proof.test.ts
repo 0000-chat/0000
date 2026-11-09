@@ -638,6 +638,21 @@ describe("tenant projection full-domain convergence proof", () => {
         name: "private_dispatch_authority",
         applied_at: "2026-09-14T01:00:00.000Z",
       },
+      {
+        version: 8,
+        name: "durable_outbound_scheduling",
+        applied_at: "2026-09-14T02:00:00.000Z",
+      },
+      {
+        version: 9,
+        name: "saved_send_authority",
+        applied_at: "2026-11-07T00:00:00.000Z",
+      },
+      {
+        version: 10,
+        name: "bounded_outbound_recovery",
+        applied_at: "2026-11-07T01:00:00.000Z",
+      },
     ]);
     expect(chronological.completed_rebuilds).toEqual([]);
     expect(chronological.failed_rebuilds).toEqual([]);

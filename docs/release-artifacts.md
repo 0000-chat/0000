@@ -11,7 +11,7 @@ point at another source revision. The record carries the exact source commit,
 affected runtime units, artifact digests, and the `api/config` compatibility
 pair consumed by private Cloud promotion.
 
-This activation publishes five runtime units:
+The release map registers these runtime units:
 
 - `gateway`, a deterministic, prebuilt Cloudflare Worker bundle.
 - `msg-worker`, a deterministic, prebuilt Cloudflare Worker bundle.
@@ -21,8 +21,19 @@ This activation publishes five runtime units:
   the public identity authority, D1 migration ledger, and rate-limit contract.
 - `msg-webhook-dispatcher`, a deterministic, prebuilt Bun runtime bundle for
   self-hosted secure MCP Events delivery.
+- `communicator-control-plane`, a prebuilt Worker and production UI bundle.
+- `communicator-matrix-gateway`, a prebuilt Linux native gateway bundle.
+- `communicator-bridge-images`, generic deployment inputs with digest-pinned
+  third-party bridge images.
 
-Streams and Communicator remain outside this activation. Brain remains
+Communicator's [bundle contract](../services/communicator/docs/release-bundles.md)
+defines its distinct artifact kinds, consumer checks, and persistent-state
+requirements. Those kinds are not generic Worker artifacts and remain outside
+`cloud_selection` until a compatible consumer is reviewed. A Communicator
+runtime change selects all three bundles and the same-revision Platform Worker.
+Local packaging checks do not publish or deploy a release.
+
+Streams remains outside this activation. Brain remains
 validation-only until its own runtime artifact and staging consumer are
 reviewed. The SDK placeholder remains checks-only and is never a release
 artifact. Private Cloud content is never included.
@@ -42,8 +53,9 @@ dispatches private Cloud staging only when the plan contains a runtime
 artifact and the opt-in repository variable `CLOUD_RELEASE_DISPATCH_ENABLED`
 is `true`; a missing variable fails closed.
 
-The shared runtime client under `packages/platform-client` is a global runtime
-input. Source and package configuration changes select all five configured
+The shared runtime packages under `packages/platform-client` and
+`packages/contracts` are global runtime inputs. Source and package
+configuration changes select all configured
 units, keeping Msg, its MCP Events companion, and Platform on one release
 version. Package documentation and test-only changes remain validation-only and
 do not create runtime artifacts by themselves.

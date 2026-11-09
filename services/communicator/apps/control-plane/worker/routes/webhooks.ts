@@ -5,6 +5,7 @@ import {
   MAX_WEBHOOK_PAGE_SIZE,
   WebhookDeliveryRetrySchema,
   WebhookDeliverySchema,
+  WebhookDeliveryPageSchema,
   WebhookSubscriptionCreateSchema,
   WebhookSubscriptionCutoverSchema,
   WebhookSubscriptionEvaluationSchema,
@@ -27,6 +28,7 @@ import {
   cutoverWebhookSubscription,
   evaluateWebhookSubscription,
   listWebhookSubscriptionPage,
+  listWebhookDeliveryPage,
   revokeWebhookSubscription,
   retryWebhookDelivery,
   updateWebhookSubscription,
@@ -216,6 +218,28 @@ export const evaluateWebhookSubscriptionRoute = createRoute({
     404: { description: "Subscription not found", content: errorContent },
     503: {
       description: "Subscription directory unavailable",
+      content: errorContent,
+    },
+  },
+});
+
+export const webhookDeliveriesRoute = createRoute({
+  method: "get",
+  path: "/api/v1/webhook-subscriptions/{subscription_id}/deliveries",
+  security: [{ bearerAuth: [] }],
+  request: {
+    params: z.object({ subscription_id: boundedId }).strict(),
+    query: z.object({ cursor: optionalCursor, limit: optionalLimit }).strict(),
+  },
+  responses: {
+    ...deliveryResponses("Webhook delivery metadata"),
+    200: {
+      description:
+        "Subscription-scoped delivery metadata in stable ID order; no payload or receiver response body",
+      content: { "application/json": { schema: WebhookDeliveryPageSchema } },
+    },
+    409: {
+      description: "Removal state changed; restart pagination",
       content: errorContent,
     },
   },
@@ -462,6 +486,33 @@ export const evaluateWebhookSubscriptionHandler: Handler<
         subscription.id,
         query.account_id,
         query.chat_id ?? null,
+      ),
+      200,
+    );
+  } catch (error) {
+    return errorResponse(context, error);
+  }
+};
+
+export const webhookDeliveriesHandler: Handler<
+  WebhookRouteEnv,
+  string,
+  {
+    out: {
+      param: { subscription_id: string };
+      query: { cursor?: string; limit?: number };
+    };
+  }
+> = async (context) => {
+  try {
+    const query = context.req.valid("query");
+    return context.json(
+      await listWebhookDeliveryPage(
+        context.env.CONTROL_DB.withSession("first-primary"),
+        actorFor(context),
+        context.req.valid("param").subscription_id,
+        query.cursor,
+        query.limit,
       ),
       200,
     );

@@ -268,7 +268,7 @@ test("identity switch replaces every scoped surface", async ({ page }) => {
   await expect(page.getByText("Alex Rivera", { exact: true })).toHaveCount(0);
 });
 
-test("direct and paced sends stay on the opened connection", async ({
+test("direct sends stay on the opened connection and pacing is rejected", async ({
   page,
 }) => {
   await page.goto(
@@ -300,23 +300,28 @@ test("direct and paced sends stay on the opened connection", async ({
 
   await message.fill("A simulated paced message");
   await mode.selectOption("paced");
-  const pacedResponse = page.waitForResponse(
-    (response) =>
-      response
-        .url()
-        .includes(
+  await expect(send).toBeDisabled();
+  const pacedStatus = await page.evaluate(
+    async () =>
+      (
+        await fetch(
           "/api/v1/conversations/conversation_human_telegram_alex/messages",
-        ) &&
-      response.request().method() === "POST" &&
-      response.status() === 202,
+          {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "Idempotency-Key": "unsupported-paced-browser",
+            },
+            body: JSON.stringify({
+              identity_id: "identity_human",
+              body: "Must not be sent",
+              delivery_mode: "paced",
+            }),
+          },
+        )
+      ).status,
   );
-  await send.click();
-  await pacedResponse;
-  await expect(
-    page
-      .getByRole("status")
-      .filter({ hasText: "Accepted — awaiting messaging confirmation" }),
-  ).toBeVisible();
+  expect(pacedStatus).toBe(400);
 
   const commands = await page.evaluate(async () => {
     const [commandsResponse, conversationResponse] = await Promise.all([
@@ -343,7 +348,6 @@ test("direct and paced sends stay on the opened connection", async ({
   expect(commands.connectionId).toBe("connection_human_telegram");
   expect(commands.sent.map((command) => command.delivery_mode)).toEqual([
     "direct",
-    "paced",
   ]);
 });
 

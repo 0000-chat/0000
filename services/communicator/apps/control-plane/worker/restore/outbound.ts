@@ -1,16 +1,16 @@
 import type { RemovalAuthority } from "../../../../packages/contracts/src/removals";
 
 /**
- * Fence outbound rows recreated from a restored projection ledger.  The
+ * Fence the retained authoritative outbound ledger. The
  * projection owns the SQLite transaction; this function deliberately accepts
- * its SqlStorage so the caller can invoke it after restoring outbound rows and
- * before publishing the projection as ready.
+ * its SqlStorage so the caller can fence before reconstructing permitted
+ * outbound views and publishing the projection as ready.
  *
  * A pending row is cancelled.  A row that was already between lease and
  * provider I/O becomes delivery_uncertain and keeps its uncertainty evidence;
  * clearing that distinction would allow a restore to resend a message whose
- * provider result is unknown.  Delivered rows retain their terminal evidence
- * and are redacted by the existing projection removal pass.
+ * provider result is unknown. Delivered rows retain their terminal evidence;
+ * removed resources are excluded from derived outbound reconstruction.
  */
 export type RestoreOutboundFenceResult = {
   cancelled_dispatches: number;

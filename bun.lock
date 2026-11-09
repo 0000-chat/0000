@@ -63,6 +63,7 @@
         "miniflare": "5.20260916.0-alpha",
         "oxlint": "1.82.0",
         "typescript": "6.0.3",
+        "vitest": "4.1.11",
         "wrangler": "4.133.0",
       },
     },

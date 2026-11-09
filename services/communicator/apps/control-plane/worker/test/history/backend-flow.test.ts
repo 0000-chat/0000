@@ -1,4 +1,4 @@
-import { env, runInDurableObject } from "cloudflare:test";
+import { env, runInDurableObject, evictDurableObject } from "cloudflare:test";
 import {
   HistoryImportDetailSchema,
   MessagePageResultSchema,
@@ -16,8 +16,16 @@ import type {
   HistoryProviderAdvanceResult,
   HistoryProviderStartResult,
 } from "../../history/provider";
-import { HistoryProviderError } from "../../history/provider";
+import {
+  HistoryProviderError,
+  HttpHistoryImportProvider,
+} from "../../history/provider";
 import { createHistoryService } from "../../history/service";
+import { runHistoryImportTick } from "../../history/runner";
+import { getDetail } from "../../history/repository";
+import { createWebhookSubscription } from "../../control-directory/webhooks";
+import { fanOutIncomingWebhookDeliveries } from "../../webhooks/delivery";
+import { z } from "zod";
 import type { HistoryRouteServices } from "../../history/routes";
 import {
   auth,
@@ -188,6 +196,7 @@ const createSinglePageProvider = (
 const createTestApp = (
   provider: HistoryImportProvider,
   applyEvents?: HistoryRouteServices["applyEvents"],
+  now = () => new Date("2026-09-03T00:00:10.000Z"),
 ) =>
   createApp({
     createTokenVerifier: () => ({
@@ -207,7 +216,7 @@ const createTestApp = (
       },
     }),
     createHistoryImportProvider: () => provider,
-    historyNow: () => new Date("2026-09-03T00:00:10.000Z"),
+    historyNow: now,
     ...(applyEvents === undefined ? {} : { applyHistoryEvents: applyEvents }),
   });
 
@@ -334,6 +343,243 @@ beforeEach(async () => {
 });
 
 describe("history import production route", () => {
+  it("resumes the same missing-key import after eviction without busy retries or duplicate live/backfill messages", async () => {
+    let millis = Date.parse("2026-09-03T00:00:10.000Z");
+    const now = () => new Date(millis);
+    let keysAvailable = false;
+    const cursors: Array<string | null> = [];
+    const paths: string[] = [];
+    await createWebhookSubscription(
+      workerEnv.CONTROL_DB,
+      {
+        tenantId,
+        principalId: "principal_human",
+        principalType: "human",
+        membershipId: "membership_human",
+        role: "owner",
+        identityIds: [identityId],
+        delegated: false,
+      },
+      {
+        destination: {
+          url: "https://hooks.example.test/history-control",
+          credential_ref: null,
+        },
+        event_filter: { event_types: ["message.created"] },
+        global_enabled: true,
+        account_rules: [{ account_id: accountId, enabled: true }],
+        chat_rules: [],
+        idempotency_key: "history-webhook-control",
+      },
+      now().toISOString(),
+    );
+    expect(
+      await fanOutIncomingWebhookDeliveries({
+        database: workerEnv.CONTROL_DB,
+        tenantId,
+        events: [liveEvent],
+        now,
+      }),
+    ).toHaveLength(1);
+    const overlap = event(
+      "overlap_backfill_event",
+      {
+        message_id: "live_message_history",
+        direction: "inbound",
+        sender_participant_id: null,
+        sender_label: "Live sender",
+        body: "live message remains readable",
+        reply_to_message_id: null,
+        delivery_status: "unknown",
+        unread: false,
+      },
+      "message.created",
+      {
+        event_source: "backfill",
+        tenant_id: tenantId,
+        identity_id: identityId,
+        account_id: accountId,
+        conversation_id: "conversation_history",
+        observed_at: "2026-09-03T00:00:01.000Z",
+        occurred_at: "2026-09-03T00:00:00.000Z",
+      },
+    );
+    const makeProvider = () =>
+      new HttpHistoryImportProvider(
+        "https://controlled-gateway.example",
+        "controlled-history-secret",
+        async (url, init) => {
+          paths.push(new URL(String(url)).pathname);
+          const isStart = String(url).endsWith("/start");
+          if (isStart) return Response.json(singleRangeStartResult);
+          const input = z
+            .object({ source_cursor: z.string().nullable() })
+            .parse(JSON.parse(String(init?.body)));
+          cursors.push(input.source_cursor);
+          return Response.json(
+            !keysAvailable
+              ? {
+                  status: "partial",
+                  events: [],
+                  next_cursor: "opaque-exact-missing-page",
+                  gap_code: "matrix_missing_room_key",
+                  error_code: "provider_error",
+                }
+              : {
+                  status:
+                    input.source_cursor === "opaque-exact-missing-page"
+                      ? "active"
+                      : "completed",
+                  events: [importedEvent, importedEvent, overlap],
+                  next_cursor:
+                    input.source_cursor === "opaque-exact-missing-page"
+                      ? "opaque-repeated-page"
+                      : null,
+                  gap_code: null,
+                  error_code: null,
+                },
+          );
+        },
+      );
+    const app = createTestApp(makeProvider(), undefined, now);
+    const initial = await startImport(app, "history-missing-keys-resume");
+    const advance = (app: ReturnType<typeof createApp>) =>
+      request(
+        app,
+        `/api/v1/history-imports/${initial.import.import_id}/advance`,
+        {
+          method: "POST",
+          body: JSON.stringify({ identity_id: identityId }),
+        },
+      );
+    const partialResponse = await advance(app);
+    expect(partialResponse.status).toBe(200);
+    const partial = HistoryImportDetailSchema.parse(
+      await partialResponse.json(),
+    );
+    expect(partial.import).toMatchObject({
+      status: "partial",
+      completed_at: null,
+      event_count: 0,
+    });
+    expect(partial.ranges[0]).toMatchObject({
+      status: "partial",
+      gap_code: "matrix_missing_room_key",
+      source_cursor: "opaque-exact-missing-page",
+      attempt_count: 1,
+      completed_at: null,
+    });
+    expect(
+      (await readLiveMessages(app)).items.map((message) => message.id),
+    ).toContain("live_message_history");
+    await advance(app);
+    expect(cursors).toEqual(["cursor-one"]);
+    expect(
+      await runHistoryImportTick(workerEnv, {
+        createProvider: makeProvider,
+        now,
+      }),
+    ).toEqual({ claimed: 0, advanced: 0 });
+
+    // Fresh service/provider instances plus a real projection DO eviction;
+    // D1, not an in-memory retry loop, owns the wake and exact cursor.
+    await evictDurableObject(workerEnv.TENANT_PROJECTION.getByName(tenantId));
+    millis += 60_000;
+    expect(
+      await runHistoryImportTick(workerEnv, {
+        createProvider: makeProvider,
+        now,
+      }),
+    ).toEqual({ claimed: 1, advanced: 1 });
+    const wake = await workerEnv.CONTROL_DB.prepare(
+      "SELECT next_attempt_at FROM history_import_ranges WHERE import_id = ?",
+    )
+      .bind(initial.import.import_id)
+      .first<{ next_attempt_at: string }>();
+    expect(wake?.next_attempt_at).toBe("2026-09-03T00:03:10.000Z");
+    keysAvailable = true;
+    expect(
+      await runHistoryImportTick(workerEnv, {
+        createProvider: makeProvider,
+        now,
+      }),
+    ).toEqual({ claimed: 0, advanced: 0 });
+    millis += 120_000;
+    expect(
+      await runHistoryImportTick(workerEnv, {
+        createProvider: makeProvider,
+        now,
+      }),
+    ).toEqual({ claimed: 2, advanced: 2 });
+    const detail = await getDetail(
+      workerEnv.CONTROL_DB,
+      tenantId,
+      initial.import.import_id,
+      accountId,
+    );
+    expect(detail.import).toMatchObject({
+      status: "completed",
+      event_count: 2,
+      gap_count: 0,
+    });
+    const restartedApp = createTestApp(makeProvider(), undefined, now);
+    const messages = (await readLiveMessages(restartedApp)).items;
+    expect(
+      messages.filter((message) => message.id === "history_message"),
+    ).toHaveLength(1);
+    expect(
+      messages.filter((message) => message.id === "live_message_history"),
+    ).toHaveLength(1);
+    expect(cursors).toEqual([
+      "cursor-one",
+      "opaque-exact-missing-page",
+      "opaque-exact-missing-page",
+      "opaque-repeated-page",
+    ]);
+    const overlappingImport = await startImport(
+      restartedApp,
+      "history-missing-keys-overlapping-import",
+    );
+    const overlappingResponse = await request(
+      restartedApp,
+      `/api/v1/history-imports/${overlappingImport.import.import_id}/advance`,
+      {
+        method: "POST",
+        body: JSON.stringify({ identity_id: identityId }),
+      },
+    );
+    expect(overlappingResponse.status).toBe(200);
+    expect(
+      HistoryImportDetailSchema.parse(await overlappingResponse.json()).import
+        .status,
+    ).toBe("completed");
+    expect(
+      (await readLiveMessages(restartedApp)).items.filter(
+        (message) => message.id === "history_message",
+      ),
+    ).toHaveLength(1);
+    expect(
+      paths.every(
+        (path) =>
+          path === "/v1/history-imports/start" ||
+          path === "/v1/history-imports/advance",
+      ),
+    ).toBe(true);
+    expect(
+      await fanOutIncomingWebhookDeliveries({
+        database: workerEnv.CONTROL_DB,
+        tenantId,
+        events: [importedEvent, overlap],
+        now,
+      }),
+    ).toEqual([]);
+    expect(
+      await workerEnv.CONTROL_DB.prepare(
+        "SELECT COUNT(*) AS count FROM webhook_deliveries",
+      ).first<{ count: number }>(),
+    ).toEqual({ count: 1 });
+  });
+
   it("keeps pending ranges active after a partial range while stored live reads continue", async () => {
     const calls: string[] = [];
     const app = createTestApp(createProvider(calls));

@@ -1,3 +1,4 @@
+import { SavedSendAuthoritySchema } from "@communicator/contracts";
 import type {
   ClaimOutboundDispatchInput,
   ClaimOutboundDispatchResult,
@@ -20,6 +21,7 @@ type AuthorityDatabase = D1Database | D1DatabaseSession;
 
 type AcceptanceRow = {
   id: string;
+  saved_authority: string | null;
   tenant_id: string;
   membership_id: string;
   identity_id: string;
@@ -82,7 +84,7 @@ const ACCEPTANCE_COLUMNS = `
   connection_id, grant_id, capability_kind, capability_id, capability_epoch,
   authority_id, idempotency_key, request_digest, body_digest, status,
   command_id, message_id, dispatch_id, transaction_id, uncertain_reason,
-  created_at, updated_at`;
+  created_at, updated_at, saved_authority`;
 
 const CLAIM_COLUMNS = `
   id, tenant_id, reservation_id, membership_id, identity_id, account_id,
@@ -217,6 +219,11 @@ const claimStatus = (status: string): OutboundDispatchClaim["status"] => {
 const acceptanceFromRow = (
   row: AcceptanceRow,
 ): OutboundAcceptanceReservation => ({
+  ...(row.saved_authority === null
+    ? {}
+    : {
+        saved: SavedSendAuthoritySchema.parse(JSON.parse(row.saved_authority)),
+      }),
   id: row.id,
   tenant_id: row.tenant_id,
   membership_id: row.membership_id,
@@ -380,10 +387,10 @@ export async function reserveOutboundAcceptance(
          conversation_id, connection_id, grant_id, capability_kind,
          capability_id, capability_epoch, authority_id, idempotency_key,
          request_digest, body_digest, status, command_id, message_id,
-         dispatch_id, transaction_id, uncertain_reason, created_at, updated_at
+         dispatch_id, transaction_id, uncertain_reason, created_at, updated_at, saved_authority
        )
        SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'reserved',
-              NULL, NULL, NULL, NULL, NULL, ?, ?
+              NULL, NULL, NULL, NULL, NULL, ?, ?, ?
        FROM memberships AS m
        JOIN tenants AS t ON t.id = m.tenant_id
        JOIN principals AS p ON p.id = m.principal_id
@@ -471,6 +478,7 @@ export async function reserveOutboundAcceptance(
       input.body_digest,
       input.now,
       input.now,
+      input.saved === undefined ? null : JSON.stringify(input.saved),
       input.identity_id,
       input.account_id,
       input.connection_id,
@@ -504,7 +512,8 @@ export async function reserveOutboundAcceptance(
     !sameTuple(row, tuple) ||
     row.idempotency_key !== input.idempotency_key ||
     row.request_digest !== input.request_digest ||
-    row.body_digest !== input.body_digest
+    row.body_digest !== input.body_digest ||
+    JSON.stringify(reservation.saved) !== JSON.stringify(input.saved)
   ) {
     return { status: "denied", reason: "idempotency_conflict" };
   }
@@ -793,6 +802,45 @@ export async function claimOutboundDispatch(
          AND a.transaction_id = ?
          AND a.request_digest = ?
          AND a.body_digest = ?
+         AND NOT EXISTS (
+           SELECT 1 FROM removal_authority AS r
+           WHERE r.tenant_id = a.tenant_id
+             AND (r.account_id IS NULL OR r.account_id = a.account_id)
+             AND (r.conversation_id IS NULL OR r.conversation_id = a.conversation_id)
+             AND (
+               (r.resource_type = 'message' AND r.resource_id = a.message_id)
+               OR (r.resource_type = 'conversation' AND r.resource_id = a.conversation_id)
+             )
+         )
+         AND (? IS NULL OR (
+           a.saved_authority = ?
+           AND c.updated_at = json_extract(a.saved_authority, '$.session_generation')
+           AND EXISTS (
+             SELECT 1 FROM connection_routes cr
+             JOIN gateway_routes gr ON gr.id = cr.gateway_route_id AND gr.status = 'active'
+             JOIN principals gp ON gp.id = gr.service_principal_id AND gp.status = 'active' AND gp.revoked_at IS NULL
+             WHERE cr.connection_id = c.id
+               AND cr.updated_at = json_extract(a.saved_authority, '$.route_generation')
+               AND cr.gateway_route_id = json_extract(a.saved_authority, '$.route.gateway_route_id')
+               AND cr.bridge_instance_id = json_extract(a.saved_authority, '$.route.bridge_instance_id')
+               AND cr.matrix_user_id = json_extract(a.saved_authority, '$.route.matrix_user_id')
+               AND cr.matrix_room_namespace = json_extract(a.saved_authority, '$.route.matrix_room_namespace')
+           )
+           AND EXISTS (
+             SELECT 1 FROM platform_bindings b
+             WHERE b.binding_id = json_extract(a.saved_authority, '$.binding_id')
+               AND b.status = 'active' AND b.local_tenant_id = a.tenant_id
+               AND b.local_membership_id = m.id AND b.local_principal_id = p.id
+               AND (b.local_identity_id IS NULL OR b.local_identity_id = i.id)
+               AND (b.local_installation_id IS NULL OR EXISTS (
+                 SELECT 1 FROM oauth_client_installations oi
+                 JOIN oauth_clients oc ON oc.client_id = b.local_client_id AND oc.status = 'active'
+                 WHERE oi.id = b.local_installation_id AND oi.status = 'active'
+               ))
+           )
+           AND EXISTS (SELECT 1 FROM connection_capabilities cc WHERE cc.tenant_id = c.tenant_id AND cc.connection_id = c.id AND cc.capability = 'message.send')
+           AND EXISTS (SELECT 1 FROM connection_provider_identities pi WHERE pi.tenant_id = c.tenant_id AND pi.connection_id = c.id AND pi.provider = c.provider)
+         ))
          AND m.status = 'active'
          AND p.status = 'active'
          AND p.revoked_at IS NULL
@@ -870,6 +918,8 @@ export async function claimOutboundDispatch(
       input.transaction_id,
       input.request_digest,
       input.body_digest,
+      input.saved === undefined ? null : JSON.stringify(input.saved),
+      input.saved === undefined ? null : JSON.stringify(input.saved),
     );
   const byReservation = claimSelect(
     database,

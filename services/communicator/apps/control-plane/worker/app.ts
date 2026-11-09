@@ -23,6 +23,7 @@ import {
   type IngestionQueueSender,
 } from "./ingestion/route";
 import { healthRoute } from "./routes/health";
+import { providerEvidenceHandler } from "./evidence/route";
 import {
   channelsRoute,
   channelsHandler,
@@ -106,6 +107,8 @@ import {
   evaluateWebhookSubscriptionHandler,
   webhookDeliveryRoute,
   webhookDeliveryHandler,
+  webhookDeliveriesRoute,
+  webhookDeliveriesHandler,
   retryWebhookDeliveryRoute,
   retryWebhookDeliveryHandler,
 } from "./routes/webhooks";
@@ -590,6 +593,7 @@ export function createApp(services: AppServices = {}) {
       services.contactServices,
       services.groupServices,
       services.receiptServices,
+      attachmentServices,
     ),
   );
   app.get("/mcp", handleMcpGet);
@@ -682,6 +686,7 @@ export function createApp(services: AppServices = {}) {
     evaluateWebhookSubscriptionHandler,
   );
   app.openapi(webhookDeliveryRoute, webhookDeliveryHandler);
+  app.openapi(webhookDeliveriesRoute, webhookDeliveriesHandler);
   app.openapi(retryWebhookDeliveryRoute, retryWebhookDeliveryHandler);
   app.openapi(removalStatusRoute, removalStatusHandler);
   app.openapi(restoreAuthorityRoute, restoreAuthorityHandler);
@@ -753,6 +758,8 @@ export function createApp(services: AppServices = {}) {
           getVerifier: getIngestionVerifier,
         });
   app.use("/internal/v1/ingestion/batches", ingestionAuthorization);
+  app.use("/internal/v1/outbound/provider-evidence", ingestionAuthorization);
+  app.post("/internal/v1/outbound/provider-evidence", providerEvidenceHandler);
   app.post(
     "/internal/v1/ingestion/batches",
     createIngestionBatchHandler(services),

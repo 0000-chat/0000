@@ -438,10 +438,376 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  await runInDurableObject(projection(), async (_instance, state) => {
+    state.storage.sql.exec(
+      "DROP TRIGGER IF EXISTS reject_removed_restore_body",
+    );
+    state.storage.sql.exec(
+      "DROP TRIGGER IF EXISTS reject_removed_restore_command",
+    );
+  });
   await cleanupArchiveTenant(bucket, tenantId);
 });
 
 describe("restore projection activation", () => {
+  it.each(["matching", "missing", "mismatched"])(
+    "restores a removed conversation without reconstructing retained outbound content (nonremoved owner: %s)",
+    async (retainedOwner) => {
+      const stub = await resetProjection();
+      const retainedConversation = "conversation_restore_activation_retained";
+      const ownerEvent = {
+        ...restoreEvent(),
+        event_id: "$restore-activation-owner:example.test",
+        event_type: "conversation.updated" as const,
+        payload: {
+          title: "Removed conversation title",
+          archived: false,
+          muted: false,
+        },
+      };
+      await seedOutboundRows(stub);
+      await runInDurableObject(stub, async (_instance, state) => {
+        state.storage.sql.exec(
+          "UPDATE outbound_dispatches SET conversation_id = ? WHERE id = 'dispatch_restore_activation_retained_pending'",
+          retainedConversation,
+        );
+        state.storage.sql.exec(
+          "UPDATE commands SET conversation_id = ? WHERE id = 'command_restore_activation_retained_pending'",
+          retainedConversation,
+        );
+        if (retainedOwner === "mismatched") {
+          state.storage.sql.exec(
+            "UPDATE outbound_dispatches SET resource_identity_id = 'identity_other' WHERE id = 'dispatch_restore_activation_retained_pending'",
+          );
+        }
+        state.storage.sql.exec(
+          `INSERT INTO outbound_evidence (id, tenant_id, command_id, dispatch_id, source, evidence_id, transaction_id, request_digest, account_id, conversation_id, generation, status, observed_at, provider_operation_id, provider_message_id, remote_echo_id, reason, created_at)
+         SELECT 'evidence_restore_activation_removed', tenant_id, command_id, id, 'provider', 'provider_restore_activation_removed', transaction_id, request_digest, account_id, conversation_id, projection_generation, 'uncertain', created_at, 'operation_restore_activation_removed', 'provider_message_restore_activation_removed', NULL, 'provider_result_unknown', created_at
+         FROM outbound_dispatches WHERE id = 'dispatch_restore_activation_removed_dispatching'`,
+        );
+      });
+      const authority = await recordRemoval(
+        workerEnv.CONTROL_DB,
+        {
+          ...removalInput(ownerEvent.conversation_id),
+          resource_type: "conversation",
+        },
+        new Date("2026-09-14T00:00:00.000Z"),
+      );
+      await purgeRecordedRemoval(
+        { database: workerEnv.CONTROL_DB, bucket, safetyWindowMs: 0 },
+        authority,
+        new Date("2026-09-14T00:00:00.000Z"),
+      );
+      await seedCompleteControlledCopies(
+        authority.id,
+        ownerEvent.conversation_id,
+        "conversation",
+      );
+      // Both ledger owners are present in the immutable source. Only the
+      // removed conversation's valid ownership event is authority-filtered.
+      await archiveCanonicalEventBatch({
+        bucket,
+        tenantId,
+        batchId: "batch_restore_activation_removed_owner",
+        events:
+          retainedOwner === "missing"
+            ? [ownerEvent]
+            : [
+                ownerEvent,
+                {
+                  ...ownerEvent,
+                  event_id: "$restore-activation-owner-retained:example.test",
+                  conversation_id: retainedConversation,
+                  payload: {
+                    ...ownerEvent.payload,
+                    title: "Retained conversation",
+                  },
+                },
+              ],
+        archivedAt: "2026-09-14T00:00:00.000Z",
+        producerVersion: "restore-activation-test/1",
+        sourceCheckpoint: null,
+      });
+      await runInDurableObject(stub, async (_instance, state) => {
+        state.storage.sql.exec(
+          `CREATE TRIGGER reject_removed_restore_body BEFORE INSERT ON messages
+         WHEN NEW.body LIKE 'restore body removed%'
+         BEGIN SELECT RAISE(ABORT, 'removed outbound body reconstructed'); END`,
+        );
+        state.storage.sql.exec(
+          `CREATE TRIGGER reject_removed_restore_command BEFORE INSERT ON commands
+         WHEN NEW.id LIKE 'command_restore_activation_removed%'
+         BEGIN SELECT RAISE(ABORT, 'removed outbound command reconstructed'); END`,
+        );
+      });
+      const restoring = restoreProjectionFromArchive({
+        database: workerEnv.CONTROL_DB,
+        bucket,
+        projection: stub,
+        adapters: restoreTestAdapters(),
+        tenantId,
+        principalId: "principal_restore_activation",
+        rebuildId: "rebuild_restore_activation_removed_owner",
+        expectedGeneration: 1,
+        startedAt: "2026-09-14T00:01:00.000Z",
+        completedAt: "2026-09-14T00:02:00.000Z",
+        connections: [
+          {
+            account_id: "account_human",
+            connection_id: "connection_human_whatsapp",
+            identity_id: "identity_human",
+            platform: "whatsapp",
+          },
+        ],
+        now: new Date("2026-09-14T00:02:00.000Z"),
+      });
+      if (retainedOwner !== "matching") {
+        await expect(restoring).rejects.toThrow("projection_conflict");
+        const dispatches = await runInDurableObject(
+          stub,
+          async (_instance, state) =>
+            state.storage.sql
+              .exec("SELECT status FROM outbound_dispatches ORDER BY id")
+              .toArray(),
+        );
+        expect(dispatches).toEqual([
+          { status: "dispatching" },
+          { status: "pending" },
+          { status: "pending" },
+        ]);
+        return;
+      }
+      const result = await restoring;
+      expect(result.projection).toMatchObject({
+        state: "ready",
+        message_count: 1,
+      });
+      const restored = await runInDurableObject(
+        stub,
+        async (_instance, state) => ({
+          messages: state.storage.sql
+            .exec("SELECT id, body FROM messages ORDER BY id")
+            .toArray(),
+          commands: state.storage.sql
+            .exec("SELECT id FROM commands ORDER BY id")
+            .toArray(),
+          dispatches: state.storage.sql
+            .exec(
+              "SELECT id, status, chat_paused, uncertainty_reason FROM outbound_dispatches ORDER BY id",
+            )
+            .toArray(),
+          evidence: state.storage.sql
+            .exec(
+              "SELECT provider_operation_id, provider_message_id, reason FROM outbound_evidence",
+            )
+            .toArray(),
+          conversations: state.storage.sql
+            .exec("SELECT id FROM conversations ORDER BY id")
+            .toArray(),
+        }),
+      );
+      expect(restored.messages).toEqual([
+        {
+          id: "message_restore_activation_outbound_retained",
+          body: "restore body retained_pending",
+        },
+      ]);
+      expect(restored.commands).toEqual([
+        { id: "command_restore_activation_retained_pending" },
+      ]);
+      expect(restored.dispatches).toEqual([
+        {
+          id: "dispatch_restore_activation_removed_dispatching",
+          status: "delivery_uncertain",
+          chat_paused: 1,
+          uncertainty_reason: `removal_authority:${authority.id}`,
+        },
+        {
+          id: "dispatch_restore_activation_removed_pending",
+          status: "cancelled",
+          chat_paused: 0,
+          uncertainty_reason: null,
+        },
+        {
+          id: "dispatch_restore_activation_retained_pending",
+          status: "pending",
+          chat_paused: 0,
+          uncertainty_reason: null,
+        },
+      ]);
+      expect(restored.evidence).toEqual([
+        {
+          provider_operation_id: "operation_restore_activation_removed",
+          provider_message_id: "provider_message_restore_activation_removed",
+          reason: "provider_result_unknown",
+        },
+      ]);
+      expect(restored.conversations).toEqual([{ id: retainedConversation }]);
+    },
+  );
+
+  it.each([false, true])(
+    "restores an immutable stale archive with removed content (retained control: %s)",
+    async (keepRetained) => {
+      const stub = await resetProjection();
+      const removed = removedEvent();
+      const command = {
+        ...removed,
+        event_id: "$restore-activation-removed-command:example.test",
+        event_type: "command.updated" as const,
+        payload: {
+          command_id: "command_restore_activation_removed",
+          operation: "message.send",
+          delivery_mode: "direct",
+          status: "accepted",
+          failure_code: null,
+        },
+      };
+      const authority = await recordRemoval(
+        workerEnv.CONTROL_DB,
+        {
+          ...removalInput(removed.payload.message_id),
+          source_event_id: command.event_id,
+        },
+        new Date("2026-09-14T00:00:00.000Z"),
+      );
+      await purgeRecordedRemoval(
+        { database: workerEnv.CONTROL_DB, bucket, safetyWindowMs: 0 },
+        authority,
+        new Date("2026-09-14T00:00:00.000Z"),
+      );
+      await seedCompleteControlledCopies(
+        authority.id,
+        removed.payload.message_id,
+      );
+      // Restore an old immutable R2 snapshot after the primary removal ledger.
+      await archiveCanonicalEventBatch({
+        bucket,
+        tenantId,
+        batchId: "batch_restore_activation_stale",
+        events: keepRetained
+          ? [removed, command, retainedEvent()]
+          : [removed, command],
+        archivedAt: "2026-09-14T00:00:00.000Z",
+        producerVersion: "restore-activation-test/1",
+        sourceCheckpoint: null,
+      });
+      const view = await readRestoreReplayPage(
+        bucket,
+        workerEnv.CONTROL_DB,
+        tenantId,
+      );
+      expect(view).not.toHaveProperty("immutable_page");
+      expect(view.manifests[0]?.event_count).toBe(keepRetained ? 3 : 2);
+      expect(view.events.map((event) => event.event_id)).toEqual(
+        keepRetained ? [retainedEvent().event_id] : [],
+      );
+      // An insert-then-redact implementation must fail too: no removed body
+      // may ever enter the disposable SQLite projection, even transiently.
+      await runInDurableObject(stub, async (_instance, state) => {
+        state.storage.sql.exec(
+          `CREATE TRIGGER reject_removed_restore_body BEFORE INSERT ON messages
+           WHEN NEW.body = 'removed during restore'
+           BEGIN SELECT RAISE(ABORT, 'removed restore body persisted'); END`,
+        );
+        state.storage.sql.exec(
+          `CREATE TRIGGER reject_removed_restore_command BEFORE INSERT ON commands
+           WHEN NEW.id = 'command_restore_activation_removed'
+           BEGIN SELECT RAISE(ABORT, 'removed restore command persisted'); END`,
+        );
+      });
+      const retryingProjection = new Proxy(stub, {
+        get(target, property, receiver) {
+          if (property !== "applyReplayPage") {
+            return Reflect.get(target, property, receiver);
+          }
+          return async (input: Parameters<typeof stub.applyReplayPage>[0]) => {
+            const applied = await target.applyReplayPage(input);
+            await expect(target.applyReplayPage(input)).resolves.toEqual(
+              applied,
+            );
+            // Even removed bytes remain part of immutable page identity.
+            await expect(
+              runInDurableObject(stub, async (instance) => {
+                try {
+                  await instance.applyReplayPage({
+                    ...input,
+                    page: {
+                      ...input.page,
+                      events: input.page.events.map((event) =>
+                        event.event_id === removed.event_id
+                          ? {
+                              ...event,
+                              payload: {
+                                ...event.payload,
+                                body: "different removed body",
+                              },
+                            }
+                          : event,
+                      ),
+                    },
+                  });
+                  return null;
+                } catch (error) {
+                  return error instanceof Error ? error.message : null;
+                }
+              }),
+            ).resolves.toBe("projection_conflict");
+            return applied;
+          };
+        },
+      });
+      const result = await restoreProjectionFromArchive({
+        database: workerEnv.CONTROL_DB,
+        bucket,
+        projection: retryingProjection,
+        adapters: restoreTestAdapters(),
+        tenantId,
+        principalId: "principal_restore_activation",
+        rebuildId: "rebuild_restore_activation_stale",
+        expectedGeneration: 1,
+        startedAt: "2026-09-14T00:01:00.000Z",
+        completedAt: "2026-09-14T00:02:00.000Z",
+        connections: [
+          {
+            account_id: "account_human",
+            connection_id: "connection_human_whatsapp",
+            identity_id: "identity_human",
+            platform: "whatsapp",
+          },
+        ],
+        now: new Date("2026-09-14T00:02:00.000Z"),
+      });
+      expect(result).toMatchObject({
+        removed_event_ids: expect.arrayContaining([
+          removed.event_id,
+          command.event_id,
+        ]),
+        projection: { state: "ready", message_count: keepRetained ? 1 : 0 },
+      });
+      const stored = await runInDurableObject(
+        stub,
+        async (_instance, state) => ({
+          messages: state.storage.sql
+            .exec<{ body: string }>("SELECT body FROM messages")
+            .toArray(),
+          events: state.storage.sql
+            .exec<{ event_id: string }>("SELECT event_id FROM applied_events")
+            .toArray(),
+          commands: state.storage.sql.exec("SELECT id FROM commands").toArray(),
+        }),
+      );
+      expect(stored.messages).toEqual(
+        keepRetained ? [{ body: "unrelated retained message" }] : [],
+      );
+      expect(stored.events.map((event) => event.event_id)).toEqual(
+        keepRetained ? [retainedEvent().event_id] : [],
+      );
+      expect(stored.commands).toEqual([]);
+    },
+  );
+
   it("blocks an empty ledger without nonvacuous current store evidence", async () => {
     const stub = await resetProjection();
 
@@ -785,7 +1151,7 @@ describe("restore projection activation", () => {
         state: "ready",
         authority_count: 2,
       },
-      projection: { state: "ready", generation: 2, message_count: 4 },
+      projection: { state: "ready", generation: 2, message_count: 2 },
     });
     await expect(
       stub.getWebhookMessage({

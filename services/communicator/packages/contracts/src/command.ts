@@ -160,6 +160,35 @@ export const OutboundDispatchSchema = z
   })
   .strict();
 
+export const OUTBOUND_DISPATCH_LEASE_MS = 30_000;
+export const OUTBOUND_GATEWAY_TIMEOUT_MS = 20_000;
+export const OUTBOUND_RESULT_MARGIN_MS = 5_000;
+
+export const ClaimOutboundDispatchResultSchema = z.discriminatedUnion(
+  "outcome",
+  [
+    z
+      .object({
+        outcome: z.literal("acquired"),
+        dispatch: OutboundDispatchSchema.extend({
+          status: z.literal("dispatching"),
+          dispatch_lease_id: CommunicatorIdSchema,
+          dispatch_lease_expires_at: TimestampSchema,
+        }),
+      })
+      .strict(),
+    z
+      .object({
+        outcome: z.literal("not_acquired"),
+        dispatch: OutboundDispatchSchema,
+      })
+      .strict(),
+  ],
+);
+export type ClaimOutboundDispatchResult = z.infer<
+  typeof ClaimOutboundDispatchResultSchema
+>;
+
 /**
  * Internal payload released to the adapter only after a live dispatch lease
  * has been claimed.  The public dispatch and command projections deliberately
@@ -255,7 +284,11 @@ export const AcceptTextReplyInputSchema = z
     conversation_id: CommunicatorIdSchema,
     account_id: CommunicatorIdSchema.optional(),
     body: z.string().trim().min(1).max(20_000),
-    delivery_mode: DeliveryModeSchema,
+    delivery_mode: z
+      .literal("direct")
+      .describe(
+        "Only direct sending is supported; human pacing is unavailable",
+      ),
     idempotency_key: z.string().trim().min(1).max(200),
     accepted_at: TimestampSchema,
     initial_dispatch_status: z
@@ -273,7 +306,7 @@ export const TextReplyRequestSchema = z
     conversation_id: CommunicatorIdSchema,
     account_id: CommunicatorIdSchema.optional(),
     body: z.string().trim().min(1).max(20_000),
-    delivery_mode: DeliveryModeSchema,
+    delivery_mode: AcceptTextReplyInputSchema.shape.delivery_mode,
   })
   .strict();
 
@@ -343,6 +376,24 @@ export const OutboundReconcileInputSchema = z
     now: TimestampSchema,
     connection_available: z.boolean().optional(),
     evidence: OutboundEvidenceInputSchema.optional(),
+    provider_context: z
+      .object({
+        dispatch_id: CommunicatorIdSchema,
+        connection_id: CommunicatorIdSchema,
+        session_generation: TimestampSchema,
+      })
+      .strict()
+      .optional(),
+  })
+  .strict();
+
+/** Private trigger: the trusted gateway fetches the observation; no claimed outcome is accepted. */
+export const ProviderEvidenceObservationSchema = z
+  .object({
+    schema_version: z.literal(1),
+    tenant_id: CommunicatorIdSchema,
+    command_id: CommunicatorIdSchema,
+    observation_event_id: z.string().regex(/^\$[^\s]{1,199}$/u),
   })
   .strict();
 

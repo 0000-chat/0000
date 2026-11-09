@@ -307,14 +307,6 @@ const applyDefaultProjectionEvents = async (input: {
     identity_id: input.identityId,
     platform: binding.provider,
   });
-  const last = [...input.events]
-    .sort((left, right) =>
-      left.observed_at === right.observed_at
-        ? left.event_id.localeCompare(right.event_id)
-        : left.observed_at.localeCompare(right.observed_at),
-    )
-    .at(-1);
-  if (last === undefined) return;
   await projection.applyBatch({
     schema_version: 1,
     tenant_id: input.tenantId,
@@ -323,12 +315,9 @@ const applyDefaultProjectionEvents = async (input: {
     rebuild_id: null,
     connections: [connection],
     events: [...input.events],
-    checkpoint: {
-      kind: "history_import",
-      value: `${input.importId}:${input.rangeId}`,
-      last_observed_at: last.observed_at,
-      last_event_id: last.event_id,
-    },
+    // D1 owns each import's cursor. A shared projection checkpoint cannot
+    // represent overlapping imports of the same event with different IDs.
+    checkpoint: null,
   });
 };
 
@@ -371,11 +360,15 @@ const updateFailed = async (
   terminal: boolean,
   leaseToken?: string,
 ): Promise<void> => {
-  const nextAttempts = Math.min(item.max_attempts, range.attempt_count + 1);
-  const exhausted = terminal || nextAttempts >= item.max_attempts;
+  const waitingForKeys = isMissingKeyGap(range) && !terminal;
+  const nextAttempts = waitingForKeys
+    ? Math.min(10, range.attempt_count + 1)
+    : Math.min(item.max_attempts, range.attempt_count + 1);
+  const exhausted =
+    !waitingForKeys && (terminal || nextAttempts >= item.max_attempts);
   await updateRange(db, {
     range_id: range.range_id,
-    status: exhausted ? "failed" : "active",
+    status: waitingForKeys ? "partial" : exhausted ? "failed" : "active",
     attempt_count: nextAttempts,
     error_code: errorCode,
     updated_at: now,
@@ -399,7 +392,11 @@ const updateFailed = async (
   const importFailed = exhausted && !hasPending;
   await updateImport(db, {
     import_id: item.import_id,
-    status: importFailed ? "failed" : "active",
+    status: importFailed
+      ? "failed"
+      : waitingForKeys && !hasPending
+        ? "partial"
+        : "active",
     availability:
       errorCode === "runtime_unavailable" ? "unavailable" : "blocked",
     attempt_count: nextAttempts,
@@ -440,6 +437,16 @@ const retryAt = (now: string, attemptCount: number): string => {
   return new Date(timestamp + retryDelay(attemptCount)).toISOString();
 };
 
+const isMissingKeyGap = (range: HistoryImportRange): boolean =>
+  range.status === "partial" &&
+  range.gap_code === "matrix_missing_room_key" &&
+  range.source_cursor !== null;
+
+const isRunnableRange = (range: HistoryImportRange): boolean =>
+  range.status === "active" ||
+  range.status === "pending" ||
+  isMissingKeyGap(range);
+
 /** Reconcile wake state only after the range checkpoint has been written. */
 const reconcileHistoryWork = async (input: {
   env: HistoryServiceEnvironment;
@@ -452,7 +459,7 @@ const reconcileHistoryWork = async (input: {
   for (const range of input.ranges) {
     const currentLease =
       range.range_id === input.currentRangeId ? input.leaseToken : undefined;
-    if (range.status === "active" || range.status === "pending") {
+    if (isRunnableRange(range)) {
       if (input.currentRangeId === undefined || currentLease !== undefined) {
         await scheduleHistoryRangeWork(input.env.CONTROL_DB, {
           tenant_id: input.item.tenant_id,
@@ -461,7 +468,7 @@ const reconcileHistoryWork = async (input: {
           account_id: input.item.account_id,
           source_cursor: range.source_cursor,
           next_attempt_at:
-            range.error_code === null
+            range.error_code === null && !isMissingKeyGap(range)
               ? input.now
               : retryAt(input.now, range.attempt_count),
           updated_at: input.now,
@@ -477,7 +484,7 @@ const reconcileHistoryWork = async (input: {
         ...(currentLease === undefined ? {} : { lease_token: currentLease }),
       });
     }
-    if (range.status === "active" || range.status === "pending") {
+    if (isRunnableRange(range)) {
       await ensureHistoryRangeWork(input.env.CONTROL_DB, {
         import_id: input.item.import_id,
         range_id: range.range_id,
@@ -745,27 +752,17 @@ const createService = (
     );
     const range = input.rangeId
       ? before.ranges.find((candidate) => candidate.range_id === input.rangeId)
-      : before.ranges.find(
-          (candidate) =>
-            candidate.status === "active" || candidate.status === "pending",
-        );
+      : before.ranges.find(isRunnableRange);
     if (range === undefined) {
       if (input.rangeId !== undefined)
         throw new HistoryServiceError("history_not_found");
       return before;
     }
-    if (
-      range.status === "completed" ||
-      range.status === "gap" ||
-      range.status === "failed" ||
-      range.status === "partial"
-    )
-      return before;
+    if (!isRunnableRange(range)) return before;
 
     const now = nowIso(clock);
     for (const candidate of before.ranges) {
-      if (candidate.status !== "active" && candidate.status !== "pending")
-        continue;
+      if (!isRunnableRange(candidate)) continue;
       await ensureHistoryRangeWork(input.env.CONTROL_DB, {
         import_id: item.import_id,
         range_id: candidate.range_id,
@@ -788,7 +785,7 @@ const createService = (
         input.leaseUntil ??
         new Date(Date.parse(now) + 5 * 60_000).toISOString(),
       now,
-      ignore_due: input.leaseToken === undefined,
+      ignore_due: input.leaseToken === undefined && !isMissingKeyGap(range),
     });
     if (!claimed) return before;
 
@@ -888,6 +885,10 @@ const createService = (
             : result.status === "failed"
               ? "failed"
               : "active";
+      const waitingForKeys =
+        nextRangeStatus === "partial" &&
+        result.gap_code === "matrix_missing_room_key" &&
+        result.next_cursor !== null;
       await updateRange(input.env.CONTROL_DB, {
         range_id: range.range_id,
         status: nextRangeStatus,
@@ -895,9 +896,14 @@ const createService = (
         gap_code: result.gap_code,
         error_code: result.error_code,
         event_count: eventCount,
-        attempt_count: range.attempt_count,
+        attempt_count: waitingForKeys
+          ? Math.min(10, range.attempt_count + 1)
+          : isMissingKeyGap(range)
+            ? 0
+            : range.attempt_count,
         updated_at: updated,
-        completed_at: nextRangeStatus === "active" ? null : updated,
+        completed_at:
+          nextRangeStatus === "active" || waitingForKeys ? null : updated,
         lease_token: leaseToken,
       });
       const allRanges = await getRanges(input.env.CONTROL_DB, item.import_id);
@@ -936,7 +942,10 @@ const createService = (
         gap_count: gaps,
         last_error_code: result.error_code,
         updated_at: updated,
-        completed_at: importStatus === "active" ? null : updated,
+        completed_at:
+          importStatus === "active" || allRanges.some(isMissingKeyGap)
+            ? null
+            : updated,
         lease_token: leaseToken,
         range_id: range.range_id,
       });

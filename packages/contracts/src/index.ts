@@ -102,6 +102,56 @@ export interface PrincipalExpectations {
   now?: number;
 }
 
+/** Non-secret descriptor, not a credential. Platform retains the authoritative binding. */
+export interface SavedOperationAuthorization {
+  id: string;
+  authority: string;
+  subjectId: string;
+  organizationId: string;
+  audience: string;
+  operationId: string;
+  capability: string;
+}
+
+export type SavedOperationFailure =
+  | { status: "denied" }
+  | { status: "authority_unavailable" };
+
+export type SavedOperationCaptureResult =
+  | { status: "allowed"; authorization: SavedOperationAuthorization }
+  | SavedOperationFailure;
+
+export type SavedOperationRevalidationResult =
+  | { status: "allowed"; principal: HumanPrincipal | AgentPrincipal }
+  | SavedOperationFailure;
+
+export function parseSavedOperationAuthorization(
+  value: unknown,
+): SavedOperationAuthorization | null {
+  if (
+    !isRecord(value) ||
+    !isNonEmptyString(value.id) ||
+    !isNonEmptyString(value.authority) ||
+    !isNonEmptyString(value.subjectId) ||
+    !isNonEmptyString(value.organizationId) ||
+    !isNonEmptyString(value.audience) ||
+    !isNonEmptyString(value.operationId) ||
+    value.operationId.length > 256 ||
+    !isNonEmptyString(value.capability) ||
+    !/^[A-Za-z0-9][A-Za-z0-9:_./-]{0,63}$/.test(value.capability)
+  )
+    return null;
+  return {
+    id: value.id,
+    authority: value.authority,
+    subjectId: value.subjectId,
+    organizationId: value.organizationId,
+    audience: value.audience,
+    operationId: value.operationId,
+    capability: value.capability,
+  };
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }

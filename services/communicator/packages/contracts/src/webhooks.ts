@@ -269,6 +269,18 @@ export const WebhookDeliverySchema = z
   .strict();
 export type WebhookDelivery = z.infer<typeof WebhookDeliverySchema>;
 
+// Discovery exposes ledger metadata, never receiver response bodies or payloads.
+export const WebhookDeliverySummarySchema = WebhookDeliverySchema.omit({
+  last_response_body: true,
+});
+export const WebhookDeliveryPageSchema = z
+  .object({
+    items: z.array(WebhookDeliverySummarySchema).max(MAX_WEBHOOK_PAGE_SIZE),
+    next_cursor: z.string().min(1).max(2_048).nullable(),
+  })
+  .strict();
+export type WebhookDeliveryPage = z.infer<typeof WebhookDeliveryPageSchema>;
+
 export const WebhookDeliveryRetrySchema = z
   .object({
     idempotency_key: z.string().trim().min(1).max(200),

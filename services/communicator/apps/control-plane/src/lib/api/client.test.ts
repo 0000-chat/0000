@@ -11,6 +11,10 @@ import {
   identitiesFromSession,
   isDefinitiveRequestRejection,
 } from "./client";
+import {
+  webhookDeliveries,
+  webhookSubscriptions,
+} from "@/mocks/webhook-fixtures";
 
 const session: SessionResponse = {
   tenant: {
@@ -44,6 +48,92 @@ const session: SessionResponse = {
 };
 
 describe("Communicator API client", () => {
+  it("discovers delivery metadata with an independent subscription cursor and validates its contract", async () => {
+    const { last_response_body: _body, ...summary } = webhookDeliveries()[0]!;
+    const requests: string[] = [];
+    const client = new ApiClient(async (input) => {
+      requests.push(String(input));
+      return Response.json({ items: [summary], next_cursor: "next/+=page" });
+    }, "https://communicator.test");
+    expect(
+      await client.getWebhookDeliveries(
+        "subscription/support",
+        "cursor/+=page",
+      ),
+    ).toEqual({ items: [summary], next_cursor: "next/+=page" });
+    expect(requests).toEqual([
+      "https://communicator.test/api/v1/webhook-subscriptions/subscription%2Fsupport/deliveries?limit=20&cursor=cursor%2F%2B%3Dpage",
+    ]);
+    const invalid = new ApiClient(async () =>
+      Response.json({
+        items: [{ ...summary, last_response_body: "not discovery metadata" }],
+        next_cursor: null,
+      }),
+    );
+    await expect(
+      invalid.getWebhookDeliveries("subscription_support"),
+    ).rejects.toMatchObject({ status: 502 });
+  });
+
+  it("uses existing webhook routes, paginates opaquely and validates responses and retry input", async () => {
+    const requests: { url: string; method: string; body: unknown }[] = [];
+    const delivery = webhookDeliveries()[0]!;
+    const client = new ApiClient(async (input, init) => {
+      const url = String(input);
+      requests.push({
+        url,
+        method: init?.method ?? "GET",
+        body: init?.body ? JSON.parse(String(init.body)) : null,
+      });
+      return Response.json(
+        url.includes("subscriptions")
+          ? { items: webhookSubscriptions(), next_cursor: "cursor/+=next" }
+          : delivery,
+      );
+    }, "https://communicator.test");
+    expect(
+      (await client.getWebhookSubscriptions("cursor/+=next")).next_cursor,
+    ).toBe("cursor/+=next");
+    expect(await client.getWebhookDelivery("delivery/1")).toEqual(delivery);
+    expect(
+      await client.retryWebhookDelivery("delivery/1", "retry-key"),
+    ).toEqual(delivery);
+    expect(requests).toEqual([
+      {
+        url: "https://communicator.test/api/v1/webhook-subscriptions?limit=20&cursor=cursor%2F%2B%3Dnext",
+        method: "GET",
+        body: null,
+      },
+      {
+        url: "https://communicator.test/api/v1/webhook-deliveries/delivery%2F1",
+        method: "GET",
+        body: null,
+      },
+      {
+        url: "https://communicator.test/api/v1/webhook-deliveries/delivery%2F1/retry",
+        method: "POST",
+        body: { idempotency_key: "retry-key" },
+      },
+    ]);
+    expect(() => client.retryWebhookDelivery("delivery/1", "")).toThrow();
+    expect(requests).toHaveLength(3);
+    const invalid = new ApiClient(async () =>
+      Response.json({ status: "delivered" }),
+    );
+    await expect(
+      invalid.getWebhookDelivery("delivery/1"),
+    ).rejects.toMatchObject({ status: 502 });
+    const denied = new ApiClient(async () =>
+      Response.json(
+        { error: { code: "forbidden", message: "Denied" } },
+        { status: 403 },
+      ),
+    );
+    await expect(
+      denied.retryWebhookDelivery("delivery/1", "key"),
+    ).rejects.toMatchObject({ status: 403 });
+  });
+
   it("publishes authentication failures so the workspace can pause immediately", async () => {
     const statuses: number[] = [];
     const client = new ApiClient(

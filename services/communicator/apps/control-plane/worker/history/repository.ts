@@ -569,7 +569,8 @@ export async function ensureHistoryRangeWork(
                 operation_key = COALESCE(operation_key, ?),
                 updated_at = ?
           WHERE import_id = ? AND range_id = ? AND account_id = ?
-            AND status IN ('pending', 'active')
+            AND (status IN ('pending', 'active') OR
+                 (status = 'partial' AND gap_code = 'matrix_missing_room_key' AND source_cursor IS NOT NULL))
             AND (lease_token IS NULL OR lease_until IS NULL OR lease_until <= ?)`,
       )
       .bind(
@@ -618,7 +619,8 @@ export async function claimHistoryRangeWork(
             SET lease_token = ?, lease_until = ?,
                 operation_key = ?, updated_at = ?
           WHERE import_id = ? AND range_id = ? AND account_id = ?
-            AND status IN ('pending', 'active')
+            AND (status IN ('pending', 'active') OR
+                 (status = 'partial' AND gap_code = 'matrix_missing_room_key' AND source_cursor IS NOT NULL))
             AND EXISTS (
               SELECT 1 FROM history_imports
                WHERE history_imports.import_id = history_import_ranges.import_id
@@ -671,7 +673,8 @@ export async function claimNextHistoryRangeWork(
                 r.account_id, r.source_cursor, r.operation_key, r.lease_until
            FROM history_import_ranges AS r
            JOIN history_imports AS i ON i.import_id = r.import_id
-          WHERE r.status IN ('pending', 'active')
+          WHERE (r.status IN ('pending', 'active') OR
+                 (r.status = 'partial' AND r.gap_code = 'matrix_missing_room_key' AND r.source_cursor IS NOT NULL))
             AND (r.next_attempt_at IS NULL OR r.next_attempt_at <= ?)
             AND (r.lease_token IS NULL OR r.lease_until IS NULL OR r.lease_until <= ?)
           ORDER BY COALESCE(r.next_attempt_at, r.updated_at) ASC,
@@ -733,7 +736,8 @@ export async function scheduleHistoryRangeWork(
             SET next_attempt_at = ?, lease_token = NULL, lease_until = NULL,
                 operation_key = ?, updated_at = ?
           WHERE import_id = ? AND range_id = ? AND account_id = ?
-            AND status IN ('pending', 'active')
+            AND (status IN ('pending', 'active') OR
+                 (status = 'partial' AND gap_code = 'matrix_missing_room_key' AND source_cursor IS NOT NULL))
             AND ${leaseClause}`,
       )
       .bind(
@@ -779,6 +783,7 @@ export async function closeHistoryRangeWork(
                 updated_at = ?
           WHERE import_id = ? AND range_id = ? AND account_id = ?
             AND status IN ('completed', 'partial', 'failed', 'gap')
+            AND NOT (status = 'partial' AND COALESCE(gap_code, '') = 'matrix_missing_room_key' AND source_cursor IS NOT NULL)
             AND ${leaseClause}`,
       )
       .bind(

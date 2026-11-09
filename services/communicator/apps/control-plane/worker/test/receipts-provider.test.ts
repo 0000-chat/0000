@@ -45,7 +45,15 @@ describe("WhatsApp receipt provider", () => {
   it("sends the account-bound route and preserves provider evidence", async () => {
     const fetcher: typeof fetch = vi.fn(async (_input, init) => {
       const body = JSON.parse(String(init?.body)) as {
-        route: ReceiptDispatchPayload["route"];
+        route: Pick<
+          ReceiptDispatchPayload["route"],
+          | "gateway_route_id"
+          | "bridge_instance_id"
+          | "matrix_user_id"
+          | "matrix_room_namespace"
+          | "provider_login_id"
+        >;
+        account_id: string;
         matrix_event_id: string;
         membership_id: string;
         actor_identity_id: string;
@@ -53,8 +61,14 @@ describe("WhatsApp receipt provider", () => {
         capability: ReceiptDispatchPayload["capability"];
         request_hash: string;
       };
-      expect(body.route.account_id).toBe(payload.route.account_id);
-      expect(body.route.provider_login_id).toBe("login-primary");
+      expect(body.account_id).toBe(payload.route.account_id);
+      expect(body.route).toEqual({
+        gateway_route_id: payload.route.gateway_route_id,
+        bridge_instance_id: payload.route.bridge_instance_id,
+        matrix_user_id: payload.route.matrix_user_id,
+        matrix_room_namespace: payload.route.matrix_room_namespace,
+        provider_login_id: "login-primary",
+      });
       expect(body.matrix_event_id).toBe(payload.matrix_event_id);
       expect(body.membership_id).toBe(payload.membership_id);
       expect(body.actor_identity_id).toBe(payload.actor_identity_id);

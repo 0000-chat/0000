@@ -4,7 +4,7 @@ import {
   OutboundDispatchSchema,
   type SessionResponse,
 } from "@communicator/contracts";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   defaultWhatsAppTextAdapter,
   HttpWhatsAppTextAdapter,
@@ -54,6 +54,26 @@ const payload = OutboundDispatchPayloadSchema.parse({
   body_digest: "b".repeat(64),
   authority: {
     reservation_id: "reservation_adapter_test",
+    saved: {
+      platform: {
+        id: "saved_adapter",
+        authority: "test",
+        subjectId: "test",
+        organizationId: "test",
+        audience: "test",
+        operationId: "test",
+        capability: "message.send",
+      },
+      binding_id: "binding_adapter",
+      session_generation: "2026-08-29T00:00:00.000Z",
+      route_generation: "2026-08-29T00:00:00.000Z",
+      route: {
+        gateway_route_id: "gateway_route_human",
+        bridge_instance_id: "bridge-human",
+        matrix_user_id: "route-user-human",
+        matrix_room_namespace: "route-room-human",
+      },
+    },
     membership_id: "membership_human",
     identity_id: "identity_human",
     capability: {
@@ -159,6 +179,54 @@ async function seedAdapterDirectory() {
 
 describe("HttpWhatsAppTextAdapter", () => {
   beforeEach(seedAdapterDirectory);
+  beforeEach(() => {
+    vi.spyOn(Date, "now").mockReturnValue(
+      Date.parse("2026-09-14T01:00:00.000Z"),
+    );
+  });
+  afterEach(() => vi.restoreAllMocks());
+
+  it.each([1, 2])(
+    "defers without gateway I/O when route read %s is unavailable",
+    async (failedRead) => {
+      const withSession = env.CONTROL_DB.withSession.bind(env.CONTROL_DB);
+      let reads = 0;
+      vi.spyOn(env.CONTROL_DB, "withSession").mockImplementation((...args) => {
+        if (++reads === failedRead)
+          throw new Error("controlled directory outage");
+        return withSession(...args);
+      });
+      const fetcher = vi.fn(async () => acceptedResponse());
+      const adapter = new HttpWhatsAppTextAdapter(context(), fetcher);
+      expect(await adapter.dispatch(dispatch, payload)).toEqual({
+        type: "deferred",
+        reason: "authority_unavailable",
+      });
+      expect(fetcher).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([25_000, 24_999, 0, -1])(
+    "requires the gateway timeout plus persistence margin with %s ms remaining",
+    async (remaining) => {
+      vi.spyOn(Date, "now").mockReturnValue(
+        Date.parse(payload.dispatch_lease_expires_at) - remaining,
+      );
+      const fetcher = vi.fn(async () => acceptedResponse());
+      const adapter = new HttpWhatsAppTextAdapter(context(), fetcher);
+      const result = await adapter.dispatch(dispatch, payload);
+      if (remaining >= 25_000) {
+        expect(result.type).not.toBe("failure");
+        expect(fetcher).toHaveBeenCalledTimes(1);
+      } else {
+        expect(result).toMatchObject({
+          type: "failure",
+          reason: "dispatch_lease_budget_exhausted",
+        });
+        expect(fetcher).not.toHaveBeenCalled();
+      }
+    },
+  );
 
   it.each([
     ["missing", undefined],

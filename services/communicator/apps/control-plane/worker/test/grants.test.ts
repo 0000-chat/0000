@@ -16,6 +16,7 @@ import {
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { createApp, type AppServices } from "../app";
 import {
+  acceptTextReply,
   reconcileTrustedOutboundEvidence,
   type OutboundAcceptanceServices,
 } from "../outbound/acceptance";
@@ -450,7 +451,8 @@ describe("account-scoped grant API", () => {
     });
     expect(create.status).toBe(201);
 
-    const app = createTestApp();
+    const wakeDispatch = vi.fn(async () => undefined);
+    const app = createTestApp({ outboundAcceptance: { wakeDispatch } });
     const { client, transport } = await connectMcpClient(app, "agent-token");
     try {
       const tools = await client.listTools();
@@ -464,6 +466,88 @@ describe("account-scoped grant API", () => {
         delivery_mode: "direct",
         idempotency_key: idempotencyKey,
       } as const;
+
+      const projection = workerEnv.TENANT_PROJECTION.getByName(tenantId);
+      const counts = () =>
+        rows(
+          projection,
+          "SELECT (SELECT COUNT(*) FROM outbound_dispatches) AS dispatches, (SELECT COUNT(*) FROM commands) AS commands, (SELECT COUNT(*) FROM messages) AS messages, (SELECT COUNT(*) FROM applied_events) AS events",
+        );
+      const before = await counts();
+      const intentCount = () =>
+        workerEnv.CONTROL_DB.prepare(
+          "SELECT COUNT(*) AS count FROM outbound_acceptance_intents",
+        ).first<number>("count");
+      const intentsBefore = await intentCount();
+      const paced = await client.callTool({
+        name: "send_text_reply",
+        arguments: { ...input, delivery_mode: "paced" },
+      });
+      expect(paced.isError).toBe(true);
+      expect(await counts()).toEqual(before);
+      expect(await intentCount()).toBe(intentsBefore);
+
+      const pacedApi = await requestForApp(
+        app,
+        "/api/v1/conversations/conversation_human_one/messages",
+        "agent-token",
+        {
+          method: "POST",
+          headers: { "Idempotency-Key": idempotencyKey },
+          body: JSON.stringify({
+            identity_id: input.identity_id,
+            body: input.body,
+            delivery_mode: "paced",
+          }),
+        },
+      );
+      expect(pacedApi.status).toBe(400);
+      expect(await counts()).toEqual(before);
+      expect(await intentCount()).toBe(intentsBefore);
+
+      const sessionResponse = await requestForApp(
+        app,
+        "/api/v1/session",
+        "agent-token",
+      );
+      const authorization = SessionResponseSchema.parse(
+        await sessionResponse.json(),
+      );
+      await expect(
+        acceptTextReply(
+          { env: workerEnv, authorization },
+          {
+            ...input,
+            // @ts-expect-error Exercise malformed runtime input despite the direct-only type.
+            delivery_mode: "paced",
+          },
+          idempotencyKey,
+          { wakeDispatch },
+        ),
+      ).rejects.toMatchObject({ name: "ZodError" });
+      expect(await counts()).toEqual(before);
+      expect(await intentCount()).toBe(intentsBefore);
+
+      await runInDurableObject(projection, async (instance) => {
+        await expect(
+          instance.acceptTextReply({
+            schema_version: 1,
+            tenant_id: tenantId,
+            actor_principal_id: authorization.principal.id,
+            actor_identity_id: input.identity_id,
+            conversation_id: input.conversation_id,
+            body: input.body,
+            // @ts-expect-error The internal RPC must reject invalid callers before any write.
+            delivery_mode: "paced",
+            idempotency_key: idempotencyKey,
+            accepted_at: "2026-09-14T00:00:00.000Z",
+          }),
+        ).rejects.toMatchObject({ code: "projection_invalid" });
+      });
+      expect(await counts()).toEqual(before);
+      expect(await intentCount()).toBe(intentsBefore);
+      expect(wakeDispatch).not.toHaveBeenCalled();
+
       const first = await client.callTool({
         name: "send_text_reply",
         arguments: input,
@@ -517,7 +601,6 @@ describe("account-scoped grant API", () => {
       const apiCommand = (await apiReplay.json()) as { id: string };
       expect(apiCommand.id).toBe(firstValue.command.id);
 
-      const projection = workerEnv.TENANT_PROJECTION.getByName(tenantId);
       expect(
         await rows(
           projection,
@@ -1570,7 +1653,7 @@ describe("account-scoped grant API", () => {
         "SELECT body, deleted_at FROM messages WHERE id = ?",
         first.message_id!,
       ),
-    ).toEqual([{ body: "", deleted_at: expect.any(String) }]);
+    ).toEqual([]);
     expect(
       await rows(
         projection,
@@ -1578,7 +1661,7 @@ describe("account-scoped grant API", () => {
         dispatchRows[0]!.message_id,
         dispatchRows[1]!.message_id,
       ),
-    ).toHaveLength(2);
+    ).toEqual([{ id: second.message_id }]);
     expect(
       await rows(
         projection,
@@ -1586,7 +1669,7 @@ describe("account-scoped grant API", () => {
         dispatchRows[0]!.command_id,
         dispatchRows[1]!.command_id,
       ),
-    ).toHaveLength(2);
+    ).toEqual([{ id: second.id }]);
   });
 
   it("anchors offline waiting to the saved clock, reconnects without aging it, and cancels durably", async () => {
@@ -1611,7 +1694,9 @@ describe("account-scoped grant API", () => {
       .bind("connection_human_whatsapp")
       .run();
 
-    let now = new Date("2026-09-14T00:00:00.000Z");
+    const savedAt = Date.now() + 60_000;
+    const hour = 60 * 60 * 1000;
+    let now = new Date(savedAt);
     const app = createTestApp({ outboundAcceptance: { now: () => now } });
     const send = async (key: string) =>
       requestForApp(
@@ -1654,11 +1739,11 @@ describe("account-scoped grant API", () => {
       {
         status: "waiting_for_connection",
         created_at: now.toISOString(),
-        confirmation_due_at: "2026-09-14T04:00:00.000Z",
+        confirmation_due_at: new Date(savedAt + 4 * hour).toISOString(),
       },
     ]);
 
-    now = new Date("2026-09-14T03:59:59.999Z");
+    now = new Date(savedAt + 4 * hour - 1);
     const beforeDue = await requestForApp(
       app,
       `/api/v1/commands/${waitingCommand.id}/reconcile`,
@@ -1683,7 +1768,7 @@ describe("account-scoped grant API", () => {
     );
     expect(tooEarly.status).toBe(400);
 
-    now = new Date("2026-09-14T04:00:00.000Z");
+    now = new Date(savedAt + 4 * hour);
     const atDue = await requestForApp(
       app,
       `/api/v1/commands/${waitingCommand.id}/reconcile`,
@@ -1754,7 +1839,7 @@ describe("account-scoped grant API", () => {
     );
     expect(conflictingCancel.status).toBe(400);
 
-    now = new Date("2026-09-14T01:00:00.000Z");
+    now = new Date(savedAt + hour);
     const reconnectKey = `offline-reconnect-${crypto.randomUUID()}`;
     const reconnect = await send(reconnectKey);
     expect(reconnect.status).toBe(202);
@@ -1766,7 +1851,7 @@ describe("account-scoped grant API", () => {
     expect(reconnectCommand.status).toBe("waiting_for_connection");
     expect(reconnectCommand.created_at).toBe(now.toISOString());
 
-    now = new Date("2026-09-14T02:00:00.000Z");
+    now = new Date(savedAt + 2 * hour);
     await workerEnv.CONTROL_DB.prepare(
       "UPDATE connections SET status = 'ready' WHERE id = ?",
     )
@@ -1793,9 +1878,11 @@ describe("account-scoped grant API", () => {
       reconnectKey,
     );
     expect(reconnectDispatch[0]?.status).toBe("pending");
-    expect(reconnectDispatch[0]?.created_at).toBe("2026-09-14T01:00:00.000Z");
+    expect(reconnectDispatch[0]?.created_at).toBe(
+      new Date(savedAt + hour).toISOString(),
+    );
     expect(reconnectDispatch[0]?.confirmation_due_at).toBe(
-      "2026-09-14T05:00:00.000Z",
+      new Date(savedAt + 5 * hour).toISOString(),
     );
 
     await workerEnv.CONTROL_DB.prepare(
@@ -1803,7 +1890,7 @@ describe("account-scoped grant API", () => {
     )
       .bind("connection_human_whatsapp")
       .run();
-    now = new Date("2026-09-14T05:00:00.000Z");
+    now = new Date(savedAt + 5 * hour);
     const droppedAfterReconnect = await requestForApp(
       app,
       `/api/v1/commands/${reconnectCommand.id}/reconcile`,
@@ -1827,8 +1914,8 @@ describe("account-scoped grant API", () => {
     expect(droppedDispatch).toEqual([
       {
         status: "confirmation_required",
-        created_at: "2026-09-14T01:00:00.000Z",
-        confirmation_due_at: "2026-09-14T05:00:00.000Z",
+        created_at: new Date(savedAt + hour).toISOString(),
+        confirmation_due_at: new Date(savedAt + 5 * hour).toISOString(),
       },
     ]);
 
@@ -1935,7 +2022,7 @@ describe("account-scoped grant API", () => {
         decision: "cancel",
         actor_principal_id: "principal_human",
         actor_identity_id: "identity_human",
-        decided_at: "2026-09-14T04:00:00.000Z",
+        decided_at: new Date(savedAt + 4 * hour).toISOString(),
       },
     ]);
     expect(
@@ -1981,7 +2068,7 @@ describe("account-scoped grant API", () => {
       status: "cancelled",
       confirmation_decision: "cancel",
       confirmation_actor_principal_id: "principal_human",
-      confirmation_decided_at: "2026-09-14T04:00:00.000Z",
+      confirmation_decided_at: new Date(savedAt + 4 * hour).toISOString(),
     });
     expect(
       rebuiltCommands.find((command) => command.id === reconnectCommand.id),
@@ -2253,11 +2340,13 @@ describe("account-scoped grant API", () => {
         confirmation_due_at: "2040-01-01T06:00:00.000Z",
       },
     ]);
+    // Observation wakes sooner without moving either immutable deadline or
+    // executing the earlier pending command.
     expect(
       await runInDurableObject(projection, (_instance, state) =>
         state.storage.getAlarm(),
       ),
-    ).toBe(Date.parse("2040-01-01T06:00:00.000Z"));
+    ).toBe(Date.parse("2040-01-01T05:01:00.000Z"));
   });
 
   it("allows a granted agent to cancel before dispatch, then blocks cancellation after grant revocation", async () => {
@@ -2946,6 +3035,16 @@ describe("account-scoped grant API", () => {
     const duplicate = await trustedReconcile(app, command.id, evidence);
     expect(duplicate.command.id).toBe(command.id);
 
+    // Resend uses the same executor now: its independently ambiguous attempt
+    // still pauses this chat even when the original receives an echo.
+    expect(resendResult.dispatch.status).toBe("delivery_uncertain");
+    await trustedReconcile(app, resendResult.command.id, {
+      ...evidence,
+      command_id: resendResult.command.id,
+      transaction_id: resendResult.dispatch.transaction_id,
+      request_digest: resendResult.dispatch.request_digest,
+      evidence_id: "matrix-echo-explicit-resend",
+    });
     const resumedChat = await send(
       "conversation_human_one",
       `uncertain-resumed-${crypto.randomUUID()}`,

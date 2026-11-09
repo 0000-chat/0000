@@ -3,242 +3,108 @@ repo: 0000-chat/0000
 status: current
 ---
 
-# OAuth remote MCP deployment runbook
+# Prepare Platform-backed API and MCP authentication
 
-This runbook describes the controlled Cloudflare configuration for the
-Communicator OAuth authorization server, shared API/MCP resource, and stored
-read tools. It is a preparation and validation guide. It does not register a
-real client, deploy a Worker, configure an external identity provider, or send
-a message.
+Use this guide to review a controlled Communicator target before client
+acceptance. It does not authorize deployment, registration, pairing, provider
+sends, or webhook calls. Use synthetic data for local checks.
 
-The Worker is the OAuth authorization server and resource server. The
-configured external OIDC provider is used only to authenticate the human at
-the browser authorization step. Its token is exchanged and verified by the
-Worker; it is never accepted as delegated API/MCP authority. A client
-installation creates a separate non-admin agent principal with zero account
-grants. An administrator must grant an account before any stored read works.
+Communicator uses `0000-platform` as the production credential authority.
+[`auth/platform.ts`](../../apps/control-plane/worker/auth/platform.ts) creates
+the Platform client. Communicator resolves the authenticated principal through
+its immutable local binding and applies its own tenant, identity, account,
+chat, and administrator checks. A Platform capability is a ceiling, not a
+replacement for local grants. Permission requests remain pending until an
+administrator acts. They never grant access themselves.
 
-## Configuration boundary
+The maintained [MCP topology](../../../../docs/architecture/mcp-topology.md#communicator-discovery-and-authentication)
+defines the standalone target `https://communicator.0000.chat/mcp`, with
+`https://communicator.0000.chat` as its registered resource and audience.
+An implemented handler and a target contract are not a deployed endpoint.
+Do not infer a public route, Gateway catalog entry, approved external client,
+or deployed authority from this guide or from checked-in hostnames.
 
-The checked-in `apps/control-plane/wrangler.jsonc` contains only non-secret
-development or `.invalid` placeholders. The deployable environments already
-declare the public Worker, D1, Durable Object, R2, Queue, and OAuth variable
-names. Replace the placeholders in an environment-specific file outside the
-repository before a controlled deployment.
+## Review the target configuration
 
-Start from
-`deploy/cloudflare/control-plane-oauth.env.example` and copy it to protected
-operator storage. The required non-secret values are:
+Have the deployment owner confirm the intended target and its Platform
+registration. Do not change live configuration as part of an acceptance run.
 
-| Variable | Purpose |
-| --- | --- |
-| `COMMUNICATOR_OAUTH_ISSUER` | Canonical HTTPS issuer for local access tokens. |
-| `COMMUNICATOR_OAUTH_RESOURCE` | Canonical HTTPS resource, ending in `/mcp`, shared by API and MCP. |
-| `COMMUNICATOR_OAUTH_ACCESS_TOKEN_TTL_SECONDS` | Access-token lifetime, bounded to 60–3600 seconds. |
-| `COMMUNICATOR_OAUTH_HUMAN_AUTHORIZE_URL` | External IdP authorization endpoint. |
-| `COMMUNICATOR_OAUTH_HUMAN_CLIENT_ID` | Communicator’s upstream OIDC client identifier. |
-| `COMMUNICATOR_OAUTH_HUMAN_REDIRECT_URI` | Exact public `https://host/oauth/callback` URI. |
-| `COMMUNICATOR_OAUTH_HUMAN_SCOPE` | Least upstream scope needed for human sign-in. |
-| `COMMUNICATOR_OAUTH_HUMAN_TOKEN_URL` | External IdP token endpoint; HTTPS and no redirects. |
-| `COMMUNICATOR_OAUTH_HUMAN_ISSUER` | Issuer claim expected in the upstream ID token. |
-| `COMMUNICATOR_OAUTH_HUMAN_AUDIENCE` | ID-token audience; defaults to the upstream client ID when omitted. |
-| `COMMUNICATOR_OAUTH_HUMAN_JWKS_URL` | HTTPS JWKS endpoint for upstream ID-token verification. |
+The production verifier requires these settings:
 
-Supply `COMMUNICATOR_OAUTH_SIGNING_SECRET` with `wrangler secret put` or in
-the validator process environment. It must be at least 32 random characters.
-Supply `COMMUNICATOR_OAUTH_HUMAN_CLIENT_SECRET` the same way only when the
-external provider requires a confidential client. Never put either secret in
-`wrangler.jsonc`, a checked-in env file, a client registration JSON, logs, or
-the bootstrap SQL.
+- `COMMUNICATOR_PLATFORM_BASE_URL`: the Platform service base URL.
+- `COMMUNICATOR_PLATFORM_AUTHORITY`: the expected Platform authority.
+- `COMMUNICATOR_PLATFORM_AUDIENCE`: the registered Communicator audience.
+- `COMMUNICATOR_PLATFORM_SERVICE_VERIFIER`: the protected service verifier.
 
-Provider-backed environments also require two independently managed secrets.
-Set `CONNECTION_GATEWAY_TOKEN` to the same value stored in the Matrix gateway's
-`provisioning.gateway_shared_secret_file`. Set
-`LINKING_IDENTITY_HMAC_SECRET` to a separate random value. Never reuse the
-gateway secret for the identity HMAC secret. Keep both values outside
-`wrangler.jsonc`, checked-in env files, logs, and command arguments.
+Browser login additionally requires the `COMMUNICATOR_PLATFORM_BROWSER_`
+settings `CLIENT_ID`, `CLIENT_SECRET`, `REDIRECT_URI`, `RESOURCE`, and `SCOPES`.
+Treat both the service verifier and the browser client secret as secrets.
+Never put them in source, client configuration JSON, evidence, or logs.
 
-The external IdP registration is an operator-owned prerequisite. It must
-allow exactly the configured callback URI, issue an ID token containing
-`iss`, `sub`, `aud`, `nonce`, `iat`, and `exp`, publish the configured JWKS,
-and refuse token-endpoint redirects. The provider’s client registration and
-credentials are not created by this repository task.
+[`auth/browser-routes.ts`](../../apps/control-plane/worker/auth/browser-routes.ts)
+owns the browser configuration. It checks that the request origin matches the
+configured redirect origin. Missing or invalid configuration fails closed.
+The checked-in Wrangler settings describe configuration, not live deployment
+evidence or permission to create a registration.
 
-## Validate without network access
+## Check the current login and metadata flow
 
-The validator parses only the supplied non-secret env file and bootstrap client
-JSON. It makes no Cloudflare request and does not print secret values. A local
-placeholder check is explicit:
+For an approved controlled target, inspect the following behavior:
 
-```sh
-python3 scripts/validate-control-plane-oauth.py \
-  --env-file deploy/cloudflare/control-plane-oauth.env.example \
-  --client-file deploy/cloudflare/oauth-client.example.json \
-  --environment local \
-  --allow-placeholders
-```
+1. Open `/auth/login` through the configured application origin. Communicator
+   starts the Platform browser authorization flow.
+2. Complete the approved Platform flow. `/auth/callback` validates the
+   transaction through the Platform browser client and sets the credential
+   cookie. A valid credential still needs a local principal binding.
+3. Inspect `/.well-known/oauth-protected-resource` and its `/mcp` alias.
+   `resource` must equal `COMMUNICATOR_PLATFORM_BROWSER_RESOURCE`.
+   `authorization_servers` must name the configured Platform base URL.
+4. Inspect `/.well-known/oauth-authorization-server`. With browser
+   configuration available, it advertises Platform's
+   `/api/auth/oauth2/authorize` and `/api/auth/oauth2/token` endpoints and
+   authorization-code PKCE S256. Communicator does not issue those tokens.
+5. Check unauthenticated, wrong-authority/resource, expired, and revoked
+   credentials. API and MCP requests must fail authentication. For an
+   authenticated credential, compare each operation's capability ceiling and
+   local resource checks across transports.
 
-For a reviewed staging or production file, run the stricter check with the
-signing secret provided only to the process:
+The exact resource comes from the registration and metadata. It is not
+necessarily a URL ending in `/mcp`. Production verification goes through
+Platform on each request. The local verifier injection in component tests is
+not a production fallback. `/auth/logout` clears the local credential and
+browser-binding cookies after an origin check. It does not imply global
+Platform credential revocation.
 
-```sh
-COMMUNICATOR_OAUTH_SIGNING_SECRET="$OAUTH_SIGNING_SECRET" \
-python3 scripts/validate-control-plane-oauth.py \
-  --env-file /protected/communicator/staging/oauth.env \
-  --client-file /protected/communicator/staging/oauth-client.json \
-  --environment staging \
-  --require-signing-secret
-```
+The MCP handler uses the installed SDK's Streamable HTTP transport and the
+existing origin policy. Do not widen supported origins to make an external
+client test pass. Obtain any external-client registration and routing decision
+from the integration owner rather than inventing one here.
 
-Production and staging reject `.invalid`, `.example`, and replacement values
-unless `--allow-placeholders` is supplied. Never use that override with
-`--execute` or a real deployment. The checked-in example intentionally passes
-only the explicit local dry-run command above.
+## Keep legacy issuer preparation out of production
 
-Validation reads the external file; it does not change the checked-in
-`wrangler.jsonc` or automatically load these values into a Worker bundle. For a
-controlled deployment, pass every reviewed non-secret OAuth value explicitly as
-a Wrangler `--var` override. The upstream human callback and the downstream MCP
-client callback are different OAuth legs: `COMMUNICATOR_OAUTH_HUMAN_REDIRECT_URI`
-must point to the Worker’s `/oauth/callback`, while the client JSON’s
-`redirect_uri` must remain the exact callback registered by ChatGPT Work, Grok,
-or another MCP client.
+Worker-local `/oauth/authorize`, `/oauth/token`, and `/oauth/revoke` issuance
+routes are retired. Do not provision a local signing secret or bootstrap a
+local D1 OAuth client to enable production authentication.
 
-After sourcing the protected file, review the rendered command before running
-it. The command below is the complete OAuth variable set; it leaves secrets to
-Wrangler secret bindings and uses `--dry-run`, so it only builds and checks the
-bundle:
+The legacy `scripts/validate-control-plane-oauth.py`,
+`scripts/bootstrap-control-plane-oauth-client.py`, and
+`deploy/cloudflare/control-plane-oauth.env.example` still describe that former
+issuer. A consumer audit finds the bootstrap script imports the validator and
+`tests/test_validate_control_plane_oauth.py` exercises both. They remain for
+historical fixture checks, not as the current operator workflow. This guide
+does not delete them or authorize running their remote execution mode.
 
-```sh
-set -a
-. /protected/communicator/staging/oauth.env
-set +a
-pnpm --filter @communicator/control-plane exec wrangler deploy \
-  --env staging --dry-run \
-  --var "COMMUNICATOR_OAUTH_ISSUER:${COMMUNICATOR_OAUTH_ISSUER}" \
-  --var "COMMUNICATOR_OAUTH_RESOURCE:${COMMUNICATOR_OAUTH_RESOURCE}" \
-  --var "COMMUNICATOR_OAUTH_ACCESS_TOKEN_TTL_SECONDS:${COMMUNICATOR_OAUTH_ACCESS_TOKEN_TTL_SECONDS}" \
-  --var "COMMUNICATOR_OAUTH_HUMAN_AUTHORIZE_URL:${COMMUNICATOR_OAUTH_HUMAN_AUTHORIZE_URL}" \
-  --var "COMMUNICATOR_OAUTH_HUMAN_CLIENT_ID:${COMMUNICATOR_OAUTH_HUMAN_CLIENT_ID}" \
-  --var "COMMUNICATOR_OAUTH_HUMAN_REDIRECT_URI:${COMMUNICATOR_OAUTH_HUMAN_REDIRECT_URI}" \
-  --var "COMMUNICATOR_OAUTH_HUMAN_SCOPE:${COMMUNICATOR_OAUTH_HUMAN_SCOPE}" \
-  --var "COMMUNICATOR_OAUTH_HUMAN_TOKEN_URL:${COMMUNICATOR_OAUTH_HUMAN_TOKEN_URL}" \
-  --var "COMMUNICATOR_OAUTH_HUMAN_ISSUER:${COMMUNICATOR_OAUTH_HUMAN_ISSUER}" \
-  --var "COMMUNICATOR_OAUTH_HUMAN_AUDIENCE:${COMMUNICATOR_OAUTH_HUMAN_AUDIENCE}" \
-  --var "COMMUNICATOR_OAUTH_HUMAN_JWKS_URL:${COMMUNICATOR_OAUTH_HUMAN_JWKS_URL}"
-```
+## Record evidence without overstating it
 
-Use the same reviewed `--var` list for an explicitly approved deployment after
-the dry run. The local example can exercise the identical bundle path without
-remote access by omitting `--env staging`, adding
-`--config apps/control-plane/wrangler.jsonc`, and using the checked-in example
-values with `--allow-placeholders` only for validation. This task runs only the
-local dry run and performs no upload.
+Run the [client acceptance runner](client-acceptance.md) only against an
+approved controlled service or separately authorized external client. Review
+the exact registered resource, client surface/version, and authority before
+supplying a credential through a protected file or environment source.
 
-## Prepare the bootstrap client
+Local Platform fixtures and SDK tests prove only controlled behavior. They do
+not prove a real ChatGPT Work, Grok web/mobile/Bot integration, public routing,
+issuer cryptography, provider delivery, or receiver behavior. Keep missing
+evidence `unverified` and explicit unavailable capabilities `unsupported`.
 
-Client registrations are exact `(client_id, redirect_uri)` rows in D1.
-Dynamic registration is disabled. Copy
-`deploy/cloudflare/oauth-client.example.json` outside the repository and set
-the client ID, display name, and exact callback URI that the external MCP
-client has been configured to use. The bootstrap helper is dry-run by default:
-
-```sh
-python3 scripts/bootstrap-control-plane-oauth-client.py \
-  --env-file /protected/communicator/staging/oauth.env \
-  --client-file /protected/communicator/staging/oauth-client.json \
-  --environment staging
-```
-
-Review the printed `INSERT ... ON CONFLICT` statement. It contains only the
-client registration and never an access token, upstream secret, or human
-subject. A later, explicitly approved operator may execute the same helper
-with `--execute`; that command uses the named environment’s remote D1 binding:
-
-```sh
-python3 scripts/bootstrap-control-plane-oauth-client.py \
-  --env-file /protected/communicator/staging/oauth.env \
-  --client-file /protected/communicator/staging/oauth-client.json \
-  --environment staging \
-  --execute
-```
-
-This runbook does not run that command. Before execution, confirm the target
-Cloudflare account, Worker environment, D1 database, callback hostname, and
-external IdP registration with the deployment owner. The helper refuses the
-placeholder override when `--execute` is present.
-
-## Secret and migration order
-
-After the non-secret values pass validation, an approved operator applies the
-checked-in D1 migrations to the selected environment and sets secrets without
-printing them:
-
-Wrangler reads the `migrations` directory from `apps/control-plane/wrangler.jsonc`
-and applies every pending SQL file in numeric filename order. This includes the
-current authority and lifecycle migrations.
-
-```sh
-pnpm --filter @communicator/control-plane exec wrangler d1 migrations apply \
-  CONTROL_DB --env staging --remote
-pnpm --filter @communicator/control-plane exec wrangler secret put \
-  CONNECTION_GATEWAY_TOKEN --env staging
-pnpm --filter @communicator/control-plane exec wrangler secret put \
-  LINKING_IDENTITY_HMAC_SECRET --env staging
-pnpm --filter @communicator/control-plane exec wrangler secret put \
-  COMMUNICATOR_OAUTH_SIGNING_SECRET --env staging
-pnpm --filter @communicator/control-plane exec wrangler secret put \
-  COMMUNICATOR_OAUTH_HUMAN_CLIENT_SECRET --env staging
-```
-
-The upstream client secret command is needed only for providers that require
-one. Secret rotation invalidates locally signed access tokens when the signing
-secret changes; plan a fresh client authorization after rotation. Installation
-and token revocation are checked on every API/MCP request, and revocation
-records remain in the control directory.
-
-No command in this implementation session applies a remote migration, writes
-a secret, or registers a real client.
-
-## Metadata, health, and controlled ingress checks
-
-Cloudflare is the public ingress. The Worker exposes the liveness endpoint and
-the OAuth metadata endpoints without a bearer token:
-
-```sh
-curl --fail https://<approved-host>/api/v1/health
-curl --fail https://<approved-host>/.well-known/oauth-authorization-server
-curl --fail https://<approved-host>/.well-known/oauth-protected-resource
-curl --fail https://<approved-host>/.well-known/oauth-protected-resource/mcp
-```
-
-The protected-resource document must advertise the configured `/mcp` resource
-and the local authorization-server issuer. An unauthenticated API or MCP
-request must return `401` with a `WWW-Authenticate` resource-metadata
-challenge. A valid installation without an administrator account grant must
-return `403`; a wrong issuer, resource, expired token, revoked token, or
-revoked installation must return `401`. The Streamable HTTP MCP endpoint is
-`POST /mcp`; it validates `Origin` and uses the official SDK transport.
-
-After a controlled deployment, the operator can use a pre-registered test
-client to complete browser authorization-code PKCE, approve the displayed
-consent, redeem the code, and verify that the installation appears as a
-non-admin target with zero account grants. Grant one fixture account through
-the administrator path, then compare API and MCP stored reads by stable
-conversation and message identifiers. Provider requests must never receive
-the inbound Communicator bearer.
-
-## Pending live proof and stop conditions
-
-The local and controlled fixtures prove protocol behavior, default upstream
-token/JWKS wiring, identity separation, and API/MCP authority reuse. They do
-not prove an external IdP’s registration, a Cloudflare account’s DNS or Access
-policy, or a real ChatGPT Work, Grok web/mobile, or Bot client. Those are later
-live proofs requiring explicit operator approval and real external setup.
-
-Stop before deployment or client registration if any hostname, issuer,
-audience, JWKS URL, callback URI, D1 binding, Access policy, or secret owner is
-uncertain. Do not enable simulated data for a live provider, do not place
-provider credentials in the Worker test environment, and do not infer that a
-successful local OAuth test authorizes sending, webhooks, search, attachments,
-or other provider behavior.
+Stop if the registration, origin, authority, audience, resource, callback, or
+credential owner is unknown. Do not fall back to the retired local issuer.

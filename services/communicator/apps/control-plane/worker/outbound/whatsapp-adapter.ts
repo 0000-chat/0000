@@ -1,6 +1,8 @@
 import {
   OutboundEvidenceInputSchema,
   OutboundDispatchPayloadSchema,
+  OUTBOUND_GATEWAY_TIMEOUT_MS,
+  OUTBOUND_RESULT_MARGIN_MS,
   ProviderSchema,
   TimestampSchema,
   type OutboundDispatch,
@@ -166,7 +168,7 @@ export class HttpWhatsAppTextAdapter {
   private readonly sharedSecret: string;
 
   constructor(
-    private readonly context: OutboundAcceptanceContext,
+    private readonly context: Pick<OutboundAcceptanceContext, "env">,
     private readonly fetcher: GatewayFetch,
   ) {
     const env = runtimeEnvironment(context.env);
@@ -192,6 +194,10 @@ export class HttpWhatsAppTextAdapter {
       dispatch.conversation_id !== payload.conversation_id ||
       dispatch.transaction_id !== payload.transaction_id ||
       dispatch.request_digest !== payload.request_digest ||
+      dispatch.status !== "dispatching" ||
+      dispatch.dispatch_lease_id !== payload.dispatch_lease_id ||
+      dispatch.dispatch_lease_expires_at !==
+        payload.dispatch_lease_expires_at ||
       (dispatch.body_digest !== undefined &&
         dispatch.body_digest !== payload.body_digest) ||
       dispatch.projection_generation !== payload.projection_generation
@@ -201,6 +207,9 @@ export class HttpWhatsAppTextAdapter {
     if (payload.authority === undefined || payload.body_digest === undefined) {
       return failure("provider_protocol_error", "dispatch_authority_missing");
     }
+    const saved = payload.authority.saved;
+    if (saved === undefined)
+      return failure("authorization_revoked", "saved_authority_missing");
     if (
       dispatch.authority !== undefined &&
       JSON.stringify(dispatch.authority) !== JSON.stringify(payload.authority)
@@ -214,7 +223,12 @@ export class HttpWhatsAppTextAdapter {
       return failure("provider_unavailable", "whatsapp_gateway_not_configured");
     }
 
-    const connection = await this.readConnection(payload);
+    let connection: ConnectionRow | null;
+    try {
+      connection = await this.readConnection(payload);
+    } catch {
+      return { type: "deferred", reason: "authority_unavailable" };
+    }
     if (connection === null) {
       return failure("account_mismatch", "selected_account_route_not_found");
     }
@@ -233,7 +247,20 @@ export class HttpWhatsAppTextAdapter {
     if (connection.has_provider_identity !== 1) {
       return failure("session_expired", "provider_identity_missing");
     }
-    const currentConnection = await this.readConnection(payload);
+    if (
+      saved.session_generation !== connection.session_generation ||
+      saved.route.gateway_route_id !== connection.gateway_route_id ||
+      saved.route.bridge_instance_id !== connection.bridge_instance_id ||
+      saved.route.matrix_user_id !== connection.matrix_user_id ||
+      saved.route.matrix_room_namespace !== connection.matrix_room_namespace
+    )
+      return failure("authorization_revoked", "saved_route_or_session_changed");
+    let currentConnection: ConnectionRow | null;
+    try {
+      currentConnection = await this.readConnection(payload);
+    } catch {
+      return { type: "deferred", reason: "authority_unavailable" };
+    }
     if (currentConnection === null) {
       return failure("account_mismatch", "selected_account_route_not_found");
     }
@@ -252,7 +279,21 @@ export class HttpWhatsAppTextAdapter {
       return failure("session_expired", "provider_identity_missing");
     }
 
+    // Authorization consumes the first part of the lease, never the I/O or
+    // persistence reserve. Refuse a late start instead of sending past expiry.
+    if (
+      Date.parse(payload.dispatch_lease_expires_at) - Date.now() <
+      OUTBOUND_GATEWAY_TIMEOUT_MS + OUTBOUND_RESULT_MARGIN_MS
+    ) {
+      return failure("provider_unavailable", "dispatch_lease_budget_exhausted");
+    }
     let response: Response;
+    let responseBody: unknown = null;
+    const controller = new AbortController();
+    const timeout = setTimeout(
+      () => controller.abort(),
+      OUTBOUND_GATEWAY_TIMEOUT_MS,
+    );
     try {
       response = await this.fetcher(`${this.baseUrl}/v1/outbound/text`, {
         method: "POST",
@@ -283,32 +324,41 @@ export class HttpWhatsAppTextAdapter {
           request_digest: payload.request_digest,
           body_digest: payload.body_digest,
           projection_generation: payload.projection_generation,
-          session_generation: connection.session_generation,
-          route: {
-            gateway_route_id: connection.gateway_route_id,
-            bridge_instance_id: connection.bridge_instance_id,
-            matrix_user_id: connection.matrix_user_id,
-            matrix_room_namespace: connection.matrix_room_namespace,
-          },
+          session_generation: saved.session_generation,
+          route: saved.route,
           body: payload.body,
         }),
-        signal: AbortSignal.timeout(30_000),
+        signal: controller.signal,
       });
+      try {
+        responseBody = await response.json();
+      } catch {
+        responseBody = null;
+      }
     } catch {
       return {
         type: "uncertain",
         reason: "gateway_request_timeout_or_network_error",
         evidence_id: `uncertain_${payload.transaction_id}`,
       };
+    } finally {
+      clearTimeout(timeout);
     }
 
-    let responseBody: unknown = null;
-    try {
-      responseBody = await response.clone().json();
-    } catch {
-      responseBody = null;
-    }
     if (!response.ok) {
+      // Only an explicit authenticated pre-claim refusal proves no I/O. A
+      // generic 503 or lost response stays uncertain and must not auto-retry.
+      if (
+        response.status === 503 &&
+        z
+          .object({
+            status: z.literal("authority_unavailable"),
+            provider_allowed: z.literal(false),
+          })
+          .strict()
+          .safeParse(responseBody).success
+      )
+        return { type: "deferred", reason: "authority_unavailable" };
       const reason = parseErrorReason(
         responseBody,
         `gateway_http_${response.status}`,
@@ -444,7 +494,7 @@ export class HttpWhatsAppTextAdapter {
 }
 
 export const defaultWhatsAppTextAdapter = (
-  context: OutboundAcceptanceContext,
+  context: Pick<OutboundAcceptanceContext, "env">,
   fetcher?: GatewayFetch,
 ): HttpWhatsAppTextAdapter | undefined => {
   const env = runtimeEnvironment(context.env);

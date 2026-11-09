@@ -1,6 +1,7 @@
 import {
   OutboundCapabilitySchema,
   CommunicatorIdSchema,
+  SavedSendRouteSchema,
 } from "@communicator/contracts";
 import { parseBearerToken } from "../auth/bearer";
 import {
@@ -10,7 +11,11 @@ import {
 import { resolvePlatformBinding } from "../control-directory/platform-bindings";
 import type { Context } from "hono";
 import { z } from "zod";
-import { claimOutboundDispatch } from "./authority";
+import {
+  claimOutboundDispatch,
+  readOutboundAcceptanceReservation,
+} from "./authority";
+import { revalidateSavedSend, savedSendOperationId } from "./saved-authority";
 import type {
   ClaimOutboundDispatchInput,
   ClaimOutboundDispatchResult,
@@ -43,6 +48,8 @@ const TupleSchema = z.object({
 
 const MessageClaimSchema = TupleSchema.extend({
   operation: z.literal("message.send"),
+  session_generation: TimestampSchema,
+  route: SavedSendRouteSchema,
   command_id: CommunicatorIdSchema,
   dispatch_id: CommunicatorIdSchema,
   transaction_id: CommunicatorIdSchema,
@@ -154,7 +161,9 @@ const platformGatewayAuthorized = async (
   context: Context,
   token: string,
   value: DispatchClaim,
-): Promise<"authorized" | "unauthorized" | "not_found" | "unavailable"> => {
+): Promise<
+  "authorized" | "unauthorized" | "not_found" | "denied" | "unavailable"
+> => {
   const authenticator = createPlatformAuthenticator(context.env);
   if (authenticator === null) return "unavailable";
   const authenticated = await authenticator.authenticate(token);
@@ -187,17 +196,64 @@ const platformGatewayAuthorized = async (
     )
     .bind(value.connection_id, binding.binding.localPrincipalId)
     .first()) as { authorized: number } | null;
-  return route === null ? "unauthorized" : "authorized";
+  return route === null ? "denied" : "authorized";
 };
 
 const capabilityInput = (capability: OutboundCapability): OutboundCapability =>
   capability;
 
 const claimMessage = async (
-  database: D1Database,
+  env: Cloudflare.Env,
   value: Extract<DispatchClaim, { operation: "message.send" }>,
-): Promise<ClaimOutboundDispatchResult> => {
+): Promise<
+  | ClaimOutboundDispatchResult
+  | { status: "authority_unavailable"; provider_allowed: false }
+> => {
+  const database = env.CONTROL_DB;
+  let reservation: Awaited<
+    ReturnType<typeof readOutboundAcceptanceReservation>
+  >;
+  try {
+    reservation = await readOutboundAcceptanceReservation(
+      database,
+      value.tenant_id,
+      value.reservation_id,
+    );
+  } catch (error) {
+    return error instanceof SyntaxError || error instanceof z.ZodError
+      ? { status: "denied", reason: "tuple_mismatch" }
+      : { status: "authority_unavailable", provider_allowed: false };
+  }
+  const saved = reservation?.saved;
+  if (
+    saved === undefined ||
+    reservation === null ||
+    saved.platform.operationId !==
+      savedSendOperationId(value.tenant_id, value.request_digest) ||
+    value.operation_id !== value.dispatch_id ||
+    value.request_hash !== value.request_digest ||
+    saved.session_generation !== value.session_generation ||
+    JSON.stringify(saved.route) !== JSON.stringify(value.route)
+  )
+    return { status: "denied", reason: "tuple_mismatch" };
+  let authority: Awaited<ReturnType<typeof revalidateSavedSend>>;
+  try {
+    authority = await revalidateSavedSend(env, saved, reservation);
+  } catch {
+    return { status: "authority_unavailable", provider_allowed: false };
+  }
+  if (authority.status === "authority_unavailable")
+    return { status: authority.status, provider_allowed: false };
+  if (authority.status === "denied")
+    return { status: "denied", reason: "authorization_revoked" };
+  const expiry = Math.min(
+    Date.parse(value.expires_at),
+    Date.parse(authority.expiresAt),
+  );
+  if (expiry <= Date.now())
+    return { status: "denied", reason: "authorization_revoked" };
   const input: ClaimOutboundDispatchInput = {
+    saved,
     tenant_id: value.tenant_id,
     membership_id: value.membership_id,
     identity_id: value.identity_id,
@@ -217,9 +273,19 @@ const claimMessage = async (
     body_digest: value.body_digest,
     ...(value.claim_id === undefined ? {} : { claim_id: value.claim_id }),
     now: value.now,
-    expires_at: value.expires_at,
+    expires_at: new Date(expiry).toISOString(),
   };
-  return claimOutboundDispatch(database, input);
+  const result = await claimOutboundDispatch(database, input);
+  return result.status === "denied"
+    ? result
+    : {
+        ...result,
+        claim: {
+          ...result.claim,
+          session_generation: saved.session_generation,
+          route: saved.route,
+        },
+      };
 };
 
 const claimOperation = async (
@@ -268,7 +334,11 @@ export const dispatchClaimHandlerAt = async (
   }
   if (platformMode || options.allowLegacyGatewaySecret !== true) {
     if (getPlatformRuntimeConfig(context.env) === null) {
-      return jsonResponse(context, { error: "service_unavailable" }, 503);
+      return jsonResponse(
+        context,
+        { status: "authority_unavailable", provider_allowed: false },
+        503,
+      );
     }
   } else if (secret.length < 16 || authorization !== `Bearer ${secret}`) {
     return unauthorized(context);
@@ -310,13 +380,28 @@ export const dispatchClaimHandlerAt = async (
         parsed.data,
       );
     } catch {
-      return jsonResponse(context, { error: "service_unavailable" }, 503);
+      return jsonResponse(
+        context,
+        { status: "authority_unavailable", provider_allowed: false },
+        503,
+      );
     }
     if (authorizationResult === "unavailable") {
-      return jsonResponse(context, { error: "service_unavailable" }, 503);
+      return jsonResponse(
+        context,
+        { status: "authority_unavailable", provider_allowed: false },
+        503,
+      );
     }
     if (authorizationResult === "not_found") {
       return jsonResponse(context, { error: "not_found" }, 404);
+    }
+    if (authorizationResult === "denied") {
+      return jsonResponse(
+        context,
+        { status: "denied", reason: "authorization_revoked" },
+        403,
+      );
     }
     if (authorizationResult !== "authorized") return unauthorized(context);
   }
@@ -343,16 +428,24 @@ export const dispatchClaimHandlerAt = async (
   } as DispatchClaim;
   const database = context.env.CONTROL_DB;
   if (database === undefined || typeof database.withSession !== "function")
-    return jsonResponse(context, { error: "service_unavailable" }, 503);
+    return jsonResponse(
+      context,
+      { status: "authority_unavailable", provider_allowed: false },
+      503,
+    );
   try {
     const result =
       normalized.operation === "message.send"
-        ? await claimMessage(database, normalized)
+        ? await claimMessage(context.env, normalized)
         : await claimOperation(database, normalized);
     return jsonResponse(
       context,
       result,
-      result.status === "denied" ? 403 : 200,
+      result.status === "authority_unavailable"
+        ? 503
+        : result.status === "denied"
+          ? 403
+          : 200,
     );
   } catch {
     return jsonResponse(context, { error: "service_unavailable" }, 503);

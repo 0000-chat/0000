@@ -65,9 +65,7 @@ export function ConnectionCard({
           className="mt-4 rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950"
         >
           <p className="font-semibold">Action required</p>
-          <p className="mt-1">
-            This simulated connection needs operator attention.
-          </p>
+          <p className="mt-1">This connection needs operator attention.</p>
         </div>
       )}
       {connection.status === "disconnected" && (
@@ -94,6 +92,12 @@ export function ConnectionCard({
       )}
 
       <dl className="mt-5 grid gap-3 text-sm sm:grid-cols-2">
+        <div className="min-w-0 sm:col-span-2">
+          <dt className="text-muted-foreground">Owning identity</dt>
+          <dd className="break-all font-medium">
+            {identityDisplayName} · {connection.identity_id}
+          </dd>
+        </div>
         <div>
           <dt className="text-muted-foreground">Provider</dt>
           <dd className="font-medium">{providerLabel(connection.provider)}</dd>

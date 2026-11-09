@@ -90,3 +90,107 @@ keeps that identity; different-account relink returns a different ID; logout
 removes the login and blocks a stale process callback. Record only redacted
 status/identity, never QR data or session credentials.
 
+## Trusted outbound evidence contract
+
+The gateway normalizer supports the status event shape in the reviewed
+WhatsApp source commit `e7e5e57d9ed9ea12e3e54c2d9d3dcdc998516fb5` and its
+mautrix-go dependency `v0.30.0`, commit
+`f3c3eead62765374838556b048ed1b3469e9ef2b`. This source review does not prove
+that the locked image digest contains those sources. The registry assessment
+above is historical, not a fresh registry check or a live delivery test.
+
+The versioned sources define these facts:
+
+- [Event fields and status constants](https://github.com/mautrix/go/blob/f3c3eead62765374838556b048ed1b3469e9ef2b/event/beeper.go)
+  define `com.beeper.message_send_status`, uppercase `SUCCESS`, `PENDING`,
+  `FAIL_RETRIABLE`, and `FAIL_PERMANENT`.
+- [Status serialization](https://github.com/mautrix/go/blob/f3c3eead62765374838556b048ed1b3469e9ef2b/bridgev2/messagestatus.go)
+  emits `m.relates_to` with `m.reference`, optional `relates_to_txn_id`, and
+  optional `delivered_to_users`. It does not serialize `IsCertain` into the
+  status event. A permanent failure therefore does not prove that nothing sent.
+- [Matrix status emission](https://github.com/mautrix/go/blob/f3c3eead62765374838556b048ed1b3469e9ef2b/bridgev2/matrix/connector.go)
+  uses the bridge bot. The supported local renderer sets its username to
+  `whatsappbot`.
+- [Remote delivery handling](https://github.com/mautrix/go/blob/f3c3eead62765374838556b048ed1b3469e9ef2b/bridgev2/portal.go)
+  accepts delivery receipts only for DMs and emits a one-user recipient list
+  referencing the original Matrix event. This is bridge-reported provider
+  delivery, not an independent provider signature.
+- The same portal source emits `m.bridge` with `com.beeper.room_type.v2`
+  and the remote JID in `channel.id`. The connector uses state key
+  `<homeserver domain>/whatsapp` in the supported appservice configuration.
+  [WhatsApp identity conversion](https://github.com/mautrix/whatsapp/blob/e7e5e57d9ed9ea12e3e54c2d9d3dcdc998516fb5/pkg/waid/id.go)
+  maps numeric `@s.whatsapp.net` and `@lid` JIDs to numeric and `lid-` user
+  IDs. The reviewed mautrix-go
+  [default configuration](https://github.com/mautrix/go/blob/f3c3eead62765374838556b048ed1b3469e9ef2b/bridgev2/matrix/mxmain/example-config.yaml)
+  uses ghost username template `whatsapp_{{.}}`.
+
+### Private observation trigger
+
+`POST /internal/v1/outbound/provider-evidence` uses the Worker's existing
+private ingestion service authentication, including `ingestion.write` for
+Platform service credentials. Its strict version 1 body contains only
+`schema_version`, `tenant_id`, `command_id`, and `observation_event_id`.
+The caller selects an observation ID, never an outcome, recipient, or URL.
+The registered public administrator evidence POST remains unconditionally
+forbidden. No MCP evidence-write operation exists.
+
+The Worker reads the saved dispatch and active primary D1 route. It checks
+the service principal, tenant, account binding, connection, saved session,
+route generation, and message removal authority before and after gateway I/O.
+It calls the configured private gateway's `POST /v1/outbound/evidence` with
+the gateway bearer credential, request ID, and idempotency key. The strict
+gateway request contains the version, tenant, account, connection, resource
+identity, conversation, transaction, request digest, projection generation,
+session generation, and observation event ID.
+
+The production gateway uses its activated Matrix SDK to fetch the event from
+the saved room. Its protected outbound journal must contain a confirmed
+Matrix event for that exact transaction and request digest. The event must
+come from `@whatsappbot:<configured owner server>`, match the requested event
+and room IDs, and reference that sealed Matrix event. A nonempty transaction
+ID must match. A stale binding or absent correlation fails closed. No
+provider operation, sync, message send, receipt, or automatic resend occurs.
+
+For delivery candidates, the SDK also fetches current room state. The
+`m.bridge` state key must be `<owner server>/whatsapp`, with the expected bot
+as author and `bridgebot`, protocol `whatsapp`, and room type exactly `dm`.
+The singleton recipient must match the default ghost for that portal's
+numeric PN or LID JID. An unrelated valid MXID, group room, missing metadata,
+custom template, or unproven PN-to-LID alias is unsupported. A singleton
+recipient alone never proves the room type or intended counterparty.
+
+### Outcomes and unsupported cases
+
+The gateway returns version 1 correlation fields, the observation ID as
+`evidence_id`, `source`, `status`, a fixed safe `reason`, `observed_at`, the
+referenced Matrix event as `remote_echo_id`, and `provider_read: "unsupported"`.
+It never returns raw provider errors, message text, or recipient identities.
+
+| Source event | Normalized observation |
+| --- | --- |
+| `SUCCESS`, absent, null, or empty recipient list | Bridge accepted only |
+| `SUCCESS`, one recipient matching authenticated DM portal metadata | Provider delivered, reason `bridge_reported_dm_delivery` |
+| `PENDING` | Bridge uncertain, reason `bridge_pending` |
+| `FAIL_RETRIABLE` or `FAIL_PERMANENT` | Bridge uncertain with the matching fixed reason |
+| Ordinary Matrix read receipt, encrypted event, unknown status, invalid recipient, or multiple recipients | Unsupported |
+
+The Worker validates the complete response tuple before reconciliation.
+The existing evidence ledger records exact dispatch IDs and preserves
+stronger bridge or provider evidence when older pending or failure events
+arrive. Identical replays are idempotent. Conflicting replays fail, and late
+evidence for an earlier attempt never updates an explicit resend. Removal,
+session rotation, route replacement, and projection rebuild block stale
+observations. The existing ledger needs no D1 migration for this contract.
+
+No journaled Matrix confirmation means correlation is unsupported, even if
+the send might have succeeded. Missing events and unavailable Matrix I/O
+remain unavailable, not delivered. Provider-read evidence, encrypted status
+events, custom bot names, unmatched portal identities, and group delivery are
+not supported. The trigger
+does not discover events or add a scheduler. Automatic event discovery and
+any live image, account, or delivery proof require separate verification.
+
+Controlled checks are in `src/evidence_tests.rs` under the gateway and
+`worker/test/outbound/provider-evidence.test.ts` under the control plane.
+They use actual SDK HTTP and the local Worker, D1, and SQLite Durable Object
+runtime. They establish the adapter contract, not live WhatsApp delivery.

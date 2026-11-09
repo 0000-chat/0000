@@ -74,6 +74,10 @@
       "type": "object",
       "additionalProperties": false,
       "required": ["name", "version", "digest", "kind", "media_type", "asset_name", "compatibility", "source_commit", "archive_paths"],
+      "allOf": [{
+        "if": { "properties": { "kind": { "enum": ["communicator-worker-bundle", "communicator-native-bundle", "communicator-bridge-bundle"] } }, "required": ["kind"] },
+        "then": { "required": ["artifact_format", "manifest_digest"], "properties": { "artifact_format": { "const": "0000-communicator-bundle-v1" } } }
+      }],
       "properties": {
         "name": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$" },
         "version": { "type": "string", "pattern": "^v[0-9]+\\.[0-9]+\\.[0-9]+-[0-9a-f]{40}$" },
@@ -84,7 +88,8 @@
         "compatibility": { "$ref": "#/$defs/compatibility" },
         "source_commit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
         "archive_paths": { "type": "array", "items": { "type": "string" } },
-        "artifact_format": { "enum": ["0000-cloudflare-worker-bundle-v1", "0000-bun-runtime-bundle-v1"] },
+        "artifact_format": { "enum": ["0000-cloudflare-worker-bundle-v1", "0000-bun-runtime-bundle-v1", "0000-communicator-bundle-v1"] },
+        "manifest_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
         "entrypoint": { "type": "string", "pattern": "^[A-Za-z0-9._-]+$" },
         "config": { "type": "string", "pattern": "^[A-Za-z0-9._-]+$" },
         "files": {

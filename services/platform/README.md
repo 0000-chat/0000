@@ -81,6 +81,13 @@ integration and full T12 acceptance remain open.
 The full MVP is not implemented or accepted, and these reports do not establish
 production readiness.
 
+[Saved operation authorization](docs/saved-operations.md) adds local
+Worker/D1 capture and current-state revalidation through the shared client.
+It retains native session or delegation lineage without storing user bearer
+tokens, distinguishes denial from authority failure, and binds capture retries
+to an immutable operation. Its actor and credential-expiry limits are explicit;
+Communicator adoption and release packaging remain separate work.
+
 [T11_SERVICE_PRINCIPAL_REPORT.md](T11_SERVICE_PRINCIPAL_REPORT.md) records the
 bounded organization-owned service-principal prerequisite, integrated here on
 the existing machine lifecycle. Service principals have an immutable stored

@@ -4,7 +4,7 @@ import {
   useQuery,
   useQueryClient,
 } from "@tanstack/react-query";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import type {
   AccountGrant,
   AccountGrantOperationScope,
@@ -26,24 +26,30 @@ const targetValue = (
 ) => `${target.membership_id}:${target.identity_id}`;
 
 function ChatPicker({
-  chats,
+  identityId,
+  accountId,
   selectedChatIds,
   onToggle,
-  query,
 }: {
-  chats: readonly ConversationPageResult["items"][number][];
+  identityId: string;
+  accountId: string;
   selectedChatIds: readonly string[];
   onToggle: (chatId: string) => void;
-  query: {
-    isLoading: boolean;
-    isError: boolean;
-    refetch: () => unknown;
-    hasNextPage: boolean | undefined;
-    isFetchingNextPage: boolean;
-    fetchNextPage: () => unknown;
-    isFetchNextPageError: boolean;
-  };
 }) {
+  const query = useInfiniteQuery<ConversationPageResult, Error>({
+    queryKey: queryKeys.grantChats(identityId, accountId),
+    queryFn: ({ pageParam }) =>
+      apiClient.getAccountConversations(
+        accountId,
+        identityId,
+        typeof pageParam === "string" ? pageParam : undefined,
+        2,
+      ),
+    initialPageParam: null as string | null,
+    getNextPageParam: (page) => page.next_cursor,
+    enabled: Boolean(identityId && accountId),
+  });
+  const chats = query.data?.pages.flatMap((page) => page.items) ?? [];
   const selected = new Set(selectedChatIds);
   if (query.isLoading)
     return (
@@ -51,7 +57,7 @@ function ChatPicker({
         Loading chats…
       </p>
     );
-  if (query.isError) {
+  if (query.isError && !query.isFetchNextPageError) {
     return (
       <div role="alert" className="space-y-2 text-sm text-destructive">
         <p>Unable to load chats for this account.</p>
@@ -131,6 +137,9 @@ function GrantManagementPanel({
   grantsHasNextPage,
   grantsFetchingNextPage,
   onLoadMoreGrants,
+  targetsHasNextPage,
+  targetsFetchingNextPage,
+  onLoadMoreTargets,
   onChanged,
 }: {
   accounts: readonly ConnectedAccount[];
@@ -142,6 +151,9 @@ function GrantManagementPanel({
   grantsHasNextPage: boolean;
   grantsFetchingNextPage: boolean;
   onLoadMoreGrants: () => void;
+  targetsHasNextPage: boolean;
+  targetsFetchingNextPage: boolean;
+  onLoadMoreTargets: () => void;
   onChanged: () => void;
 }) {
   const [targetKey, setTargetKey] = useState("");
@@ -159,42 +171,17 @@ function GrantManagementPanel({
   const selectedTarget =
     targets.find((target) => targetValue(target) === targetKey) ?? targets[0];
   const narrowGrant = grants.find((grant) => grant.id === narrowGrantId);
-  const pickerIdentityId =
-    narrowGrant?.identity_id ?? selectedTarget?.identity_id;
-  const pickerAccountId = narrowGrant?.account_id ?? accountId;
-  const pickerSelectedChatIds =
-    narrowGrantId === null ? chatIds : narrowChatIds;
-  const chatLookupEnabled = Boolean(
-    pickerIdentityId &&
-      pickerAccountId &&
-      (chatScope === "selected_chats" || narrowGrantId !== null),
-  );
-  const chatsQuery = useInfiniteQuery<ConversationPageResult, Error>({
-    queryKey: queryKeys.grantChats(pickerIdentityId ?? "", pickerAccountId),
-    queryFn: ({ pageParam }) =>
-      apiClient.getAccountConversations(
-        pickerAccountId,
-        pickerIdentityId ?? "",
-        typeof pageParam === "string" ? pageParam : undefined,
-        2,
-      ),
-    initialPageParam: null as string | null,
-    getNextPageParam: (page) => page.next_cursor,
-    enabled: chatLookupEnabled,
-  });
-  const chats = useMemo(
-    () => chatsQuery.data?.pages.flatMap((page) => page.items) ?? [],
-    [chatsQuery.data],
-  );
 
   useEffect(() => {
     if (!targets.some((target) => targetValue(target) === targetKey)) {
       setTargetKey(selectedTarget ? targetValue(selectedTarget) : "");
+      setChatIds([]);
     }
   }, [selectedTarget, targetKey, targets]);
   useEffect(() => {
     if (!accounts.some((account) => account.account_id === accountId)) {
       setAccountId(accounts[0]?.account_id ?? "");
+      setChatIds([]);
     }
   }, [accountId, accounts]);
   useEffect(() => {
@@ -266,14 +253,10 @@ function GrantManagementPanel({
       ),
   });
 
-  const toggleChat = (chatId: string) => {
-    const setter = narrowGrantId === null ? setChatIds : setNarrowChatIds;
-    setter((current) =>
-      current.includes(chatId)
-        ? current.filter((value) => value !== chatId)
-        : [...current, chatId],
-    );
-  };
+  const toggleChat = (current: string[], chatId: string) =>
+    current.includes(chatId)
+      ? current.filter((value) => value !== chatId)
+      : [...current, chatId];
 
   return (
     <section
@@ -302,19 +285,22 @@ function GrantManagementPanel({
         </p>
       )}
       <form
-        className="mt-5 grid gap-3 sm:grid-cols-2 lg:grid-cols-5"
+        className="mt-5 grid gap-3 sm:grid-cols-2"
         onSubmit={(event) => {
           event.preventDefault();
           setError(null);
           createGrant.mutate();
         }}
       >
-        <label className="grid gap-1 text-sm font-medium">
+        <label className="grid min-w-0 gap-1 text-sm font-medium">
           Identity
           <select
-            className="h-9 rounded-md border bg-background px-2"
+            className="h-9 min-w-0 w-full rounded-md border bg-background px-2"
             value={selectedTarget ? targetValue(selectedTarget) : ""}
-            onChange={(event) => setTargetKey(event.target.value)}
+            onChange={(event) => {
+              setTargetKey(event.target.value);
+              setChatIds([]);
+            }}
             disabled={targets.length === 0}
           >
             {targets.map((target) => (
@@ -325,12 +311,15 @@ function GrantManagementPanel({
             ))}
           </select>
         </label>
-        <label className="grid gap-1 text-sm font-medium">
+        <label className="grid min-w-0 gap-1 text-sm font-medium">
           Connected account
           <select
-            className="h-9 rounded-md border bg-background px-2"
+            className="h-9 min-w-0 w-full rounded-md border bg-background px-2"
             value={accountId}
-            onChange={(event) => setAccountId(event.target.value)}
+            onChange={(event) => {
+              setAccountId(event.target.value);
+              setChatIds([]);
+            }}
             disabled={accounts.length === 0}
           >
             {accounts.map((account) => (
@@ -340,10 +329,10 @@ function GrantManagementPanel({
             ))}
           </select>
         </label>
-        <label className="grid gap-1 text-sm font-medium">
+        <label className="grid min-w-0 gap-1 text-sm font-medium">
           Permission
           <select
-            className="h-9 rounded-md border bg-background px-2"
+            className="h-9 min-w-0 w-full rounded-md border bg-background px-2"
             value={operationScope}
             onChange={(event) =>
               setOperationScope(
@@ -356,10 +345,10 @@ function GrantManagementPanel({
             <option value="webhook.manage">Manage webhooks</option>
           </select>
         </label>
-        <label className="grid gap-1 text-sm font-medium">
+        <label className="grid min-w-0 gap-1 text-sm font-medium">
           Chat scope
           <select
-            className="h-9 rounded-md border bg-background px-2"
+            className="h-9 min-w-0 w-full rounded-md border bg-background px-2"
             value={chatScope}
             onChange={(event) =>
               setChatScope(event.target.value as "all_chats" | "selected_chats")
@@ -381,15 +370,19 @@ function GrantManagementPanel({
       </form>
 
       {chatScope === "selected_chats" && (
-        <div className="mt-3 grid gap-2 rounded-lg border p-3 sm:col-span-2">
+        <div
+          role="group"
+          aria-label="Chats for selected identity and account"
+          className="mt-3 grid gap-2 rounded-lg border p-3"
+        >
           <p className="text-sm font-medium">
             Chats for selected identity and account
           </p>
           <ChatPicker
-            chats={chats}
-            selectedChatIds={pickerSelectedChatIds}
-            onToggle={toggleChat}
-            query={chatsQuery}
+            identityId={selectedTarget?.identity_id ?? ""}
+            accountId={accountId}
+            selectedChatIds={chatIds}
+            onToggle={(id) => setChatIds((current) => toggleChat(current, id))}
           />
           <p className="text-xs text-muted-foreground">
             {chatIds.length} chat{chatIds.length === 1 ? "" : "s"} selected.
@@ -424,6 +417,16 @@ function GrantManagementPanel({
                   : `${grant.chat_ids.length} selected chats`}{" "}
                 · {grant.status}
               </p>
+              {grant.chat_scope === "selected_chats" && (
+                <details className="mt-2">
+                  <summary className="cursor-pointer">Granted chat IDs</summary>
+                  <ul className="mt-1 break-all text-xs text-muted-foreground">
+                    {grant.chat_ids.map((id) => (
+                      <li key={id}>{id}</li>
+                    ))}
+                  </ul>
+                </details>
+              )}
             </div>
             {grant.status === "active" && (
               <div className="flex flex-wrap items-center justify-end gap-2">
@@ -453,15 +456,21 @@ function GrantManagementPanel({
               </div>
             )}
             {grant.status === "active" && narrowGrantId === grant.id && (
-              <div className="basis-full space-y-2 rounded-lg border p-3">
+              <div
+                role="group"
+                aria-label="Select chats for narrowed access"
+                className="basis-full space-y-2 rounded-lg border p-3"
+              >
                 <p className="text-sm font-medium">
                   Select chats for narrowed access
                 </p>
                 <ChatPicker
-                  chats={chats}
+                  identityId={grant.identity_id}
+                  accountId={grant.account_id}
                   selectedChatIds={narrowChatIds}
-                  onToggle={toggleChat}
-                  query={chatsQuery}
+                  onToggle={(id) =>
+                    setNarrowChatIds((current) => toggleChat(current, id))
+                  }
                 />
                 <Button
                   type="button"
@@ -500,6 +509,19 @@ function GrantManagementPanel({
           onClick={onLoadMoreGrants}
         >
           {grantsFetchingNextPage ? "Loading more grants…" : "Load more grants"}
+        </Button>
+      )}
+      {targetsHasNextPage && (
+        <Button
+          type="button"
+          variant="outline"
+          className="mt-4"
+          disabled={targetsFetchingNextPage}
+          onClick={onLoadMoreTargets}
+        >
+          {targetsFetchingNextPage
+            ? "Loading more identities…"
+            : "Load more identities"}
         </Button>
       )}
     </section>
@@ -641,6 +663,16 @@ export function ConnectionsPage() {
           );
         })}
       </div>
+      {!identitiesLoading && protectedApiReady && !isAdministrator && (
+        <p
+          role="status"
+          className="rounded-lg border border-dashed p-4 text-sm"
+        >
+          Administrator access is required to manage account grants. Linking
+          also requires connection management permission for the selected human
+          identity.
+        </p>
+      )}
       {isAdministrator && (
         <>
           {(accountsQuery.isError ||
@@ -669,22 +701,32 @@ export function ConnectionsPage() {
               Loading account grants…
             </p>
           )}
-          <GrantManagementPanel
-            accounts={accounts}
-            grants={grants}
-            targets={targets}
-            accountsHasNextPage={accountsQuery.hasNextPage}
-            accountsFetchingNextPage={accountsQuery.isFetchingNextPage}
-            onLoadMoreAccounts={() => void accountsQuery.fetchNextPage()}
-            grantsHasNextPage={grantsQuery.hasNextPage}
-            grantsFetchingNextPage={grantsQuery.isFetchingNextPage}
-            onLoadMoreGrants={() => void grantsQuery.fetchNextPage()}
-            onChanged={() => {
-              void queryClient.invalidateQueries({
-                queryKey: queryKeys.accountGrants,
-              });
-            }}
-          />
+          {!accountsQuery.isPending &&
+            !grantsQuery.isPending &&
+            !targetsQuery.isPending &&
+            !accountsQuery.isError &&
+            !grantsQuery.isError &&
+            !targetsQuery.isError && (
+              <GrantManagementPanel
+                accounts={accounts}
+                grants={grants}
+                targets={targets}
+                accountsHasNextPage={accountsQuery.hasNextPage}
+                accountsFetchingNextPage={accountsQuery.isFetchingNextPage}
+                onLoadMoreAccounts={() => void accountsQuery.fetchNextPage()}
+                grantsHasNextPage={grantsQuery.hasNextPage}
+                grantsFetchingNextPage={grantsQuery.isFetchingNextPage}
+                onLoadMoreGrants={() => void grantsQuery.fetchNextPage()}
+                targetsHasNextPage={targetsQuery.hasNextPage}
+                targetsFetchingNextPage={targetsQuery.isFetchingNextPage}
+                onLoadMoreTargets={() => void targetsQuery.fetchNextPage()}
+                onChanged={() => {
+                  void queryClient.invalidateQueries({
+                    queryKey: queryKeys.accountGrants,
+                  });
+                }}
+              />
+            )}
           <HistoryImportPanel
             accounts={accounts.filter(
               (account) => account.identity_id === activeIdentity?.id,

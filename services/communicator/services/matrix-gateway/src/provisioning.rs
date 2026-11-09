@@ -31,7 +31,8 @@ use crate::{
     outbound::{
         MatrixGroupAction, MatrixGroupChange, MatrixGroupFailure, MatrixGroupManager,
         MatrixGroupObservation, MatrixGroupObservationRequest, MatrixReadReceiptFailure,
-        MatrixReadReceiptSender, OutboundTextSender,
+        MatrixReadReceiptSender, MatrixSdkGroupManager, MatrixSdkReadReceiptSender,
+        MatrixSdkTextSender, OutboundTextSender,
     },
     store::{NewOutboundText, OutboundTextCompletion, OutboundTextPreparation, Store},
 };
@@ -915,14 +916,7 @@ struct GatewayRequest {
     provider_login_id: Option<String>,
 }
 
-#[derive(Clone, Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct OutboundRouteRequest {
-    gateway_route_id: String,
-    bridge_instance_id: String,
-    matrix_user_id: String,
-    matrix_room_namespace: String,
-}
+type OutboundRouteRequest = crate::authority::SendRoute;
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1403,6 +1397,7 @@ pub struct ProvisioningGatewayServer {
     history: Option<Arc<HistoryGatewayServer>>,
     outbound_store: Option<Arc<Mutex<Store>>>,
     outbound_sender: Option<Arc<dyn OutboundTextSender>>,
+    evidence_reader: Option<Arc<crate::evidence::MatrixEvidenceReader>>,
     read_receipt_sender: Option<Arc<dyn MatrixReadReceiptSender>>,
     group_manager: Option<Arc<dyn MatrixGroupManager>>,
     outbound_authority: Option<Arc<dyn OutboundAuthority>>,
@@ -1431,10 +1426,46 @@ impl ProvisioningGatewayServer {
             history: None,
             outbound_store: None,
             outbound_sender: None,
+            evidence_reader: None,
             read_receipt_sender: None,
             group_manager: None,
             outbound_authority: None,
         })
+    }
+
+    /// Compose the production private gateway around one restored Matrix client.
+    pub fn new_with_matrix_runtime(
+        client: WhatsAppProvisioningClient,
+        gateway_token: SecretString,
+        route: GatewayRouteMetadata,
+        history: HistoryGatewayServer,
+        matrix_client: matrix_sdk::Client,
+        authority: Arc<dyn OutboundAuthority>,
+        request_timeout: Duration,
+    ) -> Result<Self, ProvisioningFailure> {
+        Ok(Self::new(client, gateway_token, route)?
+            .with_evidence_reader(matrix_client.clone(), request_timeout)
+            .with_history(history)
+            .with_outbound_sender(Arc::new(MatrixSdkTextSender::new(
+                matrix_client.clone(),
+                request_timeout,
+            )))
+            .with_read_receipt_sender(Arc::new(MatrixSdkReadReceiptSender::new(
+                matrix_client.clone(),
+                request_timeout,
+            )))
+            .with_group_manager(Arc::new(MatrixSdkGroupManager::new(
+                matrix_client,
+                request_timeout,
+            )))
+            .with_outbound_authority(authority))
+    }
+
+    fn with_evidence_reader(mut self, client: matrix_sdk::Client, timeout: Duration) -> Self {
+        self.evidence_reader = Some(Arc::new(crate::evidence::MatrixEvidenceReader::new(
+            client, timeout,
+        )));
+        self
     }
 
     /// Add the authenticated Matrix history adapter to the same private
@@ -1475,13 +1506,14 @@ impl ProvisioningGatewayServer {
         self
     }
 
-    async fn claim_provider(&self, request: AuthorityClaimRequest) -> Result<(), &'static str> {
+    async fn claim_provider(&self, request: AuthorityClaimRequest) -> Result<String, &'static str> {
         let Some(authority) = self.outbound_authority.as_ref() else {
             return Err(AUTHORITY_UNCERTAIN);
         };
         match authority.claim(request).await {
-            Ok(AuthorityClaimOutcome::Allowed { .. }) => Ok(()),
+            Ok(AuthorityClaimOutcome::Allowed { expires_at }) => Ok(expires_at),
             Ok(AuthorityClaimOutcome::Denied { .. }) => Err(AUTHORITY_DENIED),
+            Ok(AuthorityClaimOutcome::Unavailable) => Err("authority_unavailable"),
             Err(_) => Err(AUTHORITY_UNCERTAIN),
         }
     }
@@ -1527,6 +1559,35 @@ impl ProvisioningGatewayServer {
                 .is_some_and(|value| !value.is_empty() && value.len() <= MAX_ID_BYTES)
         {
             return response(400, json!({ "error": INVALID_REQUEST }));
+        }
+        if request.path == "/v1/outbound/evidence" {
+            let parsed =
+                match serde_json::from_slice::<crate::evidence::EvidenceRequest>(&request.body) {
+                    Ok(value) => value,
+                    Err(_) => return response(400, json!({ "error": INVALID_REQUEST })),
+                };
+            let (Some(reader), Some(store)) = (&self.evidence_reader, &self.outbound_store) else {
+                return response(503, json!({"error": crate::evidence::EVIDENCE_UNAVAILABLE}));
+            };
+            return match reader
+                .observe(
+                    store,
+                    &self.route.gateway_route_id,
+                    &self.route.matrix_user_id,
+                    parsed,
+                )
+                .await
+            {
+                Ok(value) => response(200, value),
+                Err(error) => response(
+                    match error.code() {
+                        crate::evidence::EVIDENCE_CONFLICT => 409,
+                        crate::evidence::EVIDENCE_UNSUPPORTED => 422,
+                        _ => 503,
+                    },
+                    json!({"error": error.code()}),
+                ),
+            };
         }
         if request.path == "/v1/outbound/text" {
             let idempotency_key = request.idempotency_key.as_deref().unwrap_or_default();
@@ -2185,6 +2246,8 @@ impl ProvisioningGatewayServer {
 
         let authority_result = self
             .claim_provider(AuthorityClaimRequest::Message(MessageAuthorityClaim {
+                session_generation: request.session_generation.clone(),
+                route: request.route.clone(),
                 tenant_id: request.tenant_id.clone(),
                 membership_id: request.membership_id.clone(),
                 actor_identity_id: request.actor_identity_id.clone(),
@@ -2200,6 +2263,25 @@ impl ProvisioningGatewayServer {
                 capability: request.capability.clone(),
             }))
             .await;
+        if authority_result == Err("authority_unavailable") {
+            // Only an explicit refusal before the Worker's claim INSERT is
+            // retryable. A lost response may have consumed the one-shot claim.
+            let mut store = store_handle.lock().await;
+            if store
+                .forget_unclaimed_outbound_text(
+                    &request.tenant_id,
+                    &request.transaction_id,
+                    &request.request_digest,
+                )
+                .is_ok_and(|removed| removed)
+            {
+                return response(
+                    503,
+                    json!({ "status": "authority_unavailable", "provider_allowed": false }),
+                );
+            }
+            return response(503, json!({ "error": OUTBOUND_UNCERTAIN }));
+        }
         if let Err(reason) = authority_result {
             let (outcome, state, matrix_stage, evidence, failure_reason) =
                 if reason == AUTHORITY_DENIED {
@@ -2256,9 +2338,37 @@ impl ProvisioningGatewayServer {
             return (200, body_bytes);
         }
 
-        let send_result = sender
-            .send_encrypted_text(&matrix_room_id, &request.transaction_id, &request.body)
-            .await;
+        // Re-read after the awaited claim. The sender is the immutable client
+        // for this session and receives only this pinned room; never resolve
+        // a replacement client or route after this check. Release the journal
+        // lock before network I/O so duplicate requests can observe pending.
+        let store = store_handle.lock().await;
+        let current = store.active_room_binding_for_outbound(
+            &request.tenant_id,
+            &request.account_id,
+            &request.connection_id,
+            &request.identity_id,
+            Provider::Whatsapp,
+            &request.conversation_id,
+        );
+        let pinned = current.is_ok_and(|binding| {
+            binding.is_some_and(|binding| {
+                binding.session_generation() == Some(request.session_generation.as_str())
+                    && binding.matrix_room_id() == matrix_room_id
+                    && binding.gateway_route_id() == self.route.gateway_route_id
+                    && binding.owner_matrix_user_id() == self.route.matrix_user_id
+            })
+        }) && authority_result.as_ref().is_ok_and(|expiry| {
+            DateTime::parse_from_rfc3339(expiry).is_ok_and(|expiry| expiry > Utc::now())
+        });
+        drop(store);
+        let send_result = if pinned {
+            sender
+                .send_encrypted_text(&matrix_room_id, &request.transaction_id, &request.body)
+                .await
+        } else {
+            Err(crate::outbound::OutboundSendFailure::MatrixSessionExpired)
+        };
         let observed_at = Utc::now().to_rfc3339();
         let (outcome, state, matrix_stage, matrix_evidence, reason, status) = match send_result {
             Ok(result) => {
@@ -2734,6 +2844,8 @@ mod tests {
     use async_trait::async_trait;
     use base64::Engine as _;
     use chrono::{TimeZone, Utc};
+    use matrix_sdk::test_utils::mocks::MatrixMockServer;
+    use matrix_sdk_test::JoinedRoomBuilder;
     use serde_json::json;
     use tempfile::tempdir;
     use tokio::{io::AsyncWriteExt, sync::Notify};
@@ -2755,8 +2867,7 @@ mod tests {
         normalize::{MatrixAttachment, MatrixMessage, MatrixMessageKind},
         outbound::{
             MatrixGroupChange, MatrixGroupFailure, MatrixGroupManager, MatrixGroupObservation,
-            MatrixGroupObservationRequest, MatrixReadReceiptResult, MatrixReadReceiptSender,
-            MatrixSendResult, OutboundTextSender,
+            MatrixGroupObservationRequest, MatrixSendResult, OutboundTextSender,
         },
         registry::NewRoomBinding,
         secret::{SafeError, SecretBytes},
@@ -2790,7 +2901,7 @@ mod tests {
             _request: AuthorityClaimRequest,
         ) -> Result<AuthorityClaimOutcome, crate::authority::AuthorityClaimFailure> {
             Ok(AuthorityClaimOutcome::Allowed {
-                expires_at: "2026-09-14T00:01:00.000Z".to_owned(),
+                expires_at: (Utc::now() + chrono::Duration::seconds(60)).to_rfc3339(),
             })
         }
     }
@@ -2802,6 +2913,8 @@ mod tests {
     const AUTHORITY_ALLOW: u8 = 0;
     const AUTHORITY_DENY: u8 = 1;
     const AUTHORITY_UNCERTAIN: u8 = 2;
+    const AUTHORITY_UNAVAILABLE: u8 = 3;
+    const AUTHORITY_EXPIRED: u8 = 4;
 
     struct SwitchableAuthority {
         mode: AtomicU8,
@@ -2827,14 +2940,64 @@ mod tests {
         ) -> Result<AuthorityClaimOutcome, crate::authority::AuthorityClaimFailure> {
             match self.mode.load(Ordering::SeqCst) {
                 AUTHORITY_ALLOW => Ok(AuthorityClaimOutcome::Allowed {
-                    expires_at: "2026-09-14T00:01:00.000Z".to_owned(),
+                    expires_at: (Utc::now() + chrono::Duration::seconds(60)).to_rfc3339(),
                 }),
                 AUTHORITY_DENY => Ok(AuthorityClaimOutcome::Denied {
                     reason: AUTHORITY_DENIED.to_owned(),
                 }),
                 AUTHORITY_UNCERTAIN => Err(crate::authority::AuthorityClaimFailure::Uncertain),
+                AUTHORITY_UNAVAILABLE => Ok(AuthorityClaimOutcome::Unavailable),
+                AUTHORITY_EXPIRED => Ok(AuthorityClaimOutcome::Allowed {
+                    expires_at: (Utc::now() - chrono::Duration::seconds(1)).to_rfc3339(),
+                }),
                 _ => Err(crate::authority::AuthorityClaimFailure::InvalidRequest),
             }
+        }
+    }
+
+    struct RotatingAuthority {
+        store: Arc<Mutex<Store>>,
+        retire: bool,
+    }
+
+    #[async_trait]
+    impl OutboundAuthority for RotatingAuthority {
+        async fn claim(
+            &self,
+            request: AuthorityClaimRequest,
+        ) -> Result<AuthorityClaimOutcome, crate::authority::AuthorityClaimFailure> {
+            let AuthorityClaimRequest::Message(request) = request else {
+                panic!("expected message claim");
+            };
+            let mut store = self.store.lock().await;
+            if self.retire {
+                store
+                    .retire_room_binding(
+                        "binding_cccccccccccccccccccccccccccccccc",
+                        DateTime::from_timestamp_millis(Utc::now().timestamp_millis()).unwrap(),
+                    )
+                    .expect("retire selected room during awaited claim");
+            } else {
+                assert_eq!(
+                    store
+                        .rebind_room_bindings(
+                            &request.tenant_id,
+                            &request.account_id,
+                            &request.connection_id,
+                            "identity_outbound",
+                            Provider::Whatsapp,
+                            &request.route.gateway_route_id,
+                            &request.route.matrix_user_id,
+                            &request.session_generation,
+                            "2026-11-07T09:00:00.000Z",
+                        )
+                        .expect("rotate selected session during awaited claim"),
+                    1
+                );
+            }
+            Ok(AuthorityClaimOutcome::Allowed {
+                expires_at: (Utc::now() + chrono::Duration::seconds(60)).to_rfc3339(),
+            })
         }
     }
 
@@ -3591,25 +3754,30 @@ mod tests {
         rooms: Arc<StdMutex<Vec<String>>>,
     }
 
-    struct RecordingReadReceiptSender {
-        calls: Arc<StdMutex<Vec<(String, String)>>>,
+    async fn receipt_matrix_client(room_id: &str) -> (MatrixMockServer, matrix_sdk::Client) {
+        let matrix = MatrixMockServer::new().await;
+        let client = matrix.client_builder().build().await;
+        let room_id = ruma::RoomId::parse(room_id).expect("fixture room ID");
+        matrix
+            .mock_sync()
+            .ok_and_run(&client, |builder| {
+                builder.add_joined_room(JoinedRoomBuilder::new(&room_id));
+            })
+            .await;
+        (matrix, client)
     }
 
-    #[async_trait]
-    impl MatrixReadReceiptSender for RecordingReadReceiptSender {
-        async fn send_read_receipt(
-            &self,
-            room_id: &str,
-            event_id: &str,
-        ) -> Result<MatrixReadReceiptResult, MatrixReadReceiptFailure> {
-            self.calls
-                .lock()
-                .expect("receipt calls lock")
-                .push((room_id.to_owned(), event_id.to_owned()));
-            Ok(MatrixReadReceiptResult {
-                event_id: OwnedEventId::try_from(event_id.to_owned()).expect("fixture event id"),
+    async fn receipt_requests(matrix: &MatrixMockServer) -> Vec<wiremock::Request> {
+        matrix
+            .received_requests()
+            .await
+            .expect("Matrix requests")
+            .into_iter()
+            .filter(|request| {
+                request.url.path().contains("/receipt/")
+                    || request.url.path().ends_with("/read_markers")
             })
-        }
+            .collect()
     }
 
     struct RecordingGroupManager {
@@ -3635,8 +3803,10 @@ mod tests {
         }
     }
 
+    include!("evidence_tests.rs");
+
     #[tokio::test]
-    async fn read_receipt_routes_one_bound_room_and_reports_matrix_only_evidence() {
+    async fn production_receipts_require_explicit_current_authority_and_report_matrix_only() {
         let bridge = MockServer::start().await;
         let client = WhatsAppProvisioningClient::new_for_test(
             client_url(&bridge),
@@ -3686,16 +3856,19 @@ mod tests {
             GATEWAY_SECRET,
         )
         .expect("history gateway");
-        let calls = Arc::new(StdMutex::new(Vec::new()));
-        let server =
-            ProvisioningGatewayServer::new(client, SecretString::new(GATEWAY_SECRET), route())
-                .expect("provisioning gateway")
-                .with_history(history)
-                .with_read_receipt_sender(Arc::new(RecordingReadReceiptSender {
-                    calls: Arc::clone(&calls),
-                }))
-                .with_outbound_authority(allowing_authority());
-        let request = HttpRequest {
+        let (matrix, matrix_client) = receipt_matrix_client("!receipt:example.test").await;
+        let authority = Arc::new(SwitchableAuthority::new(AUTHORITY_ALLOW));
+        let server = ProvisioningGatewayServer::new_with_matrix_runtime(
+            client,
+            SecretString::new(GATEWAY_SECRET),
+            route(),
+            history,
+            matrix_client,
+            Arc::clone(&authority) as Arc<dyn OutboundAuthority>,
+            Duration::from_secs(2),
+        )
+        .expect("production composition");
+        let request = || HttpRequest {
             path: "/v1/receipts/read".to_owned(),
             authorization: Some(GATEWAY_SECRET.to_owned()),
             request_id: Some("request-receipt".to_owned()),
@@ -3735,21 +3908,130 @@ mod tests {
             .expect("request JSON"),
         };
 
-        let (status, bytes) = server.handle_request(request).await;
-        assert_eq!(status, 200);
-        let response: Value = serde_json::from_slice(&bytes).expect("receipt response JSON");
+        let mut unauthorized = request();
+        unauthorized.authorization = Some("wrong-gateway-secret".to_owned());
+        let (status, bytes) = server.handle_request(unauthorized).await;
+        assert_eq!(status, 401);
+        assert_eq!(
+            serde_json::from_slice::<Value>(&bytes).unwrap()["error"],
+            "unauthorized"
+        );
+
+        for (field, value, status, error) in [
+            ("account_id", "account_other", 403, RECEIPT_SCOPE_MISMATCH),
+            (
+                "session_generation",
+                "2026-09-13T00:00:00.000Z",
+                409,
+                RECEIPT_STALE_SESSION,
+            ),
+        ] {
+            let mut invalid = request();
+            let mut body: Value = serde_json::from_slice(&invalid.body).unwrap();
+            body[field] = json!(value);
+            invalid.body = serde_json::to_vec(&body).unwrap();
+            let (actual_status, bytes) = server.handle_request(invalid).await;
+            assert_eq!(actual_status, status);
+            assert_eq!(
+                serde_json::from_slice::<Value>(&bytes).unwrap()["error"],
+                error
+            );
+        }
+
+        for (mode, expected_status, expected_failure) in [
+            (AUTHORITY_DENY, "rejected", AUTHORITY_DENIED),
+            (AUTHORITY_UNCERTAIN, "unknown", "provider_timeout"),
+        ] {
+            authority.set_mode(mode);
+            let (status, bytes) = server.handle_request(request()).await;
+            assert_eq!(status, 200);
+            let body: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(body["status"], expected_status);
+            assert_eq!(body["failure_code"], expected_failure);
+            assert_eq!(body["provider_stage"], "unknown");
+            assert_eq!(body["evidence"], json!([]));
+        }
+        assert!(receipt_requests(&matrix).await.is_empty());
+        authority.set_mode(AUTHORITY_ALLOW);
+
+        let receipt_path =
+            "/_matrix/client/v3/rooms/!receipt:example.test/receipt/m.read/$receipt:example.test";
+        Mock::given(matchers::method("POST"))
+            .and(matchers::path(receipt_path))
+            .and(matchers::header("authorization", "Bearer 1234"))
+            .and(matchers::body_json(json!({})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+            .expect(1)
+            .mount(matrix.server())
+            .await;
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("private listener");
+        let address = listener.local_addr().expect("listener address");
+        let task = tokio::spawn(server.clone().serve(listener));
+        let http = Client::builder().no_proxy().build().expect("HTTP client");
+        let accepted = http
+            .post(format!("http://{address}/v1/receipts/read"))
+            .bearer_auth(GATEWAY_SECRET)
+            .header("content-type", "application/json")
+            .header("x-request-id", "request-receipt")
+            .header("idempotency-key", "receipt-idempotency")
+            .body(request().body)
+            .send()
+            .await
+            .expect("explicit receipt response");
+        assert_eq!(accepted.status(), StatusCode::OK);
+        let response: Value = serde_json::from_slice(&accepted.bytes().await.unwrap())
+            .expect("receipt response JSON");
         assert_eq!(response["status"], "accepted");
         assert_eq!(response["matrix_stage"], "accepted");
         assert_eq!(response["bridge_stage"], "unknown");
         assert_eq!(response["provider_stage"], "unknown");
         assert_eq!(response["evidence"][0]["source"], "matrix");
         assert_eq!(
-            calls.lock().expect("receipt calls lock").as_slice(),
-            [(
-                "!receipt:example.test".to_owned(),
-                "$receipt:example.test".to_owned()
-            )]
+            response["evidence"][0]["evidence_id"],
+            "$receipt:example.test"
         );
+        assert_eq!(receipt_requests(&matrix).await.len(), 1);
+        matrix.server().verify().await;
+
+        for (template, expected_status, failure) in [
+            (
+                ResponseTemplate::new(403).set_body_json(
+                    json!({"errcode": "M_FORBIDDEN", "error": "controlled rejection"}),
+                ),
+                "rejected",
+                "matrix_rejected",
+            ),
+            (
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({}))
+                    .set_delay(Duration::from_secs(3)),
+                "unknown",
+                "provider_timeout",
+            ),
+        ] {
+            matrix.server().reset().await;
+            Mock::given(matchers::method("POST"))
+                .and(matchers::path(receipt_path))
+                .respond_with(template)
+                .expect(1)
+                .mount(matrix.server())
+                .await;
+            let (status, bytes) = server.handle_request(request()).await;
+            assert_eq!(status, 200);
+            let body: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(body["status"], expected_status);
+            assert_eq!(body["failure_code"], failure);
+            assert_eq!(body["matrix_stage"], "unknown");
+            assert_eq!(body["bridge_stage"], "unknown");
+            assert_eq!(body["provider_stage"], "unknown");
+            assert_eq!(body["evidence"], json!([]));
+            assert_eq!(receipt_requests(&matrix).await.len(), 1);
+            matrix.server().verify().await;
+        }
+        assert!(bridge.received_requests().await.unwrap().is_empty());
+        task.abort();
     }
 
     #[tokio::test]
@@ -4282,6 +4564,36 @@ mod tests {
         assert!(rooms.lock().expect("recording sender lock").is_empty());
         authority.set_mode(AUTHORITY_ALLOW);
 
+        authority.set_mode(AUTHORITY_EXPIRED);
+        let (_, expired_body) = server
+            .handle_request(request("conversation_one", "txn_expired_claim", 'a'))
+            .await;
+        assert_ne!(
+            serde_json::from_slice::<Value>(&expired_body).unwrap()["outcome"],
+            "accepted"
+        );
+        assert!(rooms.lock().expect("recording sender lock").is_empty());
+
+        authority.set_mode(AUTHORITY_UNAVAILABLE);
+        let (unavailable_status, unavailable_body) = server
+            .handle_request(request("conversation_one", "txn_unavailable_claim", 'a'))
+            .await;
+        assert_eq!(unavailable_status, 503);
+        assert_eq!(
+            serde_json::from_slice::<Value>(&unavailable_body).unwrap(),
+            json!({ "status": "authority_unavailable", "provider_allowed": false })
+        );
+        assert!(rooms.lock().expect("recording sender lock").is_empty());
+        authority.set_mode(AUTHORITY_ALLOW);
+        let (_, retry_body) = server
+            .handle_request(request("conversation_one", "txn_unavailable_claim", 'a'))
+            .await;
+        assert_eq!(
+            serde_json::from_slice::<Value>(&retry_body).unwrap()["outcome"],
+            "accepted"
+        );
+        rooms.lock().expect("recording sender lock").clear();
+
         let mut stale_request = request("conversation_one", "txn_chat_stale", 'c');
         let mut stale_body: Value =
             serde_json::from_slice(&stale_request.body).expect("stale request JSON");
@@ -4316,6 +4628,32 @@ mod tests {
             .await;
         assert_eq!(wrong_status, 403);
         assert_eq!(rooms.lock().expect("recording sender lock").len(), 2);
+
+        for (retire, conversation_id, transaction_id) in [
+            (true, "conversation_two", "txn_final_room_retired"),
+            (false, "conversation_one", "txn_final_session_rotated"),
+        ] {
+            let racing = server
+                .clone()
+                .with_outbound_authority(Arc::new(RotatingAuthority {
+                    store: Arc::clone(server.outbound_store.as_ref().unwrap()),
+                    retire,
+                }));
+            let (_, body) = racing
+                .handle_request(request(conversation_id, transaction_id, 'f'))
+                .await;
+            assert_ne!(
+                serde_json::from_slice::<Value>(&body).unwrap()["outcome"],
+                "accepted"
+            );
+            assert_eq!(
+                rooms
+                    .lock()
+                    .expect("zero new provider calls at final boundary")
+                    .len(),
+                2
+            );
+        }
     }
 
     #[tokio::test]
@@ -4465,10 +4803,17 @@ mod tests {
             GATEWAY_SECRET,
         )
         .expect("history gateway");
-        let server =
-            ProvisioningGatewayServer::new(client, SecretString::new(GATEWAY_SECRET), route())
-                .expect("provisioning gateway")
-                .with_history(history);
+        let (matrix, matrix_client) = receipt_matrix_client("!attachment:example.test").await;
+        let server = ProvisioningGatewayServer::new_with_matrix_runtime(
+            client,
+            SecretString::new(GATEWAY_SECRET),
+            route(),
+            history,
+            matrix_client,
+            allowing_authority(),
+            Duration::from_secs(2),
+        )
+        .expect("production composition");
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind listener");
@@ -4546,6 +4891,7 @@ mod tests {
         assert_eq!(missing_body["status"], "unavailable");
         assert_eq!(missing_body["reason"], "missing");
         assert_eq!(transport.calls.load(Ordering::SeqCst), 2);
+        assert!(receipt_requests(&matrix).await.is_empty());
         task.abort();
     }
 
@@ -4647,6 +4993,7 @@ mod tests {
     ) -> (
         tempfile::TempDir,
         Arc<SharedHistoryTransport>,
+        MatrixMockServer,
         std::net::SocketAddr,
         tokio::task::JoinHandle<Result<(), std::io::Error>>,
     ) {
@@ -4696,16 +5043,23 @@ mod tests {
             GATEWAY_SECRET,
         )
         .expect("history gateway");
-        let server =
-            ProvisioningGatewayServer::new(client, SecretString::new(GATEWAY_SECRET), route())
-                .expect("provisioning gateway")
-                .with_history(history);
+        let (matrix, matrix_client) = receipt_matrix_client("!shared-history:example.test").await;
+        let server = ProvisioningGatewayServer::new_with_matrix_runtime(
+            client,
+            SecretString::new(GATEWAY_SECRET),
+            route(),
+            history,
+            matrix_client,
+            allowing_authority(),
+            Duration::from_secs(2),
+        )
+        .expect("production composition");
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind listener");
         let address = listener.local_addr().expect("listener address");
         let task = tokio::spawn(server.serve(listener));
-        (directory, transport, address, task)
+        (directory, transport, matrix, address, task)
     }
 
     fn shared_history_owner(import_id: &str, max_events: u64) -> Value {
@@ -4724,7 +5078,7 @@ mod tests {
 
     #[tokio::test]
     async fn shared_listener_authenticates_history_and_replays_a_lost_advance_response() {
-        let (_directory, transport, address, task) = spawn_shared_history_gateway(1).await;
+        let (_directory, transport, matrix, address, task) = spawn_shared_history_gateway(1).await;
         let http = Client::builder().no_proxy().build().expect("HTTP client");
         let base_url = format!("http://{address}");
         let owner = shared_history_owner("import_shared_history", 100);
@@ -4800,6 +5154,7 @@ mod tests {
         assert_ne!(public_cursor, "matrix-end");
         assert_eq!(transport.calls.load(Ordering::SeqCst), 1);
 
+        assert!(receipt_requests(&matrix).await.is_empty());
         task.abort();
     }
 
@@ -4809,7 +5164,7 @@ mod tests {
             (500_usize, 500_u64, StatusCode::OK),
             (501, 501, StatusCode::BAD_GATEWAY),
         ] {
-            let (_directory, transport, address, task) =
+            let (_directory, transport, matrix, address, task) =
                 spawn_shared_history_gateway(event_count).await;
             let http = Client::builder().no_proxy().build().expect("HTTP client");
             let base_url = format!("http://{address}");
@@ -4908,6 +5263,7 @@ mod tests {
                 assert_eq!(start_retry_body["ranges"][0]["source_cursor"], Value::Null);
             }
 
+            assert!(receipt_requests(&matrix).await.is_empty());
             task.abort();
         }
     }
